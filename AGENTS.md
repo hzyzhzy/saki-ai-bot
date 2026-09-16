@@ -23,6 +23,16 @@
 
 ---
 
+## 🗣️ 一律说中文（**连思考过程也是**）—— 2026-09-17 用户定
+
+**用户原话**：「你又说英语或者思考时输出英语了，我看英语的速度没那么快。」
+
+规则写在**全局那份**里（`C:\Users\hzy\AppData\Local\DeepSeekHarness\.dsh\AGENTS.md`，
+对所有会话生效）：**正文 + 思考过程都中文**；命令、代码、路径、报错原文、`git`/`API` 这类
+没中文译名的技术词照旧；但**整句英文和中英混排不许有**。
+
+---
+
 ## ⚠️ 一晚改多件没问题，但要「一件一闭合 + 交清单」（2026-09-17 用户定）
 
 **用户原话**：「一晚塞太多改动和一天塞得我感觉应该没区别吧，因为改动不是一步搞完的，
@@ -92,6 +102,30 @@ git revert <sha>              # 整次提交退回去（留记录，比 reset �
 2. 交付清单里那条「出事退哪一步」，以后直接写 commit 号 / 文件名。
 3. ⚠️ `.gitattributes` 里钉了 `*.bat` `*.ps1` `*.vbs` **`eol=crlf`** ——
    别再手工转行尾了，git 会保证检出来就是 CRLF。
+
+---
+
+## 🌐 这机器上 **GitHub 必须走代理**（2026-09-17 实测）
+
+- `hosts` 里 `github.com` / `api.github.com` / `raw.githubusercontent.com` / `github.io`
+  等一大串指向了 `127.0.0.1` —— **用户说这大概率是代理软件（Clash）自己写进去的**，
+  所以**代理非正常退出时，那些条目和系统代理会留下** →
+  表现就是「代理明明关了/挂了，GitHub 反而还是连不上」。
+  遇到这种情况：**先看系统代理和 hosts，而不是怀疑 GitHub 或 git**。
+- Clash 在跑时（`127.0.0.1:7890` 在听）这样推：
+
+```powershell
+cd '<项目目录>\qq-ai-bot-public'
+git -c http.proxy=http://127.0.0.1:7890 -c https.proxy=http://127.0.0.1:7890 push -u origin main
+```
+
+- ⚠️ **不要写进 `git config --global`** —— 代理一关，之后所有 git 操作都会卡死。
+  用 `-c` 一次性传（或者只写进这一个仓库的 local config）。
+- 查 GitHub API 也一样：`Invoke-RestMethod ... -Proxy http://127.0.0.1:7890`。
+- ⚠️ 我这边 `git push` 报 **exit code 1 但其实是成功** —— PowerShell 会把 git 写到
+  stderr 的进度行当成错误记录。**看 `main -> main` 那行**，别只看退出码。
+- 公开副本远端：`https://github.com/hzyzhzy/saki-ai-bot`（**只有公开副本能推**；
+  live 那份（`qq-ai-bot/`）**永远不加 remote**）。
 
 ---
 
