@@ -25,6 +25,9 @@ knowledge/_backup*/
 library/_pending/
 library/_stats.json
 
+# ── 由 README 生成的说明书（本地看就行，不用提交）───────
+manual/
+
 # ── 抓下来的真实群聊记录（工具输入，不是测试夹具）──────
 test/corpus.txt
 test/essence.json
