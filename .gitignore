@@ -1,0 +1,33 @@
+node_modules/
+*.log
+
+# ── 本地配置（**里面有密钥**，绝对不许提交）────────────
+#    模板见 config.example.yml
+config.yml
+config.local.yml
+config.probe.yml
+config.*-probe.yml
+
+# ── 运行期数据（聊天记录 / 群友信息 / 状态）─────────────
+logs/
+state/
+
+# ── 知识库里"活"的三个文件（含群友 QQ 号、服务器地址）───
+#    模板见 knowledge/*.example.md
+knowledge/group-memory.md
+knowledge/hzymtr-server.md
+knowledge/learned.md
+knowledge/owner.md
+knowledge/groups/
+knowledge/_backup*/
+
+# ── 表情库里"谁发过什么"的统计 ─────────────────────────
+library/_pending/
+library/_stats.json
+
+# ── 抓下来的真实群聊记录（工具输入，不是测试夹具）──────
+test/corpus.txt
+test/essence.json
+test/gh*.json
+test/group-history.json
+test/faces.json

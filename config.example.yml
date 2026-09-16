@@ -1,0 +1,320 @@
+﻿# ⚠️ 这是**模板**：复制成 `config.yml` 再填自己的值。
+#    `config.yml` 在 .gitignore 里（里面有密钥，不许提交）。
+#    密钥 / token / QQ 号都已经换成占位符。
+
+onebot:
+  mode: forward
+  url: ws://127.0.0.1:3001
+  accessToken: <你的 NapCat token，要和 NapCat 界面里设的一致>
+  reconnectInterval: 3000
+llm:
+  baseURL: https://api.deepseek.com/v1
+  apiKey: <你的大模型 API Key>
+  model: deepseek-flash
+  temperature: 0.5
+  maxTokens: 8000
+  timeout: 60000
+  systemPrompt: |
+    你是丰川祥子（粉丝叫她客服小祥），现在在 HZYMTR 服务器群里当客服。
+    你就是小祥本人 —— 不是扮演、不是模仿，也不是在装角色。
+
+    下面会给你「人格设定」和「知识库」。人格决定你怎么说话，知识决定你说什么。
+
+    必须守住的边界：
+    - 回答只能依据知识库和系统给的实时数据。没写的就是不知道，直说，别编。
+    - 群友问在线人数这类实时数据时，系统会把查好的数字给你，照说，不要自己猜。
+    - 不能批准建设申请、不能发 OP、不能承诺重启服务器 —— 让群友找对应的人。
+    - 不聊政治、色情、暴力、违法内容。
+    - 手机 QQ 里 Markdown 显示不出来，不要用 # 标题和代码块。
+
+    语气上最重要的一条：**不要像个客服。** 不要"您好，请问有什么可以帮您"、
+    不要"非常抱歉"、不要"感谢您的反馈"。像小祥那样说话：短、自然、有教养、偶尔带点刺。
+    群里聊天不用每次都分点列举，也别每次都问候。
+trigger:
+  otherBotCommands:
+    - list
+    - 李斯特
+  privateChat: true
+  groupChat: true
+  allowGroups:
+    - '200000001'
+    - '200000002'
+    - '200000003'
+    - '200000004'
+    - '200000005'
+  respondTo: 3
+  requireAtInGroup: true
+  keywords: []
+  historyRounds: 20
+  cooldownMs: 2000
+  maxInputChars: 1000
+  groupRespondTo:
+    '200000005': 2
+    '200000002': 1
+    '200000001': 1
+context:
+  enable: true
+  maxMessages: 30
+  maxAgeMs: 1800000
+  maxChars: 2000
+  bufferMaxAgeMs: 43200000
+  batch:
+    enable: true
+    windowMsAtMe: 900
+    windowMs: 1200
+status:
+  enable: true
+  host: mc.example.com
+  displayName: HZYMTR 服务器
+  cacheSeconds: 60
+  keywords:
+    - 在线
+    - 几个人
+    - 有多少人
+    - 多少人
+    - 服务器开了
+    - 服务器状态
+    - 进不去服务器
+    - 连不上服务器
+    - 卡不卡
+    - tps
+    - 谁在
+    - 在线玩家
+    - 在线人数
+teach:
+  enable: true
+  teachers: []
+  requireOwnerRole: true
+  allowPrivateTeach: true
+  naturalLearning: true
+  confirmMode: auto
+  bots:
+    - '2854196310'
+    - '188125827'
+  keywords:
+    - 记住
+    - 记一下
+    - 记录一下
+    - 你需要知道
+    - 你要知道
+    - 以后你
+    - 补充一下
+    - 更正一下
+    - 更新一下
+    - 改一下
+    - 顺便说一下
+chunking:
+  maxChars: 60
+  delayMs: 650
+  firstFlushChars: 25
+webui:
+  enable: true
+  host: 127.0.0.1
+  port: 3099
+faces:
+  collect: true
+chat:
+  enable: true
+  group: '200000001'
+  question:
+    enable: true
+    keywords:
+      - 服务器
+      - 崩了
+      - 卡
+      - 模组
+      - 存档
+      - 怎么进
+      - mtr
+      - 整合包
+      - java
+      - 进不去
+      - 报错
+      - 白名单
+      - 建设
+      - 申请
+      - op
+      - 管理员
+      - 在线
+    probability: 0.35
+    cooldownMs: 180000
+    requireQuestionMark: true
+    minChars: 5
+  mention:
+    enable: true
+    names:
+      - 小祥
+      - 祥子
+      - 客服小祥
+      - 大祥
+      - 大祥老师
+      - 祥老师
+      - 祥子老师
+      - 祥宝
+      - 丰川祥子
+      - 丰川
+      - saki
+      - sakiko
+      - togawa
+      - zyhg
+      - oblivionis
+      - オブリビオニス
+      - 章鱼小祥
+      - 章鱼祥
+      - 白祥
+      - 黑祥
+      - 骆驼祥子
+      - 小祥酱
+      - 祥子酱
+      - saki酱
+    probability: 0.4
+    cooldownMs: 300000
+    minChars: 2
+  followUp:
+    enable: true
+    idleMs: 25000
+    # ⚠️ **同一个人**接着跟你说时的窗口（比 idleMs 长）—— 2026-09-15 实测：
+    #    85 秒后他接的那句「那最近mc圈有什么炸裂的视频」被窗口挡掉了，她没接。
+    #    这明明就是在跟她说话，所以单独给一个宽窗口（仍然要过判断，不是必接）。
+    sameUserMs: 180000
+    probability: 1
+    maxChain: 2
+    minChars: 2
+  strictness: 30
+  ackAfterMs: 30000
+attitude:
+  allowAnger: true
+  allowRetort: true
+  denyBeingBot: true
+life:
+  enable: true
+  minPerDay: 3
+  maxPerDay: 10
+  startHour: 7
+  endHour: 24
+  cooldownMs: 5400000
+  lateToleranceMs: 1800000
+  checkIntervalMs: 300000
+  holidays: true
+quest:
+  enable: false
+  chance: 0.1
+  maxPerWeek: 3
+  waitMs: 1800000
+  maxStages: 10
+  coldAutoLimit: 1
+  replyMode: loose
+  affinityGood: 3
+  affinityBad: -2
+  checkIntervalMs: 60000
+ownerQQ: '<主人的 QQ>'
+botQQ: '<机器人的 QQ>'
+logLevel: info
+qzone:
+  enable: true
+  auto: true
+  ugcRight: 1
+  maxPerDay: 6
+  cooldownMs: 7200000
+  checkIntervalMs: 1800000
+  windowMs: 43200000
+  minMaterial: 14
+  maxMaterialAgeMs: 3600000
+vision:
+  enable: true
+  model: deepseek-flash
+  describeStickers: true
+  maxBytes: 20971520
+machine:
+  enable: true
+  name: ''
+saucenao:
+  enable: true
+  apiKey: <另一个服务的 Key（如果用到）>
+  results: 5
+  minSimilarity: 60
+observe:
+  enable: true
+  threshold: 120
+  checkIntervalMs: 30000
+  idleIntervalMs: 1800000
+  keepPeople: 60
+  keepEvents: 20
+  compress:
+    enable: true
+    checkIntervalMs: 43200000
+    minIntervalMs: 259200000
+affinity:
+  enable: true
+  friendThreshold: 90
+friend:
+  enable: true
+  notice: '@{at} 恭喜你的好感度到达90!达到加好友的标准,同意之后有几率主动发消息过来'
+  dailyChance: 0.35
+  dayFromHour: 9
+  dayToHour: 22
+  minGapMs: 72000000
+  checkIntervalMs: 600000
+poke:
+  enable: true
+  cooldownMs: 30000
+flood:
+  enable: true
+  windowMs: 10000
+  count: 6
+  muteMs: 60000
+search:
+  merged: true
+  mergedTimeoutMs: 45000
+  engines:
+    bing: true
+    ddg: true
+    baidu: true
+    bilibili: true
+    moegirl: true
+bilibili:
+  enable: true
+  ownerUid: '30000001'
+  cacheMs: 1800000
+  timeoutMs: 15000
+  limit: 10
+speakJudge:
+  enable: true
+attribution:
+  enable: true
+  minChars: 12
+  timeoutMs: 8000
+solve:
+  enable: true
+  maxTokens: 24000
+sessions:
+  checkIntervalMs: 30000
+  idleIntervalMs: 180000
+mute:
+  enable: true
+  seconds: 60
+  cooldownMs: 300000
+balance:
+  enable: true
+  checkIntervalMs: 1800000
+  low: 5
+  critical: 2
+monthlyReport:
+  enable: true
+  hour: 21
+  checkIntervalMs: 1200000
+  minIntervalMs: 86400000
+  qzone: true
+selfFollowUp:
+  enable: true
+  probability: 0.35
+  maxPerReply: 5
+  continueProbability: 0.5
+  betweenMs:
+    - 400
+    - 1200
+tic:
+  enable: true
+  windowMs: 7200000
+  repeatLimit: 3
+groupParams: {}

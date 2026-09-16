@@ -1,0 +1,34 @@
+﻿# 仅用于自动化测试，不要用于实际运行。
+# 由 test/e2e.js 通过 QQBOT_CONFIG 环境变量加载。
+onebot:
+  mode: forward
+  url: ws://127.0.0.1:39001
+  accessToken: "test-token"
+  reconnectInterval: 300
+
+llm:
+  baseURL: http://127.0.0.1:39002/v1
+  apiKey: "sk-test-fake-key"
+  model: test-model
+  temperature: 0.8
+  maxTokens: 100
+  timeout: 10000
+  systemPrompt: "你是测试机器人。"
+
+trigger:
+  privateChat: true
+  groupChat: true
+  requireAtInGroup: true
+  keywords: []
+  historyRounds: 2
+  cooldownMs: 0
+  maxInputChars: 1000
+
+adminQQ: ""
+logLevel: info
+
+# 测试专用：独立端口，避免多个测试抢 3099
+webui:
+  enable: false
+  port: 3107
+

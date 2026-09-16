@@ -1,0 +1,9 @@
+# Windows 脚本必须是 CRLF —— cmd 解析 LF 的 .bat 会报一堆
+# 「'xxx' is not recognized」，所以这里钉死行尾
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.vbs text eol=crlf
+*.cmd text eol=crlf
+
+# 其余按内容自动判断
+* text=auto

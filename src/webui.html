@@ -1,0 +1,2821 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>客服小祥 · 管理台</title>
+<style>
+  :root{
+    --bg:#f5f6f8; --card:#fff; --line:#e4e7ec; --text:#1f2430; --dim:#6b7280;
+    --accent:#5b7fd4; --ok:#16a34a; --warn:#d97706; --err:#dc2626; --radius:10px;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font:14px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--text)}
+  header{background:var(--card);border-bottom:1px solid var(--line);padding:14px 22px;display:flex;align-items:center;gap:14px;position:sticky;top:0;z-index:10}
+  header h1{font-size:17px;margin:0;font-weight:600}
+  header .sub{color:var(--dim);font-size:12px}
+  header .spacer{flex:1}
+  .wrap{max-width:1000px;margin:0 auto;padding:20px}
+  nav{display:flex;gap:6px;margin-bottom:18px;flex-wrap:wrap}
+  nav button{background:var(--card);border:1px solid var(--line);padding:8px 16px;border-radius:8px;cursor:pointer;font-size:14px;color:var(--dim)}
+  nav button.on{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:18px 20px;margin-bottom:16px}
+  .card h2{font-size:15px;margin:0 0 4px;font-weight:600}
+  .card .hint{color:var(--dim);font-size:12.5px;margin:0 0 14px}
+  /* 说明用的表格（比如「该往哪个库写」） */
+  .tbl{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:6px}
+  .tbl th,.tbl td{border:1px solid var(--line);padding:7px 10px;text-align:left;vertical-align:top}
+  .tbl th{background:rgba(127,127,127,.08);font-weight:600;white-space:nowrap}
+  .tbl td:last-child{white-space:nowrap;color:var(--dim)}
+  /* 分群灵敏度列表 */
+  .gr-list{display:flex;flex-direction:column;gap:8px;margin-top:6px}
+  .gr-row{display:flex;align-items:center;gap:12px;padding:8px 10px;border:1px solid var(--line);border-radius:8px}
+  .gr-name{flex:1;font-size:13px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .gr-id{color:var(--dim);font-size:11.5px;margin-left:8px}
+  .gr-row select{width:auto;min-width:210px;flex:0 0 auto}
+  label{display:block;font-size:13px;color:var(--dim);margin:10px 0 4px}
+  input[type=text],input[type=number],input[type=password],textarea,select{
+    width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:7px;font:inherit;background:#fff;color:var(--text)
+  }
+  textarea{resize:vertical;font-family:ui-monospace,Consolas,monospace;font-size:13px}
+  .row{display:flex;gap:14px;flex-wrap:wrap}
+  .row>div{flex:1;min-width:190px}
+  button.act{background:var(--accent);color:#fff;border:0;padding:9px 18px;border-radius:7px;cursor:pointer;font-size:14px;font-weight:500}
+  button.act:hover{filter:brightness(1.07)}
+  button.act:disabled{opacity:.5;cursor:default}
+  button.ghost{background:#fff;border:1px solid var(--line);color:var(--text);padding:9px 16px;border-radius:7px;cursor:pointer}
+  button.danger{background:#fff;border:1px solid var(--err);color:var(--err);padding:6px 12px;border-radius:7px;cursor:pointer}
+  .btns{display:flex;gap:10px;align-items:center;margin-top:16px;flex-wrap:wrap}
+  .msg{font-size:13px;padding:7px 12px;border-radius:7px;display:none;white-space:pre-wrap}
+  .msg.show{display:inline-block}
+  .msg.ok{background:#ecfdf5;color:var(--ok);border:1px solid #a7f3d0}
+  .msg.err{background:#fef2f2;color:var(--err);border:1px solid #fecaca}
+  .msg.warn{background:#fffbeb;color:var(--warn);border:1px solid #fde68a}
+  .switch{display:flex;align-items:center;gap:9px;padding:9px 0;border-bottom:1px dashed var(--line)}
+  .switch:last-child{border-bottom:0}
+  .switch input{width:17px;height:17px;accent-color:var(--accent)}
+  .switch .t{font-size:14px}
+  .switch .d{color:var(--dim);font-size:12.5px}
+  .faces{display:grid;grid-template-columns:repeat(auto-fill,minmax(158px,1fr));gap:12px;margin-top:6px}
+  .face{border:1px solid var(--line);border-radius:9px;overflow:hidden;background:#fafbfc}
+  .face img{width:100%;height:112px;object-fit:contain;background:#fff;display:block}
+  .face .body{padding:8px 9px}
+  .face .tag{font-weight:600;font-size:13px;margin-bottom:3px}
+  .face .when{color:var(--dim);font-size:11.5px;line-height:1.45;min-height:32px}
+  .face .ops{display:flex;gap:6px;margin-top:7px}
+  .face .ops button{flex:1;font-size:12px;padding:4px 0;border-radius:6px;border:1px solid var(--line);background:#fff;cursor:pointer}
+  .drop{border:2px dashed var(--line);border-radius:9px;padding:26px;text-align:center;color:var(--dim);cursor:pointer;font-size:13px}
+  .drop.over{border-color:var(--accent);background:#f0f4fc;color:var(--accent)}
+  .pill{display:inline-block;padding:2px 9px;border-radius:20px;font-size:12px;background:#eef2f8;color:var(--dim);margin-right:6px}
+  .kv{display:flex;gap:10px;padding:7px 0;border-bottom:1px dashed var(--line);font-size:13.5px}
+  .kv b{color:var(--dim);font-weight:500;min-width:96px}
+  /* ⚠️ 容器类：`kv()` 生成的行本身就是 .kv，外层**不能**再套 .kv ——
+     套了外层就成了横向 flex，每一格被挤成一列竖排（一个字一行，2026-09-15 用户截图）。 */
+  .kvs{display:block;padding:0;border:0;font-size:13.5px}
+  .mono{font-family:ui-monospace,Consolas,monospace;font-size:12.5px;word-break:break-all}
+  details summary{cursor:pointer;color:var(--dim);font-size:13px;padding:6px 0}
+  .hidden{display:none}
+  .rad{display:flex;align-items:flex-start;gap:10px;padding:11px 13px;border:1px solid var(--line);border-radius:9px;cursor:pointer;background:#fafbfc}
+  .rad:hover{border-color:var(--accent);background:#f5f8fd}
+  .rad input{margin-top:3px;width:16px;height:16px;accent-color:var(--accent);flex-shrink:0}
+  .rad .t{font-size:14px;font-weight:500}
+  .rad .d{color:var(--dim);font-size:12.5px;line-height:1.5}
+</style>
+</head>
+<body>
+<header>
+  <h1>客服小祥 · 管理台</h1>
+  <span class="sub" id="hdr"></span>
+  <span class="spacer"></span>
+  <button class="ghost" onclick="reloadAll()">重新读取</button>
+</header>
+
+<div class="wrap">
+  <div id="problems"></div>
+
+  <nav>
+    <button data-tab="model" class="on">模型</button>
+    <button data-tab="groups">群与触发</button>
+    <button data-tab="faces">表情包</button>
+    <button data-tab="knowledge">知识库</button>
+    <button data-tab="qzone">QQ空间</button>
+    <button data-tab="life">日常事件</button>
+    <button data-tab="quest">二级剧情</button>
+    <!-- ⚠️ 2026-09-16：按群设定**单独一页**（它管日常事件 + 二级剧情 + 收紧度三样） -->
+    <button data-tab="groupcfg">按群设定</button>
+    <button data-tab="affinity">好感度 / 好友</button>
+    <button data-tab="qqlogin">QQ登录</button>
+      <button data-tab="status">运行状态</button>
+  </nav>
+
+  <!-- 模型 -->
+  <section id="tab-model">
+    <div class="card">
+      <h2>身份（主人 / 机器人）</h2>
+      <p class="hint">
+        「<b>主人</b>」= 这台机器人**归谁**（原来的叫法是"群主/服主"，用户 2026-09-15 改叫<b>主人</b>）。
+        对他说话是**同级口吻**、不走客服那套；好感度那套也**对他不生效**。<br>
+        「<b>机器人账号</b>」= 它自己那个 QQ —— **登录脚本（一键启动）也读这里**去做快速登录，所以别填错。
+      </p>
+      <div class="row">
+        <div style="flex:1">
+          <label>主人 QQ</label>
+          <input type="text" id="id-ownerQQ" placeholder="例如 10000001">
+        </div>
+        <div style="flex:1">
+          <label>机器人 QQ</label>
+          <input type="text" id="id-botQQ" placeholder="例如 10000002">
+        </div>
+      </div>
+      <div class="btns">
+        <button class="act" onclick="saveIdentity()">保存</button>
+        <span class="msg" id="msg-id"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>大模型</h2>
+      <p class="hint">换成别的服务（百炼、Kimi、本地 Ollama…）也可以，只要兼容 OpenAI 接口。改完记得保存。</p>
+      <div class="row">
+        <div style="flex:2">
+          <label>API 地址（baseURL）</label>
+          <input type="text" id="llm-baseURL" placeholder="https://api.deepseek.com/v1">
+        </div>
+        <div style="flex:1.4">
+          <label>模型（点右边按钮从 API 拉取列表）</label>
+          <div style="display:flex;gap:8px">
+            <select id="llm-model" style="flex:1"></select>
+            <button class="ghost" onclick="loadModels()" id="btn-models" style="white-space:nowrap;padding:8px 12px">刷新列表</button>
+          </div>
+        </div>
+      </div>
+      <p class="hint" id="model-hint" style="margin-top:8px"></p>
+      <label>API Key</label>
+      <input type="password" id="llm-apiKey" placeholder="sk-...">
+      <div class="row">
+        <div><label>temperature（0~2，越大越发散）</label><input type="number" step="0.1" min="0" max="2" id="llm-temperature"></div>
+        <div><label>单次最大 token</label><input type="number" id="llm-maxTokens"></div>
+        <div><label>超时（毫秒）</label><input type="number" id="llm-timeout"></div>
+      </div>
+      <div class="btns">
+        <button class="act" onclick="saveModel()">保存</button>
+        <button class="ghost" onclick="testLLM()">测试连通性</button>
+        <span class="msg" id="msg-llm"></span>
+      </div>
+    </div>
+  </section>
+
+  <!-- 群与触发 -->
+  <section id="tab-groups" class="hidden">
+    <div class="card">
+      <h2>它能在哪些群说话</h2>
+      <p class="hint">
+        ⚠️ <b>这个名单同时决定两件事</b>：① 不在名单里的群，消息它<b>完全不处理</b>；
+        ② <b>只有名单里的群，它才会主动搭话</b>（没 @ 它也接）。<br>
+        一行一个群号。留空 = 所有群都应答（不推荐，客服容易在无关的群里乱说话）。<br>
+        不知道群号？在目标群里随便发条消息，然后看机器人日志，或者用
+        <span class="mono">node test/group-history.js</span> 拉群列表。<br>
+        ⚠️ 想让它<b>主动搭话</b>，除了填在这里，那个群的<b>灵敏度还要设成 1 或 2</b>
+        （在「每个群的灵敏度」里设）；3 档只认 @。
+      </p>
+      <textarea id="trigger-allowGroups" rows="4" placeholder="200000001"></textarea>
+
+      <div class="switch">
+        <input type="checkbox" id="trigger-groupChat">
+        <div><div class="t">群聊应答</div><div class="d">关掉之后它只在私聊里回话</div></div>
+      </div>
+      <div class="switch">
+        <input type="checkbox" id="trigger-privateChat">
+        <div><div class="t">私聊应答</div><div class="d">任何人都能私聊它提问</div></div>
+      </div>
+      <div class="switch">
+        <input type="checkbox" id="trigger-requireAtInGroup">
+        <div><div class="t">群里需要 @ 才回复</div><div class="d">旧选项，下面选了灵敏度之后以灵敏度为准</div></div>
+      </div>
+      <div class="btns">
+        <!-- ⚠️ 保存按钮必须放在**这个卡片里**。
+             以前它只在下面「回复与分条」那个卡片里，用户在这儿填完群号
+             根本找不到保存按钮（真实反馈：「我都不知道哪个按钮是保存群号的」）。 -->
+        <button class="act" onclick="saveTrigger()">保存以上设置</button>
+        <span class="msg" id="msg-groups"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>群里回复灵敏度</h2>
+      <p class="hint">决定它在群里多主动。越往下越活跃，但也越费 token。</p>
+      <div style="display:flex;flex-direction:column;gap:10px;margin-top:6px">
+        <label class="rad">
+          <input type="radio" name="respondTo" value="3">
+          <div><div class="t">③ 只有 @ 它才回复</div><div class="d">最安静。群里不 @ 它它就不说话，除非命中关键词。</div></div>
+        </label>
+        <label class="rad">
+          <input type="radio" name="respondTo" value="2">
+          <div><div class="t">② 只回跟服务器有关、或聊到它的消息（推荐）</div><div class="d">有人问服务器的事它主动答；有人聊「小祥」它出来接话。普通闲聊不插嘴。</div></div>
+        </label>
+        <label class="rad">
+          <input type="radio" name="respondTo" value="1">
+          <div><div class="t">① 只要有能回答的就马上回</div><div class="d">最活跃，什么话题都可能接。token 消耗最大，群里会显得很话痨。</div></div>
+        </label>
+      </div>
+      <div class="btns">
+        <button class="act" onclick="saveRespondTo()">保存灵敏度</button>
+        <span class="msg" id="msg-respond"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>① 档的「收紧度」（按群）</h2>
+      <p class="hint">
+        <b>只对灵敏度 ① 的群生效</b>（② ③ 本来就是安静档，不受这里影响）。<br>
+        往左 = 更活跃，往右 = 更安静。<b>改了当场生效，不用重启。</b>
+        <br>⚠️ **按群各设各的**（2026-09-15 晚）：热闹的大群可以调松一点（才接得上话），
+        严肃的群可以调紧。<b>没设过的群 = 默认 50</b>。
+      </p>
+      <div class="kv" style="flex-wrap:wrap;gap:8px;margin:0 0 8px">
+        <b>哪个群</b>
+        <select id="strict-group" style="width:auto;margin:0" onchange="fillStrictForGroup()"></select>
+        <span class="hint" style="margin:0" id="strict-group-note"></span>
+      </div>
+      <div style="margin:14px 0 6px">
+        <input type="range" id="strictness" min="0" max="100" step="5" value="50"
+               style="width:100%" oninput="onStrictInput()">
+      </div>
+      <div style="display:flex;justify-content:space-between;font-size:12px;color:#666">
+        <span>0 · 最活跃</span><span>50 · 平衡</span><span>100 · 最克制</span>
+      </div>
+      <div id="strict-desc" style="margin-top:10px;font-size:13px;line-height:1.7"></div>
+      <div class="btns">
+        <button class="act" onclick="saveStrictForGroup()">保存这个群的</button>
+        <button class="ghost" onclick="clearStrictForGroup()">还原成默认（50）</button>
+        <span class="msg" id="msg-strict-group"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>分群调节（每个群可以不一样）</h2>
+      <p class="hint">
+        上面那个是**全局默认**。这里可以给**单个群**单独设一档 ——
+        比如大群收紧成「只认 @」，熟人小群放开成「什么都能聊」。<br>
+        选「跟随全局」就用上面的默认值。
+      </p>
+      <div id="group-respond-list" class="gr-list">加载中…</div>
+      <div class="btns">
+        <button class="ghost" onclick="loadGroupRespond()">刷新群列表</button>
+        <span class="msg" id="msg-group-respond"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>谁能教它</h2>
+      <p class="hint">群里默认只认群主和管理员（靠 QQ 角色判断）。这里可以额外授权某些 QQ 号，一行一个。</p>
+      <textarea id="teach-teachers" rows="3" placeholder="（留空 = 只认群主和管理员）"></textarea>
+      <div class="switch">
+        <input type="checkbox" id="teach-allowPrivateTeach">
+        <div><div class="t">允许群主私聊教它</div><div class="d">关掉则只能在群里教</div></div>
+      </div>
+      <div class="row">
+        <div>
+          <label>触发教学的词（逗号分隔）</label>
+          <input type="text" id="teach-keywords" placeholder="记住,你需要知道,更正一下">
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>回复与分条</h2>
+      <div class="row">
+        <div><label>记忆轮数</label><input type="number" id="trigger-historyRounds"></div>
+        <div><label>冷却（毫秒）</label><input type="number" id="trigger-cooldownMs"></div>
+        <div><label>单条最多字数</label><input type="number" id="chunking-maxChars"></div>
+        <div><label>分条间隔（毫秒）</label><input type="number" id="chunking-delayMs"></div>
+      </div>
+      <div class="btns">
+        <button class="act" onclick="saveTrigger()">保存以上设置</button>
+        <span class="msg" id="msg-trigger"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>实时查服务器</h2>
+      <div class="switch">
+        <input type="checkbox" id="status-enable">
+        <div><div class="t">开启实时查询</div><div class="d">问「几个人在线」时去查真实状态，而不是瞎猜</div></div>
+      </div>
+      <div class="row">
+        <div style="flex:2"><label>服务器地址（带 SRV 记录的域名即可）</label><input type="text" id="status-host"></div>
+        <div><label>显示名</label><input type="text" id="status-displayName"></div>
+        <div><label>缓存秒数</label><input type="number" id="status-cacheSeconds"></div>
+      </div>
+      <div class="btns">
+        <button class="act" onclick="saveStatus()">保存</button>
+        <button class="ghost" onclick="testServer()">立即查一次</button>
+        <span class="msg" id="msg-status"></span>
+      </div>
+    </div>
+  </section>
+
+  <!-- 表情包 -->
+  <section id="tab-faces" class="hidden">
+    <div class="card">
+      <h2>添加表情</h2>
+      <p class="hint">
+        图片会被存到 <span class="mono">library/</span>。<b>「适用场合」写得越具体，它用得越准</b>——
+        这句话是它决定什么时候发这张图的唯一依据。<br>
+        QQ 表情支持 jpg / png / gif / webp，单张建议不超过 1MB。
+      </p>
+      <div class="drop" id="drop">点这里选图片，或把图片拖进来（可多选）</div>
+      <input type="file" id="file" accept="image/*" multiple class="hidden">
+      <div class="btns">
+        <button class="act" onclick="scanFaces()" id="btn-scan">更新表情库</button>
+        <button class="ghost" onclick="annotateFaces()" id="btn-annotate">自动补注释</button>
+        <span class="hint" style="margin:0">先扫一遍 <span class="mono">library/</span>；
+          「自动补注释」让机器人看图补上「图里是谁 / 什么时候用」（每张约 5~10 秒）</span>
+      </div>
+      <div class="btns">
+        <span class="msg" id="msg-face"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>表情列表 <span class="pill" id="face-count"></span></h2>
+      <p class="hint">点「编辑」可以改标签和适用场合。标签是模型调用时写的名字。</p>
+      <div class="faces" id="faces"></div>
+    </div>
+  </section>
+
+  <!-- 知识库 -->
+  <section id="tab-knowledge" class="hidden">
+    <div class="card">
+      <h2>该往哪个库写（别放错）</h2>
+      <p class="hint">知识分成几类，**放错地方会出现「我记录了你」这种副作用**，或者该记住的记不住。对照着写：</p>
+      <table class="tbl">
+        <tr><th>内容</th><th>放哪</th></tr>
+        <tr><td>它**自己**是什么、会干什么（比如「你会自己发说说」）</td><td><b>persona.md</b>（人设）</td></tr>
+        <tr><td>服务器的事：进服、排障、规则、存档、价格</td><td><b>hzymtr-server.md</b></td></tr>
+        <tr><td>**群友是谁**、什么性格、群里发生过什么（比如「luomosan 上初三，压力大」）</td><td><b>group-memory.md</b>（群资料库）</td></tr>
+        <tr><td>二次元作品、乐队、角色</td><td><b>anime.md</b></td></tr>
+        <tr><td>群里临时教的一句话（「记住：…」）</td><td><b>learned.md</b>（自动维护，这里只读）</td></tr>
+      </table>
+      <p class="hint" style="margin-top:8px">
+        简单判断：<b>关于「它自己」→ 人设</b>；<b>关于「服务器」→ 服务器库</b>；
+        <b>关于「群和群友」→ 群资料库</b>。
+      </p>
+    </div>
+
+    <div class="card">
+      <h2>知识文件</h2>
+      <p class="hint">改完保存立即生效（不需要重启）。<span class="mono">learned.md</span> 由机器人和群主在群里维护，这里只读。</p>
+      <div class="row">
+        <div>
+          <label>选择文件</label>
+          <select id="k-file"></select>
+        </div>
+      </div>
+      <p class="hint" id="k-desc" style="margin-top:6px"></p>
+      <label>内容</label>
+      <textarea id="k-content" rows="22"></textarea>
+      <div class="btns">
+        <button class="act" onclick="saveKnowledge()" id="k-save">保存</button>
+        <span class="msg" id="msg-k"></span>
+      </div>
+    </div>
+    <div class="card">
+      <h2>它学到的 <span class="pill" id="learned-count"></span></h2>
+      <p class="hint">群主在群里教它的内容。想删就在群里说「忘记：主题名」。</p>
+      <div id="learned-list" class="mono"></div>
+    </div>
+  </section>
+
+  <!-- 运行状态 -->
+  <section id="tab-qzone" class="hidden">
+    <div class="card">
+      <h2>QQ空间</h2>
+      <p class="hint">让客服小祥把群里的趣事、服务器近况、自己的感想发到 QQ 空间。
+        自动模式会定期看一遍攒下来的群消息，<b>觉得值得发才发</b>；觉得没什么可发的就什么都不做。</p>
+      <div id="qzone-status" class="kvs"></div>
+    </div>
+
+    <div class="card">
+      <h2>立刻发一条</h2>
+      <div class="btns">
+        <button class="act" onclick="qzonePreview()" id="btn-qz-preview">先看看会发什么（不发布）</button>
+        <button class="act" onclick="qzonePost()" id="btn-qz-post" style="background:#16a34a">立刻发送说说</button>
+        <span class="msg" id="msg-qzone"></span>
+      </div>
+      <p class="hint">「立刻发送」会让它自己挑素材写一条发出去。<b>发出去就收不回来了</b>，建议先点预览看看。</p>
+    </div>
+
+    <div class="card">
+      <h2>自己写一条</h2>
+      <p class="hint">不想让它自己写？直接在这里写好内容发出去。</p>
+      <textarea id="qz-manual" rows="4" placeholder="想说点什么……"></textarea>
+      <div class="btns">
+        <label style="margin:0;display:flex;align-items:center;gap:6px;font-size:13px">
+          配表情（可留空，一条说说配一张）
+          <select id="qz-face" style="width:auto;margin:0"></select>
+        </label>
+        <button class="act" onclick="qzoneManualPost()">发送这条</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>设置</h2>
+      <div class="row">
+        <div><label>每天最多发几条</label><input type="number" id="qz-maxPerDay" min="1" max="10"></div>
+        <div><label>两次间隔（小时）</label><input type="number" id="qz-cooldownHours" min="1" max="24" step="0.5"></div>
+        <div>
+          <label>查看权限</label>
+          <select id="qz-ugcRight">
+            <option value="1">所有人可见</option>
+            <option value="4">好友可见</option>
+            <option value="64">仅自己可见</option>
+          </select>
+        </div>
+      </div>
+      <div class="switch">
+        <input type="checkbox" id="qz-enable">
+        <div><div class="t">启用 QQ 空间功能</div><div class="d">关掉之后既不自动发，也发不出去</div></div>
+      </div>
+      <div class="switch">
+        <input type="checkbox" id="qz-auto">
+        <div><div class="t">自动判断并发布</div><div class="d">关掉后只能手动点「立刻发送」</div></div>
+      </div>
+      <div class="btns">
+        <button class="act" onclick="saveQzone()">保存设置</button>
+        <span class="msg" id="msg-qzone-cfg"></span>
+      </div>
+    </div>
+  </section>
+  <!-- QQ 登录 -->
+  <section id="tab-life" class="hidden">
+    <div class="card">
+      <h2>日常事件（一级）</h2>
+      <p class="hint">
+        让祥子像真人一样，在一天里随机发生些小事（拼好饭被偷、没赶上末班地铁…），
+        她用自己的口气吐槽/炫耀，主动发到 <b>1 档群</b>。
+        节奏是「<b>随机 + 冷却</b>」，不是计划表。<br>
+        ⚠️ 同一件事<b>只润色一次</b>、发给所有 1 档群，但<b>每个群各记各的故事线</b>
+        —— 所以两个群看到的是同一件小事，往后两边的剧情却各走各的。
+        想<b>单独关掉某个群</b>的日常事件，去「二级剧情 → 按群设定」。
+      </p>
+      <div id="life-status" class="kvs"></div>
+    </div>
+
+    <div class="card">
+      <h2>手动发一条（测试用）</h2>
+      <p class="hint">
+        「<b>预览一条</b>」= 按现在这个时段抽一条、让模型润色出来给你看，<b>不发、不记账</b>（会调一次模型）。<br>
+        「<b>立即发送</b>」= <b>发的就是上面预览的那一条</b>（没预览过才现抽一条），
+        <b>算今天的一条</b>（今天已发数 +1，后面的时间会重排）。
+        ⚠️ 只有 <b>1 档群</b>会收到 —— 别的档位不进事件系统。
+      </p>
+      <div class="kv" style="margin:6px 0">
+        <b>发到哪个群</b>
+        <select id="life-group" style="width:auto;margin:0"
+          onchange="localStorage.setItem('life-group', this.value)"></select>
+        <span class="hint" style="margin:0">每群的条数和排程是分开的 —— 这里只发到你选的那个群</span>
+      </div>
+      <div id="life-preview" class="kvs"></div>
+      <div class="btns" style="margin-top:8px">
+        <button class="act" onclick="lifePreview()">预览一条</button>
+        <button class="act" onclick="lifeSendNow()">立即发送</button>
+        <span class="msg" id="msg-life2"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>节奏 / 参数（**按群**）</h2>
+      <p class="hint">
+        ⚠️ 2026-09-16 起：日常事件和二级剧情的参数**没有"全局默认"了**，
+        <b>完全按群各设各的</b> —— 每天几条、间隔多久、时段、剧情概率…全在
+        <b>「按群设定」</b>那一页里，选一个群就设那个群。<br>
+        没设过的群用<b>内置起点</b>（每天 3 条、间隔 90 分钟、7:00-24:00）。
+      </p>
+      <div class="btns">
+        <button class="act" onclick="showTab('groupcfg')">去「按群设定」</button>
+      </div>
+      <p class="hint" style="margin-top:10px">
+        事件库在「知识库」页的 <span class="mono">life-events.md</span>、节日在 <span class="mono">holidays.md</span>，改完保存即热重载。
+      </p>
+    </div>
+  </section>
+
+  <section id="tab-quest" class="hidden">
+    <div class="card">
+      <h2>二级剧情（任务系统）</h2>
+      <p class="hint">
+        「能改变世界线的关键事件」—— 像一个游戏任务，<b>分阶段</b>。
+        起因从<b>这个群自己的</b>日常和故事线里长出来，群友可以在中途插话改变走向。
+        ⚠️ <b>每个群各跑一条</b>：同一个群里只允许 1 条（两条并行会互相打架），
+        但不同群互不干扰 —— <b>每个群有自己的故事线</b>，A 群的事不会串到 B 群。
+      </p>
+      <div id="quest-status" class="kvs"></div>
+    </div>
+
+    <div class="card">
+      <h2>故事线（每个群一份）</h2>
+      <p class="hint">
+        她在这条世界线上发生过什么 —— 一级日常 + 二级主线，全是<b>按群分开存</b>的。
+        这里的数字就是"生成新事件/剧情时喂给模型的那份记忆"。<br>
+        ⚠️ <b>带「锁定」的主线条目永远不会被删</b>，压缩时只允许变短；
+        模型想删掉任何一条锁定的，整次压缩作废、一个字都不写。
+      </p>
+      <div id="sl-total" class="kvs"></div>
+      <div id="sl-groups" style="margin-top:10px"></div>
+      <div id="sl-entries" style="margin-top:10px"></div>
+    </div>
+
+    <div class="card">
+      <h2>参数（**按群**）</h2>
+      <p class="hint">
+        ⚠️ 2026-09-16 起：二级剧情的参数**没有"全局默认"了**，<b>完全按群各设各的</b> ——
+        自动开不开、概率、每周几条、每段等多久、段数、好感度增减、
+        「群友哪句话能改变剧情」，全在 <b>「按群设定」</b>那一页里选群设置。<br>
+        没设过的群用<b>内置起点</b>（自动开=关、概率 0.1、每周 3 条、每段等 30 分钟）。<br>
+        ⚠️「起哄/纯笑」（哈哈哈哈、草、卧槽…）<b>任何档位都不算</b> —— 放宽也要有底线。<br>
+        <b>自动开剧情关着也能测</b>：「立即开始剧情」和「剧情模拟测试」都不受那个开关影响。
+      </p>
+      <div class="btns">
+        <button class="act" onclick="showTab('groupcfg')">去「按群设定」</button>
+      </div>
+    </div>
+
+    <div class="card">
+
+    <div class="card">
+      <h2>手动开一条</h2>
+      <p class="hint">
+        下面这个框有两个用处：点「立即开始剧情」= <b>现在就用它开一条，发到你选的那个群</b>；
+        点「替换下次二级事件」= <b>不现在开</b>，只把它记下来，等<b>这个群</b>下次自动轮到二级事件时用它。
+        ⚠️ 两者<b>都按「发到哪个群」选中的那个群</b>来 ——
+        每个群的故事线是分开的，所以那句子由头也<b>各群各存一句</b>。
+        ⚠️ 「立即开始剧情」会<b>真的往群里发消息</b>。
+      </p>
+      <!-- ⚠️ 这个选择器是 2026-09-15 补的：HZY「我手动开剧情，699开头的群没启动」——
+           原来按钮**根本不传 groupId**，服务端只会退回 groups[0]（配置里第一个 1 档群），
+           所以不管想开在哪个群，它都开在 200000002。 -->
+      <div class="kv" style="margin:6px 0">
+        <b>发到哪个群</b>
+        <select id="q-group" style="width:auto;margin:0"
+          onchange="localStorage.setItem('q-group', this.value); renderQuest()"></select>
+        <span class="hint" style="margin:0">只有 1 档群会进事件系统；每个群各跑自己的一条，互不影响</span>
+      </div>
+      <textarea id="q-hint" rows="3" placeholder="留空 = 让它自己从最近的故事线里找由头……"></textarea>
+      <div class="btns">
+        <button class="act" onclick="questStartNow()" id="btn-q-now" style="background:#dc2626">立即开始剧情（会发到群里）</button>
+        <button class="ghost" onclick="questSaveHint()">替换这个群下次的二级事件</button>
+        <span class="msg" id="msg-quest2"></span>
+      </div>
+      <!-- 清空（2026-09-15 晚 HZY：「加一个清空上次故事的按钮吧，现在还在测试中」）-->
+      <hr style="border:0;border-top:1px dashed var(--line);margin:12px 0">
+      <p class="hint" style="margin:0 0 6px">
+        <b>清空／重来（测试用）</b>：把上一次那条剧情当没发生过 ——
+        <b>中止</b>正在跑的那条（<b>不写结局、不动好感度</b>）、清掉<b>故事线历史</b>、
+        把这个群的「本周开过几条」也清零（不然会被每周上限挡着，没法连着试）。
+        ⚠️ 删掉就找不回来。
+      </p>
+      <div class="btns">
+        <button class="ghost" onclick="questReset(false)">清空所选群的剧情和故事线</button>
+        <button class="ghost" onclick="questReset(true)" style="color:#b91c1c">清空所有群</button>
+        <span class="msg" id="msg-quest3"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>剧情控制（正在跑的那条）</h2>
+      <p class="hint">
+        跟下面「剧情模拟测试」那一套按钮一样，区别是<b>这些动的是真群里的那条剧情</b>。<br>
+        「推进下一段」<b>不等那 30 分钟</b>，现在就写下一段发到群里；想让她这一段听某个建议，
+        就写在下面的框里（会当成"群里有人这么说"喂给她，跟真群友发言走同一条路）。
+        ⚠️ 都会<b>真的往群里发消息</b>。
+      </p>
+      <div class="kv" style="margin:6px 0">
+        <b>操作哪个群</b>
+        <select id="qc-group" style="width:auto;margin:0"
+          onchange="localStorage.setItem('qc-group', this.value); this.dataset.touched='1'"></select>
+        <span class="hint" style="margin:0" id="qc-now">—</span>
+      </div>
+      <textarea id="qc-reply" rows="2" placeholder="以群友身份说一句（可选）：想让这一段的走向听某句建议，就写在这儿"></textarea>
+      <div class="btns">
+        <button class="act" onclick="questNext(false)">推进下一段（带上面那句话）</button>
+        <button class="ghost" onclick="questNext(true)">不发话，直接推进一段</button>
+        <button class="ghost" onclick="questNext(true,'good')">收尾：好结局</button>
+        <button class="ghost" onclick="questNext(true,'bad')">收尾：坏结局</button>
+        <span class="msg" id="msg-quest4"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>剧情模拟测试</h2>
+      <p class="hint">
+        <b>在沙箱里跑，不会发消息、不落盘、也不会动真实的故事线。</b>
+        先开始一条，然后像群友一样说话、点「发送并生成下一阶段」，直到收尾 ——
+        最后可以看这次模拟写下的全部故事线。
+      </p>
+      <textarea id="qs-seed" rows="3" placeholder="留空 = 让它自动生成由头；也可以自己写一句（比如：她今天在便利店被人缠上了）"></textarea>
+      <div class="btns">
+        <button class="act" onclick="simStart(false)" id="btn-qs-auto">自动生成并填充并开始剧情</button>
+        <button class="ghost" onclick="simStart(true)" id="btn-qs-custom">立即用自定义内容开始剧情</button>
+        <button class="ghost" onclick="simReset()">清空模拟</button>
+        <span class="msg" id="msg-sim"></span>
+      </div>
+      <div id="sim-panel" style="margin-top:14px"></div>
+      <div id="sim-reply-box" class="hidden" style="margin-top:12px">
+        <label>模拟群友说的话（会走和真群一样的判定：@她 / 回她 / 明显建议 才算数）</label>
+        <textarea id="qs-reply" rows="2" placeholder="比如：要不你先去医院看看吧"></textarea>
+        <div class="btns">
+          <button class="act" onclick="simNext()" id="btn-qs-next">发送并生成下一阶段剧情</button>
+          <button class="ghost" onclick="simNext(true)">不发话，直接推进一段</button>
+        </div>
+        <div class="btns" style="margin-top:8px">
+          <button class="ghost" onclick="simNext(false,'good')" id="btn-qs-good"
+                  style="border-color:#16a34a;color:#16a34a">↳ 直接收成好结局</button>
+          <button class="ghost" onclick="simNext(false,'bad')" id="btn-qs-bad"
+                  style="border-color:#dc2626;color:#dc2626">↳ 直接收成坏结局</button>
+        </div>
+        <p class="hint" style="margin-top:6px">
+          这两个按钮会让它<b>照着那个结局写一段真正的收尾</b>（不是硬切），
+          这样好结局和坏结局你都能看到长什么样。
+        </p>
+      </div>
+      <div id="sim-story" style="margin-top:14px"></div>
+    </div>
+  </section>
+
+  <!-- ⚠️ 2026-09-16：**按群设定单独一页**（用户要求）——
+       原来它塞在「二级剧情」页里，可它管的是**日常事件 + 二级剧情 + 收紧度**三样，
+       放在剧情页里既不好找、也容易让人以为只管剧情。 -->
+  <section id="tab-groupcfg" class="hidden">
+    <div class="card">
+      <h2>按群设定（日常事件 · 二级剧情 · 收紧度）</h2>
+      <p class="hint">
+        ⚠️ 2026-09-16 起：<b>没有"全局默认"了，完全按群各设各的</b> ——
+        「日常事件」页和「二级剧情」页里的参数就是这一页在管。<br>
+        <b>留空 = 用内置起点</b>（输入框里的灰字就是"现在生效的值"）；填了 = 这个群单独用。<br>
+        ⚠️ 和「群与触发」里的<b>档位</b>不是一回事：
+        档位管的是「她要不要在这个群说话」，这里管的是「<b>事件和剧情在这个群怎么跑</b>」。<br>
+        ⚠️ <b>每个群的条数、排程、故事线都是分开算的</b> —— 给 A 群设成每天 1 条，不影响 B 群。
+      </p>
+      <div class="kv" style="margin:6px 0">
+        <b>哪个群</b>
+        <select id="gp-group" style="width:auto;margin:0"
+          onchange="localStorage.setItem('gp-group', this.value); fillGroupParams()"></select>
+        <span class="hint" style="margin:0" id="gp-note">—</span>
+      </div>
+      <div id="gp-form"></div>
+      <p class="hint" style="margin-top:6px">
+        「日常事件」关掉 = 这个群不再收到一级随机事件（别的群照常）；
+        「自动开剧情」关掉 = 这个群不自动开二级剧情（手动/模拟仍然能用）。
+      </p>
+    </div>
+  </section>
+
+  <section id="tab-affinity" class="hidden">
+    <div class="card">
+      <h2>好感度</h2>
+      <p class="hint">
+        每个群友一个 0~100 的数，默认 50。<b>只由"事件和互动"改变</b> ——
+        压缩、摘要那些自动机制一个字都不许碰它。
+        ⚠️ <b>对服主不生效</b>（你和它的关系是单独一套，优先级更高）。
+        <br>⚠️ <b>按群各记各的</b>（2026-09-15 晚）：同一个人在不同群里的分是分开的 ——
+        在 A 群混熟了不代表在 B 群也熟。下面选一个群看那一个群的。
+      </p>
+      <!-- 「看哪个群」：好感度分群之后必须能选（2026-09-15 晚） -->
+      <div class="kv" style="margin:6px 0">
+        <b>看哪个群</b>
+        <select id="aff-group" style="width:auto;margin:0" onchange="renderAffinity()"></select>
+        <span class="hint" style="margin:0">（空 = 不分群的那份老数据，已经尽量归属到各群了）</span>
+      </div>
+      <div id="aff-status" class="kvs"></div>
+    </div>
+
+    <div class="card">
+      <h2>排行榜预览</h2>
+      <p class="hint">
+        口径：<b>最近好感度有过变化的 10 个</b>，再按分数从高到低。
+        ⚠️ 不是"分数最高的 10 个" —— 那样榜会永远被同一批老面孔占着。
+        群里发 <span class="mono">/好感度</span> 就会发这个（<b>不进聊天上文</b>，也不分条）。
+      </p>
+      <div id="aff-board" class="kvs"></div>
+      <div class="btns"><button class="ghost" onclick="renderAffinity()">刷新</button></div>
+    </div>
+
+    <div class="card">
+      <h2>参数</h2>
+      <div class="row">
+        <div><label>加好友的门槛（好感度）</label><input type="number" id="a-threshold" min="50" max="100"></div>
+        <div><label>排行榜显示几个</label><input type="number" id="a-boardSize" min="1" max="30"></div>
+        <div><label>回应判定窗口（分钟）</label><input type="number" id="a-window" min="1" step="5"></div>
+      </div>
+      <div class="switch" style="margin-top:8px">
+        <input type="checkbox" id="f-enable">
+        <div>
+          <div class="t">好友功能（到线通知 + 主动私聊）</div>
+          <div class="d">关掉就不发到线通知、也不主动私聊</div>
+        </div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <div><label>每天主动私聊的概率</label><input type="number" id="f-chance" min="0" max="1" step="0.05"></div>
+        <div><label>只在白天（从）</label><input type="number" id="f-from" min="0" max="23"></div>
+        <div><label>到</label><input type="number" id="f-to" min="1" max="24"></div>
+        <div><label>同一个好友至少隔（小时）</label><input type="number" id="f-gapHours" min="1" step="1"></div>
+      </div>
+      <label>到线通知的固定模板（<span class="mono">{at}</span> 是 @，别加祥子的口气）</label>
+      <textarea id="f-notice" rows="2"></textarea>
+      <div class="btns">
+        <button class="act" onclick="saveAffinity()">保存</button>
+        <span class="msg" id="msg-aff"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>好友</h2>
+      <div id="f-list" class="kvs"></div>
+    </div>
+
+    <div class="card">
+      <h2>手动测试</h2>
+      <p class="hint">
+        ⚠️ 到 90 那条线正常要攒好几天，所以给你一个**立刻能验**的办法。
+        这两个按钮都会<b>真的发消息</b>（到线通知发到 1 档群、私聊直接发给本人）。
+      </p>
+      <div class="row">
+        <div><label>测给谁（QQ 号）</label><input type="text" id="f-testUid" placeholder="比如 10000001"></div>
+      </div>
+      <div class="btns">
+        <button class="ghost" onclick="testNotice()" id="btn-f-notice">试一下到线通知（发到群里，不记账）</button>
+        <button class="ghost" onclick="previewDm()" id="btn-f-prev">预览一条主动私聊（不发）</button>
+        <button class="act" onclick="sendDm()" id="btn-f-dm" style="background:#dc2626">真的发一条私聊</button>
+        <span class="msg" id="msg-f"></span>
+      </div>
+      <div id="f-preview" class="kvs" style="margin-top:10px"></div>
+    </div>
+  </section>
+
+  <section id="tab-qqlogin" class="hidden">
+    <div class="card">
+      <h2>QQ 登录状态</h2>
+      <p class="hint">
+        机器人能不能收消息，取决于 QQ <b>真的在线</b>。
+        光看「进程还在、端口还在监听」是不够的 —— 被踢下线时那些都正常，但消息收不到。
+      </p>
+      <div id="qq-status" class="kvs"></div>
+      <div class="btns">
+        <button class="act" onclick="qqRecover()" id="btn-qq-recover"
+                style="background:#16a34a">一键恢复登录（先试免扫码）</button>
+        <button class="ghost" onclick="qqRefresh()">刷新状态</button>
+        <button class="ghost" onclick="qqReloadQr()">显示二维码</button>
+        <button class="ghost" onclick="qqNewQr()" id="btn-qq-newqr">重新出码</button>
+      </div>
+      <p class="hint" id="qq-recover-msg" style="margin-top:10px"></p>
+    </div>
+
+    <div class="card" id="qq-qr-card" style="display:none">
+      <h2>用手机 QQ 扫码登录</h2>
+      <p class="hint">
+        <b>登录前先确认手机上退出了这个号</b>，否则会互相挤下线。<br>
+        二维码有时效（几分钟）。<b>扫码失败就点「重新出码」拿一张新的</b>再扫 ——
+        每次点都会让 QQ 现生成一张，不是把旧的再画一遍。
+      </p>
+      <div style="text-align:center;padding:12px 0">
+        <!--
+          ⚠️⚠️ 2026-09-15：**别加 `image-rendering: pixelated`、也别硬写 280px 拉大**。
+          NapCat 给的原图只有 147×147，最近邻放大到 280 会把二维码模块拉得
+          宽窄不一 → **手机扫不出来**（用户反馈"从来没扫成功过"的原因之一）。
+          现在按原始比例铺满卡片、用浏览器的平滑缩放，交给摄像头去分辨。
+        -->
+        <img id="qq-qr-img" alt="登录二维码"
+             style="width:100%;max-width:320px;height:auto;background:#fff;padding:10px;border-radius:10px">
+      </div>
+      <p class="hint" id="qq-qr-hint" style="text-align:center"></p>
+    </div>
+
+    <div class="card">
+      <h2>为什么会掉线 / 起不来</h2>
+      <p class="hint">
+        <b>网络瞬断</b>：网恢复后 QQ 一般能自己重连，不用管。<br>
+        <b>被踢下线</b>（日志里写 <code>KickedOffLine</code>）：腾讯把登录态作废了，
+        <b>重试没用，必须重新扫码</b>。<br>
+        ⚠️ <b>NapCat 压根没在跑的时候</b>（比如电脑重启过、QQ 被关掉了），
+        下面这个按钮会<b>把它启动起来</b>（开一个 NapCat 窗口，最小化在任务栏）——
+        不是只能"重启"，没跑的时候点它也有用。
+      </p>
+      <p class="hint" id="qq-restart-hint" style="margin-bottom:8px"></p>
+      <div class="btns">
+        <button class="act" onclick="qqRestart()" id="btn-qq-restart"
+                style="background:#dc2626">重启 NapCat（重新出码）</button>
+      </div>
+    </div>
+  </section>
+
+  <section id="tab-status" class="hidden">
+    <div class="card">
+      <h2>当前状态</h2>
+      <div id="stats"></div>
+      <div class="btns">
+        <button class="ghost" onclick="reloadAll()">刷新</button>
+      </div>
+    </div>
+    <div class="card">
+      <h2>连接与路径</h2>
+      <div id="paths"></div>
+    </div>
+  </section>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let STATE = null;
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  return r.json();
+}
+
+// ── 这个标签页是不是旧的？（2026-09-15 加）──
+// ⚠️ 起因：用户点「立即发送」后事件**变了一条**才发出去。查明是**这个标签页还是旧页面** ——
+//    界面没有轮询，服务端的 webui.html 改了，开着的标签页不会知道，
+//    旧页面的 lifeSendNow() 不传预览 → 服务端只好重新抽一条。
+//    所以这里每 60 秒跟服务端比一次版本，不一致就在底下挂一条提示让人刷新。
+const PAGE_VER = '__PAGE_VER__';
+let pageStaleShown = false;
+async function checkPageVer() {
+  try {
+    const r = await (await fetch('/api/pagever', { cache: 'no-store' })).json();
+    if (!r || !r.ver || String(r.ver) === String(PAGE_VER) || pageStaleShown) return;
+    pageStaleShown = true;
+    const bar = document.createElement('div');
+    bar.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:9999;background:#8a6d1f;color:#fff;' +
+      'padding:10px 14px;font:14px/1.5 system-ui,sans-serif;text-align:center;cursor:pointer;box-shadow:0 -2px 8px rgba(0,0,0,.25)';
+    bar.textContent = '⚠️ 服务端的界面文件更新过了，这个标签页还是旧的（按钮行为可能不一样）—— 点这里刷新';
+    bar.onclick = () => location.reload();
+    document.body.appendChild(bar);
+    document.title = '⚠️ 该刷新了 · ' + document.title;
+  } catch {}
+}
+setInterval(checkPageVer, 60000);
+checkPageVer();
+
+function flash(el, ok, text) {
+  el.className = 'msg show ' + (ok === true ? 'ok' : ok === false ? 'err' : 'warn');
+  el.textContent = text;
+  if (ok === true) setTimeout(() => { el.className = 'msg'; }, 5000);
+}
+
+function lines(str) {
+  return String(str || '').split('\n').map(s => s.trim()).filter(Boolean);
+}
+
+// ── 标签页 ──
+document.querySelectorAll('nav button').forEach(b => {
+  b.onclick = () => {
+    document.querySelectorAll('nav button').forEach(x => x.classList.remove('on'));
+    b.classList.add('on');
+    // ⚠️ 这个列表必须跟 nav 里的 data-tab 一一对应 —— 漏了哪个，哪个标签就切不过去
+    //    （qzone 就漏过一阵子，面板永远显示不出来）
+    ['model','groups','faces','knowledge','qzone','life','quest','groupcfg','affinity','qqlogin','status'].forEach(t => {
+      const el = $('tab-' + t);
+      if (el) el.classList.toggle('hidden', t !== b.dataset.tab);
+    });
+    if (b.dataset.tab === 'knowledge') loadKnowledge();
+    if (b.dataset.tab === 'faces') renderFaces();
+    if (b.dataset.tab === 'groups') { loadGroupRespond(); fillStrictForGroup(); }
+    if (b.dataset.tab === 'qzone') renderQzone();
+    if (b.dataset.tab === 'life') renderLife();
+    if (b.dataset.tab === 'quest') { renderQuest(); renderStoryline(); }
+    // ⚠️ 2026-09-16：按群设定自己一页了（原来挤在二级剧情页里）
+    if (b.dataset.tab === 'groupcfg') renderGroupParams();
+    if (b.dataset.tab === 'affinity') renderAffinity();
+    if (b.dataset.tab === 'qqlogin') qqRefresh();
+  };
+});
+
+/**
+ * 切到某个标签页（界面上的按钮用的，比如「日常事件」页里那个「去按群设定」）。
+ * ⚠️ 直接复用 nav 按钮自己的 onclick —— 免得两处逻辑各写一遍、以后改一处漏一处。
+ */
+function showTab(name) {
+  const b = document.querySelector(`nav button[data-tab="${name}"]`);
+  if (b) b.click();
+  else console.warn('没有这个标签页：', name);
+}
+
+// ── 读取状态 ──
+async function reloadAll() {
+  const r = await api('/api/state');
+  if (!r.ok) return;
+  STATE = r;
+  const c = r.config;
+  fillQuestGroup();                        // 「立即开始剧情」发到哪个群（1 档群列表）
+
+  $('hdr').textContent = `表情 ${r.stats.faces} · 学到 ${r.stats.learned} 条 · ${c.llm.model}`;
+
+  // 身份（主人 / 机器人）—— 2026-09-15 用户要求：可编辑，而且「群主」改称「主人」
+  $('id-ownerQQ').value = c.ownerQQ || '';
+  $('id-botQQ').value = c.botQQ || '';
+
+  // 模型
+  $('llm-baseURL').value = c.llm.baseURL || '';
+  // 模型下拉框：先把当前值放进去，再尝试从 API 拉完整列表
+  fillModelSelect([c.llm.model].filter(Boolean), c.llm.model);
+  renderQzone();
+  $('qz-face').innerHTML =
+    '<option value="">不配图</option>' +
+    FACES.map((f) => '<option value="' + esc(f.tag) + '">' + esc(f.tag) + '</option>').join('');
+  loadModels({ silent: true });
+  $('llm-apiKey').value = c.llm.apiKey || '';
+  $('llm-temperature').value = c.llm.temperature ?? 0.5;
+  $('llm-maxTokens').value = c.llm.maxTokens ?? 800;
+  $('llm-timeout').value = c.llm.timeout ?? 60000;
+
+  // 群与触发
+  $('trigger-allowGroups').value = (c.trigger.allowGroups || []).join('\n');
+  $('trigger-groupChat').checked = !!c.trigger.groupChat;
+  $('trigger-privateChat').checked = !!c.trigger.privateChat;
+  $('trigger-requireAtInGroup').checked = !!c.trigger.requireAtInGroup;
+  $('trigger-historyRounds').value = c.trigger.historyRounds ?? 6;
+  $('trigger-cooldownMs').value = c.trigger.cooldownMs ?? 2000;
+
+  // QQ空间
+  if (c.qzone) {
+    $('qz-enable').checked = c.qzone.enable !== false;
+    $('qz-auto').checked = c.qzone.auto !== false;
+    $('qz-maxPerDay').value = c.qzone.maxPerDay ?? 3;
+    $('qz-cooldownHours').value = Math.round(((c.qzone.cooldownMs ?? 14400000) / 3600000) * 2) / 2;
+    $('qz-ugcRight').value = String(c.qzone.ugcRight ?? 1);
+  }
+
+  // 日常事件（一级）
+  // ⚠️ 2026-09-16：全局那张「节奏设置」卡**删掉了**（参数完全按群，去「按群设定」页）。
+  //    所以这里**只刷新状态**，不再回填那些已经不存在的输入框
+  //    （原来 `$('life-minPerDay').value = ...` 会直接抛错，把后面的初始化全带停）。
+  if (c.life) renderLife();
+
+  // 灵敏度：没配过就从 requireAtInGroup 推断（true→3，false→1）
+  const lvl = [1,2,3].includes(Number(c.trigger.respondTo))
+    ? Number(c.trigger.respondTo)
+    : (c.trigger.requireAtInGroup === false ? 1 : 3);
+  document.querySelectorAll('input[name=respondTo]').forEach(r => {
+    r.checked = Number(r.value) === lvl;
+  });
+  // 收紧度滑块（只对灵敏度 ① 生效）
+  $('strictness').value = Number.isFinite(Number(c.chat?.strictness)) ? Number(c.chat.strictness) : 50;
+  onStrictInput();
+  $('chunking-maxChars').value = c.chunking?.maxChars ?? 260;
+  $('chunking-delayMs').value = c.chunking?.delayMs ?? 700;
+
+  // 教学
+  $('teach-teachers').value = (c.teach.teachers || []).join('\n');
+  $('teach-allowPrivateTeach').checked = c.teach.allowPrivateTeach !== false;
+  $('teach-keywords').value = (c.teach.keywords || []).join(',');
+
+  // 实查
+  $('status-enable').checked = !!c.status.enable;
+  $('status-host').value = c.status.host || '';
+  $('status-displayName').value = c.status.displayName || '';
+  $('status-cacheSeconds').value = c.status.cacheSeconds ?? 60;
+
+  // 问题提示
+  const p = $('problems');
+  if (r.problems && r.problems.length) {
+    p.innerHTML = '<div class="card" style="border-color:#fde68a;background:#fffbeb">' +
+      '<h2 style="color:#d97706">配置有问题</h2>' +
+      r.problems.map(x => '<div style="font-size:13.5px">• ' + esc(x) + '</div>').join('') + '</div>';
+  } else {
+    p.innerHTML = '';
+  }
+
+  // 状态页
+  $('stats').innerHTML =
+    kv('机器人账号', c.botQQ ? esc(c.botQQ) + '（登录脚本用它快速登录）' : '— 未配置') +
+    // ⚠️ 2026-09-15：这里原来叫「群主」，用户要求**改称「主人」**；
+    //    而且它不再是只读的 —— 想改去上面「身份（主人 / 机器人）」那张卡片。
+    kv('主人', c.ownerQQ ? esc(c.ownerQQ) + '（对他说话是同级口吻；要改去上面那张卡片）' : '— 未配置') +
+    kv('表情库', r.stats.faces + ' 张') +
+    kv('学到的知识', r.stats.learned + ' 条') +
+    kv('知识库', r.stats.knowledge ? '已加载' : '未加载') +
+    kv('服务器状态', esc(r.server?.text || '—'));
+
+  $('paths').innerHTML =
+    kv('配置文件', '<span class="mono">' + esc(r.files.config) + '</span>') +
+    kv('数据目录', '<span class="mono">' + esc(r.files.root) + '</span>') +
+    kv('NapCat 连接', '<span class="mono">' + esc(c.onebot.mode + ' ' + c.onebot.url) + '</span>');
+
+  $('learned-count').textContent = r.stats.learned + ' 条';
+  $('learned-list').innerHTML = r.learnedTopics.length
+    ? r.learnedTopics.map((t, i) => (i + 1) + '. ' + esc(t)).join('<br>')
+    : '<span style="color:#6b7280">还没有学到额外的东西</span>';
+
+  renderFaces();
+}
+
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch]));
+const kv = (k, v) => `<div class="kv"><b>${esc(k)}</b><span>${v}</span></div>`;
+
+// ── 模型下拉框 ──
+
+/** 用给定列表填充下拉框，并把 current 选中 */
+function fillModelSelect(models, current) {
+  const sel = $('llm-model');
+  const want = current || sel.value;
+  const list = [...new Set([...(models || []), want].filter(Boolean))];
+  sel.innerHTML = list.map(m => `<option value="${esc(m)}">${esc(m)}</option>`).join('');
+  if (want && list.includes(want)) sel.value = want;
+}
+
+/** 从 API 拉可用模型列表 */
+async function loadModels(opts = {}) {
+  const el = $('msg-llm');
+  const hint = $('model-hint');
+  const btn = $('btn-models');
+  if (!opts.silent) btn.disabled = true;
+  if (!opts.silent) { hint.textContent = '正在从 API 拉取模型列表…'; }
+
+  try {
+    const r = await api('/api/models', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        baseURL: $('llm-baseURL').value.trim(),
+        apiKey: $('llm-apiKey').value.trim(),
+      })
+    });
+    if (r.ok && r.models.length) {
+      fillModelSelect(r.models, $('llm-model').value);
+      hint.textContent = `API 上有 ${r.models.length} 个模型：${r.models.join('、')}`;
+      hint.style.color = '#16a34a';
+    } else {
+      // 拉不到就保留手填能力
+      hint.textContent = `拉取失败（${r.error || '未知错误'}）—— 可以直接在下拉框里手打模型名，或者检查 API 地址和 Key。`;
+      hint.style.color = '#d97706';
+      ensureModelEditable();
+    }
+  } finally {
+    if (!opts.silent) btn.disabled = false;
+  }
+}
+
+/** 列表为空时，至少放一个可编辑的项，别让用户没得选 */
+function ensureModelEditable() {
+  const sel = $('llm-model');
+  if (!sel.options.length) {
+    sel.innerHTML = '<option value="">（拉取失败，请直接输入模型名）</option>';
+  }
+}
+
+// ── 日常事件（一级）──
+async function renderLife() {
+  const el = $('life-status');
+  if (!el) return;
+  try {
+    const r = await api('/api/state');
+    const s = r.life?.status || {};
+    const p = r.life?.plan || {};
+    const fmt = (ms) => {
+      if (!ms) return '—';
+      const d = new Date(ms);
+      return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+    };
+    // ⚠️ 2026-09-16：**每个群各排各的**（分群之后）—— 这张卡先填"发到哪个群"那个下拉框，
+    //    再把这个群的进度列出来（不再是"一份全局进度"）。
+    const gids = s.targets || [];
+    const sel = $('life-group');
+    if (sel) {
+      const keep = String(sel.value || localStorage.getItem('life-group') || '');
+      sel.innerHTML = gids.length
+        ? gids.map((g) => `<option value="${esc(g)}">群 ${esc(g)}</option>`).join('')
+        : '<option value="">（没有 1 档群）</option>';
+      if (gids.length) sel.value = gids.includes(keep) ? keep : gids[0];
+    }
+    const cur = String(sel?.value || '');
+    let per = null;
+    if (cur) {
+      try {
+        const one = await api(`/api/life/status?groupId=${encodeURIComponent(cur)}`);
+        if (one?.ok) per = one;
+      } catch {}
+    }
+    const st = per?.status || s;
+    const pl = per?.plan || p;
+    let html = kv('开关', st.enable ? '<b style="color:#16a34a">开</b>' : '<b style="color:#d97706">关</b>') +
+      (cur ? kv('下面是哪个群', `<b>${esc(cur)}</b>`) : '') +
+      kv('今天', `已发 ${pl.fired ?? 0} / 目标 ${pl.target ?? 0}`) +
+      kv('下次大概', fmt(pl.nextAt)) +
+      kv('允许时段', st.window || '7:00-24:00') +
+      kv('发到 1 档群', gids.join('、') || '（没有 1 档群）') +
+      kv('事件库', `${s.templates ?? 0} 条 / ${s.slots ?? 0} 个时段`);
+    // ⚠️ 每个群的进度都列一下（一眼看出"没混在一起"）
+    const bg = Array.isArray(s.byGroup) ? s.byGroup : [];
+    if (bg.length > 1) {
+      html += kv(
+        '各群各自算',
+        bg
+          .map((x) => `${esc(x.groupId)}：${x.fired ?? 0}/${x.target ?? 0}`)
+          .join(' · '),
+      );
+    }
+    if (s.today && s.today.length) {
+      html += kv('今天是什么日子', `<b style="color:#7c3aed">${esc(s.today.join('、'))}</b>` + (s.off ? '（放假）' : ''));
+    }
+    el.innerHTML = html;
+  } catch (e) {
+    el.innerHTML = kv('出错', esc(e.message));
+  }
+}
+
+async function saveLife() {
+  // ⚠️ 2026-09-16：全局那张「节奏设置」卡删了（参数**完全按群**）→ 这个函数没有入口了。
+  //    留着只为兼容旧页面：元素不在就**什么都不提交**（否则一调用就抛错）。
+  if (!$('life-enable')) return;
+  const el = $('msg-life');
+  const r = await api('/api/config', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ life: {
+      enable: $('life-enable').checked,
+      holidays: $('life-holidays').checked,
+      minPerDay: Number($('life-minPerDay').value),
+      maxPerDay: Number($('life-maxPerDay').value),
+      cooldownMs: Math.round(Number($('life-cooldownMin').value) * 60000),
+      lateToleranceMs: Math.round(Number($('life-lateMin').value) * 60000),
+      startHour: Number($('life-startHour').value),
+      endHour: Number($('life-endHour').value),
+    }})
+  });
+  flash(el, r.ok, r.ok ? '已保存并生效（节奏类参数下次检查时生效）' : ('保存失败：' + r.error));
+  if (r.ok) { await reloadAll(); renderLife(); }
+}
+
+// ── 日常事件：预览 / 立即发送（HZY：「日常事件也加一个预览和立即发送」）──
+// ⚠️ 「预览一条」抽到的那条（2026-09-15 用户要求「预览和发送合为一条」）：
+//    点「立即发送」时把它一起传上去，**发的就是你看过的那一句**，
+//    不再重新抽（原来是重新抽，所以你看到的和发出去的不是同一句）。
+let lifePreviewed = null;
+
+function renderLifePreview(p, extra) {
+  const box = $('life-preview');
+  if (!box || !p) return;
+  box.innerHTML =
+    kv('时段', esc(String(p.slot || '—'))) +
+    kv('抽到的事件', esc(String(p.event || '—'))) +
+    kv('她会这么说', `<b>${esc(String(p.text || '—'))}</b>`) +
+    (p.unclean ? kv('⚠️ 提示', '这次润色没成功，下面是事件原文') : '') +
+    (extra ? kv('发送到', esc(extra)) : '');
+}
+
+async function lifePreview() {
+  const el = $('msg-life2');
+  const gid = String($('life-group')?.value || '');
+  el.textContent = '正在让模型写一条…（要几秒）';
+  const p = await api('/api/life/preview', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ groupId: gid }) });
+  if (!p.ok) { el.textContent = '没抽出来：' + (p.reason || ''); return; }
+  lifePreviewed = p;                       // ★ 记住这一条，等下"立即发送"就发它
+  renderLifePreview(p);
+  el.textContent = '预览好了（没发送、也没记账）—— 点"立即发送"发的就是这一条';
+}
+
+async function lifeSendNow() {
+  const el = $('msg-life2');
+  const pre = lifePreviewed;
+  const gid = String($('life-group')?.value || '');
+  const what = pre?.text ? '你刚预览的那一条' : '现场新抽的一条';
+  if (!confirm(`这会**真的**往群 ${gid} 发一条日常事件（发的是${what}），而且**算这个群今天的一条**。\n\n确定吗？`)) return;
+  el.textContent = pre?.text ? '正在发送刚预览的那一条…' : '正在写并发送…（要几秒）';
+  const r = await api('/api/life/send-now', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ preview: pre || null, groupId: gid }),
+  });
+  if (!r.ok) { el.textContent = '没发出去：' + (r.error || ''); renderLifePreview(r); return; }
+  lifePreviewed = null;                    // 发过了，下次要重新预览
+  renderLifePreview(r, (r.sent || []).join('、'));
+  el.textContent = '已发到 ' + (r.sent || []).join('、');
+  renderLife();
+}
+
+// ── 剧情发展时间线（2026-09-15 晚 HZY：「把剧情发展呈现在 webui 上更详细一点」）──
+// ⚠️ 原来只列「第N段 + 群友回复」，既看不出**先后顺序**，也看不到
+//    她自己在群里**顺口接的话**（那句"答应了"的话原来哪儿都没显示）。
+//    这里把三段数据合成一条按时间排的时间线：
+//      ① 已经写出来的每一段（她说的话 + 世界发生了什么 + 群友的回复）
+//      ② 插曲：她在群里顺口接的话（不算分段，但下一段必须跟它一致）
+//      ③ 等下一段：群里说了、还没被消化掉的发言
+function hm(at) {
+  const n = Number(at ?? 0);
+  if (!n) return '—';
+  const d = new Date(n);
+  const p = (x) => String(x).padStart(2, '0');
+  return `${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+function questDevHtml(s) {
+  const rows = [];
+  const row = (at, inner) =>
+    `<div style="display:flex;gap:8px;padding:6px 0;border-bottom:1px dashed var(--line)">
+      <div style="color:#9ca3af;font-size:12px;min-width:38px">${hm(at)}</div>
+      <div style="flex:1">${inner}</div></div>`;
+  for (const st of s.stages || []) {
+    const reps = (st.replies || [])
+      .map((x) => `<div style="color:#6b7280;font-size:12.5px;padding-left:8px">↳ ${esc(x.name)}：${esc(x.text)}</div>`)
+      .join('');
+    rows.push({
+      at: Number(st.at ?? 0),
+      html: row(
+        st.at,
+        `<div><b>第 ${st.i} 段</b>　${esc(st.text || '')}</div>` +
+          (st.event && st.event !== st.text ? `<div style="color:#6b7280;font-size:12.5px">（世界：${esc(st.event)}）</div>` : '') +
+          reps,
+      ),
+    });
+  }
+  for (const x of s.interludes || []) {
+    rows.push({
+      at: Number(x.at ?? 0),
+      html: row(
+        x.at,
+        `<span style="background:#ede9fe;color:#5b21b6;border-radius:3px;padding:1px 4px;font-size:11.5px">插曲</span>
+         她在群里顺口接的：${esc(x.text)}`,
+      ),
+    });
+  }
+  for (const x of s.pendingList || []) {
+    rows.push({
+      at: Number(x.at ?? 0),
+      html: row(
+        x.at,
+        `<span style="background:#fef3c7;color:#92400e;border-radius:3px;padding:1px 4px;font-size:11.5px">等下一段</span>
+         ${esc(x.name)}：${esc(x.text)}`,
+      ),
+    });
+  }
+  if (!rows.length) return '';
+  return '<div style="margin-top:4px">' + rows.sort((a, b) => a.at - b.at).map((r) => r.html).join('') + '</div>';
+}
+
+// ── 二级剧情 ──
+async function renderQuest() {
+  const el = $('quest-status');
+  if (!el) return;
+  try {
+    const r = await api('/api/quest/state');
+    const s = r.status || {};
+    const c = r.config || {};
+    // ⚠️ 2026-09-16：全局那张「参数」卡删了（二级剧情参数**完全按群**，去「按群设定」页）
+    //    → 元素不在就跳过回填（不然页面初始化会在这里抛错）。
+    if ($('q-enable')) {
+      $('q-enable').checked = c.enable === true;
+      $('q-chance').value = c.chance ?? 0.1;
+      $('q-maxPerWeek').value = c.maxPerWeek ?? 3;
+      $('q-waitMin').value = Math.round((c.waitMs ?? 1800000) / 60000);
+      $('q-maxStages').value = c.maxStages ?? 10;
+      $('q-cold').value = c.coldAutoLimit ?? 1;
+      $('q-good').value = c.affinityGood ?? 3;
+      $('q-bad').value = c.affinityBad ?? -2;
+      $('q-replyMode').value = c.replyMode || 'normal';
+    }
+    // ⚠️ 「下次二级事件」是**按群**存的（2026-09-15 晚）——
+    //    这个框显示/编辑的是「发到哪个群」里选中的那个群那一句。
+    //    （每个群的故事线不一样，一句由头只对写它的那个群有意义）
+    const hintGid = String($('q-group')?.value || '');
+    const hints = s.hints || {};
+    const hintText = hints[hintGid] || (hintGid ? '' : (s.nextHint || ''));
+    if (document.activeElement !== $('q-hint')) $('q-hint').value = hintText;
+
+    let html = kv('自动开启', s.enable
+      ? '<b style="color:#16a34a">开</b>（会掷骰子自动开剧情）'
+      : '<b style="color:#d97706">关</b>（不会自动开；手动和模拟都能用）') +
+      kv('现在', s.running ? `<b style="color:#7c3aed">在跑（第 ${s.stage} / 计划 ${s.plannedStages} 段）</b>` : '没有在跑的剧情') +
+      kv('最近 7 天', `${s.weeklyUsed ?? 0} / ${s.maxPerWeek ?? 3} 条`);
+    if (s.running) {
+      // ⚠️ 2026-09-15 晚加：这一段原来只报"起因/发在/回过几次"，
+      //    用户要求「把剧情发展呈现在 webui 上更详细一点」——现在把
+      //    进度、等待窗口、结局好感度、以及**按时间排的整条发展**都摆出来。
+      const waitedMin = s.awaitingSince ? Math.max(0, Math.round((Date.now() - s.awaitingSince) / 60000)) : 0;
+      const waitMin = Math.round((s.waitMs ?? 1800000) / 60000);
+      const leftMin = Math.max(0, waitMin - waitedMin);
+      html += kv('起因', esc(s.premise || '')) +
+        kv('发在', `群 ${esc(s.groupId || '—')}` + (s.topicLabel ? ` · 题材「${esc(s.topicLabel)}」` : '')) +
+        kv('进度', `第 ${s.stage} / 计划 ${s.plannedStages} 段（最多 ${c.maxStages ?? 10} 段）`) +
+        kv('这一段', `已经等了 ${waitedMin} 分钟` +
+          (leftMin > 0
+            ? `，最多等 ${waitMin} 分钟（约 ${leftMin} 分钟后自动推下一段）`
+            : `，<b style="color:#7c3aed">已经到点</b> —— 下一次检查就推下一段`)) +
+        kv('群友回过', `${s.humanReplies ?? 0} 次` +
+          ((s.pending ?? 0) ? `（还有 ${s.pending} 句等着进下一段）` : '（现在没有等着的话）')) +
+        kv('自动续写', `${s.autoContinues ?? 0} 次（连着 ${c.coldAutoLimit ?? 1} 次没人回应就收尾）`) +
+        kv('结局影响', `好结局 ${(c.affinityGood ?? 3) > 0 ? '+' : ''}${c.affinityGood ?? 3} · ` +
+          `坏结局 ${c.affinityBad ?? -2}（<b>只给参与过的人</b>）`) +
+        kv('参与过的人', `${(s.cast || []).length} 人`);
+      const dev = questDevHtml(s);
+      if (dev) {
+        html += '<div style="margin-top:12px"><b style="font-size:13px">剧情发展（按时间）</b>' +
+          '<div class="hint" style="margin:2px 0 0">紫标＝她在群里顺口接的话（也算数）；黄标＝群里说了、还没进下一段</div>' +
+          dev + '</div>';
+      }
+      // 控制卡片那边显示"现在哪个群在跑"
+      const nowEl = $('qc-now');
+      if (nowEl) nowEl.textContent = `现在在跑：群 ${s.groupId}（第 ${s.stage} / 计划 ${s.plannedStages} 段）`;
+      const sel = $('qc-group');
+      if (sel && s.groupId && (sel.value !== String(s.groupId)) && !sel.dataset.touched) {
+        sel.value = String(s.groupId);           // 默认选"正在跑的那个群"
+      }
+    } else {
+      const nowEl = $('qc-now');
+      if (nowEl) nowEl.textContent = '现在没有在跑的剧情（先用上面的「立即开始剧情」开一条）';
+    }
+    if (hintText) {
+      html += kv(`下次二级事件（群 ${esc(hintGid || '全局兜底')}）`, '<b style="color:#d97706">' + esc(hintText) + '</b>');
+    }
+    // 别的群也各存了句子由头 → 列出来（省得以为"只有一份"）
+    const otherHints = Object.entries(hints).filter(([g, t]) => t && g !== hintGid);
+    if (otherHints.length) {
+      html += kv('别的群各存了',
+        otherHints.map(([g, t]) => `群 ${esc(g)}：${esc(String(t).slice(0, 24))}`).join('<br>'));
+    }
+    if (s.recent && s.recent.length) {
+      html += '<div style="margin-top:10px"><b style="font-size:13px">最近几条</b>' +
+        s.recent.map((x) => `<div style="font-size:12.5px;color:#6b7280;padding:2px 0">
+          ${x.ending === 'good' ? '🟢' : '🔴'} ${esc(x.premise || '')}（${x.stages} 段）</div>`).join('') + '</div>';
+    }
+    el.innerHTML = html;
+
+    const sim = r.sim || {};
+    renderSim(sim);
+  } catch (e) {
+    el.innerHTML = kv('出错', esc(e.message));
+  }
+}
+
+async function saveQuest() {
+  // ⚠️ 2026-09-16：全局那张「参数」卡删了（二级剧情参数**完全按群**，去「按群设定」页）
+  //    → 没有入口了；元素不在就别提交（不然一调用就抛错）。
+  if (!$('q-enable')) return;
+  const el = $('msg-quest');
+  const r = await api('/api/config', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ quest: {
+      enable: $('q-enable').checked,
+      chance: Number($('q-chance').value),
+      maxPerWeek: Number($('q-maxPerWeek').value),
+      waitMs: Math.round(Number($('q-waitMin').value) * 60000),
+      maxStages: Number($('q-maxStages').value),
+      coldAutoLimit: Number($('q-cold').value),
+      affinityGood: Number($('q-good').value),
+      affinityBad: Number($('q-bad').value),
+      replyMode: $('q-replyMode').value,
+    }})
+  });
+  flash(el, r.ok, r.ok ? '已保存并生效' : ('保存失败：' + r.error));
+  if (r.ok) renderQuest();
+}
+
+// ⚠️ 2026-09-15 晚：「替换下次二级事件」**按群存**（HZY：「最好也加个群选择…
+//    因为每个群的故事线不一样」）。所以这里必须把「发到哪个群」那个选择器的值带上 ——
+//    不传的话存的是"全局兜底"那份（老页面会那样），界面文案也会说清是哪个群。
+async function questSaveHint() {
+  const el = $('msg-quest2');
+  const gid = String($('q-group')?.value || '').trim();
+  if (!gid) { flash(el, false, '先在「发到哪个群」里选一个群（每个群各存各的）'); return; }
+  const r = await api('/api/quest/hint', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ text: $('q-hint').value, groupId: gid })
+  });
+  flash(el, r.ok,
+    r.ok
+      ? (r.nextHint ? `记住了：群 ${gid} 下次自动开剧情时用这句` : `群 ${gid} 那句已清空`)
+      : ('失败：' + r.error));
+  renderQuest();
+}
+
+// ── 「立即开始剧情」发到哪个群（2026-09-15 补）──
+// ⚠️ 起因：HZY「我手动开剧情，699开头的群没启动」。
+//    查日志：`管理界面手动开了一条剧情 → 群 200000002` —— 那个按钮**压根没传 groupId**，
+//    服务端只能退回 `groups[0]`（配置里第一个 1 档群），所以想开在 699 也会开在 621。
+//    现在界面上明确列出 1 档群让人选，并且记住上次选的（localStorage）。
+function eventGroupIds() {
+  const c = (STATE && STATE.config) || {};
+  const trig = c.trigger || {};
+  const lv = trig.groupRespondTo || {};
+  const allow = (trig.allowGroups || []).map(String);
+  return Object.keys(lv)
+    .filter((g) => Number(lv[g]) === 1 && (!allow.length || allow.includes(g)))
+    .sort();
+}
+
+function fillQuestGroup() {
+  const gids = eventGroupIds();
+  // ⚠️ 两个下拉框共用同一份 1 档群名单：
+  //    `q-group`  = 开新剧情发到哪个群
+  //    `qc-group` = 正在跑的那条剧情，操作哪个群
+  for (const id of ['q-group', 'qc-group']) {
+    const sel = $(id);
+    if (!sel) continue;
+    const keep = sel.value || localStorage.getItem(id) || '';
+    sel.innerHTML = gids.length
+      ? gids.map((g) => `<option value="${esc(g)}">群 ${esc(g)}</option>`).join('')
+      : '<option value="">（现在没有 1 档群）</option>';
+    if (keep && gids.includes(keep)) sel.value = keep;
+  }
+}
+
+// ── 真剧情控制：推进下一段 / 收尾（2026-09-15 晚 HZY：「也和模拟一样也加一套剧情控制按钮」）──
+// `noReply = true` → 不把上面那个框里的话当成群友发言（＝模拟面板的「不发话，直接推进一段」）；
+// `forceEnd` = 'good' / 'bad' → 强制收尾（跟模拟面板那两颗按钮一个意思）。
+// ⚠️ 服务端会**真的发到群里**，并且真的结算好感度（好结局 +N / 坏结局 −N）。
+async function questNext(noReply, forceEnd) {
+  const el = $('msg-quest4');
+  const gid = String($('qc-group')?.value || '').trim();
+  if (!gid) { flash(el, false, '先选一个群（只有 1 档群会进事件系统）'); return; }
+  const reply = noReply ? '' : String($('qc-reply')?.value || '').trim();
+  const what = forceEnd ? `收尾（${forceEnd === 'good' ? '好' : '坏'}结局）` : '推进下一段';
+  if (
+    !confirm(
+      `对群 ${gid} ${what}？\n\n` +
+        `这会**真的往群里发一条**（要几秒生成）。` +
+        (reply ? `\n会先当成"群里有人说了「${reply}」"。` : '') +
+        (forceEnd ? `\n⚠️ 收尾会按${forceEnd === 'good' ? '好' : '坏'}结局**结算好感度**。` : '') +
+        `\n\n确定吗？`,
+    )
+  ) {
+    return;
+  }
+  const card = el?.closest('.card');
+  card?.querySelectorAll('button').forEach((b) => { b.disabled = true; });
+  flash(el, null, `正在写${forceEnd ? '结局那一段' : '下一段'}…（要几秒）`);
+  try {
+    const r = await api('/api/quest/next', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ groupId: gid, reply, forceEnd: forceEnd || null }),
+    });
+    if (!r.ok) { flash(el, false, '失败：' + (r.error || '')); return; }
+    if (reply) $('qc-reply').value = '';
+    flash(el, true,
+      `${forceEnd ? '收尾了' : '已推进'}：群 ${gid} 第 ${r.status?.stage ?? '?'} 段` +
+        (r.ending ? `（${r.ending === 'good' ? '好' : '坏'}结局）` : ''));
+  } finally {
+    card?.querySelectorAll('button').forEach((b) => { b.disabled = false; });
+    renderQuest();
+  }
+}
+
+async function questStartNow() {
+  const el = $('msg-quest2');
+  const btn = $('btn-q-now');
+  const gid = String($('q-group')?.value || '').trim();
+  if (!gid) { flash(el, false, '没有 1 档群可选（只有 1 档群进事件系统，先去「群与触发」改档位）'); return; }
+  if (!confirm(`这会**真的**往群 ${gid} 发一条剧情，而且它会开始等群友回话（最多跑几小时）。\n\n确定吗？`)) return;
+  btn.disabled = true;
+  flash(el, null, `正在给群 ${gid} 生成开场…`);
+  try {
+    const r = await api('/api/quest/start', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      // ⚠️ groupId **必须带上** —— 不带的话服务端只会退回 groups[0]（配置里第一个 1 档群），
+      //    于是"想开在 699，结果开在 621"（HZY 2026-09-15 踩到）
+      body: JSON.stringify({ text: $('q-hint').value, groupId: gid })
+    });
+    flash(el, r.ok, r.ok ? `已发到群 ${r.groupId}：${r.text}` : ('失败：' + r.error));
+  } finally {
+    btn.disabled = false;
+    renderQuest();
+  }
+}
+
+// ── 清空剧情 / 故事线（测试用，2026-09-15 晚加）──
+// HZY：「加一个清空上次故事的按钮吧，现在还在测试中」
+//   `all=true` → 所有群；否则只清「发到哪个群」里选中的那个。
+//   ⚠️ 服务端走的是 `quest.abort()`（**不写结局、不动好感度**）+ `storyline.clear()`，
+//      别拿"正常收尾"去凑合 —— 那会改好感度、还会往她记忆里写一条假结局。
+async function questReset(all) {
+  const el = $('msg-quest3');
+  const gid = all ? '' : String($('q-group')?.value || '').trim();
+  if (!all && !gid) { flash(el, false, '先在「发到哪个群」里选一个群（或者点"清空所有群"）'); return; }
+  const what = all ? '所有群' : `群 ${gid}`;
+  if (!confirm(`清空${what}的剧情和故事线？\n\n· 正在跑的剧情会被**中止**（不写结局、不动好感度）\n· 故事线历史**删掉就找不回来**\n· 这个群的「本周开过几条」清零\n\n确定吗？`)) return;
+  const r = await api('/api/quest/reset', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ groupId: gid }),
+  });
+  if (!r.ok) { flash(el, false, '失败：' + (r.error || '')); return; }
+  flash(el, true, `清完了：中止 ${(r.stopped || []).length} 条剧情，清掉 ${r.groups ?? 0} 个群的故事线`);
+  renderQuest();
+  if (typeof renderStoryline === 'function') renderStoryline();
+  if (typeof renderGroupParams === 'function') renderGroupParams();
+}
+
+// ── 剧情模拟（沙箱）──
+
+function renderSim(s) {
+  const panel = $('sim-panel');
+  const box = $('sim-reply-box');
+  const story = $('sim-story');
+  if (!panel) return;
+  if (!s || !s.premise) {
+    panel.innerHTML = '<p class="hint">还没开始模拟。</p>';
+    if (box) box.classList.add('hidden');
+    if (story) story.innerHTML = '';
+    return;
+  }
+  panel.innerHTML = kv('起因', esc(s.premise)) +
+    kv('进度', `第 ${s.stage} 段 / 计划 ${s.plannedStages} 段`) +
+    (s.transcript || []).map((x) => {
+      if (x.role === 'saki') {
+        return `<div style="padding:6px 0;border-bottom:1px dashed var(--line)">
+          <b style="color:#5b7fd4">祥子（第 ${x.stage} 段）</b>　${esc(x.text)}
+          ${x.event ? `<div style="color:#6b7280;font-size:12.5px">（世界：${esc(x.event)}）</div>` : ''}</div>`;
+      }
+      if (x.role === 'skip') {
+        return `<div style="padding:4px 0;color:#d97706;font-size:12.5px">⚠️ 「${esc(x.text)}」被判成<span class="mono">${esc(x.why || '')}</span>，<b>不会影响剧情</b>（真实群里也是这样）</div>`;
+      }
+      return `<div style="padding:4px 0;color:#16a34a;font-size:12.5px">${esc(x.name)}：${esc(x.text)}　<span class="mono">(${esc(x.why || '')})</span></div>`;
+    }).join('');
+  if (box) box.classList.toggle('hidden', !!s.ended);
+  if (story) {
+    story.innerHTML = (s.story && s.story.length)
+      ? '<h2 style="font-size:14px">这次模拟写下的故事线</h2><div class="kvs">' +
+        s.story.map((e) => `<div style="padding:3px 0;font-size:12.5px">${e.tier === 2 ? '【主线】' : ''}${esc(e.text)}</div>`).join('') +
+        '</div>'
+      : '';
+  }
+}
+
+async function simStart(custom) {
+  const el = $('msg-sim');
+  const text = custom ? $('qs-seed').value.trim() : '';
+  if (custom && !text) return flash(el, false, '先在框里写一句，或者点左边的"自动生成"');
+  flash(el, null, '正在生成…');
+  const r = await api('/api/quest/sim/start', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ text })
+  });
+  flash(el, r.ok, r.ok ? '开始跑了，接着在下面模拟群友说话' : ('失败：' + r.error));
+  renderSim(r);
+}
+
+async function simNext(silent, forceEnd) {
+  const el = $('msg-sim');
+  const reply = silent ? '' : $('qs-reply').value.trim();
+  // ★ forceEnd：'good' / 'bad' → 这一段强制收尾成那个结局
+  flash(el, null, forceEnd ? `正在写成${forceEnd === 'good' ? '好' : '坏'}结局…` : '正在生成下一段…');
+  const r = await api('/api/quest/sim/next', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ reply, forceEnd: forceEnd || null })
+  });
+  if (r.ok) {
+    if (!silent) $('qs-reply').value = '';
+    flash(el, true, r.done
+      ? `剧情结束：${r.ending === 'good' ? '好结局' : '坏结局'}（好感度 +${r.ended ? r.ended.delta : '?'}）`
+      : '已生成下一段');
+  } else {
+    flash(el, false, '失败：' + r.error);
+  }
+  renderSim(r);
+}
+
+async function simReset() {
+  const r = await api('/api/quest/sim/reset', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
+  flash($('msg-sim'), true, '已清空模拟');
+  renderSim(r);
+}
+
+// ── 故事线（**每个群一份**，2026-09-15 HZY 要求）──
+//
+// 用户原话：「一个群设一个故事线知识库……知识库调用时一定要分清就行了。
+//   然后再做故事线卡片」。
+// ⚠️ 界面上**每行都是一个群** —— 压缩/看内容都是按群做的（不许有"全局默认"这种含糊操作）。
+let slOpenGroup = '';
+
+async function renderStoryline() {
+  const total = $('sl-total');
+  const box = $('sl-groups');
+  if (!total || !box) return;
+  try {
+    const r = await api('/api/storyline/state');
+    const s = r.status || {};
+    total.innerHTML =
+      kv('一共几个群', `${s.groups ?? 0} 个（每个群一条独立的世界线）`) +
+      kv('全部条数', `${s.total ?? 0} 条，其中锁定 <b style="color:#16a34a">${s.locked ?? 0}</b> 条`) +
+      kv('压缩过几次', `${s.compressRuns ?? 0} 次`) +
+      kv('存档', `<span class="mono">${esc(s.file || '')}</span>`) +
+      (s.lastError ? kv('上次出错', `<b style="color:#d97706">${esc(s.lastError)}</b>`) : '');
+
+    const rows = s.byGroup || [];
+    if (!rows.length) {
+      box.innerHTML = '<p class="hint">还没有任何群的故事线 —— 等她发第一条日常或剧情就有了。</p>';
+      $('sl-entries').innerHTML = '';
+      return;
+    }
+    box.innerHTML = rows.map((g) => `
+      <div class="kv">
+        <b>群 ${esc(g.groupId)}</b>
+        <span>${g.total} 条（锁定 <b style="color:#16a34a">${g.locked}</b>）· ${g.chars} 字 ·
+          上次压缩 ${g.lastCompressAt ? new Date(g.lastCompressAt).toLocaleString('zh-CN') : '从没压过'}</span>
+        <span style="margin-left:auto;white-space:nowrap">
+          <button class="act" onclick="slView('${esc(g.groupId)}')">${slOpenGroup === g.groupId ? '收起' : '看内容'}</button>
+          <button class="act" onclick="slCompress('${esc(g.groupId)}')">压缩这个群</button>
+        </span>
+      </div>`).join('');
+
+    if (slOpenGroup) await slView(slOpenGroup, true);
+    else $('sl-entries').innerHTML = '';
+  } catch (e) {
+    total.innerHTML = `<div class="kv"><b>读取失败</b><span>${esc(e.message)}</span></div>`;
+  }
+}
+
+/** 展开看某个群的故事线（⚠️ 按群拉，绝不混着看） */
+async function slView(groupId, keepOpen) {
+  const box = $('sl-entries');
+  if (!box) return;
+  if (slOpenGroup === groupId && !keepOpen) {
+    slOpenGroup = '';
+    box.innerHTML = '';
+    renderStoryline();
+    return;
+  }
+  slOpenGroup = groupId;
+  try {
+    const r = await api('/api/storyline/entries?groupId=' + encodeURIComponent(groupId) + '&limit=80');
+    const list = r.entries || [];
+    box.innerHTML =
+      `<h2 style="font-size:14px">群 ${esc(groupId)} 的故事线（${list.length} 条，时间正序）</h2>` +
+      (list.length
+        ? list.map((e) => `<div class="kv">
+            <b>${new Date(e.at).toLocaleString('zh-CN', {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'})}</b>
+            <span>${e.locked ? '<b style="color:#16a34a">[锁定·主线]</b> ' : ''}${esc(e.text)}</span>
+            ${(e.tags || []).length ? `<span class="mono" style="margin-left:auto">${esc((e.tags || []).join(' '))}</span>` : ''}
+          </div>`).join('')
+        : '<p class="hint">（这个群还没有条目）</p>');
+    if (!keepOpen) renderStoryline();
+  } catch (e) {
+    box.innerHTML = `<p class="hint">读取失败：${esc(e.message)}</p>`;
+  }
+}
+
+/** 压缩**某一个群**（会真的调模型，整次可能作废 —— 失败原因会原样显示出来） */
+async function slCompress(groupId) {
+  if (!confirm(`压缩群 ${groupId} 的故事线？\n\n（会调一次模型；带「锁定」的主线条目只允许变短，\n  模型想删掉任何一条都会整次作废、一个字都不写）`)) return;
+  const box = $('sl-entries');
+  box.innerHTML = `<p class="hint">正在压缩群 ${esc(groupId)}…（可能要十几秒）</p>`;
+  const r = await api('/api/storyline/compress', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ groupId, force: true }),
+  });
+  if (r.ok) {
+    box.innerHTML = `<p class="hint">✅ 群 ${esc(groupId)} 压缩完成：${r.result.before} → ${r.result.after} 字，
+      ${r.result.kept} 条（锁定 ${r.result.locked} 条一条没少）</p>`;
+  } else {
+    box.innerHTML = `<p class="hint">❌ 没压成：${esc((r.result && r.result.message) || r.error || '未知原因')}</p>`;
+  }
+  renderStoryline();
+}
+
+// ── 按群设定（HZY：「参数也可以分群设定」）──
+//
+// ⚠️⚠️ 2026-09-16 改造（用户要求）：
+//    「把**日常事件的节奏设置**和**二级事件的参数**也加一个**下拉群菜单**分群调节，
+//      注意修改的参数**一定要能真正保存**，而且能在 webui 上**马上看到变化**，
+//      不同群的数据**一定不要混在一起**了」
+//
+//   · 下拉选一个群 → 下面整张表单都是**这个群**的（不是一行行平铺所有群）
+//   · 每个输入框显示的都是**这个群现在实际生效的值**（没有"跟全局"那一档了）
+//   · 保存后**立刻回读**（`fillGroupParams()`）→ 界面马上显示这个群现在生效的值
+//   · 后端 config.js 会做白名单 + 数值化，所以"存了不生效"的字符串进不去
+//   · 数据不混：life/quest 的参数、计数、排程、故事线**都是按群的**
+let gpGroups = [];
+
+async function renderGroupParams() {
+  const sel = $('gp-group');
+  const box = $('gp-form');
+  if (!sel || !box) return;
+  try {
+    const [st, sl] = await Promise.all([api('/api/state'), api('/api/storyline/state')]);
+    const lv = (st.config && st.config.trigger && st.config.trigger.groupRespondTo) || {};
+    const allow = ((st.config && st.config.trigger && st.config.trigger.allowGroups) || []).map(String);
+    const inSl = ((sl.status && sl.status.byGroup) || []).map((x) => String(x.groupId));
+    // ⚠️⚠️ **只有 1 档群才进事件系统**（HZY 2026-09-15：
+    //    「挡位 2 不能进事件系统，只有 1 才能设置」）—— 所以下拉里**只有 1 档群**。
+    const isEvent = (g) => Number(lv[g]) === 1 && (!allow.length || allow.includes(g));
+    const all = [...new Set([...Object.keys(lv), ...inSl])];
+    gpGroups = all.filter(isEvent).sort();
+    const skipped = all.filter((g) => !isEvent(g)).sort();
+    if (!gpGroups.length) {
+      sel.innerHTML = '<option value="">（没有 1 档群）</option>';
+      box.innerHTML =
+        '<p class="hint">现在<b>没有 1 档群</b> —— 只有 1 档群才进事件系统（日常事件 + 剧情）。' +
+        (skipped.length ? `<br>不在事件系统里的群：${skipped.map(esc).join('、')}` : '') +
+        '<br>先去「群与触发」把要跑事件的群改成 <b>1 档</b>。</p>';
+      return;
+    }
+    const keep = String($('gp-group')?.value || localStorage.getItem('gp-group') || '');
+    sel.innerHTML = gpGroups.map((g) => `<option value="${esc(g)}">群 ${esc(g)}</option>`).join('');
+    sel.value = gpGroups.includes(keep) ? keep : gpGroups[0];
+    // ⚠️ 把"不在事件系统里"的群**明说出来** —— 不然用户会奇怪"我那个群怎么没有"
+    if (skipped.length) {
+      $('gp-note').innerHTML =
+        `—— 只有 1 档群能设置；${skipped.map(esc).join('、')} 现在不在事件系统里`;
+    }
+    await fillGroupParams();
+  } catch (e) {
+    box.innerHTML = `<p class="hint">读取失败：${esc(e.message)}</p>`;
+  }
+}
+
+/** 选中群的表单（**框里就是这个群现在实际生效的值**，没有"跟全局"） */
+async function fillGroupParams() {
+  const box = $('gp-form');
+  const gid = String($('gp-group')?.value || '').trim();
+  if (!box) return;
+  if (!gid) {
+    box.innerHTML = '';
+    return;
+  }
+  box.innerHTML = '<p class="hint">读取中…</p>';
+  let r;
+  try {
+    r = await api(`/api/group-params?groupId=${encodeURIComponent(gid)}`);
+  } catch (e) {
+    box.innerHTML = `<p class="hint">读取失败：${esc(e.message)}</p>`;
+    return;
+  }
+  if (!r.ok) {
+    box.innerHTML = `<p class="hint">读取失败：${esc(r.error || '')}</p>`;
+    return;
+  }
+  const ov = r.overrides || {};
+  const p = r.params || {};
+  const L = p.life || {};
+  const Q = p.quest || {};
+  const C = p.chat || {};
+  const oL = ov.life || {};
+  const oQ = ov.quest || {};
+  const oC = ov.chat || {};
+  // ⚠️⚠️ 2026-09-16（用户要求）：「还是有跟全局的选项」「默认选关闭就行了」——
+  //    **彻底去掉"跟全局"这个概念**：每个群就是**自己完整的一份**。
+  //    所以这里所有输入框显示的都是**这个群现在实际生效的值**，
+  //    开关只有「开 / 关」两态（不再有第三档"跟全局"）。
+  const val = (v) => (v === undefined || v === null ? '' : esc(String(v)));
+  /** 开 / 关 两态（值 = 这个群现在实际生效的那个状态） */
+  const onoff = (id, on) =>
+    `<select id="${id}" style="width:auto;margin:0">
+       <option value="1"${on ? ' selected' : ''}>开</option>
+       <option value="0"${on ? '' : ' selected'}>关</option>
+     </select>`;
+  const mins = (ms) => (Number.isFinite(Number(ms)) ? String(Math.round(Number(ms) / 60000)) : '');
+
+  // 今天这个群的进度（"马上看到变化"）
+  let today = '';
+  try {
+    const s = await api(`/api/life/status?groupId=${encodeURIComponent(gid)}`);
+    if (s?.ok && s.status) {
+      const nx = s.status.nextAt ? new Date(s.status.nextAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : '—';
+      today = `今天 <b>${s.status.fired}/${s.status.target}</b> 条 · 下次约 ${nx} · 时段 ${esc(s.status.window)}`;
+    }
+  } catch {}
+
+  box.innerHTML = `
+    <div class="hint" style="margin:0 0 8px">群 <b>${esc(gid)}</b> · ${today}</div>
+    <div class="hint" style="margin:0 0 8px">
+      下面是<b>这个群自己的一份</b>（框里就是它现在实际生效的值）——
+      改完保存只写进这个群，<b>不影响别的群</b>。没动过的群用的是内置起点。
+    </div>
+
+    <div style="border:1px dashed var(--line);border-radius:8px;padding:8px;margin-bottom:8px">
+      <b>日常事件（一级）</b>
+      <div class="kv" style="flex-wrap:wrap;gap:8px;margin-top:6px">
+        <label>这个群收日常事件 ${onoff('gp-life-enable', L.enable !== false)}</label>
+        <label title="节日会换事件池、放假屏蔽「上课/赶电车」">节日生效 ${onoff('gp-life-holidays', L.holidays !== false)}</label>
+        <label title="每天最少几条">每天最少 <input type="number" id="gp-life-min" min="1" max="20" style="width:70px" value="${val(L.minPerDay)}"></label>
+        <label title="每天最多几条">每天最多 <input type="number" id="gp-life-max" min="1" max="20" style="width:70px" value="${val(L.maxPerDay)}"></label>
+        <label title="从几点开始允许发（0-7 点不发）">几点开始 <input type="number" id="gp-life-sh" min="0" max="23" style="width:70px" value="${val(L.startHour)}"></label>
+        <label title="到几点（24 = 到午夜）">几点结束 <input type="number" id="gp-life-eh" min="1" max="24" style="width:70px" value="${val(L.endHour)}"></label>
+        <label title="两条之间最少隔多久">间隔（分钟） <input type="number" id="gp-life-cool" min="1" style="width:80px" value="${mins(L.cooldownMs)}"></label>
+        <label title="错过多久就不补发">迟到容忍（分钟） <input type="number" id="gp-life-late" min="0" style="width:80px" value="${mins(L.lateToleranceMs)}"></label>
+      </div>
+    </div>
+
+    <div style="border:1px dashed var(--line);border-radius:8px;padding:8px;margin-bottom:8px">
+      <b>二级剧情</b>
+      <div class="kv" style="flex-wrap:wrap;gap:8px;margin-top:6px">
+        <label>这个群自动开剧情 ${onoff('gp-quest-enable', Q.enable === true)}</label>
+        <label title="一级事件攒到点时，掷骰子自动开一条剧情的概率">概率 <input type="number" id="gp-quest-chance" min="0" max="1" step="0.01" style="width:70px" value="${val(Q.chance)}"></label>
+        <label title="每 7 天最多几条">每周上限 <input type="number" id="gp-quest-max" min="1" max="20" style="width:70px" value="${val(Q.maxPerWeek)}"></label>
+        <label title="每段等群友多久">每段等待（分钟） <input type="number" id="gp-quest-wait" min="1" style="width:80px" value="${mins(Q.waitMs)}"></label>
+        <label title="硬上限段数">最多段数 <input type="number" id="gp-quest-stages" min="1" max="10" style="width:70px" value="${val(Q.maxStages)}"></label>
+        <label title="没人回最多自动续几段">冷场自动续 <input type="number" id="gp-quest-cold" min="0" max="5" style="width:70px" value="${val(Q.coldAutoLimit)}"></label>
+        <label title="群友哪句话才算「能改变剧情」">谁的话算数
+          <select id="gp-quest-mode" style="width:auto;margin:0">
+            <option value="strict"${Q.replyMode === 'strict' ? ' selected' : ''}>严格（只认@她/回她/明显的建议）</option>
+            <option value="normal"${(Q.replyMode ?? 'normal') === 'normal' ? ' selected' : ''}>标准（+任何问句）</option>
+            <option value="loose"${Q.replyMode === 'loose' ? ' selected' : ''}>宽松（+6字以上闲聊）</option>
+          </select>
+        </label>
+        <label title="好结局加多少好感度">结局好感 + <input type="number" id="gp-quest-good" min="0" max="10" style="width:70px" value="${val(Q.affinityGood)}"></label>
+        <label title="坏结局扣多少（负数）">结局好感 − <input type="number" id="gp-quest-bad" min="-10" max="0" style="width:70px" value="${val(Q.affinityBad)}"></label>
+      </div>
+    </div>
+
+    <div style="border:1px dashed var(--line);border-radius:8px;padding:8px">
+      <b>她怎么说话</b>
+      <div class="kv" style="flex-wrap:wrap;gap:8px;margin-top:6px">
+        <label title="0 = 最松（爱接话）、100 = 最紧（几乎不主动）">收紧度 <input type="number" id="gp-chat-strict" min="0" max="100" style="width:70px" value="${val(C.strictness ?? 50)}"></label>
+      </div>
+    </div>
+
+    <div class="btns" style="margin-top:10px">
+      <button class="act" onclick="saveGroupParams()">保存这个群的设置</button>
+      <button class="act" onclick="clearGroupParams()">恢复内置起点</button>
+      <span class="msg" id="msg-gp"></span>
+    </div>
+    <div class="hint" style="margin-top:6px">
+      这个群现在：日常事件 <b>${L.enable === false ? '关' : '开'}</b>
+      （每天 ${esc(String(L.minPerDay))}~${esc(String(L.maxPerDay))} 条、间隔 ${mins(L.cooldownMs)} 分钟、${esc(String(L.startHour))}~${esc(String(L.endHour))} 点）·
+      自动开剧情 <b>${Q.enable === true ? '开' : '关'}</b>
+      （概率 ${esc(String(Q.chance))}、每周 ${esc(String(Q.maxPerWeek))} 条、每段等 ${mins(Q.waitMs)} 分钟）·
+      收紧度 <b>${esc(String(C.strictness ?? 50))}</b>
+      ${Object.keys(ov).length ? `<br>这个群单独设过：<span class="mono">${esc(JSON.stringify(ov))}</span>` : '<br>（这个群还没单独设过，用的是内置起点）'}
+      <br>⚠️「恢复内置起点」= 把这个群的设置清掉，回到内置起点（<b>不是</b>回到别的群）。
+    </div>`;
+}
+
+async function saveGroupParams() {
+  const gid = String($('gp-group')?.value || '').trim();
+  if (!gid) return;
+  const numOrNull = (id) => {
+    const v = String($(id)?.value ?? '').trim();
+    return v === '' ? null : Number(v);
+  };
+  const minOrNull = (id) => {
+    const v = numOrNull(id);
+    return v === null || !Number.isFinite(v) ? null : Math.round(v * 60000);
+  };
+  const boolOrNull = (id) => {
+    const v = String($(id)?.value ?? '');
+    return v === '' ? null : v === '1';
+  };
+  const patch = {
+    life: {
+      enable: boolOrNull('gp-life-enable'),
+      holidays: boolOrNull('gp-life-holidays'),
+      minPerDay: numOrNull('gp-life-min'),
+      maxPerDay: numOrNull('gp-life-max'),
+      startHour: numOrNull('gp-life-sh'),
+      endHour: numOrNull('gp-life-eh'),
+      cooldownMs: minOrNull('gp-life-cool'),
+      lateToleranceMs: minOrNull('gp-life-late'),
+    },
+    quest: {
+      enable: boolOrNull('gp-quest-enable'),
+      chance: numOrNull('gp-quest-chance'),
+      maxPerWeek: numOrNull('gp-quest-max'),
+      waitMs: minOrNull('gp-quest-wait'),
+      maxStages: numOrNull('gp-quest-stages'),
+      coldAutoLimit: numOrNull('gp-quest-cold'),
+      affinityGood: numOrNull('gp-quest-good'),
+      affinityBad: numOrNull('gp-quest-bad'),
+      replyMode: (() => {
+        const v = String($('gp-quest-mode')?.value ?? '');
+        return v === '' ? null : v;
+      })(),
+    },
+    chat: { strictness: numOrNull('gp-chat-strict') },
+  };
+  const btn = event?.target;
+  if (btn) btn.disabled = true;
+  const r = await api('/api/group-params', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ groupId: gid, patch }),
+  });
+  if (btn) btn.disabled = false;
+  if (!r.ok) return alert('保存失败：' + (r.error || ''));
+  // ⚠️ 存完**立刻回读**（用户要求「能在 webui 上马上看到变化」）——
+  //    显示的灰字 = 现在真正生效的值，而不是我以为存进去的值
+  await fillGroupParams();
+  const m = $('msg-gp');
+  if (m) {
+    m.textContent = `已保存到群 ${gid}（界面显示的就是现在生效的值）`;
+    setTimeout(() => (m.textContent = ''), 4000);
+  }
+}
+
+async function clearGroupParams() {
+  const gid = String($('gp-group')?.value || '').trim();
+  if (!gid) return;
+  if (!confirm(`把群 ${gid} 的设置清掉，回到**内置起点**？\n\n（不是回到别的群 —— 每个群各是各的）`)) return;
+  const r = await api('/api/group-params', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      groupId: gid,
+      patch: {
+        life: {
+          enable: null,
+          holidays: null,
+          minPerDay: null,
+          maxPerDay: null,
+          startHour: null,
+          endHour: null,
+          cooldownMs: null,
+          lateToleranceMs: null,
+        },
+        quest: {
+          enable: null,
+          chance: null,
+          maxPerWeek: null,
+          waitMs: null,
+          maxStages: null,
+          coldAutoLimit: null,
+          affinityGood: null,
+          affinityBad: null,
+          replyMode: null,
+        },
+        chat: { strictness: null },
+      },
+    }),
+  });
+  if (!r.ok) return alert('失败：' + (r.error || ''));
+  await fillGroupParams();
+}
+
+// ── 好感度 / 好友 ──
+async function renderAffinity() {
+  const el = $('aff-status');
+  if (!el) return;
+  try {
+    // ⚠️ 好感度**按群**（2026-09-15 晚）：带上选中的群号；顺手把群列表填进下拉框
+    const gid = String($('aff-group')?.value || '').trim();
+    const r = await api('/api/friend/state' + (gid ? `?groupId=${encodeURIComponent(gid)}` : ''));
+    const c = r.config || {};
+    const s = r.status || {};
+    {
+      const sel = $('aff-group');
+      if (sel) {
+        const gids = Array.isArray(r.groups) && r.groups.length ? r.groups : [];
+        const keep = gid;
+        sel.innerHTML = ['<option value="">（全部 / 老数据）</option>']
+          .concat(gids.map((g) => `<option value="${esc(g)}">群 ${esc(g)}</option>`))
+          .join('');
+        sel.value = keep && gids.includes(keep) ? keep : '';
+      }
+    }
+    $('a-threshold').value = c.friendThreshold ?? 90;
+    $('a-boardSize').value = c.boardSize ?? 10;
+    $('a-window').value = Math.round((c.interactWindowMs ?? 1800000) / 60000);
+    $('f-enable').checked = c.enable !== false;
+    $('f-chance').value = c.dailyChance ?? 0.35;
+    $('f-from').value = c.dayFromHour ?? 9;
+    $('f-to').value = c.dayToHour ?? 22;
+    $('f-gapHours').value = Math.round((c.minGapMs ?? 72000000) / 3600000);
+    $('f-notice').value = c.notice ?? '';
+
+    const sc = r.scores || {};
+    el.innerHTML =
+      kv('有记录的人数', sc.count ?? (s.friendList || []).length ?? 0) +
+      kv('加好友门槛', `<b>${c.friendThreshold ?? 90}</b>（到线会在群里 @ 他，让他来加）`) +
+      kv('已发到线通知', `${s.noticed ?? 0} 人`) +
+      kv('已经是好友', `${s.friends ?? 0} 人`) +
+      kv('今天挑过了吗', s.todayPicked ? '挑过了' : '还没') +
+      kv('上次主动私聊', s.lastDmAt ? new Date(s.lastDmAt).toLocaleString('zh-CN', { hour12: false }) : '—');
+
+    // 排行榜预览（★ 显示**名字**；号码留着给管理看）
+    const board = r.board || [];
+    const nm = (x) =>
+      `${esc(x.name || '（还没说过话）')} <span class="mono" style="opacity:.55">${esc(x.userId)}</span>`;
+    $('aff-board').innerHTML = board.length
+      ? board.map((x, i) => `<div class="kv"><b>${i + 1}.</b><span>${nm(x)}</span><span style="margin-left:auto"><b>${x.score}</b></span></div>`).join('')
+      : '<div class="hint">还没有人的好感度有过变化。</div>';
+
+    // 好友名单
+    const list = s.friendList || [];
+    $('f-list').innerHTML = list.length
+      ? list.map((f) => `<div class="kv"><span>${nm(f)}</span><span style="margin-left:auto">好感度 ${f.score}　${f.lastDmAt ? '上次私聊 ' + new Date(f.lastDmAt).toLocaleDateString('zh-CN') : '还没私聊过'}</span></div>`).join('')
+      : '<div class="hint">还没有好友加进来。<br>（⚠️ 协议层发不了加好友申请，所以是"到线时在群里 @ 他、让他来加"。）</div>';
+  } catch (e) {
+    el.innerHTML = kv('出错', esc(e.message));
+  }
+}
+
+async function saveAffinity() {
+  const el = $('msg-aff');
+  const r = await api('/api/config', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({
+      affinity: {
+        friendThreshold: Number($('a-threshold').value),
+        boardSize: Number($('a-boardSize').value),
+        interactWindowMs: Math.round(Number($('a-window').value) * 60000),
+      },
+      friend: {
+        enable: $('f-enable').checked,
+        dailyChance: Number($('f-chance').value),
+        dayFromHour: Number($('f-from').value),
+        dayToHour: Number($('f-to').value),
+        minGapMs: Math.round(Number($('f-gapHours').value) * 3600000),
+        notice: $('f-notice').value,
+      },
+    })
+  });
+  flash(el, r.ok, r.ok ? '已保存并生效' : ('保存失败：' + r.error));
+  if (r.ok) renderAffinity();
+}
+
+async function testNotice() {
+  const el = $('msg-f');
+  const uid = $('f-testUid').value.trim();
+  if (!uid) return flash(el, false, '先填一个 QQ 号');
+  if (!confirm('这会往 1 档群里发一条 @"' + uid + '" 的到线通知。\n（测试不记账，真到 90 的时候还会正常发）\n\n确定吗？')) return;
+  const r = await api('/api/friend/test-notice', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ userId: uid })
+  });
+  flash(el, r.ok, r.ok ? `已发到群 ${r.groupId}` : ('失败：' + r.error));
+}
+
+async function previewDm() {
+  const el = $('msg-f');
+  const uid = $('f-testUid').value.trim();
+  if (!uid) return flash(el, false, '先填一个 QQ 号');
+  flash(el, null, '正在写…');
+  const r = await api('/api/friend/preview-dm', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ userId: uid })
+  });
+  flash(el, r.ok, r.ok ? '写出来了（见下面）' : ('失败：' + r.error));
+  $('f-preview').innerHTML = r.ok ? kv('它会私聊说', esc(r.text)) : '';
+}
+
+async function sendDm() {
+  const el = $('msg-f');
+  const uid = $('f-testUid').value.trim();
+  if (!uid) return flash(el, false, '先填一个 QQ 号');
+  if (!confirm('这会**真的**给 ' + uid + ' 发一条私聊。\n\n确定吗？')) return;
+  flash(el, null, '正在写并发送…');
+  const r = await api('/api/friend/send-dm', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ userId: uid })
+  });
+  flash(el, r.ok, r.ok ? '已私聊发出' : ('失败：' + r.error));
+  if (r.ok) $('f-preview').innerHTML = kv('刚才发的', esc(r.text));
+}
+
+// ── 保存：模型 ──
+/**
+ * 保存「主人 / 机器人」这两个 QQ。
+ *
+ * ⚠️ 2026-09-15 用户要求：「把群主改成可编辑的，并且**改称主人**」。
+ * 原来它在状态页上只是**只读一行字**（`kv('群主', …)`），想改只能去编辑 config.yml。
+ *
+ * ⚠️ 两个都要**只留数字**再存：填了空格/引号的话，
+ *    `start-all.ps1`（一键启动）读 `botQQ` 做快速登录时会读不到（那个脚本的正则只认数字）。
+ */
+async function saveIdentity() {
+  const el = $('msg-id');
+  const ownerQQ = String($('id-ownerQQ').value || '').replace(/\D/g, '');
+  const botQQ = String($('id-botQQ').value || '').replace(/\D/g, '');
+  if (!ownerQQ) return flash(el, false, '主人 QQ 不能空');
+  if (!botQQ) return flash(el, false, '机器人 QQ 不能空');
+  if (ownerQQ === botQQ) return flash(el, false, '主人和机器人不能是同一个 QQ');
+  const r = await api('/api/config', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ ownerQQ, botQQ }),
+  });
+  flash(el, r.ok, r.ok ? '已保存并生效' : ('保存失败：' + r.error));
+  if (r.ok) reloadAll();
+}
+
+async function saveModel() {  const el = $('msg-llm');
+  const r = await api('/api/config', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ llm: {
+      baseURL: $('llm-baseURL').value.trim(),
+      model: $('llm-model').value.trim(),
+      apiKey: $('llm-apiKey').value.trim(),
+      temperature: Number($('llm-temperature').value),
+      maxTokens: Number($('llm-maxTokens').value),
+      timeout: Number($('llm-timeout').value),
+    }})
+  });
+  flash(el, r.ok, r.ok ? '已保存并生效' : ('保存失败：' + r.error));
+  if (r.ok) reloadAll();
+}
+
+async function testLLM() {
+  const el = $('msg-llm');
+  flash(el, null, '测试中…');
+  const r = await api('/api/test-llm', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ llm: {
+      baseURL: $('llm-baseURL').value.trim(),
+      model: $('llm-model').value.trim(),
+      apiKey: $('llm-apiKey').value.trim(),
+    }})
+  });
+  flash(el, r.ok, r.ok ? `连通，${r.ms}ms，返回「${r.reply}」` : `失败：${r.error}`);
+}
+
+// ── 保存：群与触发 ──
+async function saveTrigger() {
+  // ⚠️ 这份设置横跨两个卡片（「它能在哪些群说话」+「回复与分条」），
+  //    两边各有一个保存按钮，点了都要有反馈 —— 所以两个提示位都刷。
+  const r = await api('/api/config', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({
+      trigger: {
+        allowGroups: lines($('trigger-allowGroups').value),
+        groupChat: $('trigger-groupChat').checked,
+        privateChat: $('trigger-privateChat').checked,
+        requireAtInGroup: $('trigger-requireAtInGroup').checked,
+        historyRounds: Number($('trigger-historyRounds').value),
+        cooldownMs: Number($('trigger-cooldownMs').value),
+      },
+      chunking: {
+        maxChars: Number($('chunking-maxChars').value),
+        delayMs: Number($('chunking-delayMs').value),
+      },
+      teach: {
+        teachers: lines($('teach-teachers').value),
+        allowPrivateTeach: $('teach-allowPrivateTeach').checked,
+        keywords: $('teach-keywords').value.split(/[,，]/).map(s => s.trim()).filter(Boolean),
+      },
+    })
+  });
+  for (const id of ['msg-groups', 'msg-trigger']) {
+    const el = $(id);
+    if (el) flash(el, r.ok, r.ok ? '已保存并生效' : ('保存失败：' + r.error));
+  }
+  if (r.ok) reloadAll();
+}
+
+// ── QQ 空间 ──
+
+// ── QQ 登录 ──
+
+async function qqRefresh() {
+  const el = $('qq-status');
+  if (!el) return;
+  el.innerHTML = kv('状态', '正在查…');
+  try {
+    const r = await api('/api/qq/status');
+    if (!r.ok) { el.innerHTML = kv('出错', esc(r.error || '查询失败')); return; }
+    const n = r.napcat || {};
+    const o = r.onebot || {};
+
+    // 两边都看：NapCat 说「已登录」不代表 QQ 真在线
+    const online = o.online === true;
+    const badge = online
+      ? '<b style="color:#16a34a">✅ 在线</b>'
+      : '<b style="color:#dc2626">❌ 离线（收不到消息）</b>';
+
+    let html =
+      kv('QQ 是否在线', badge) +
+      kv('账号', esc(o.qq || '—') + (o.nickname ? ' (' + esc(o.nickname) + ')' : ''));
+
+    // NapCat 进程在不在（2026-09-17 加）：不看这一条，「重启 NapCat」按钮点下去
+    // 只会弹一句「fetch failed」——因为那个按钮原来只能问候一个**没在跑**的服务。
+    const running = r.running === true;
+    html += kv(
+      'NapCat 进程',
+      running ? '<b style="color:#16a34a">在跑</b>' : '<b style="color:#dc2626">没在跑</b>',
+    );
+
+    // 按钮跟着状态变：没在跑就说「启动」，别写着"重启"骗人
+    const btn = $('btn-qq-restart');
+    if (btn) {
+      btn.textContent = running ? '重启 NapCat（重新出码）' : '启动 NapCat（它没在跑）';
+      btn.style.background = running ? '#dc2626' : '#16a34a';
+    }
+    const h = $('qq-restart-hint');
+    if (h) {
+      h.textContent = running
+        ? '重启会短暂断开连接，机器人几秒后自己重连。'
+        : 'NapCat 现在没在运行 —— 点这个按钮会把它的窗口开起来（登录态失效时窗口里会出二维码）。';
+    }
+
+    if (!n.reachable) {
+      html += kv('NapCat 管理接口', '<b style="color:#dc2626">连不上</b> — ' + esc(n.error || ''));
+    } else {
+      html += kv('NapCat 侧登录状态', n.isLogin ? '已登录' : '未登录');
+      if (n.isOffline) html += kv('NapCat 侧', '<b style="color:#dc2626">标记为离线</b>');
+      if (n.loginError) html += kv('登录错误', esc(n.loginError));
+      if (n.quickLogin && n.quickLogin.length) {
+        html += kv('可快速登录的号', n.quickLogin.map(esc).join('、'));
+      }
+    }
+    el.innerHTML = html;
+  } catch (e) {
+    el.innerHTML = kv('出错', esc(e.message));
+  }
+}
+
+/**
+ * 显示二维码。
+ *
+ * ⚠️⚠️ `?fresh=1` 不能省（2026-09-15 修）。原因：
+ *   `GetQQLoginQrcode`（原来唯一走的那个接口）**只是把缓存里的 URL 读出来，
+ *   根本不会重出二维码** —— 而码几分钟就死。所以以前这里画出来的
+ *   十有八九是**一张早就过期的码**，用户「从来没扫成功过」。
+ *   带上 `fresh=1` 后，后端会先调 `RefreshQRcode` 让 QQ **现生成一张**再返回。
+ */
+async function qqReloadQr() {
+  const card = $('qq-qr-card');
+  const img = $('qq-qr-img');
+  if (!card || !img) return;
+  card.style.display = '';
+  // ⚠️ NapCat 没在跑的时候出不了码（后端直接 503），别让浏览器去请求一个空白图
+  const st = await api('/api/qq/status').catch(() => null);
+  if (st && st.running === false) {
+    img.removeAttribute('src');
+    if ($('qq-qr-hint')) {
+      $('qq-qr-hint').innerHTML = 'NapCat 没在运行，出不了码 —— 先点下面的「启动 NapCat」把窗口开起来。';
+    }
+    return;
+  }
+  img.src = '/api/qq/qrcode.png?fresh=1&t=' + Date.now();
+  $('qq-qr-hint').textContent = '这是刚生成的新码。扫不出来就再点一次「重新出码」。';
+}
+
+/**
+ * 轻量「重新出码」：让 NapCat 现生成一张（`RefreshQRcode`），**不重启进程**。
+ *
+ * ⚠️ 以前这个按钮走的是「重启 NapCat」——那是**一次 QQ 登录**（风控信号）、
+ *    要等 20 秒，而且新实例还没生成码界面就去取 → 「重新出码也一直不出」。
+ */
+async function qqNewQr() {
+  const btn = $('btn-qq-newqr');
+  const img = $('qq-qr-img');
+  if (btn) { btn.disabled = true; btn.textContent = '正在出码…'; }
+  try {
+    const r = await api('/api/qq/refresh-qr', { method: 'POST' });
+    const card = $('qq-qr-card');
+    if (card) card.style.display = '';
+    if (img) img.src = '/api/qq/qrcode.png?t=' + Date.now();
+    if ($('qq-qr-hint')) {
+      $('qq-qr-hint').textContent = r.ok
+        ? '已生成新码，扫吧。'
+        : '出码失败：' + (r.message || '未知原因') + '（可以先点「重启 NapCat」）';
+    }
+  } catch (e) {
+    if ($('qq-qr-hint')) $('qq-qr-hint').textContent = '出码出错：' + e.message;
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '重新出码'; }
+  }
+}
+
+async function qqRecover() {
+  const btn = $('btn-qq-recover');
+  const msg = $('qq-recover-msg');
+  btn.disabled = true;
+  btn.textContent = '正在尝试…（最多 15 秒）';
+  if (msg) msg.textContent = '先试快速登录（不用扫码），不行再出二维码…';
+  try {
+    const r = await api('/api/qq/recover', { method: 'POST' });
+    if (msg) {
+      msg.innerHTML = r.recovered
+        ? '<b style="color:#16a34a">✅ ' + esc(r.message) + '</b>'
+        : '<b style="color:#d97706">⚠️ ' + esc(r.message) + '</b> —— 请扫下面的二维码';
+    }
+    await qqRefresh();
+    if (!r.recovered) qqReloadQr();
+  } catch (e) {
+    if (msg) msg.textContent = '出错：' + e.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '一键恢复登录（先试免扫码）';
+  }
+}
+
+async function qqRestart() {
+  const btn = $('btn-qq-restart');
+  // 先问一下服务端「NapCat 到底在不在跑」——不在跑就是「启动」，不是「重启」
+  const st = await api('/api/qq/status').catch(() => null);
+  const running = !!(st && st.running === true);
+  const ask = running
+    ? '重启 NapCat 会短暂断开机器人连接（几秒后自己重连）。\n如果只是网络抖断、QQ 已经自己重连上了，就不需要点这个。\n\n确定要重启吗？'
+    : 'NapCat 现在没在运行，点确定会把它启动起来：\n' +
+      '· 会先关掉没被注入 NapCat 的残留 QQ 进程；\n' +
+      '· 然后开一个 NapCat 窗口（最小化在任务栏）；\n' +
+      '· 登录态还在就自己登回去，失效了要在那个窗口里扫码。\n\n确定要启动吗？';
+  if (!confirm(ask)) return;
+  btn.disabled = true;
+  btn.textContent = running ? '正在重启…（约 20 秒）' : '正在启动…（最多等 1 分钟）';
+  try {
+    const r = await api('/api/qq/restart', { method: 'POST' });
+    if (!r.ok) {
+      alert((r.launched ? '启动遇到问题：' : '重启失败：') + r.message);
+      await qqRefresh();
+      return;
+    }
+    // 启动要等 NapCat 起来（服务端已经等过了），重启则按老规矩等 15 秒
+    await new Promise((res) => setTimeout(res, running ? 15000 : 2000));
+    await qqRefresh();
+    if (r.launched) await qqNewQr(); // 起来了就把码拿出来，省得再去任务栏翻窗口
+    else qqReloadQr();
+    await qqRefresh();
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '重启 NapCat（重新出码）';
+  }
+}
+
+// ── 分群灵敏度 ──
+
+const RESP_LABEL = {
+  0: '跟随全局',
+  1: '① 什么都可能接（最活跃）',
+  2: '② 只接服务器话题/聊到它',
+  3: '③ 只认 @（最安静）',
+};
+
+async function loadGroupRespond() {
+  const el = $('group-respond-list');
+  if (!el) return;
+  el.textContent = '加载中…';
+  try {
+    const r = await api('/api/qq/groups');
+    if (!r.ok) { el.textContent = '出错：' + (r.error || '取群列表失败'); return; }
+    const per = r.perGroup || {};
+    if (!r.groups.length) {
+      el.textContent = '没取到群列表（机器人可能没连上 QQ）';
+      return;
+    }
+    el.innerHTML = r.groups.map((g) => {
+      const cur = per[g.id] ?? 0;
+      const opts = [0, 1, 2, 3].map((v) =>
+        `<option value="${v}"${v === cur ? ' selected' : ''}>${esc(RESP_LABEL[v])}</option>`,
+      ).join('');
+      const mark = per[g.id] ? ' <b style="color:#d97706">已单独设置</b>' : '';
+      return `<div class="gr-row">
+        <div class="gr-name">${esc(g.name || '(无名群)')}<span class="gr-id">${esc(g.id)}${g.count ? ' · ' + g.count + ' 人' : ''}</span>${mark}</div>
+        <select onchange="setGroupRespond('${esc(g.id)}', this.value, this)">${opts}</select>
+      </div>`;
+    }).join('');
+  } catch (e) {
+    el.textContent = '出错：' + e.message;
+  }
+}
+
+async function setGroupRespond(gid, level, sel) {
+  const msg = $('msg-group-respond');
+  sel.disabled = true;
+  try {
+    const r = await api('/api/qq/group-respond', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ groupId: gid, level: Number(level) }),
+    });
+    flash(msg, r.ok, r.ok ? `${gid} 已保存` : ('保存失败：' + r.error));
+    if (r.ok) await loadGroupRespond();
+  } catch (e) {
+    flash(msg, false, '出错：' + e.message);
+  } finally {
+    sel.disabled = false;
+  }
+}
+
+async function renderQzone() {
+  try {
+    const q = await api('/api/qzone');
+    if (!q.ok) return;
+    const m = q.material || {};
+    $('qzone-status').innerHTML =
+      kv('今天已发', `${q.todayCount} / ${q.maxPerDay} 条`) +
+      kv('素材', `${m.count || 0} 条（最近一条 ${m.newest || 0} 分钟前）`) +
+      kv('能不能发', q.canPost ? '可以' : `暂时不行 — ${q.blockReason || ''}`);
+    $('qz-enable').checked = q.enable !== false;
+    $('qz-maxPerDay').value = q.maxPerDay ?? 3;
+    $('qz-ugcRight').value = String(q.ugcRight ?? 1);
+    if (q.recent && q.recent.length) {
+      $('qzone-status').innerHTML += '<div style="margin-top:12px"><b>最近发过的：</b><br>' +
+        q.recent.map(p => '· ' + esc(p.content.slice(0, 80))).join('<br>') + '</div>';
+    }
+  } catch {}
+}
+
+async function qzonePreview() {
+  const el = $('msg-qzone');
+  const btn = $('btn-qz-preview');
+  btn.disabled = true;
+  flash(el, null, '正在生成（会先回填群素材，可能要十几秒）…');
+  try {
+    const r = await api('/api/qzone/preview', { method: 'POST' });
+    if (!r.ok) { flash(el, false, '出错：' + r.error); return; }
+    if (!r.post) {
+      flash(el, null, `它决定不发。理由：${r.reason}`);
+      return;
+    }
+    flash(el, true, `打算发这个（类型 ${r.type}${r.face ? '，配图 ' + r.face : ''}）：`);
+    $('qz-manual').value = r.content;
+    await renderQzone();
+  } finally { btn.disabled = false; }
+}
+
+async function qzonePost() {
+  const el = $('msg-qzone');
+  const btn = $('btn-qz-post');
+  if (!confirm('确定要发到 QQ 空间吗？发出去就收不回来了。')) return;
+  btn.disabled = true;
+  flash(el, null, '正在生成并发布…');
+  try {
+    const r = await api('/api/qzone/post', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
+    // ⚠️ 2026-09-15 深夜：接口"不发"时给的是 `skipped` / `reason`，**不是 `error`**。
+    //    原来直接读 `r.error` → 界面只显示「失败： undefined」，看不出为什么没发 ✗
+    //    （真实踩过：HZY 截图「动态好像还有个问题」）
+    if (r.skipped) { flash(el, null, '没有发：' + r.skipped); return; }
+    if (!r.ok) { flash(el, false, '失败：' + (r.error || '（没给原因，去看日志）')); return; }
+    if (!r.posted) { flash(el, null, `没有发。${r.reason || ''}`); return; }
+    flash(el, true, '已发布：' + r.content.slice(0, 60));
+    await renderQzone();
+  } finally { btn.disabled = false; }
+}
+
+async function qzoneManualPost() {
+  const el = $('msg-qzone');
+  const content = $('qz-manual').value.trim();
+  if (!content) { flash(el, false, '先写点内容'); return; }
+  if (!confirm('确定发这条到 QQ 空间吗？')) return;
+  flash(el, null, '正在发布…');
+  const r = await api('/api/qzone/post', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    // 一条说说配一张（qz-face 是单选）
+    body: JSON.stringify({ content, face: $('qz-face').value || null })
+  });
+  flash(el, r.ok, r.ok ? '已发布' : ('失败：' + r.error));
+  if (r.ok) { $('qz-manual').value = ''; await renderQzone(); }
+}
+
+async function saveQzone() {
+  const el = $('msg-qzone-cfg');
+  const r = await api('/api/config', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ qzone: {
+      enable: $('qz-enable').checked,
+      auto: $('qz-auto').checked,
+      maxPerDay: Number($('qz-maxPerDay').value),
+      cooldownMs: Number($('qz-cooldownHours').value) * 3600000,
+      ugcRight: Number($('qz-ugcRight').value),
+    }})
+  });
+  flash(el, r.ok, r.ok ? '已保存并生效' : ('保存失败：' + r.error));
+  if (r.ok) await reloadAll();
+}
+// 保存灵敏度
+async function saveRespondTo() {
+  const el = $('msg-respond');
+  const sel = [...document.querySelectorAll('input[name=respondTo]')].find(r => r.checked);
+  if (!sel) { flash(el, false, '先选一个档次'); return; }
+  const level = Number(sel.value);
+  const r = await api('/api/config', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ trigger: { respondTo: level } })
+  });
+  const names = {1:'① 有能回答的就回', 2:'② 只回服务器/聊到它的', 3:'③ 只有 @ 才回'};
+  flash(el, r.ok, r.ok ? `已切到 ${names[level]}，立即生效` : ('保存失败：' + r.error));
+  if (r.ok) reloadAll();
+}
+
+// ── 收紧度滑块（2026-09-13 加，用户要求；**只对灵敏度 ① 生效**）──────
+// 拖动时实时给出"这意味着什么"的说明，让人不用猜数字。
+function onStrictInput() {
+  const v = Number($('strictness').value);
+  const d = $('strict-desc');
+  let txt, color;
+  if (v <= 15) {
+    txt = '它会比较爱说话 —— 只要接得上就接。群友可能觉得它话有点多。';
+    color = '#c2410c';
+  } else if (v <= 40) {
+    txt = '偏活跃。服务器问题照答，闲聊里能接的也会接。';
+    color = '#a16207';
+  } else if (v <= 65) {
+    txt = '平衡（推荐）。服务器问题、求助、聊到它的会答；普通闲聊一般不插嘴。';
+    color = '#15803d';
+  } else if (v <= 85) {
+    txt = '偏安静。只有明确需要它的时候才开口，闲聊基本不参与。';
+    color = '#1d4ed8';
+  } else {
+    txt = '很克制。几乎只在"不回答就不对"的时候才说话（服务器问题、求助）。';
+    color = '#1e3a8a';
+  }
+  d.innerHTML = '<b style="color:' + color + '">' + v + '</b> · ' + txt;
+}
+
+// ⚠️ 2026-09-15 晚（HZY：「直接取消保存全局的说法，首先默认 50，然后只保留分群的数据」）：
+//    **全局那个滑块和"保存收紧度（全局）"按钮已经删掉了** —— 现在只按群设，
+//    没设过的群 = 默认 50。落盘在 `config.groupParams[<群号>].chat.strictness`。
+
+// ── 收紧度**按群**单独调（2026-09-15 晚 HZY 要求）──────────────────
+// 上面那个滑块是**全局默认**；这里是"只改某一个群"。
+// ⚠️ 落盘在 `config.groupParams[<群号>].chat.strictness`；留空 = 删掉覆盖 → 回到默认 50。
+
+/** 把 1 档群填进下拉框，并把选中的群现在生效的收紧度回填 */
+async function fillStrictForGroup() {
+  const sel = $('strict-group');
+  if (!sel) return;
+  try {
+    const st = STATE || (await api('/api/state'));
+    const lv = (st.config?.trigger?.groupRespondTo) || {};
+    const allow = (st.config?.trigger?.allowGroups || []).map(String);
+    const gids = Object.keys(lv)
+      .filter((g) => Number(lv[g]) === 1 && (!allow.length || allow.includes(g)))
+      .sort();
+    const keep = sel.value || localStorage.getItem('strict-group') || '';
+    sel.innerHTML = gids.length
+      ? gids.map((g) => `<option value="${esc(g)}">群 ${esc(g)}</option>`).join('')
+      : '<option value="">（现在没有 1 档群）</option>';
+    if (keep && gids.includes(keep)) sel.value = keep;
+    await fillStrictValueForSelected();
+  } catch {}
+}
+
+/** 回填"选中的那个群"现在生效的收紧度 —— **滑块要跟着动**（用户报过：切群滑块没更新） */
+async function fillStrictValueForSelected() {
+  const sel = $('strict-group');
+  if (!sel) return;
+  const gid = String(sel.value || '').trim();
+  if (gid) localStorage.setItem('strict-group', gid);
+  const slider = $('strictness');
+  const note = $('strict-group-note');
+  if (!gid) {
+    if (slider) slider.value = '50';
+    if (note) note.textContent = '（没有 1 档群可设）';
+    onStrictInput();
+    return;
+  }
+  try {
+    const r = await api(`/api/group-params?groupId=${encodeURIComponent(gid)}`);
+    const raw = r?.overrides?.chat?.strictness;
+    const has = raw !== undefined && raw !== null && raw !== '';
+    // ⚠️ 没设过 = **默认 50**（不再有"跟全局"这个概念了）
+    if (slider) slider.value = String(has ? Number(raw) : 50);
+    if (note) note.textContent = has ? `群 ${gid}：单独设过` : `群 ${gid}：还没设过（默认 50）`;
+  } catch {
+    if (slider) slider.value = '50';
+    if (note) note.textContent = '';
+  }
+  onStrictInput();
+}
+
+async function saveStrictForGroup() {
+  const el = $('msg-strict-group');
+  const gid = String($('strict-group')?.value || '').trim();
+  if (!gid) { flash(el, false, '先选一个 1 档群'); return; }
+  const v = Number($('strictness')?.value ?? 50);
+  const r = await api('/api/group-params', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ groupId: gid, patch: { chat: { strictness: v } } }),
+  });
+  flash(el, r.ok, r.ok ? `群 ${gid} 的收紧度 = ${v}，立即生效` : ('失败：' + (r.error || '')));
+  if (r.ok) { renderGroupParams?.(); fillStrictValueForSelected(); }
+}
+
+async function clearStrictForGroup() {
+  const el = $('msg-strict-group');
+  const gid = String($('strict-group')?.value || '').trim();
+  if (!gid) return;
+  const r = await api('/api/group-params', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ groupId: gid, patch: { chat: { strictness: null } } }),
+  });
+  flash(el, r.ok, r.ok ? `群 ${gid} 已还原成默认（50）` : ('失败：' + (r.error || '')));
+  if (r.ok) { renderGroupParams?.(); fillStrictValueForSelected(); }
+}
+
+async function saveStatus() {
+  const el = $('msg-status');
+  const r = await api('/api/config', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ status: {
+      enable: $('status-enable').checked,
+      host: $('status-host').value.trim(),
+      displayName: $('status-displayName').value.trim(),
+      cacheSeconds: Number($('status-cacheSeconds').value),
+    }})
+  });
+  flash(el, r.ok, r.ok ? '已保存并生效' : ('保存失败：' + r.error));
+  if (r.ok) reloadAll();
+}
+
+async function testServer() {
+  const el = $('msg-status');
+  flash(el, null, '查询中…');
+  const r = await api('/api/test-server', { method: 'POST' });
+  flash(el, r.ok, r.text);
+}
+
+// ── 表情包 ──
+let FACES = [];
+
+function renderFaces() {
+  FACES = STATE?.faces ?? [];
+  const unset = FACES.filter(f => !f.when || f._未完善).length;
+  $('face-count').textContent = FACES.length + ' 张' + (unset ? ` · ${unset} 张待完善` : '');
+  $('faces').innerHTML = FACES.map(f => {
+    const need = !f.when || f._未完善;
+    return `
+    <div class="face" style="${need ? 'border-color:#f59e0b;background:#fffbeb' : ''}">
+      <img src="/library/${encodeURIComponent(f.file)}" alt="${esc(f.tag)}" loading="lazy">
+      <div class="body">
+        <div class="tag">[表情:${esc(f.tag)}]${need ? ' ⚠️' : ''}</div>
+        ${f.who ? `<div class="when" style="color:#374151">${esc(f.who)}</div>` : ''}
+        <div class="when">${esc(f.when || '（还没填「适用场合」——不填的话它不会用这张）')}</div>
+        <div class="ops">
+          <button onclick="editFace('${esc(f.tag)}')">${need ? '去完善' : '编辑'}</button>
+          <button onclick="delFace('${esc(f.tag)}')" style="color:#dc2626">删除</button>
+        </div>
+      </div>
+    </div>`;
+  }).join('') || '<div style="color:#6b7280">还没有表情，上面拖图片进来</div>';
+  return Promise.resolve();
+}
+
+// 扫 library/ 目录，把没登记的图补进来；发现缺注释的就问要不要自动补
+window.scanFaces = async () => {
+  const el = $('msg-face');
+  const btn = $('btn-scan');
+  btn.disabled = true;
+  flash(el, null, '正在扫描 library/ 目录…');
+  try {
+    const r = await api('/api/faces/scan', { method: 'POST' });
+    if (!r.ok) { flash(el, false, '失败：' + r.error); return; }
+    const parts = [];
+    if (r.added.length) parts.push(`新增 ${r.added.length} 张`);
+    if (r.missing.length) parts.push(`清掉 ${r.missing.length} 条失效记录`);
+    if (r.broken.length) parts.push(`删除 ${r.broken.length} 张重复图`);
+
+    // 有缺注释的 → 问一句要不要让机器人看图自动补（用户要求：跟更新表情库集成）
+    if (r.unannotatedCount > 0) {
+      flash(el, true, (parts.length ? parts.join('；') + '。' : '') +
+        `发现 ${r.unannotatedCount} 张缺注释（谁/什么时候用）。`);
+      const yes = confirm(
+        `有 ${r.unannotatedCount} 张表情还没有注释（"图里是谁"和"什么时候用"）。\n\n` +
+        `要现在让机器人看图自动补吗？\n` +
+        `· 每张约 5~10 秒（要过一次视觉模型）\n` +
+        `· 一次处理 10 张，做完会显示进度\n` +
+        `· 中途可以随时关掉页面，已完成的会保存\n\n` +
+        `（也可以稍后在界面上手动填）`,
+      );
+      if (yes) await annotateFaces();
+      return;
+    }
+
+    flash(el, true, parts.length ? parts.join('；') + '。' : '没有变化，表情库是最新的。');
+  } catch (e) {
+    flash(el, false, '出错：' + e.message);
+  } finally {
+    btn.disabled = false;
+    await reloadAll();
+  }
+};
+
+// 分批补注释，边做边显示进度（每批 10 张，避免单个请求挂太久）
+window.annotateFaces = async () => {
+  const el = $('msg-face');
+  const btn = $('btn-annotate');
+  if (btn) btn.disabled = true;
+  let total = 0;
+  let done = 0;
+  let failed = 0;
+  try {
+    for (let round = 0; round < 50; round++) {
+      flash(el, null, `正在看图补注释… 已完成 ${done} 张${total ? ` / ${total}` : ''}（每张约 5~10 秒）`);
+      const r = await api('/api/faces/annotate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ batch: 10 }),
+      });
+      if (!r.ok) { flash(el, false, '出错：' + r.error); break; }
+      if (r.message) { flash(el, true, r.message); break; }
+      done += (r.added || []).length;
+      failed += (r.failed || []).length;
+      if (!total) total = done + r.remaining;
+      await reloadAll();
+      if (r.done) {
+        flash(el, failed ? null : true,
+          `补完了：成功 ${done} 张${failed ? `，失败 ${failed} 张` : ''}。` +
+          (failed ? '失败的可以手动填，或者再点一次重试。' : ''));
+        break;
+      }
+    }
+  } catch (e) {
+    flash(el, false, '出错：' + e.message);
+  } finally {
+    if (btn) btn.disabled = false;
+    await reloadAll();
+  }
+};
+
+$('drop').onclick = () => $('file').click();
+$('file').onchange = (e) => uploadFiles([...e.target.files]);
+$('drop').addEventListener('dragover', e => { e.preventDefault(); $('drop').classList.add('over'); });
+$('drop').addEventListener('dragleave', () => $('drop').classList.remove('over'));
+$('drop').addEventListener('drop', e => {
+  e.preventDefault(); $('drop').classList.remove('over');
+  uploadFiles([...e.dataTransfer.files].filter(f => f.type.startsWith('image/')));
+});
+
+async function uploadFiles(files) {
+  const el = $('msg-face');
+  if (!files.length) return;
+  let done = 0;
+  for (const f of files) {
+    if (f.size > 8 * 1024 * 1024) { flash(el, false, `${f.name} 超过 8MB，跳过`); continue; }
+    const r = await fetch('/api/upload?name=' + encodeURIComponent(f.name), {
+      method: 'POST', body: f,
+    }).then(x => x.json());
+    if (!r.ok) { flash(el, false, `${f.name} 上传失败：${r.error}`); continue; }
+    // 自动建一条，标签先用文件名，用户再改
+    const tag = f.name.replace(/\.[^.]+$/, '').slice(0, 12) || '新表情';
+    await api('/api/faces', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ action: 'add', tag, file: r.file, when: '（请填写适用场合）', desc: '' })
+    });
+    done++;
+  }
+  flash(el, true, `已上传 ${done} 张，请给它们填上「适用场合」`);
+  await refreshFaces();
+}
+
+async function refreshFaces() {
+  await reloadAll();
+}
+
+window.editFace = async (tag) => {
+  const f = FACES.find(x => x.tag === tag);
+  if (!f) return;
+  const newTag = prompt('标签（模型调用时写 [表情:标签]，简短好记）', f.tag);
+  if (newTag === null) return;
+  const who = prompt('图里是谁（有人问「为什么发这个」时它要答得出；认不出就留空）', f.who || '');
+  if (who === null) return;
+  const when = prompt('适用场合（必填！不填它不会用这张）\n写得越具体，它用得越准', f.when || '');
+  if (when === null) return;
+  const r = await api('/api/faces', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({
+      action: 'update', oldTag: tag, tag: newTag.trim(), file: f.file,
+      who: who.trim(), when: when.trim(), desc: f.desc,
+    })
+  });
+  if (r.ok) await reloadAll();
+  else flash($('msg-face'), false, r.error);
+};
+
+window.delFace = async (tag) => {
+  if (!confirm(`删除表情「${tag}」？图片文件也会被删掉。`)) return;
+  const r = await api('/api/faces', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ action: 'delete', tag })
+  });
+  if (r.ok) await reloadAll();
+};
+
+// ── 知识库 ──
+$('k-file').onchange = loadKnowledge;
+
+/** 动态填知识文件下拉框（后端返回的列表，加了新文件不用改这里） */
+async function loadKnowledgeList(keep) {
+  const r = await api('/api/knowledge/list');
+  const files = r.files ?? [];
+  const sel = $('k-file');
+  const want = keep || sel.value || 'persona.md';
+  sel.innerHTML = files
+    .map((f) => `<option value="${esc(f.name)}">${esc(f.name)}${f.desc ? ' —— ' + esc(f.desc) : ''}${f.readonly ? '（只读）' : ''}</option>`)
+    .join('');
+  if (files.some((f) => f.name === want)) sel.value = want;
+  return files;
+}
+
+async function loadKnowledge() {
+  const name = $('k-file').value;
+  const r = await api('/api/knowledge?name=' + encodeURIComponent(name));
+  const list = await api('/api/knowledge/list');
+  const meta = (list.files ?? []).find((f) => f.name === name);
+  $('k-desc').textContent = meta
+    ? `${meta.desc || ''}　共 ${meta.size} 字${meta.readonly ? '　（只读）' : ''}`
+    : '';
+  if (!r.ok) { $('k-content').value = '（读取失败：' + r.error + '）'; return; }
+  $('k-content').value = r.content;
+  // ⚠️ 只读与否**完全由服务端说了算**（`meta.readonly`）。
+  //    原来这里还写死了一句 `|| name === 'learned.md'` ——
+  //    于是服务端把 `learned.md` 放开之后，**界面照样锁着**，
+  //    改了半天没效果。这类"两边各写一份判断"的地方最容易漏。
+  const readOnly = meta?.readonly === true;
+  $('k-content').readOnly = readOnly;
+  $('k-save').disabled = readOnly;
+  $('k-save').textContent = readOnly ? '只读' : '保存';
+}
+
+async function saveKnowledge() {
+  const el = $('msg-k');
+  const r = await api('/api/knowledge', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ name: $('k-file').value, content: $('k-content').value })
+  });
+  flash(el, r.ok, r.ok ? '已保存并生效' : ('保存失败：' + r.error));
+}
+
+// 启动：先拉知识文件列表，再读第一个
+loadKnowledgeList().then(() => loadKnowledge());
+
+// 启动
+reloadAll();
+</script>
+</body>
+</html>

@@ -1,0 +1,68 @@
+# 仅用于自然教学测试，由 test/natural-teach.js 通过 QQBOT_CONFIG 加载。
+onebot:
+  mode: forward
+  url: ws://127.0.0.1:40101
+  accessToken: "nat-token"
+  reconnectInterval: 300
+
+llm:
+  baseURL: http://127.0.0.1:40102/v1
+  apiKey: "sk-test-fake-key"
+  model: test-model
+  temperature: 0
+  maxTokens: 300
+  timeout: 10000
+  systemPrompt: |
+    你是客服小祥。
+
+trigger:
+  privateChat: true
+  groupChat: true
+  allowGroups:
+    - "200000001"
+  requireAtInGroup: true
+  keywords: []
+  historyRounds: 2
+  cooldownMs: 0
+  maxInputChars: 1000
+
+status:
+  enable: false
+  host: ""
+  keywords: []
+
+teach:
+  enable: true
+  teachers: []
+  requireOwnerRole: true
+  allowPrivateTeach: false
+  naturalLearning: true
+  confirmMode: auto
+  keywords:
+    - 记住
+    - 你需要知道
+    - 更正一下
+
+faces:
+  collect: false
+
+chat:
+  enable: false
+
+chunking:
+  maxChars: 60
+  delayMs: 50
+  firstFlushChars: 20
+
+ownerQQ: "10000001"
+logLevel: info
+
+# 测试专用：独立端口，避免多个测试抢 3099
+webui:
+  enable: false
+  port: 3105
+
+# ⚠️ 测试里关掉在线时长跟踪 —— 它会自己独立查服务器，
+#    会污染「查询次数」类断言（真实踩过）
+sessions:
+  enable: false
