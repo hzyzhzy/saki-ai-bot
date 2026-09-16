@@ -821,6 +821,23 @@
       <h2>连接与路径</h2>
       <div id="paths"></div>
     </div>
+
+    <div class="card">
+      <h2>开机自启</h2>
+      <p class="hint">
+        开启后，<b>开机登录进桌面时</b>会自动把协议端和机器人拉起来，不用再双击任何 bat。<br>
+        跑的是仓库里的 <code>autostart.ps1</code>：它会先<b>等 OneDrive 同步完</b>、<b>等网络通</b>再启动，
+        起不来会重试 3 轮，然后交给看门狗。<br>
+        ⚠️ 它<b>不是系统服务</b> —— 要等你登录进桌面才会跑；注销/锁屏不管用。
+      </p>
+      <div id="autostart-status" class="kvs"></div>
+      <div class="btns">
+        <button class="act" id="btn-autostart-on" onclick="autostartSet(true)">开启开机自启</button>
+        <button class="ghost" id="btn-autostart-off" onclick="autostartSet(false)">关闭</button>
+        <button class="ghost" onclick="loadAutostart()">刷新状态</button>
+      </div>
+      <p class="hint" id="autostart-msg" style="margin-top:10px"></p>
+    </div>
   </section>
 </div>
 
@@ -1007,11 +1024,67 @@ async function reloadAll() {
     ? r.learnedTopics.map((t, i) => (i + 1) + '. ' + esc(t)).join('<br>')
     : '<span style="color:#6b7280">还没有学到额外的东西</span>';
 
+  // 开机自启（状态页那张卡片）—— 它自己会判元素在不在，不会把上面这些东西带停
+  loadAutostart();
+
   renderFaces();
 }
 
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch]));
 const kv = (k, v) => `<div class="kv"><b>${esc(k)}</b><span>${v}</span></div>`;
+
+// ── 开机自启（2026-09-17 加）──
+//
+// ⚠️ 每个元素先判存在再用 —— 这个文件里有过一次事故：`$('已经删掉的id').value = ...`
+//    直接抛错，把 reloadAll 后面所有初始化全带停了（见上面「日常事件」那段注释）。
+// ⚠️ 状态里的 `stale` 是"开过、但项目挪了位置，自启项还指着旧路径" ——
+//    这种要显眼地说出来，否则用户会以为"开着呢"但开机其实起不来。
+async function loadAutostart() {
+  const box = $('autostart-status');
+  if (!box) return;
+  let r;
+  try {
+    r = await api('/api/autostart');
+  } catch (e) {
+    box.innerHTML = kv('读取失败', esc(e.message));
+    return;
+  }
+  if (!r.supported) {
+    box.innerHTML = kv('状态', '不支持') + (r.reason ? kv('原因', esc(r.reason)) : '');
+    const on = $('btn-autostart-on'); if (on) on.disabled = true;
+    const off = $('btn-autostart-off'); if (off) off.disabled = true;
+    return;
+  }
+  const state = r.enabled ? '✅ 已开启' : (r.stale ? '⚠️ 开着，但指向别的目录' : '未开启');
+  box.innerHTML =
+    kv('状态', esc(state)) +
+    kv('启动项名', '<span class="mono">' + esc(r.valueName) + '</span>（任务管理器的「启动」页里能看到）') +
+    kv('开机时跑', '<span class="mono">' + esc(r.launcher) + '</span>') +
+    (!r.launcherExists ? kv('⚠️ 注意', '上面那个启动脚本不在（安装包不完整？）') : '') +
+    (r.current && !r.enabled ? kv('现在指向', '<span class="mono">' + esc(r.current) + '</span>') : '') +
+    (r.reason ? kv('提示', esc(r.reason)) : '');
+}
+
+async function autostartSet(on) {
+  const msg = $('autostart-msg');
+  if (msg) flash(msg, null, on ? '正在开启…' : '正在关闭…');
+  try {
+    const r = await api('/api/autostart', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: !!on }),
+    });
+    if (!r.ok) throw new Error(r.error || '操作失败');
+    if (msg) {
+      flash(msg, true, on
+        ? '已开启。下次开机、登录进桌面之后它会自己起来（可以先看 logs\\autostart.log）。'
+        : '已关闭，开机不会再自动启动。');
+    }
+    await loadAutostart();
+  } catch (e) {
+    if (msg) flash(msg, false, '失败：' + e.message);
+  }
+}
 
 // ── 模型下拉框 ──
 

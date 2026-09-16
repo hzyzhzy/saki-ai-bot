@@ -165,7 +165,7 @@ function Test-QQOnline {
       return [pscustomobject]@{ state = 'unknown'; hasCred = $false }
     }
     # ⚠️ 路径带空格（「OneDrive - yijia」）→ 必须交给 cmd 并显式加引号，
-    #    否则 node 收到的是 `C:\Users\hzy\OneDrive` → ENOENT → 静默 unknown（踩过）。
+    #    否则 node 收到的是 `<本机用户目录>\OneDrive` → ENOENT → 静默 unknown（踩过）。
     $cmdLine = 'node "{0}" > "{1}" 2>nul' -f $tool, $outFile
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = 'cmd.exe'

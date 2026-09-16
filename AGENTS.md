@@ -27,7 +27,7 @@
 
 **用户原话**：「你又说英语或者思考时输出英语了，我看英语的速度没那么快。」
 
-规则写在**全局那份**里（`C:\Users\hzy\AppData\Local\DeepSeekHarness\.dsh\AGENTS.md`，
+规则写在**全局那份**里（`<DSH 用户目录>\.dsh\AGENTS.md`，
 对所有会话生效）：**正文 + 思考过程都中文**；命令、代码、路径、报错原文、`git`/`API` 这类
 没中文译名的技术词照旧；但**整句英文和中英混排不许有**。
 
@@ -68,8 +68,9 @@
 
 用户的目标：**让用户几乎零成本部署** → 一个 `saki-setup.exe`，双击填几项就装完。
 
-- 源码在 `installer/`（**live 目录里维护，不进公开副本** —— 导出时已跳过 `installer/`，否则
-  135MB 的 payload 会被推上公开仓库）。详见 `installer/README.md`。
+- 源码在 `installer/`（**live 目录里维护；源码是公开的** —— 导出时只跳过
+  `build/` / `dist/` / `vendor/` 三个产物目录，否则 135MB 的 payload 和 50MB 的 exe
+  会被推上公开仓库）。⚠️ 这句原来写成"整个 installer 不进公开副本"，与代码不符，09-17 改正。详见 `installer/README.md`。
 - 构建两步：`node installer/build-payload.cjs --refresh` → `ISCC.exe installer\saki-bot.iss`。
 - 产物 `installer/dist/saki-setup-1.0.0.exe`（约 **50 MB**，< 蓝奏云 100MB 限制）。
 - 配置逻辑在 `tools/first-run-setup.mjs`（**这个要进公开副本**，手动装的人也能用）。
@@ -188,6 +189,37 @@ git -c http.proxy=http://127.0.0.1:7890 -c https.proxy=http://127.0.0.1:7890 pus
 
 ⚠️ 名字写错会**退回 `onebot`**（不让机器人挂掉），原值留在 `provider.nameRaw` 里便于排查。
 ⚠️ `src/provider.js` 只读 `provider.*`，**不碰 `onebot.*`** —— 回归套件 `test/provider.js` 专门盯这条。
+
+---
+
+## 🖥️ 开机自启（2026-09-17 加，用户要求「界面上能设自启动」）
+
+**用户在管理界面点开关就行，不用再去翻 `shell:startup`。**
+
+- 逻辑：`src/autostart.js` —— 写注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`，
+  值名 **`SakiBot`**，值 = `wscript.exe //nologo "<ROOT>\_autostart-hidden.vbs"`。
+- 那个 vbs **隐藏**跑 `autostart.ps1`（等 OneDrive 同步 → 等网络 → 重试 3 轮 → 转看门狗）。
+  ⚠️ 别改成用 `cmd` / `powershell` 直接起 —— 开机会闪一个黑框，用户为这个抱怨过（见 `_run-bot-hidden.vbs`）。
+- 界面：「状态」页 →「开机自启」卡片；接口 `GET/POST /api/autostart`。
+
+**三条设计上的讲究（别改）**：
+
+| 讲究 | 为什么 |
+| --- | --- |
+| 参数走**环境变量**传给 PowerShell，绝不拼命令行 | 这个项目的路径里有空格 + 中文（放在 OneDrive 里），拼命令行必掉进引号地狱 |
+| `status()` 把 **enabled / stale 分开** | "开着但指着旧路径"（项目搬过位置）**不能**显示成"已开启"，否则用户以为开机起得来 |
+| 开关都**写完读回来核对** | 这功能一旦"以为开了其实没开"，用户是**下次开机**才发现，代价太大 |
+
+**⚠️ 三个已经踩过的坑**：
+
+1. **`Remove-ItemProperty` 在属性不存在时，会让 `powershell -Command` 的退出码变成 1** ——
+   即使加了 `-ErrorAction SilentlyContinue`。表现：用户点「关闭」时如果本来就没开，会看到"失败"，
+   而且错误信息是**空的**（被 SilentlyContinue 吃掉了），更难查。解法：那条命令末尾补 `exit 0`。
+   （**是 `test/autostart.js` 抓出来的** —— 所以那个套件里"重复关闭不报错"这条别删。）
+2. **套件收尾必须是 `结果: 全部通过 ✅`** —— `run-all.js` 靠正则 `结果:\s*(.+)` 抓**最后一条**。
+   我第一版写成「✅ autostart 套件：0 项失败」，单独跑 21 项全绿，进回归却显示「（无结果行）」→ 被判失败。
+3. **测试绝不许碰用户真实的启动项** —— 值名走 `QQBOT_AUTOSTART_VALUE`（自检用 `SakiBotSelfTest`），
+   并且 `finally` 里一定要 `disable()`。别图省事在测试里用真值名。
 
 ---
 

@@ -21,6 +21,8 @@ import { queryServer, describe, clearCache } from './status.js';
 import * as napcat from './napcat.js';
 // ⚠️ 协议端适配层（2026-09-17 加）：管理面按它分派，换协议端只改 config.yml
 import * as provider from './provider.js';
+// ⚠️ 开机自启（2026-09-17 加）：写注册表 Run 键，界面上开/关
+import * as autostart from './autostart.js';
 import { backupKnowledge } from './backup.js';
 import { listUnannotated, annotateAll } from './face-annotate.js';
 // 二维码画图（纯 JS，无原生依赖）
@@ -773,6 +775,27 @@ const routes = {
   //    ⚠️ lastLifePreview / LIFE_PREVIEW_TTL 声明在**路由表外面**（模块作用域，见上面那一段）。
   /** 界面版本：给界面自己比"我这一页是不是旧的"用 */
   'GET /api/pagever': async (_req, res) => send(res, 200, { ver: PAGE_VER }),
+
+  // ── 开机自启（2026-09-17 加）──
+  // ⚠️ 这两个接口会**动系统设置**（注册表启动项），而且是我这边起 powershell 去改。
+  //    参数一律走环境变量传，不拼命令行 —— 见 src/autostart.js 顶部那段注释。
+  //    界面只监听 127.0.0.1、不做登录，信任级别和「重启 NapCat」那些按钮一样，
+  //    所以这里不再加额外鉴权。
+  'GET /api/autostart': async (_req, res) => send(res, 200, autostart.status()),
+
+  'POST /api/autostart': async (req, res) => {
+    let body = {};
+    try {
+      body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+    } catch { /* body 坏了就当查询，下面按 falsy 处理 */ }
+    try {
+      const st = body.enabled ? autostart.enable() : autostart.disable();
+      log.info(`管理界面${body.enabled ? '开启' : '关闭'}了开机自启（启动项名：${st.valueName}）`);
+      send(res, 200, { ok: true, ...st });
+    } catch (e) {
+      send(res, 400, { ok: false, error: e.message });
+    }
+  },
 
   /**
    * **某个群**的日常事件进度（2026-09-16 分群之后加的）。

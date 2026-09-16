@@ -85,6 +85,9 @@ const SUITES = [
   'watchdog-state',
   'qq-qrcode',
   'provider',
+  // ★ 开机自启：唯一一个会写**用户注册表**的功能 —— 盯"真写进去了 / 换了目录认得出 /
+  //   关得掉"（值名走 QQBOT_AUTOSTART_VALUE，绝不碰用户真实的 SakiBot 那一项）
+  'autostart',
   'storyline',
   'life',
   'holiday',
