@@ -22,7 +22,10 @@ $CheckSeconds = 20
 # ⚠️ 以前 `Start-NapCat` 里是**硬编码 '10000002'** 的，换号就会悄悄登错号。
 $BotQQ = ''
 try {
-  $m = Select-String -Path (Join-Path $BotDir 'config.yml') -Pattern '^\s*botQQ\s*:\s*"?(\d+)' -ErrorAction SilentlyContinue |
+  # ⚠️⚠️ 2026-09-17 修：正则原来只认双引号（`"?`），而 config.yml 里写的是
+  #    `botQQ: '10000002'`（**单引号**）→ 匹配不到 → $BotQQ 为空。
+  #    （start-all.ps1 里早就用 `['""]?` 兼容了两种引号，这份漏了。）
+  $m = Select-String -Path (Join-Path $BotDir 'config.yml') -Pattern '^\s*botQQ\s*:\s*[''""]?(\d+)' -ErrorAction SilentlyContinue |
     Select-Object -First 1
   if ($m) { $BotQQ = $m.Matches[0].Groups[1].Value }
 } catch {}
@@ -232,14 +235,25 @@ function Start-NapCat {
   # 用 config.yml 里的 botQQ 做快速登录
   $botQQ = $BotQQ
   try {
-    $m = Select-String -Path (Join-Path $BotDir 'config.yml') -Pattern 'botQQ:\s*"?(\d+)' | Select-Object -First 1
+    # ⚠️ 同上：单引号也要认（config.yml 里是 `botQQ: '10000002'`）
+    $m = Select-String -Path (Join-Path $BotDir 'config.yml') -Pattern 'botQQ:\s*[''""]?(\d+)' | Select-Object -First 1
     if ($m) { $botQQ = $m.Matches[0].Groups[1].Value }
   } catch {}
 
-  $args = @()
-  if ($botQQ) { $args = @('-q', $botQQ) }
+  # ⚠️⚠️ 2026-09-17 修（用户截图：看门狗每轮都抛异常，NapCat 永远起不来）：
+  #   ① **空数组不能传给 `-ArgumentList`** —— `Start-Process -ArgumentList @()`
+  #      会抛 `ParameterBindingValidationException`，**整条命令中断，NapCat 压根没启动**，
+  #      然后就是"等 90 秒还没监听 3001"→ 下一轮再来一遍的死循环。
+  #      （这个坑 2026-09-15 在 start-all.ps1 里修过，watchdog.ps1 这份**漏了**。）
+  #   ② 别拿 `$args` 当变量名 —— 它是 PowerShell 的**自动变量**。
+  $napArgs = @()
+  if ($botQQ) { $napArgs = @('-q', $botQQ) }
   # 最小化启动：平时不占屏幕，但要扫码时能从任务栏点出来
-  Start-Process -FilePath $launcher -ArgumentList $args -WorkingDirectory $NapCatDir -WindowStyle Minimized
+  if ($napArgs.Count -gt 0) {
+    Start-Process -FilePath $launcher -ArgumentList $napArgs -WorkingDirectory $NapCatDir -WindowStyle Minimized
+  } else {
+    Start-Process -FilePath $launcher -WorkingDirectory $NapCatDir -WindowStyle Minimized
+  }
 
   for ($i = 0; $i -lt 45; $i++) {
     Start-Sleep -Seconds 2
