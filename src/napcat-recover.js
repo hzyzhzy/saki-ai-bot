@@ -28,6 +28,12 @@ import { readFileSync, writeFileSync, rmSync, existsSync, mkdirSync } from 'node
 import { join, dirname } from 'node:path';
 import { config, ROOT } from './config.js';
 import { log } from './log.js';
+import * as provider from './provider.js';
+
+// ⚠️ 2026-09-17：这套「假在线 → 留条子 → 看门狗重启」是 **NapCat 专属**的
+//    （别的协议端没有"假在线"这个毛病，看门狗也只认 NapCat 目录）。
+//    换了协议端就别再留条子，免得看门狗被误导去重启一个不存在的东西。
+const ENABLED_FOR_PROVIDER = provider.isNapcat();
 
 const FILE = process.env.QQBOT_NAPCAT_REQ_FILE
   ? join(ROOT, process.env.QQBOT_NAPCAT_REQ_FILE)
@@ -66,6 +72,9 @@ export function onSendOk() {
  * @returns {{streak:number, requested:boolean, reason:string}}
  */
 export function onSendFail(now = Date.now()) {
+  if (!ENABLED_FOR_PROVIDER) {
+    return { streak, requested: false, reason: `当前协议端不是 NapCat（${provider.name()}），不做这套自愈` };
+  }
   if (cfg().enable === false) return { streak, requested: false, reason: '功能关着' };
   streak++;
   const threshold = Math.max(1, nz(cfg().failThreshold, 3));

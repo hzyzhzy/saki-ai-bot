@@ -2,6 +2,8 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { config, validate, ROOT, DEFAULT_LIFE, DEFAULT_QUEST, paramsFor } from './config.js';
+// ⚠️ 协议端适配层：启动横幅要报它、管理能力也由它决定（换协议端只改 config.yml）
+import * as provider from './provider.js';
 import { log } from './log.js';
 import { Bot } from './bot.js';
 import { startWebUI } from './webui.js';
@@ -146,6 +148,8 @@ process.on('uncaughtException', (e) => log.error('未捕获异常:', e?.stack ??
 log.info('═══════════════════════════════════════');
 log.info(' QQ AI 机器人启动中');
 log.info(` 连接模式 : ${config.onebot.mode}`);
+// ⚠️ 协议端（2026-09-17 加）：**收发跟它无关**，但它决定"出码/重启"这些管理能力有没有
+log.info(` 协议端   : ${provider.info().label}（管理能力：${Object.entries(provider.info().caps).filter(([, v]) => v).map(([k]) => k).join('/') || '仅收发'}）`);
 log.info(` 模型     : ${config.llm.model}`);
 log.info(` 群聊回复 : ${config.trigger.groupChat ? (config.trigger.requireAtInGroup ? '开启（需 @）' : '开启（所有消息）') : '关闭'}`);
 log.info(` 私聊回复 : ${config.trigger.privateChat ? '开启' : '关闭'}`);

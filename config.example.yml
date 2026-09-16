@@ -1,4 +1,4 @@
-﻿# ⚠️ 这是**模板**：复制成 `config.yml` 再填自己的值。
+# ⚠️ 这是**模板**：复制成 `config.yml` 再填自己的值。
 #    `config.yml` 在 .gitignore 里（里面有密钥，不许提交）。
 #    密钥 / token / QQ 号都已经换成占位符。
 
@@ -209,6 +209,20 @@ quest:
   checkIntervalMs: 60000
 ownerQQ: '<主人的 QQ>'
 botQQ: '<机器人的 QQ>'
+# ── QQ 协议端（OneBot 实现）────────────────────────────────
+# ⚠️ 「收消息/发消息」跟协议端无关（换谁都是 ws + token），所以换协议端**只需要改这里**；
+#    但"出二维码 / 重启协议端 / 查登录状态"这些**管理能力各家不一样**，不支持时界面会明说。
+#
+#   name: napcat    → 有自己的 WebUI + 接口，机器人能代你出码/重启（⚠️ 它的许可**禁止商用**）
+#   name: llonebot  → LLBot 是独立应用：登录/扫码/重连在它自己的 WebUI/GUI 里做
+#                     （GPL-2.0：可商用，但**分发**它时必须一并提供源码）
+#   name: onebot    → 任何通用 OneBot 11 实现：只保证收发，管理面请用它自己的方式
+provider:
+  name: napcat
+  # 下面三项**可以留空**：napcat 会自动用 ../napcat/NapCat.Shell 和 launcher-win10-user.bat
+  dir: '' # 协议端目录（启动/守护脚本要用）
+  launcher: '' # 启动脚本/可执行（相对 dir 或绝对路径）
+  manageUrl: '' # 它自己的管理界面地址（只用于在机器人界面上给你一个链接）
 logLevel: info
 qzone:
   enable: true

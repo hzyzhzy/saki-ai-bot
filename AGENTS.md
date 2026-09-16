@@ -168,6 +168,29 @@ git -c http.proxy=http://127.0.0.1:7890 -c https.proxy=http://127.0.0.1:7890 pus
 
 ---
 
+## 🔌 协议端适配层（2026-09-17 加，用户要求「能换协议端」）
+
+**为什么**：NapCat 的许可**禁止商用**，而用户的机器人只是通过 OneBot 协议跟它说话 ——
+不该被某一家协议端绑死。所以把"管理面"抽象出来，换协议端 = **改 `config.yml`**。
+
+- 代码：`src/provider.js`（能力表 + 目录/启动器解析）、`config.provider.*`。
+- **收发那部分完全通用**（`onebot.url` + token），跟协议端无关 —— 这是设计底线。
+- 管理能力按协议端分派，**不支持就明确说"不支持"**（`provider.unsupported(cap)`），
+  **绝不假装成功**：`webui.js` 的 qrcode / refresh-qr / restart / launch / recover 路由都先问 `provider.can()`。
+- `napcat-recover.js`（假在线自愈）**只在 provider = napcat 时**才写重启条子，免得误导看门狗。
+- 支持的协议端：
+
+| name | 是什么 | 管理能力 | 许可 |
+| --- | --- | --- | --- |
+| `napcat`（默认） | 注入官方 QQ 客户端 | 全开（出码/重启/快速登录/启动） | ⚠️ **禁止商用** |
+| `llonebot` | LLBot，**独立应用**（Desktop/CLI/Docker） | 只能"启动"（如果配了 launcher）；出码/登录去它自己的 WebUI | GPL-2.0：可商用，**分发**要带源码 |
+| `onebot` | 任何通用 OneBot 11 实现 | 只保证收发 | 看具体实现 |
+
+⚠️ 名字写错会**退回 `onebot`**（不让机器人挂掉），原值留在 `provider.nameRaw` 里便于排查。
+⚠️ `src/provider.js` 只读 `provider.*`，**不碰 `onebot.*`** —— 回归套件 `test/provider.js` 专门盯这条。
+
+---
+
 ## 铁律②：改完就启动，别等测试跑完
 
 **用户明确要求（2026-09-11）**：「每次你改完测试之前就要启动机器人方便我测试」
@@ -697,6 +720,7 @@ node test/quote.js        # ★「引用」两条规矩：引用她=直接对她
 node test/tone.js         # 「别一直质疑对方」—— 连着抬杠的计数 + ≥2 才注入"这句接住"
 node test/watchdog-state.js # 看门狗判「QQ 在不在线」：★「已登录,无法重复登录」是**卡死**不是在线
 node test/qq-qrcode.js    # 二维码：★ 重新出码走 RefreshQRcode（**不许重启 NapCat**）+ 界面必须带 fresh=1
+node test/provider.js     # ★ 协议端适配：换 LLBot 后收发不变、**不支持的能力必须明确拒绝**（不假装成功）
 node test/storyline.js   # 故事线：★ 二级条目锁定，模型想删/扩写都被拦（整次作废）
 node test/life.js        # 一级事件：时段匹配 + 随机+冷却 + 0-7点不发 + 掉线不补发
 node test/holiday.js     # 节日：农历自动算 + 闰月跳过 + 日本/中国节日不混 + 放假屏蔽学校事件
