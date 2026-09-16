@@ -279,6 +279,23 @@ deepseek-flash ： 缓存命中 0.02 / 未命中 1 / 输出 4      （高峰时�
 
 ---
 
+## ⚡ 懒人版：一键安装包（建议先试这个）
+
+不想手动部署的话，去 [Releases](https://github.com/hzyzhzy/saki-ai-bot/releases) 下 **`saki-setup.exe`**（约 50 MB），
+双击 → 填几项 → 装完就能跑：
+
+- **不用装 Node**（内嵌了运行时）、不用 clone、不用手写 `config.yml`（向导生成，token 自动随机）
+- **NapCat 也能自动装**：勾选后从**它的官方 Release** 下载（校验官方 sha256）、自动解压并配好端口和 token
+  - ⚠️ 安装包**不打包** NapCat（它禁止商用、再分发要附许可全文）——
+    这一步是**你自己**从作者那里取得，安装时会先把它的许可给你确认
+- 装完只剩"登录"这一步（没人能替你点）：**完全退出 QQ** → 双击 `napcat\NapCat.Shell\launcher-win10-user.bat` → 出二维码就扫
+- 国内网络连不上 GitHub 也没关系：脚本会**自动探测本机代理**，也可以自己下好 zip 再喂给它（`--zip`）
+
+安装器源码就在 [`installer/`](installer/)（Inno Setup 脚本 + payload 打包脚本 + 中文语言文件），
+可以直接审阅它到底做了什么，也能自己构建。
+
+---
+
 ## 部署全流程（从零到跑起来）
 
 > 面向 Windows（脚本都是 `.bat` / `.ps1`）。Linux / macOS 能跑核心（`node src/index.js`），
