@@ -1,0 +1,97 @@
+# 仅用于行为测试，由 test/behavior.js 通过 QQBOT_CONFIG 加载。
+onebot:
+  mode: forward
+  url: ws://127.0.0.1:40001
+  accessToken: "bhv-token"
+  reconnectInterval: 300
+
+llm:
+  baseURL: http://127.0.0.1:40002/v1
+  apiKey: "sk-test-fake-key"
+  model: test-model
+  temperature: 0
+  maxTokens: 200
+  timeout: 10000
+  systemPrompt: |
+    你是客服小祥。
+
+trigger:
+  privateChat: true
+  groupChat: true
+  allowGroups:
+    - "200000001"
+  requireAtInGroup: true
+  keywords: []
+  historyRounds: 2
+  cooldownMs: 0
+  maxInputChars: 1000
+
+status:
+  enable: false
+  host: ""
+  keywords: []
+
+teach:
+  enable: false
+  teachers: []
+  keywords: []
+
+faces:
+  collect: false
+
+chat:
+  enable: true
+  group: "200000001"
+  question:
+    enable: true
+    keywords:
+      - 服务器
+      - 崩了
+      - 模组
+      - 怎么进
+      - 整合包
+      - 白名单
+      - 报错
+    probability: 0.6
+    cooldownMs: 10000
+    requireQuestionMark: true
+    minChars: 5
+  mention:
+    enable: true
+    names:
+      - 小祥
+      - 祥子
+    probability: 0.4
+    cooldownMs: 10000
+    minChars: 2
+  followUp:
+    enable: true
+    # ⚠️ 这两个要**拉开距离**，测试才能验证"同一个人的窗口更宽"（2026-09-15 加）
+    idleMs: 30000
+    sameUserMs: 180000
+    probability: 1
+    minChars: 2
+
+attitude:
+  allowAnger: true
+  allowRetort: true
+  denyBeingBot: true
+
+# 故意设小，好让「文字 + 表情」分成两条发出去，方便断言
+chunking:
+  maxChars: 20
+  delayMs: 50
+  firstFlushChars: 10
+
+ownerQQ: "10000001"
+logLevel: info
+
+# 测试专用：独立端口，避免多个测试抢 3099
+webui:
+  enable: false
+  port: 3101
+
+# ⚠️ 测试里关掉在线时长跟踪 —— 它会自己独立查服务器，
+#    会污染「查询次数」类断言（真实踩过）
+sessions:
+  enable: false

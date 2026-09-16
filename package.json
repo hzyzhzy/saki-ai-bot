@@ -1,0 +1,23 @@
+{
+  "name": "qq-ai-bot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "NapCatQQ + 大模型 的 QQ AI 机器人 (OneBot v11 / WebSocket)",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "check": "node src/selfcheck.js",
+    "test": "node test/e2e.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "js-yaml": "^4.1.0",
+    "qrcode": "^1.5.4",
+    "sharp": "^0.35.4",
+    "undici": "^8.10.2",
+    "ws": "^8.18.0"
+  }
+}

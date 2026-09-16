@@ -1,0 +1,155 @@
+# 由管理界面 http://127.0.0.1:3099 维护。
+# 详细注释和说明见 README.md。
+onebot:
+  mode: forward
+  url: ws://127.0.0.1:40201
+  accessToken: "sens-token"
+  reconnectInterval: 3000
+llm:
+  baseURL: http://127.0.0.1:40202/v1
+  apiKey: "sk-test-fake"
+  model: deepseek-chat
+  temperature: 0.5
+  maxTokens: 800
+  timeout: 60000
+  systemPrompt: |
+    你是丰川祥子（粉丝叫她客服小祥），现在在 HZYMTR 服务器群里当客服。
+    你就是小祥本人 —— 不是扮演、不是模仿，也不是在装角色。
+
+    下面会给你「人格设定」和「知识库」。人格决定你怎么说话，知识决定你说什么。
+
+    必须守住的边界：
+    - 回答只能依据知识库和系统给的实时数据。没写的就是不知道，直说，别编。
+    - 群友问在线人数这类实时数据时，系统会把查好的数字给你，照说，不要自己猜。
+    - 不能批准建设申请、不能发 OP、不能承诺重启服务器 —— 让群友找对应的人。
+    - 不聊政治、色情、暴力、违法内容。
+    - 手机 QQ 里 Markdown 显示不出来，不要用 # 标题和代码块。
+
+    语气上最重要的一条：**不要像个客服。** 不要"您好，请问有什么可以帮您"、
+    不要"非常抱歉"、不要"感谢您的反馈"。像小祥那样说话：短、自然、有教养、偶尔带点刺。
+    群里聊天不用每次都分点列举，也别每次都问候。
+trigger:
+  privateChat: true
+  groupChat: true
+  allowGroups:
+    - "200000001"
+    - "200000002"
+  # 群里回复灵敏度（三档）：
+  #   1 = 只要有能回答的消息就马上回（最活跃，token 消耗最大）
+  #   2 = 只有跟服务器有关、或者在聊机器人自己的消息才回（默认）
+  #   3 = 只有 @ 机器人才回（最安静）
+  respondTo: 3
+  # 兼容旧配置：respondTo 没写时用它推断（现在有 respondTo 了，可以不管）
+  requireAtInGroup: true
+  keywords: []
+  historyRounds: 20
+  cooldownMs: 2000
+  maxInputChars: 1000
+# 回答时参考的群聊上下文（让它知道刚才大家在聊什么）
+context:
+  enable: true
+  maxMessages: 15
+  maxAgeMs: 1800000
+  maxChars: 1200
+status:
+  enable: true
+  host: mc.example.com
+  displayName: HZYMTR 服务器
+  cacheSeconds: 60
+  keywords:
+    - 在线
+    - 几个人
+    - 有多少人
+    - 多少人
+    - 服务器开了
+    - 服务器状态
+    - 进不去服务器
+    - 连不上服务器
+    - 卡不卡
+    - tps
+    - 谁在
+    - 在线玩家
+    - 在线人数
+teach:
+  enable: true
+  teachers: []
+  requireOwnerRole: true
+  allowPrivateTeach: true
+  naturalLearning: true
+  confirmMode: auto
+  keywords:
+    - 记住
+    - 记一下
+    - 记录一下
+    - 你需要知道
+    - 你要知道
+    - 以后你
+    - 补充一下
+    - 更正一下
+    - 更新一下
+    - 改一下
+    - 顺便说一下
+chunking:
+  maxChars: 260
+  delayMs: 700
+  firstFlushChars: 90
+webui:
+  enable: true
+  host: 127.0.0.1
+  port: 3099
+ownerQQ: "10000001"
+logLevel: info
+faces:
+  collect: true
+chat:
+  enable: true
+  group: "200000001"
+  question:
+    enable: true
+    keywords:
+      - 服务器
+      - 崩了
+      - 卡
+      - 模组
+      - 存档
+      - 怎么进
+      - mtr
+      - 整合包
+      - java
+      - 进不去
+      - 报错
+      - 白名单
+      - 建设
+      - 申请
+      - op
+      - 管理员
+      - 在线
+    probability: 1
+    cooldownMs: 180000
+    requireQuestionMark: true
+    minChars: 5
+  mention:
+    enable: true
+    names:
+      - 小祥
+      - 祥子
+      - 客服小祥
+      - zyhg
+    probability: 1
+    cooldownMs: 300000
+    minChars: 2
+  followUp:
+    enable: true
+    idleMs: 180000
+    probability: 1
+    minChars: 2
+attitude:
+  allowAnger: true
+  allowRetort: true
+  denyBeingBot: true
+botQQ: "10000002"
+
+# ⚠️ 测试里关掉在线时长跟踪 —— 它会自己独立查服务器，
+#    会污染「查询次数」类断言（真实踩过）
+sessions:
+  enable: false
