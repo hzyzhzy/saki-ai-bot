@@ -84,6 +84,7 @@ const SUITES = [
   'tone',
   'watchdog-state',
   'qq-qrcode',
+  'provider',
   'storyline',
   'life',
   'holiday',

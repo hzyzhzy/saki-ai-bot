@@ -208,9 +208,15 @@ console.log('\n【5】★ NapCat 没在跑时：「重启」必须变成「启�
   const route = js.slice(js.indexOf("'POST /api/qq/restart'"), js.indexOf("'POST /api/qq/launch'"));
   check(/napcat\.running\(\)/.test(route), '重启路由先看端口在不在听');
   check(/napcat\.launch\(\)/.test(route), '★★ 没在跑的时候走 `napcat.launch()`（把窗口启动起来）');
+  // ⚠️ 2026-09-17 改：按钮文案不再写死「NapCat」—— 它现在按**协议端**分派
+  //    （支持重启就说"重启协议端"，只支持启动就说"启动协议端"，都不支持就禁掉）。
+  //    所以这里断言的是**新行为**，不是旧字面量。
   const html = readFileSync(join(ROOT, 'src', 'webui.html'), 'utf8');
-  check(/btn-qq-restart/.test(html) && /启动 NapCat（它没在跑）/.test(html), '界面按钮会跟着状态变成「启动 NapCat」');
-  check(/id="qq-restart-hint"/.test(html), '状态卡里会说明"没在跑，点它会把窗口开起来"');
+  check(
+    /btn-qq-restart/.test(html) && /启动协议端/.test(html) && /canRestart/.test(html),
+    '界面按钮跟着「状态 + 协议端能力」变（启动/重启协议端，不支持就禁掉）',
+  );
+  check(/id="qq-restart-hint"/.test(html), '状态卡里会说明当前协议端是什么、该去哪儿操作');
 }
 
 try {

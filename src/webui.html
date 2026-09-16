@@ -2159,6 +2159,10 @@ async function qqRefresh() {
     if (!r.ok) { el.innerHTML = kv('出错', esc(r.error || '查询失败')); return; }
     const n = r.napcat || {};
     const o = r.onebot || {};
+    // ⚠️ 协议端（2026-09-17 加）：收发跟它无关，但"出码/重启"这些能力由它决定。
+    //    不支持的能力**把按钮禁掉并说明去哪儿做** —— 比点了弹错好。
+    const pv = r.provider || {};
+    const caps = pv.caps || {};
 
     // 两边都看：NapCat 说「已登录」不代表 QQ 真在线
     const online = o.online === true;
@@ -2167,31 +2171,42 @@ async function qqRefresh() {
       : '<b style="color:#dc2626">❌ 离线（收不到消息）</b>';
 
     let html =
+      kv('协议端', esc(pv.label || '—') +
+        (pv.manageUrl ? ' · <a href="' + esc(pv.manageUrl) + '" target="_blank">它自己的管理界面</a>' : '')) +
       kv('QQ 是否在线', badge) +
-      kv('账号', esc(o.qq || '—') + (o.nickname ? ' (' + esc(o.nickname) + ')' : ''));
+      kv('账号', esc(o.qq || '—') + (o.nickname ? ' (' + esc(o.nickname) + ')' : '') +
+        ' <span class="hint">（这条来自 OneBot 侧，换任何协议端都准）</span>');
 
-    // NapCat 进程在不在（2026-09-17 加）：不看这一条，「重启 NapCat」按钮点下去
-    // 只会弹一句「fetch failed」——因为那个按钮原来只能问候一个**没在跑**的服务。
+    // 只对支持的协议端显示"进程在不在"（别的协议端我们探测不到）
     const running = r.running === true;
-    html += kv(
-      'NapCat 进程',
-      running ? '<b style="color:#16a34a">在跑</b>' : '<b style="color:#dc2626">没在跑</b>',
-    );
+    if (caps.status || caps.launch) {
+      html += kv(
+        '协议端进程',
+        running ? '<b style="color:#16a34a">在跑</b>' : '<b style="color:#dc2626">没在跑</b>',
+      );
+    }
 
-    // 按钮跟着状态变：没在跑就说「启动」，别写着"重启"骗人
+    // 按钮跟着"状态 + 协议端能力"变
     const btn = $('btn-qq-restart');
     if (btn) {
-      btn.textContent = running ? '重启 NapCat（重新出码）' : '启动 NapCat（它没在跑）';
-      btn.style.background = running ? '#dc2626' : '#16a34a';
+      const canRestart = caps.restart === true || caps.launch === true;
+      btn.disabled = !canRestart;
+      btn.textContent = !canRestart
+        ? '当前协议端不支持（看它自己的界面）'
+        : running && caps.restart
+          ? '重启协议端（重新出码）'
+          : '启动协议端';
+      btn.style.background = !canRestart ? '#6b7280' : running && caps.restart ? '#dc2626' : '#16a34a';
     }
     const h = $('qq-restart-hint');
     if (h) {
-      h.textContent = running
-        ? '重启会短暂断开连接，机器人几秒后自己重连。'
-        : 'NapCat 现在没在运行 —— 点这个按钮会把它的窗口开起来（登录态失效时窗口里会出二维码）。';
+      if (pv.how) h.textContent = pv.how + (pv.license ? '　｜　' + pv.license : '');
     }
 
-    if (!n.reachable) {
+    // NapCat 专属那几块：只在这个协议端支持时才显示（别的协议端显示"不支持 + 去哪儿做"）
+    if (!caps.status) {
+      html += kv('协议端管理接口', '<span class="hint">' + esc(n.error || '当前协议端没有这套接口') + '</span>');
+    } else if (!n.reachable) {
       html += kv('NapCat 管理接口', '<b style="color:#dc2626">连不上</b> — ' + esc(n.error || ''));
     } else {
       html += kv('NapCat 侧登录状态', n.isLogin ? '已登录' : '未登录');

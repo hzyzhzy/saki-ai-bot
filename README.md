@@ -439,6 +439,43 @@ node src/index.js
 
 ---
 
+## 🔌 换一个协议端（不想用 NapCat 时）
+
+机器人**只通过 OneBot 11 协议**跟协议端说话 —— 也就是说「收消息 / 发消息」这部分
+**跟协议端无关**（换谁都是 `ws://` + token）。所以换协议端**只需要改 `config.yml`**：
+
+```yaml
+onebot:
+  url: ws://127.0.0.1:3001     # 指向新协议端的 WS 服务端（不用改）
+  accessToken: '...'           # 它的 token（不用改）
+provider:
+  name: llonebot               # napcat（默认）| llonebot | onebot（任意通用实现）
+  dir: D:\LLBot                # 启动/守护脚本要用（可选）
+  launcher: LLBot.exe          # 相对 dir 或绝对路径（可选）
+  manageUrl: http://127.0.0.1:3080   # 它自己的管理界面（界面上给你个链接）
+```
+
+**"管理能力"各家不一样，机器人会如实告诉你** —— 不支持的能力会**明确拒绝并告诉你去哪儿做**，
+不会假装成功：
+
+| provider | 是什么 | 出码 / 重启 / 快速登录 | 许可（商用相关） |
+| --- | --- | --- | --- |
+| `napcat`（默认） | 注入官方 QQ 客户端 | ✅ 全都能（机器人代你点） | ⚠️ 自定义许可：**禁止商用** |
+| `llonebot` | [LLBot](https://github.com/LLOneBot/LLOneBot)（独立应用：Desktop / CLI / Docker） | ❌ 到它自己的 WebUI / GUI 里做 | GPL-2.0：**允许商用**；但**分发**它（打包 / 私有化交付）必须一并提供源码 |
+| `onebot` | 任何通用 OneBot 11 实现 | ❌ 用它自己的方式 | 看具体实现 |
+
+> 💡 **想商用的话**：NapCat **不行**（明确禁止）；`llonebot` 可以（GPL-2.0，只要别把**它**打进你的分发物）；
+> 真正"官方许可"的是 QQ 开放平台 / 企业微信，但那两条路要过审、能力也受限。
+> 详见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
+>
+> ⚠️ 换协议端解决的是**许可**问题，**解决不了腾讯服务条款**问题 ——
+> 所有第三方协议端都可能让账号被风控，请自行评估。
+
+`provider.name` 写错了也不会把机器人搞挂：它会退回 `onebot`（只保证收发），
+原值留在 `provider.nameRaw` 里方便排查。
+
+---
+
 ## 快速开始（命令汇总）
 
 ```bash

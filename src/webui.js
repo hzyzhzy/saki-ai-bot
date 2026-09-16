@@ -19,6 +19,8 @@ import { log } from './log.js';
 import { ping } from './llm.js';
 import { queryServer, describe, clearCache } from './status.js';
 import * as napcat from './napcat.js';
+// ⚠️ 协议端适配层（2026-09-17 加）：管理面按它分派，换协议端只改 config.yml
+import * as provider from './provider.js';
 import { backupKnowledge } from './backup.js';
 import { listUnannotated, annotateAll } from './face-annotate.js';
 // 二维码画图（纯 JS，无原生依赖）
@@ -544,12 +546,26 @@ const routes = {
   // 数据来源是 NapCat 自己的管理接口（默认 6099，见 src/napcat.js），
   // 不是 OneBot（3001）—— OneBot 管不了登录。
   'GET /api/qq/status': async (_req, res) => {
-    const st = await napcat.describe().catch((e) => ({ configured: false, reachable: false, error: e.message }));
+    // ⚠️ 2026-09-17 起这里**按协议端分派**：只有 NapCat 有那套 HTTP 管理接口。
+    //    换成 LLBot / 通用实现时，`napcat.describe()` 只会一直连不上（白等 15 秒），
+    //    所以先问 provider 支不支持，不支持就如实说"看 OneBot 侧那张卡片"。
+    const pv = provider.info();
+    const canStatus = provider.can('status');
+    const st = canStatus
+      ? await napcat.describe().catch((e) => ({ configured: false, reachable: false, error: e.message }))
+      : {
+          configured: false,
+          reachable: false,
+          unsupported: true,
+          error: provider.unsupported('status'),
+        };
     // 顺带把「端口在不在听」也报给界面 —— 界面靠它决定按钮是「启动」还是「重启」
-    const up = await napcat.running().catch(() => ({ onebot: false, webui: false }));
+    const up = canStatus || provider.can('launch')
+      ? await napcat.running().catch(() => ({ onebot: false, webui: false }))
+      : { onebot: false, webui: false };
 
     // 顺便报 OneBot 侧的真实在线状态：**两边都看才准**。
-    // NapCat 管理接口说「已登录」不代表 QQ 真的在线（被踢下线时两边会不一致）。
+    // ⚠️ 这一段是**协议端无关**的（OneBot 标准 action），所以换谁都能用 —— 这也是换协议端最靠得住的信息来源。
     let onebot = null;
     if (bot?.call) {
       try {
@@ -565,7 +581,14 @@ const routes = {
         onebot = { online: false, error: e.message };
       }
     }
-    send(res, 200, { ok: true, napcat: st, ports: up, running: up.onebot || up.webui, onebot });
+    send(res, 200, {
+      ok: true,
+      provider: pv,
+      napcat: st,
+      ports: up,
+      running: up.onebot || up.webui,
+      onebot,
+    });
   },
 
   // 出二维码。
@@ -592,6 +615,10 @@ const routes = {
   //     没有才退回自己按 URL 画（画得更大更清楚，见下面的 width/margin）。
   'GET /api/qq/qrcode.png': async (req, res) => {
     try {
+      // ⚠️ 换协议端之后，出码这套是 NapCat 专属的（LLBot 在它自己的界面里出码）
+      if (!provider.can('qrcode')) {
+        return send(res, 409, { ok: false, error: provider.unsupported('qrcode') });
+      }
       const url = String(req?.url ?? '');
       const wantFresh = /[?&]fresh=1/.test(url);
 
@@ -650,6 +677,9 @@ const routes = {
   //    而且新实例还没把码生成出来界面就去取了 → 「一直不出」。
   //    重出二维码是个轻活，用轻接口。
   'POST /api/qq/refresh-qr': async (_req, res) => {
+    if (!provider.can('refreshQr')) {
+      return send(res, 200, { ok: false, message: provider.unsupported('refreshQr'), hasImage: false });
+    }
     const r = await napcat.refreshQrcode();
     log.info(`管理界面请求重新出码：${r.ok ? 'ok' : r.message}`);
     if (r.ok) await new Promise((s) => setTimeout(s, 1200));
@@ -667,6 +697,16 @@ const routes = {
   //      · 6099 不在、3001 在 → NapCat 在跑但管理接口连不上，如实说，不乱来；
   //      · 两个都不在 → **走 `napcat.launch()` 把窗口启动起来**（这才是用户想要的效果）。
   'POST /api/qq/restart': async (_req, res) => {
+    // 换协议端之后「重启」就不归我们管了：LLBot 在它自己的界面里重连/重启
+    if (!provider.can('restart')) {
+      // ⚠️ 但"启动"还是能做的（只要配了 provider.launcher）—— 别把用户堵死
+      if (provider.can('launch')) {
+        const r = await napcat.launch();
+        log.info(`管理界面请求重启协议端：当前是 ${provider.info().label}，不支持重启 → 改成启动`);
+        return send(res, 200, { ok: r.ok, launched: true, message: r.message });
+      }
+      return send(res, 200, { ok: false, message: provider.unsupported('restart') });
+    }
     const up = await napcat.running();
     if (!up.webui && !up.onebot) {
       log.info('管理界面请求重启 NapCat：它压根没在跑 → 改成「启动」');
@@ -685,16 +725,22 @@ const routes = {
     send(res, 200, { ok: r.ok, message: r.message });
   },
 
-  // 显式「启动 NapCat」：界面在它没跑的时候用这个（窗口会开出来，登录态失效就扫码）
+  // 显式「启动协议端」：界面在它没跑的时候用这个（窗口会开出来，登录态失效就扫码）
   'POST /api/qq/launch': async (_req, res) => {
+    if (!provider.can('launch')) {
+      return send(res, 200, { ok: false, message: provider.unsupported('launch') });
+    }
     const r = await napcat.launch();
-    log.info(`管理界面请求启动 NapCat：${r.message}`);
+    log.info(`管理界面请求启动协议端：${r.message}`);
     send(res, 200, { ok: r.ok, launched: !!r.launched, already: !!r.already, message: r.message });
   },
 
   // 自动恢复：**先试快速登录（免扫码），不行再出二维码**。
-  // 这是掉线后最省事的按钮 —— 大部分情况根本不用扫。
+  // 这是掉线后最省事的按钮 —— 大部分情况根本不用扫。⚠️ 只对 NapCat 有效。
   'POST /api/qq/recover': async (_req, res) => {
+    if (!provider.can('autoRecover')) {
+      return send(res, 200, { ok: true, recovered: false, message: provider.unsupported('autoRecover') });
+    }
     const r = await napcat.autoRecover().catch((e) => ({ recovered: false, message: e.message }));
     log.info(`管理界面请求自动恢复 QQ 登录：${r.message}`);
     send(res, 200, { ok: true, ...r });

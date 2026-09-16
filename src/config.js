@@ -134,6 +134,31 @@ const DEFAULTS = {
     timeoutMs: 15000,
     quietMs: 180000, // 群最后一条消息超过这么久才算「没人说话」（3 分钟）
   },
+  /**
+   * QQ 协议端（OneBot 实现）—— 2026-09-17 加（用户要求「能换协议端」）。
+   *
+   * ⚠️ 为什么要有这一层：机器人**只通过 OneBot 协议**跟协议端说话，
+   *    「收消息/发消息」这部分**跟协议端无关**（换谁都是 ws + token）；
+   *    但**管理面**各家差很多：
+   *      · NapCat 有自己的 WebUI/HTTP 接口 → 我们能代你出码、重启、快速登录；
+   *      · LLBot 是独立应用，有自己的 WebUI/GUI → 那些操作去它界面里做；
+   *      · 通用 OneBot 实现**什么管理面都没有**。
+   *    所以换协议端 = **改这里**，代码不用动；不支持的能力会明确说"不支持"，不装作能用。
+   *
+   * ⚠️ 商用提示（详见 README / THIRD-PARTY-NOTICES.md）：
+   *    NapCat 自定义许可**禁止商用**；LLBot 是 GPL-2.0（可商用，但**分发**要带源码）；
+   *    真正"官方许可"的只有 QQ 开放平台 / 企业微信。
+   */
+  provider: {
+    /** napcat | llonebot | onebot（通用：只保证 OneBot 收发） */
+    name: 'napcat',
+    /** 协议端目录（启动/守护脚本要用）。留空 → napcat 用 ../napcat/NapCat.Shell */
+    dir: '',
+    /** 启动脚本/可执行（相对 dir 或绝对路径）。留空 → napcat 用 launcher-win10-user.bat */
+    launcher: '',
+    /** 它自己的管理界面地址（只用于在机器人界面里给你一个可点的链接） */
+    manageUrl: '',
+  },
   /** 反向图搜（SauceNAO）—— 认二次元角色和出处 */
   saucenao: {
     enable: true,
@@ -522,6 +547,18 @@ function load() {
   cfg.napcat.webuiPort = Math.max(1, Number(cfg.napcat.webuiPort) || 6099);
   cfg.napcat.webuiToken = String(cfg.napcat.webuiToken ?? '').trim();
   cfg.napcat.timeoutMs = Math.max(3000, Number(cfg.napcat.timeoutMs) || 15000);
+
+  // ── 协议端（provider）────────────────────────────────────
+  // ⚠️ 默认 napcat：老配置里没有这一段，行为必须和以前完全一样（向后兼容）。
+  const KNOWN_PROVIDERS = new Set(['napcat', 'llonebot', 'onebot']);
+  cfg.provider = cfg.provider ?? {};
+  const rawProvider = String(cfg.provider.name ?? 'napcat').trim().toLowerCase();
+  // 不认识的名字**退回通用 OneBot** 而不是让机器人挂掉（拼错了也能跑，只是管理面少）
+  cfg.provider.name = KNOWN_PROVIDERS.has(rawProvider) ? rawProvider : 'onebot';
+  cfg.provider.nameRaw = rawProvider;
+  cfg.provider.dir = String(cfg.provider.dir ?? '').trim();
+  cfg.provider.launcher = String(cfg.provider.launcher ?? '').trim();
+  cfg.provider.manageUrl = String(cfg.provider.manageUrl ?? '').trim();
 
   cfg.saucenao.enable = cfg.saucenao.enable !== false;
   cfg.saucenao.apiKey = String(cfg.saucenao.apiKey ?? '').trim();
