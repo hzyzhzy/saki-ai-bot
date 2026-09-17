@@ -182,18 +182,18 @@ console.log('\n【4】分段推进 + 群友的话进提示词、也进故事线'
   replies = [J({ event: '缠着她的那个人跟到了店门口', text: '……他还在门口站着。', done: false, ending: null })];
   const a1 = await quest.advance(q, {
     ask,
-    replies: [{ userId: '1453325399', name: '落墨同学', text: '你别一个人走，叫同事送你' }],
+    replies: [{ userId: '10000003', name: '某群友', text: '你别一个人走，叫同事送你' }],
   });
   check(a1.ok === true, '推进了一段', a1.reason ?? '');
   check(a1.done === false, '还没结束');
-  check(prompts[0].user.includes('落墨同学'), '★ 群友的话喂进去了');
+  check(prompts[0].user.includes('某群友'), '★ 群友的话喂进去了');
   check(prompts[0].user.includes('可以改主意') || prompts[0].user.includes('改主意'), '★ 明确告诉它"群友的话可以让她改主意"');
   check(quest.current().stages.length === 2, 'quest 里现在有 2 段');
-  check(quest.current().cast.includes('1453325399'), '★ 把参与的人记进了 cast（后面发好感度用）');
+  check(quest.current().cast.includes('10000003'), '★ 把参与的人记进了 cast（后面发好感度用）');
   const sl = storyline.recent(30);
   check(sl.some((e) => e.tier === 2 && /第2段/.test(e.text)), '★ 这一段写进了故事线');
   check(
-    sl.some((e) => /落墨同学说/.test(e.text)),
+    sl.some((e) => /某群友说/.test(e.text)),
     '★★ 群友那句建议也写进了故事线（用户要求：「群友说的一些话也可以记录进故事线」）',
   );
 }

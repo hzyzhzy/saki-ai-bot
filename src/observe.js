@@ -376,10 +376,29 @@ export async function summarize(opts = {}) {
     if (!byGroup.has(g)) byGroup.set(g, []);
     byGroup.get(g).push(m);
   }
-  const jobs = [...byGroup.entries()].filter(([, list]) => opts.force || list.length >= threshold);
+  // ⚠️⚠️ 2026-09-17（用户：「最近消息太少了，再加个时间阈值就行了」）——
+  //
+  //    **消息少的群永远攒不到 threshold**，那份群资料就永远不更新。
+  //    实测：752（主群）一天才一百多条，而 `pending` 只在内存、**重启就清零**，
+  //    结果它的群资料**从来没生成过**（连 `state/observe.json` 都不存在）——
+  //    用户截图来问「这个人喜欢喵喵喵没记下来」，就是这个原因。
+  //
+  //    所以补一条**时间兜底**：这一群里**最老的一条**超过 `maxAgeMs` 就总结，
+  //    哪怕只剩几条也总结。消息多的群照旧按条数触发，两条路互不影响。
+  const maxAgeMs = Math.max(60000, Number(config.observe?.maxAgeMs) || 6 * 3600 * 1000);
+  const nowMs = Date.now();
+  const jobs = [...byGroup.entries()].filter(([, list]) => {
+    if (opts.force) return true;
+    if (list.length >= threshold) return true;
+    const oldest = list[0]?.at ?? nowMs;
+    return nowMs - oldest >= maxAgeMs;
+  });
   if (!jobs.length) {
     const most = Math.max(...[...byGroup.values()].map((l) => l.length));
-    return { ok: false, reason: `还没攒够（最多的一群 ${most}/${threshold}）` };
+    return {
+      ok: false,
+      reason: `还没攒够（最多的一群 ${most}/${threshold} 条；或者等满 ${Math.round(maxAgeMs / 3600000)} 小时）`,
+    };
   }
 
   running = true;

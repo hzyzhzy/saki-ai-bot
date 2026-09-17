@@ -32,7 +32,7 @@ const CFG_REL = 'logs/__test-quote.yml';
 const GROUP = '200000001'; // 1 档 + 在白名单里
 const BOT = '10000002'; // 机器人自己
 const HZY = '10000001'; // 别人（服主）
-const OTHER = '1453325399'; // 另一个群友
+const OTHER = '10000003'; // 另一个群友
 
 // ⚠️ 配置必须在 import `src/*` **之前**写好（`config.js` 是加载时读的）
 writeFileSync(
@@ -82,7 +82,7 @@ const evOf = (message, userId = OTHER, messageId = '') => ({
   // ⚠️ `message_id` 是"这条被刷下去没有"的判据（见 `recent.messagesAfterMe`），
   //    要测引用就得给事件带上 id，并且让缓冲里真的存在这条。
   message_id: messageId,
-  sender: { user_id: String(userId), nickname: '落墨同学', role: 'member' },
+  sender: { user_id: String(userId), nickname: '某群友', role: 'member' },
 });
 
 const botWith = (myIds = []) => {

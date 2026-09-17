@@ -54,9 +54,11 @@ trigger:
     '200000001': 1
 context:
   enable: true
-  maxMessages: 30
+  # 她每次能看到的群聊上下文：**最近多少条 / 最多多少字**。
+  # ⚠️ 调大 = 她更能接上前文（指代、刚发过的分享卡片），但每次请求 token 更多。
+  maxMessages: 50
   maxAgeMs: 1800000
-  maxChars: 2000
+  maxChars: 5000
   bufferMaxAgeMs: 43200000
   batch:
     enable: true
@@ -81,6 +83,14 @@ status:
     - 谁在
     - 在线玩家
     - 在线人数
+    # 「谁上过线 / 谁来过 / 谁在玩」这类说法（2026-09-17 加）——
+    # 原来「服务器今天有谁上线」一条都不命中。「上线」故意收得宽：
+    # 最多多查一次服务器（约 1 秒），比"该查的时候没查"划算。
+    - 上线
+    - 谁上
+    - 谁来过
+    - 谁玩
+    - 在线时长
 teach:
   enable: true
   teachers: []
@@ -261,15 +271,22 @@ saucenao:
   minSimilarity: 60
 observe:
   enable: true
+  # 攒够多少条消息就总结一次群记忆
   threshold: 120
+  # ⚠️ 时间兜底：这一群里最老的一条超过这么久，**哪怕只有几条也总结**。
+  #    没有它的话，消息少的群永远攒不到 threshold，群记忆就一直不更新。
+  maxAgeMs: 21600000
   checkIntervalMs: 30000
   idleIntervalMs: 1800000
   keepPeople: 60
-  keepEvents: 20
+  # 大事这节最多留几条（和压缩提示词里写的「15 条以内」对齐）
+  keepEvents: 15
   compress:
     enable: true
     checkIntervalMs: 43200000
-    minIntervalMs: 259200000
+    # 多久允许压缩一次群记忆（毫秒）。压缩时会：**大事按时间压成小结**、
+    # **「群友」那节只许细化合并、一条都不许删**。
+    minIntervalMs: 43200000
 affinity:
   enable: true
   friendThreshold: 90
