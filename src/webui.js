@@ -774,7 +774,7 @@ const routes = {
   //    （证据：日志里只有「管理界面手动发了一条日常事件」，**没有**下面那条「用的就是刚预览的」）
   //    ⚠️ lastLifePreview / LIFE_PREVIEW_TTL 声明在**路由表外面**（模块作用域，见上面那一段）。
   /** 界面版本：给界面自己比"我这一页是不是旧的"用 */
-  'GET /api/pagever': async (_req, res) => send(res, 200, { ver: PAGE_VER }),
+  'GET /api/pagever': async (_req, res) => { loadPage(); send(res, 200, { ver: PAGE_VER }); },
 
   // ── 开机自启（2026-09-17 加）──
   // ⚠️ 这两个接口会**动系统设置**（注册表启动项），而且是我这边起 powershell 去改。
@@ -1749,7 +1749,7 @@ const routes = {
 /** 静态资源：管理界面自己的页面 + library 下的图片 */
 function serveStatic(req, res, url) {
   let rel = url.pathname;
-  if (rel === '/' || rel === '/index.html') return send(res, 200, PAGE, MIME['.html']);
+  if (rel === '/' || rel === '/index.html') return send(res, 200, loadPage(), MIME['.html']);
 
   // ⚠️ 必须先解码：文件名可能是中文，url.pathname 是百分号编码的，
   //    不解码就会去磁盘上找「%E6%88%B4%E9%94%85.jpg」这种名字，导致预览图 404。
@@ -1773,16 +1773,28 @@ function serveStatic(req, res, url) {
   send(res, 200, readFileSync(file), MIME[extname(file).toLowerCase()] ?? 'application/octet-stream');
 }
 
-// ⚠️ PAGE 是**启动时读一次**的 —— 改了 src/webui.html 必须重启才生效（版本号同理）。
-//    界面拿 `__PAGE_VER__` 跟 `/api/pagever` 比，不一致就提示"这个标签页该刷新了"。
-let PAGE_VER = '0';
+// ⚠️ 2026-09-17 改成**按请求热读**（原来是启动时读一次 → 改一行 CSS 都得重启）。
+//    起因：用户问「为什么重启要这么久」。重启本身只要 30~40 秒，贵的是它之后那段
+//    「重启 = 一次 QQ 登录」的风控间隔（≥5 分钟）—— 于是调个界面颜色要等 5 分钟。
+//    现在每次请求只 statSync 一下 mtime，变了才重读磁盘：**改界面 → 刷新即生效，零重启**。
+//    界面拿 `__PAGE_VER__`（= 文件 mtime）跟 `/api/pagever` 比，不一致就提示刷新。
 let PAGE = '<!doctype html><title>加载中</title><p>管理界面文件缺失</p>';
-try {
-  PAGE_VER = String(Math.round(statSync(join(ROOT, 'src', 'webui.html')).mtimeMs));
-  PAGE = readFileSync(join(ROOT, 'src', 'webui.html'), 'utf8').replace('__PAGE_VER__', PAGE_VER);
-} catch {
-  log.error('找不到 src/webui.html，管理界面不可用');
+let PAGE_VER = '0';
+function loadPage() {
+  try {
+    const p = join(ROOT, 'src', 'webui.html');
+    const ver = String(Math.round(statSync(p).mtimeMs));
+    if (ver !== PAGE_VER) {
+      PAGE = readFileSync(p, 'utf8').replace('__PAGE_VER__', ver);
+      PAGE_VER = ver;
+    }
+  } catch {
+    // 读不到就沿用内存里那份（别把界面搞挂）；只有一次都没读到过才报错
+    if (PAGE_VER === '0') log.error('找不到 src/webui.html，管理界面不可用');
+  }
+  return PAGE;
 }
+loadPage();
 
 export function startWebUI(botInstance = null) {
   bot = botInstance;

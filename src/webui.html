@@ -5,88 +5,326 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>客服小祥 · 管理台</title>
 <style>
+  /* ── 配色：蓝白 + 祥子代表色 ──
+     ⚠️ 2026-09-17（用户要求「模仿 NapCat 的 webui，蓝白动态渐变、鼠标周围扰乱色调」）：
+        查过了：NapCat 的 webui 是 HeroUI（主色 `#0072f5`），它自己**没有**这个动效 ——
+        这是用户想要的效果，不是照抄。所以这里自己实现：
+          ① 底层几团彩色光斑缓慢漂移（26 秒一轮，很慢，不晃眼）
+          ② 上面叠一层**跟着鼠标走**的光晕（JS 只改 --mx / --my 两个变量）
+     ⚠️ 关键：卡片必须**半透明 + 毛玻璃**，否则渐变被卡片挡住，动效等于白做。
+     ⚠️ 只改 CSS，**不碰任何类名**（HTML 和 JS 都依赖它们）。 */
   :root{
-    --bg:#f5f6f8; --card:#fff; --line:#e4e7ec; --text:#1f2430; --dim:#6b7280;
-    --accent:#5b7fd4; --ok:#16a34a; --warn:#d97706; --err:#dc2626; --radius:10px;
+    --bg:#dfe9f7; --card:rgba(255,255,255,.34); --card2:rgba(255,255,255,.22);
+    --line:rgba(20,50,90,.13); --text:#16233a; --dim:#5c6b82; --dim2:#8494a8;
+    --accent:#3b6fb5; --accent-soft:rgba(59,111,181,.12); --accent-line:rgba(59,111,181,.45);
+    --ok:#16a34a; --warn:#c2780a; --err:#dc2626;
+    --radius:12px;
   }
   *{box-sizing:border-box}
-  body{margin:0;font:14px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--text)}
-  header{background:var(--card);border-bottom:1px solid var(--line);padding:14px 22px;display:flex;align-items:center;gap:14px;position:sticky;top:0;z-index:10}
-  header h1{font-size:17px;margin:0;font-weight:600}
+  body{margin:0;font:14px/1.65 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+    /* ⚠️ 2026-09-17：底色不能再是一块纯色 —— 液态玻璃要「透出东西」才有意义。
+       下面三层柔光分别是左上偏蓝、右上偏紫、底部偏青，再压一层蓝白线性底。 */
+    /* ⚠️ 2026-09-17（第十版）：用户报「背景有点太亮了」→ 整体压暗约 6%。
+       起因是卡片底色压到三成之后透出得更多，底子太亮就显得刺眼。
+       ⚠️ 三处柔光的 rgba 结尾必须跟前面的 hex 同色（否则边缘会出现一圈脏色）。 */
+    background:
+      radial-gradient(1200px 700px at 12% -8%,#c9daf5 0%,rgba(201,218,245,0) 62%),
+      radial-gradient(1000px 620px at 92% 8%,#d4cdf6 0%,rgba(212,205,246,0) 60%),
+      radial-gradient(900px 600px at 50% 108%,#c7e2f8 0%,rgba(199,226,248,0) 60%),
+      linear-gradient(160deg,#dfe9f8 0%,#ecf2fc 46%,#d8e4f4 100%);
+    background-attachment:fixed;
+    color:var(--text);min-height:100vh}
+  /* ── 背景：会流动、会被鼠标撑散的色坨（2026-09-17 第三版）──
+     ⚠️ 前两版都不对，用户连着纠正了两次：
+        第一版「两个大渐变慢慢漂」→ **肉眼看是静态的**（位移太小、还叠了 blur）；
+        第二版加大幅度 → 仍然不是他要的，他要的是
+        **「一堆小色坨像浮在水上的油滴，鼠标穿过去把它们撑散，过后又自己合回来」**。
+     所以这版不再是"写死的 background 动画"，改成**真实元素 + 极简物理**：
+        每个色坨有一个「家」的位置 → 被鼠标推开 → 弹簧把它拉回去。
+     实现细节（别再改错）：
+        · 只改 `transform`（GPU 合成），**绝不改 `background`** —— 改背景会触发重绘，14 个必卡；
+        · 用 `blur` 让相邻色坨视觉上"融"在一起（油滴互溶的观感）；
+        · 色坨数量/大小/颜色和物理参数都在下面的 JS 里，调那几个常量就行。 */
+  .bgfx{position:fixed;inset:0;z-index:-2;pointer-events:none;overflow:hidden}
+  .blob{position:absolute;top:0;left:0;border-radius:50%;will-change:transform;
+    filter:blur(26px);opacity:.72}
+  .blob.m{opacity:.60;filter:blur(22px)}
+  @media (prefers-reduced-motion:reduce){.blob{filter:blur(24px)}}
+  header{background:linear-gradient(180deg,rgba(255,255,255,.56),rgba(255,255,255,.28));
+    backdrop-filter:blur(24px) saturate(2.3) brightness(1.06);
+    -webkit-backdrop-filter:blur(24px) saturate(2.3) brightness(1.06);
+    border-bottom:1px solid rgba(255,255,255,.66);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.75),0 6px 24px -14px rgba(31,38,135,.18);
+    padding:13px 24px;display:flex;align-items:center;gap:14px;
+    position:sticky;top:0;z-index:10}
+  header h1{font-size:16px;margin:0;font-weight:600;letter-spacing:.3px}
+  header h1::before{content:'';display:inline-block;width:8px;height:8px;border-radius:50%;
+    background:var(--accent);margin-right:9px;vertical-align:middle;
+    box-shadow:0 0 0 4px var(--accent-soft)}
   header .sub{color:var(--dim);font-size:12px}
   header .spacer{flex:1}
-  .wrap{max-width:1000px;margin:0 auto;padding:20px}
-  nav{display:flex;gap:6px;margin-bottom:18px;flex-wrap:wrap}
-  nav button{background:var(--card);border:1px solid var(--line);padding:8px 16px;border-radius:8px;cursor:pointer;font-size:14px;color:var(--dim)}
-  nav button.on{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
-  .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:18px 20px;margin-bottom:16px}
-  .card h2{font-size:15px;margin:0 0 4px;font-weight:600}
+  /* ── 布局：左侧栏目 + 右侧内容（纯 CSS Grid，**不动 HTML 结构**）── */
+  .wrap{max-width:1320px;margin:0 auto;padding:22px 24px 60px;
+    display:grid;grid-template-columns:190px minmax(0,1fr);gap:22px;align-items:start}
+  nav{display:flex;flex-direction:column;gap:3px;grid-column:1;
+    position:sticky;top:76px;padding:13px 11px;border-radius:18px;
+    /* 和 .card 同一套指数折射带（见 .card 的注释），只是窄一档 —— 侧栏是配角 */
+    background:linear-gradient(135deg,rgba(255,255,255,.21),rgba(255,255,255,.03) 48%,rgba(255,255,255,.11));
+    backdrop-filter:blur(24px) saturate(2.3) brightness(1.06);
+    -webkit-backdrop-filter:blur(24px) saturate(2.3) brightness(1.06);
+    border:0;
+    box-shadow:
+      inset 0 0 0 2px rgba(255,255,255,.92),
+      inset 0 0 9px 3px rgba(255,255,255,.58),
+      inset 0 0 18px 8px rgba(255,255,255,.36),
+      inset 0 0 30px 14px rgba(255,255,255,.20),
+      inset 0 0 48px 22px rgba(255,255,255,.10),
+      inset 0 1px 0 rgba(255,255,255,.82),
+      0 0 0 1px rgba(255,255,255,.30),
+      0 10px 34px -10px rgba(31,38,135,.20)}
+  nav button{background:transparent;border:0;padding:9px 12px;border-radius:8px;cursor:pointer;
+    font-size:13.5px;color:var(--dim);text-align:left;transition:background .12s,color .12s}
+  nav button:hover{background:var(--accent-soft);color:var(--text)}
+  nav button.on{background:var(--accent-soft);color:var(--accent);font-weight:600;
+    box-shadow:inset 2px 0 0 var(--accent)}
+  #problems{grid-column:1/-1}
+  section{grid-column:2;min-width:0}
+  /* ── 「液态玻璃」（2026-09-17 用户要求模仿 iOS 26 Liquid Glass）──
+     真液态玻璃的四件套，缺一不可：
+       ① 半透明 + 大 blur + 提高 saturate/brightness（让底下透出来的颜色更艳、更"湿"）
+       ② **斜向高光渐变**（左上亮、右下暗）—— 玻璃"有厚度"靠的就是它
+       ③ 亮描边 `1px rgba(255,255,255,.58)` —— 模拟边缘折射
+       ④ 内阴影：顶部一道强高光 + 底部一道弱反光 —— 镜面反射
+     ⚠️ 别用 `::before` 铺高光：卡片里有 h2/div，伪元素会**盖住内容**，
+        还得给每个子元素补 z-index —— 这文件有 80 多处卡片子元素，补不干净。
+        所以高光走 `background` 的多层渐变，不另开图层。 */
+  .card{position:relative;border-radius:22px;padding:21px 23px;margin-bottom:14px;
+    /* ⚠️ 2026-09-17 第五版：原来那组 (.60/.26/.46) 太白了 —— 用户连报两次「没有生效」。
+       查清了：**不是缓存，是白得看不出来**（六成白 + 浅底 ≈ 一张白纸）。
+       ── 第六版：用户要求「加大边框的厚度，也就是能折射后方背景的那一块面积」──
+       当时用 10px 实心半透明 border 做厚边，原理没错（`backdrop-filter` 覆盖整个 border-box，
+       边框区照样在折射背景），但**做出来有两条硬边**：border 内外各一条亮度跳变，
+       外加一条 `0 0 0 1px` 的实线 —— 用户一眼看出「明显有个边线，过渡不够平滑」。
+       ── 第七版（现在）：改用**多层带 blur 的 inset 内发光**叠出衰减曲线 ──
+       ① 去掉 border，折射带完全由 inset 阴影构成，每一档都比外一档暗约一半：
+          1px .92 → 5px .58 → 11px .34 → 20px .18 → 32px .09
+          连起来就是**指数衰减**的亮度剖面（用户原话「折射率应该是呈指数变化的」）。
+       ② `blur` 负责把每一档的边缘糊开，档与档之间自然接上，不再有跳变。
+       ③ 外面只留一道很淡的 `.34` 轮廓交代玻璃边界（原来 `.50` 太实，那条"边线"就是它）。
+       ⚠️ 去掉 border 后 padding 要加回同样厚度（21 ≈ 原来的 10+11），否则内容会贴到折射带上。 */
+       /* ── 第八版：用户要求「给玻璃加上高光，只有面朝鼠标的一侧边缘有高光」──
+       把鼠标当**光源**：从卡片中心朝鼠标画一条线，落在边框上的那个点就是高光中心
+       （`--glare` 由 JS 算好整条渐变写进来，见文件末尾的 updateGlare）。
+       ⚠️ 高光整个走 `var(--glare,none)`，CSS 里**不出现 calc / 变量算式** ——
+       只要有一个表达式非法，整条 `background` 都会作废（卡片会变成没背景）。 */
+    /* ⚠️ 第十八版：用户要「先把整个卡片稍微压暗一点」。
+       压暗的手段是**降低白色的 alpha（让它更透）**，而不是叠黑 ——
+       叠黑会得到一层灰、显脏；降白则是露出背景的蓝，暗得干净。 */
+    background:linear-gradient(135deg,rgba(255,255,255,.20) 0%,rgba(255,255,255,.02) 42%,rgba(255,255,255,.10) 100%);
+    backdrop-filter:blur(24px) saturate(2.3) brightness(1.06);
+    -webkit-backdrop-filter:blur(24px) saturate(2.3) brightness(1.06);
+    border:0;
+    box-shadow:
+      /* ① 折射带：由外向内指数衰减（先写的在最上层）
+         ⚠️ 第九版把每档的 spread 拉开，因为改成指数衰减后亮部被压在最外 1px
+            （用户报「看起来变薄了」）。亮度按约 ×0.6 递减 = 指数剖面，只是带更厚。
+         ⚠️ 第十一版在这里加过"内侧暗环 + 压弱玻璃体"，用户否了：
+            「这版改的不行，回退吧，我的意思不是内外的问题，就是高光方向的问题」
+            —— 而且我当时把背景油滴透过来的紫色误判成了暗环的效果。已回退。 */
+      inset 0 0 0 2px rgba(255,255,255,.95),
+      inset 0 0 9px 3px rgba(255,255,255,.66),
+      inset 0 0 18px 8px rgba(255,255,255,.44),
+      inset 0 0 30px 15px rgba(255,255,255,.27),
+      inset 0 0 48px 24px rgba(255,255,255,.15),
+      inset 0 0 72px 36px rgba(255,255,255,.07),
+      /* ② 顶部受光（光从左上来，厚度才有方向） */
+      inset 0 1px 0 rgba(255,255,255,.85),
+      /* ③ 外轮廓：很淡的一道 */
+      0 0 0 1px rgba(255,255,255,.34),
+      /* ④ 外投影 */
+      0 10px 34px -10px rgba(31,38,135,.20),
+      0 1px 2px rgba(31,38,135,.06)}
+  /* ── 边框折射高光（第十九版，2026-09-17）──
+     用户要求「高光也要参与边框光线折射弯曲，现在看着有点穿模的感觉」。
+     原来高光是一条**直线**线性渐变，从卡片一侧直穿到另一侧 → 所以像穿模。
+     真实玻璃的高光是**贴着边缘拐弯**的，所以这版两处一起换：
+       ① 高光改用 `conic-gradient` —— 它本来就是绕圈（按角度）的，
+          天然沿边框弯曲，不可能横穿卡片；
+       ② 伪元素铺满 + **四条边的渐变带 mask** 只保留边缘那一圈。
+          四层 mask 叠出来的是**渐变**，所以没有第十六版 `mask-composite:xor` 那种硬边。
+     ⚠️ 角度约定：conic 的 0deg 同样是"正上方、顺时针"，跟 linear 一致，
+        所以 JS 里那个 ang 的算法不用改。 */
+  .card::after,nav::after{content:'';position:absolute;inset:0;border-radius:inherit;
+    background:var(--glare,none);pointer-events:none;
+    -webkit-mask:
+      linear-gradient(to bottom,#000 0,#000 7px,rgba(0,0,0,0) 34px) top/100% 34px no-repeat,
+      linear-gradient(to top,#000 0,#000 7px,rgba(0,0,0,0) 34px) bottom/100% 34px no-repeat,
+      linear-gradient(to right,#000 0,#000 7px,rgba(0,0,0,0) 34px) left/34px 100% no-repeat,
+      linear-gradient(to left,#000 0,#000 7px,rgba(0,0,0,0) 34px) right/34px 100% no-repeat;
+    mask:
+      linear-gradient(to bottom,#000 0,#000 7px,rgba(0,0,0,0) 34px) top/100% 34px no-repeat,
+      linear-gradient(to top,#000 0,#000 7px,rgba(0,0,0,0) 34px) bottom/100% 34px no-repeat,
+      linear-gradient(to right,#000 0,#000 7px,rgba(0,0,0,0) 34px) left/34px 100% no-repeat,
+      linear-gradient(to left,#000 0,#000 7px,rgba(0,0,0,0) 34px) right/34px 100% no-repeat}
+  .card h2{font-size:14.5px;margin:0 0 4px;font-weight:600;letter-spacing:.2px}
   .card .hint{color:var(--dim);font-size:12.5px;margin:0 0 14px}
-  /* 说明用的表格（比如「该往哪个库写」） */
+  /* 说明用的表格 */
   .tbl{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:6px}
   .tbl th,.tbl td{border:1px solid var(--line);padding:7px 10px;text-align:left;vertical-align:top}
-  .tbl th{background:rgba(127,127,127,.08);font-weight:600;white-space:nowrap}
+  .tbl th{background:rgba(255,255,255,.40);font-weight:600;white-space:nowrap;color:var(--dim)}
   .tbl td:last-child{white-space:nowrap;color:var(--dim)}
   /* 分群灵敏度列表 */
   .gr-list{display:flex;flex-direction:column;gap:8px;margin-top:6px}
-  .gr-row{display:flex;align-items:center;gap:12px;padding:8px 10px;border:1px solid var(--line);border-radius:8px}
+  .gr-row{display:flex;align-items:center;gap:12px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:rgba(255,255,255,.34)}
   .gr-name{flex:1;font-size:13px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .gr-id{color:var(--dim);font-size:11.5px;margin-left:8px}
   .gr-row select{width:auto;min-width:210px;flex:0 0 auto}
   label{display:block;font-size:13px;color:var(--dim);margin:10px 0 4px}
   input[type=text],input[type=number],input[type=password],textarea,select{
-    width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:7px;font:inherit;background:#fff;color:var(--text)
-  }
+    width:100%;padding:8px 10px;border-radius:9px;font:inherit;
+    /* 输入框也走液态玻璃，但比卡片更透 —— 它是要填内容的地方，不该比卡片还抢眼 */
+    background:linear-gradient(135deg,rgba(255,255,255,.42),rgba(255,255,255,.18));
+    backdrop-filter:blur(18px) saturate(2.2);
+    -webkit-backdrop-filter:blur(18px) saturate(2.2);
+    border:1px solid rgba(255,255,255,.50);
+    /* 输入框也走"指数衰减"：一条亮线 + 一圈柔和内发光，别做成硬边 */
+    box-shadow:inset 0 0 0 1px rgba(255,255,255,.72),
+      inset 0 0 9px 2px rgba(255,255,255,.26),
+      inset 0 1px 0 rgba(255,255,255,.70),
+      0 1px 2px rgba(31,38,135,.05);
+    color:var(--text)}
+  input:focus,textarea:focus,select:focus{outline:0;border-color:var(--accent-line);
+    box-shadow:0 0 0 3px var(--accent-soft)}
   textarea{resize:vertical;font-family:ui-monospace,Consolas,monospace;font-size:13px}
   .row{display:flex;gap:14px;flex-wrap:wrap}
   .row>div{flex:1;min-width:190px}
-  button.act{background:var(--accent);color:#fff;border:0;padding:9px 18px;border-radius:7px;cursor:pointer;font-size:14px;font-weight:500}
-  button.act:hover{filter:brightness(1.07)}
-  button.act:disabled{opacity:.5;cursor:default}
-  button.ghost{background:#fff;border:1px solid var(--line);color:var(--text);padding:9px 16px;border-radius:7px;cursor:pointer}
-  button.danger{background:#fff;border:1px solid var(--err);color:var(--err);padding:6px 12px;border-radius:7px;cursor:pointer}
+  button.act{background:var(--accent);color:#0d1117;border:0;padding:9px 18px;border-radius:7px;
+    cursor:pointer;font-size:14px;font-weight:600}
+  button.act:hover{filter:brightness(1.1)}
+  button.act:disabled{opacity:.45;cursor:default}
+  button.ghost{background:var(--card2);border:1px solid var(--line);color:var(--text);
+    padding:9px 16px;border-radius:7px;cursor:pointer}
+  button.ghost:hover{border-color:var(--accent-line);color:var(--accent)}
+  button.danger{background:transparent;border:1px solid var(--err);color:var(--err);
+    padding:6px 12px;border-radius:7px;cursor:pointer}
   .btns{display:flex;gap:10px;align-items:center;margin-top:16px;flex-wrap:wrap}
   .msg{font-size:13px;padding:7px 12px;border-radius:7px;display:none;white-space:pre-wrap}
   .msg.show{display:inline-block}
-  .msg.ok{background:#ecfdf5;color:var(--ok);border:1px solid #a7f3d0}
-  .msg.err{background:#fef2f2;color:var(--err);border:1px solid #fecaca}
-  .msg.warn{background:#fffbeb;color:var(--warn);border:1px solid #fde68a}
+  .msg.ok{background:rgba(63,185,80,.12);color:var(--ok);border:1px solid rgba(63,185,80,.35)}
+  .msg.err{background:rgba(248,81,73,.12);color:var(--err);border:1px solid rgba(248,81,73,.35)}
+  .msg.warn{background:rgba(210,153,34,.12);color:var(--warn);border:1px solid rgba(210,153,34,.35)}
   .switch{display:flex;align-items:center;gap:9px;padding:9px 0;border-bottom:1px dashed var(--line)}
   .switch:last-child{border-bottom:0}
   .switch input{width:17px;height:17px;accent-color:var(--accent)}
   .switch .t{font-size:14px}
   .switch .d{color:var(--dim);font-size:12.5px}
   .faces{display:grid;grid-template-columns:repeat(auto-fill,minmax(158px,1fr));gap:12px;margin-top:6px}
-  .face{border:1px solid var(--line);border-radius:9px;overflow:hidden;background:#fafbfc}
-  .face img{width:100%;height:112px;object-fit:contain;background:#fff;display:block}
+  .face{border:1px solid var(--line);border-radius:9px;overflow:hidden;background:var(--card2)}
+  .face img{width:100%;height:112px;object-fit:contain;background:#0a0e13;display:block}
   .face .body{padding:8px 9px}
   .face .tag{font-weight:600;font-size:13px;margin-bottom:3px}
   .face .when{color:var(--dim);font-size:11.5px;line-height:1.45;min-height:32px}
   .face .ops{display:flex;gap:6px;margin-top:7px}
-  .face .ops button{flex:1;font-size:12px;padding:4px 0;border-radius:6px;border:1px solid var(--line);background:#fff;cursor:pointer}
-  .drop{border:2px dashed var(--line);border-radius:9px;padding:26px;text-align:center;color:var(--dim);cursor:pointer;font-size:13px}
-  .drop.over{border-color:var(--accent);background:#f0f4fc;color:var(--accent)}
-  .pill{display:inline-block;padding:2px 9px;border-radius:20px;font-size:12px;background:#eef2f8;color:var(--dim);margin-right:6px}
+  .face .ops button{flex:1;font-size:12px;padding:4px 0;border-radius:6px;border:1px solid var(--line);
+    background:var(--card);color:var(--text);cursor:pointer}
+  .drop{border:2px dashed var(--line);border-radius:9px;padding:26px;text-align:center;
+    color:var(--dim);cursor:pointer;font-size:13px;background:var(--card2)}
+  .drop.over{border-color:var(--accent);background:var(--accent-soft);color:var(--accent)}
+  .pill{display:inline-block;padding:2px 9px;border-radius:20px;font-size:12px;
+    background:var(--accent-soft);color:var(--accent);margin-right:6px}
   .kv{display:flex;gap:10px;padding:7px 0;border-bottom:1px dashed var(--line);font-size:13.5px}
   .kv b{color:var(--dim);font-weight:500;min-width:96px}
   /* ⚠️ 容器类：`kv()` 生成的行本身就是 .kv，外层**不能**再套 .kv ——
      套了外层就成了横向 flex，每一格被挤成一列竖排（一个字一行，2026-09-15 用户截图）。 */
   .kvs{display:block;padding:0;border:0;font-size:13.5px}
-  .mono{font-family:ui-monospace,Consolas,monospace;font-size:12.5px;word-break:break-all}
+  .mono{font-family:ui-monospace,Consolas,monospace;font-size:12.5px;word-break:break-all;color:#9db6d8}
   details summary{cursor:pointer;color:var(--dim);font-size:13px;padding:6px 0}
+  details summary:hover{color:var(--accent)}
   .hidden{display:none}
-  .rad{display:flex;align-items:flex-start;gap:10px;padding:11px 13px;border:1px solid var(--line);border-radius:9px;cursor:pointer;background:#fafbfc}
-  .rad:hover{border-color:var(--accent);background:#f5f8fd}
+  .rad{display:flex;align-items:flex-start;gap:10px;padding:11px 13px;border:1px solid var(--line);
+    border-radius:9px;cursor:pointer;background:var(--card2)}
+  .rad:hover{border-color:var(--accent-line);background:var(--accent-soft)}
   .rad input{margin-top:3px;width:16px;height:16px;accent-color:var(--accent);flex-shrink:0}
   .rad .t{font-size:14px;font-weight:500}
   .rad .d{color:var(--dim);font-size:12.5px;line-height:1.5}
+  /* ── 窄屏：栏目回到顶部横排（手机上还能用）── */
+  @media (max-width:820px){
+    .wrap{grid-template-columns:1fr;padding:16px}
+    nav{flex-direction:row;flex-wrap:wrap;position:static;grid-column:1}
+    nav button{text-align:center}
+    section,#problems{grid-column:1}
+  }
+  /* ══════════════════════════════════════════════════════════════
+     深色模式（第十六版，2026-09-17 用户要求「增加黑暗模式，把背景改成黑色，
+     其他的颜色也做相应的变动使得不影响美观和可读性」）
+     ── 三条原则 ──
+     ① **只覆盖颜色，不动任何布局**（宽高、间距、圆角一律不碰）；
+     ② 深色玻璃靠"白边 + 暗底"出效果 —— 卡片底压到 .10 以下，
+        边缘折射带仍是白色（低透明度）。跟浅色模式正好相反；
+     ③ 正文 #e6edf7 压 #080b11 对比度约 15:1，可读性够（次要文字 #9aa8bf ≈ 8:1）。
+     ⚠️ 油滴必须单独调：它那套青/蓝/紫是给浅底调的，直接搬到黑底上会很跳。
+     ══════════════════════════════════════════════════════════════ */
+  body.dark{
+    --bg:#080b11;
+    --card:rgba(255,255,255,.07); --card2:rgba(255,255,255,.05);
+    --line:rgba(255,255,255,.11); --text:#e6edf7; --dim:#9aa8bf; --dim2:#6f7d93;
+    --accent:#6ea8f0; --accent-soft:rgba(110,168,240,.16); --accent-line:rgba(110,168,240,.55);
+    --ok:#4ade80; --warn:#fbbf24; --err:#f87171;
+    background:
+      radial-gradient(1200px 700px at 12% -8%,#16233c 0%,rgba(22,35,60,0) 62%),
+      radial-gradient(1000px 620px at 92% 8%,#241d3d 0%,rgba(36,29,61,0) 60%),
+      radial-gradient(900px 600px at 50% 108%,#0e2733 0%,rgba(14,39,51,0) 60%),
+      linear-gradient(160deg,#080b11 0%,#0d121b 46%,#090d13 100%);
+    background-attachment:fixed}
+  body.dark header{background:linear-gradient(180deg,rgba(255,255,255,.10),rgba(255,255,255,.035));
+    border-bottom-color:rgba(255,255,255,.13);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.14),0 6px 24px -14px rgba(0,0,0,.7)}
+  /* 卡片：折射带的六档全部换成低透明度（**顺序、spread、blur 一律不动**，
+     只改 alpha —— 这样两种主题下的"厚度"是一致的） */
+  body.dark .card,body.dark nav{background:linear-gradient(135deg,rgba(255,255,255,.085) 0%,rgba(255,255,255,.02) 46%,rgba(255,255,255,.055) 100%)}
+  body.dark .card{box-shadow:
+      inset 0 0 0 2px rgba(255,255,255,.20),
+      inset 0 0 9px 3px rgba(255,255,255,.10),
+      inset 0 0 18px 8px rgba(255,255,255,.055),
+      inset 0 0 30px 15px rgba(255,255,255,.030),
+      inset 0 0 48px 24px rgba(255,255,255,.016),
+      inset 0 0 72px 36px rgba(255,255,255,.008),
+      inset 0 1px 0 rgba(255,255,255,.16),
+      0 0 0 1px rgba(255,255,255,.09),
+      0 10px 34px -10px rgba(0,0,0,.70),
+      0 1px 2px rgba(0,0,0,.40)}
+  body.dark nav{box-shadow:
+      inset 0 0 0 2px rgba(255,255,255,.18),
+      inset 0 0 9px 3px rgba(255,255,255,.09),
+      inset 0 0 18px 8px rgba(255,255,255,.050),
+      inset 0 0 30px 14px rgba(255,255,255,.026),
+      inset 0 0 48px 22px rgba(255,255,255,.013),
+      inset 0 1px 0 rgba(255,255,255,.15),
+      0 0 0 1px rgba(255,255,255,.08),
+      0 10px 34px -10px rgba(0,0,0,.70)}
+  body.dark button.ghost{background:rgba(255,255,255,.07);border-color:rgba(255,255,255,.15)}
+  body.dark button.act{color:#07101d}          /* 亮蓝底 → 深色字 */
+  body.dark nav button:hover{background:rgba(255,255,255,.08)}
+  body.dark input[type=text],body.dark input[type=number],body.dark input[type=password],
+  body.dark textarea,body.dark select{
+    background:linear-gradient(135deg,rgba(255,255,255,.09),rgba(255,255,255,.035));
+    border-color:rgba(255,255,255,.16);color:var(--text)}
+  body.dark .tbl th{background:rgba(255,255,255,.07)}
+  body.dark .gr-row{background:rgba(255,255,255,.06)}
+  body.dark .blob{opacity:.40;filter:blur(30px)}
+  body.dark .blob.m{opacity:.34;filter:blur(24px)}
 </style>
 </head>
 <body>
+<!-- 背景色坨的容器（2026-09-17 用户要求「像浮在水上的油滴，鼠标穿过会撑散、过后自己合回来」）：
+     里面的色坨由 JS 生成并逐帧算位置 —— 写死在 HTML 里没法做物理。 -->
+<div class="bgfx" id="bgfx"></div>
 <header>
   <h1>客服小祥 · 管理台</h1>
   <span class="sub" id="hdr"></span>
   <span class="spacer"></span>
+  <!-- 深色模式开关（2026-09-17 加）：文案由 JS 按当前主题写（开着显示"浅色"） -->
+  <button class="ghost" id="themeBtn" onclick="toggleTheme()">深色</button>
   <button class="ghost" onclick="reloadAll()">重新读取</button>
 </header>
 
@@ -843,7 +1081,341 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
+// ── 深色模式（第十六版，2026-09-17 加，用户要求「增加黑暗模式」）──
+//    存在 localStorage，刷新/关了页面都记得住。
+//    ⚠️ 主题只给 <body> 挂一个 class，**所有配色都在 CSS 的 `body.dark` 块里**，
+//       JS 不掺和具体颜色 —— 免得两处各写一套、改一处忘一处。
+const THEME_KEY = 'saki-theme';
+function applyTheme(dark) {
+  document.body.classList.toggle('dark', !!dark);
+  const b = document.getElementById('themeBtn');
+  if (b) b.textContent = dark ? '浅色' : '深色';
+}
+function toggleTheme() {
+  const dark = !document.body.classList.contains('dark');
+  try { localStorage.setItem(THEME_KEY, dark ? 'dark' : 'light'); } catch { /* 无痕模式就别记了 */ }
+  applyTheme(dark);
+}
+applyTheme((() => { try { return localStorage.getItem(THEME_KEY) === 'dark'; } catch { return false; } })());
+
 let STATE = null;
+
+// ── 背景油滴（2026-09-17 第四版；用户连着纠正了三次）──
+//
+//   用户要的效果：「一堆小色坨像浮在水上的油滴，互不相溶；
+//                  鼠标穿过把它们撑散、甚至会裂开，过一会儿又自己合回一起」
+//
+// ⚠️⚠️ 前三版全错在同一个地方，记下来别再犯：
+//   ① 第一版：给一块大背景渐变做 animation —— 位移太小 + 叠了 blur，**肉眼看是静态的**；
+//   ② 第二版：加大位移幅度 —— 仍然只是"渐变在动"，不是油滴；
+//   ③ 第三版：换成真实元素 + **弹簧拉回原位** —— 用户一句话点破：
+//      「像装了橡皮筋固定在一个点，被挤开又完全回到原位」。
+//      **油滴不该有"家"** —— 它就该自由漂着，被打散后在别处重新聚起来。
+//
+// 所以这一版只有三种力，**没有任何"回原位"**：
+//   ① 油滴之间：重叠 → 强排斥（不许穿模）；挨得近 → 弱吸引（表面张力，自己聚成团）
+//   ② 鼠标：近距离强排斥（撑散）
+//   ③ 阻尼 + 边界软反弹（不让它们飘出屏幕再也回不来）
+// 外加两条让效果真正立起来的东西：
+//   · **分裂**：被鼠标推得太狠的大油滴会裂成两个 —— 这才叫「撑散裂开」
+//   · **合并**：两个油滴挨得足够近会并成一个 —— 这就是「过一会儿自己合回一起」
+//
+// ⚠️ 性能红线（改之前先想清楚）：
+//   ① 只改 `transform`（GPU 合成），**绝不改 `background`** —— 那会触发重绘，20+ 个必卡；
+//   ② 不给油滴加 CSS `transition` —— 位置是逐帧算的，加过渡只会和物理打架；
+//   ③ 两两计算是 O(n²)，所以数量上限卡在 44（44²/2 ≈ 968 次/帧，安全）。
+//
+// ⚠️ 坐标约定：`x/y` 是**圆心**（不是左上角），所以 translate 时要 `- r`。
+//    上一版就是这里搞混过，排斥力算歪了半个油滴。
+(() => {
+  const host = document.getElementById('bgfx');
+  if (!host) return;
+
+  // ⚠️ 2026-09-17：蓝白为主（用户原话「背景是蓝白动态渐变」）—— 6 色里只留 1 个紫，
+  //   原来 4 色占 1/4 的紫，画面偏"紫气"，跟"蓝白"不符。
+  const COLORS = ['0,114,245', '1,207,234', '56,132,255', '120,180,255', '0,150,255', '178,73,248'];
+  // ── 手感就调这几个 ──
+  const N0 = 26;          // 初始油滴数（2026-09-17：数量加回来，尺寸相应降一点免得挤）
+  const MAXN = 44;        // 上限（分裂出来的不会无限涨）
+  // ⚠️ 2026-09-17 用户报「离鼠标色坨很远就被弹走了，要减小鼠标色坨的碰撞体积」——
+  //    300 太大：油滴还没贴上就被推开，看着像有层看不见的气墙。
+  //    收到 135（≈ 鼠标半径 44 + 油滴半径 的接触距离），挨近了才有感觉。
+  const R_MOUSE = 135;    // 鼠标影响半径
+  // ⚠️ F_MOUSE 从 4.2 降到 2.4 —— 4.2 会把油滴**直接击飞**（用户报「被击飞后再也回不来」）。
+  //    「撑散」靠的是**挤**，不是"打飞"。
+  const F_MOUSE = 2.4;
+  const F_REPEL = 4.4;    // 油滴互相排斥（不许重叠）
+  const F_TENS = 0.0012;  // 表面张力（弱吸引 → 自己聚成团）
+  const TENS_RANGE = 95;  // 张力作用范围（超出就不吸了，免得全糊成一坨）
+  // ── 回填：鼠标一挥中间空了，得让油滴**慢慢、随机地**飘回来重新摊匀 ──
+  //    用户原话：「背景色坨其实还是得往回走，要不然鼠标一挥中间就空了，
+  //    但是要往回走得随机，走完之后色坨要平均的摊在背景上」。
+  //    ⚠️ 这跟被否掉的"回原位"不是一回事：目标位**每隔十几秒整体洗牌**，
+  //    每滴还带各自的"懒散系数"，所以回来的先后、快慢都不同 —— 不是列队归位。
+  const F_HOME = 0.00022; // 回位力（必须远小于 F_MOUSE 的 2.4，否则推不动）
+  const HOME_JIT = 46;    // 目标位自身的抖动半径（摊匀，但不成网格）
+  const DAMP = 0.93;      // 阻尼（留惯性，像液体）
+  // ⚠️⚠️ 分裂阈值原来是 52，可初始半径只有 22~56 —— **大部分油滴永远够不着**，
+  //      所以用户看到的现象是「怎么都挤不烂」。降到 26 才真的会裂。
+  const SPLIT_AT = 26;
+  const MERGE_AT = 0.78;  // 圆心距 < (r1+r2)*0.78 → 合并
+  const SPLIT_PUSH = 1.2; // 推到这个力度就裂（原来 2.0 太高）
+  const MIN_R = 16;       // 裂出来的不能比这更小（否则越裂越多、糊成一片）
+  // ── 墙（用户要求「加一个比窗口略大的墙」）──
+  const PAD = 0.18;       // 墙比窗口大 18%
+  const WALL_DAMP = 0.25; // 撞墙后保留多少速度（原来 0.5 太弹，会来回撞着往外跑）
+  const F_VIEW = 0.055;   // 飘出可见区时的回拉（⚠️ 不是"回原位"，只是别飘丢）
+  const W = () => innerWidth, H = () => innerHeight;
+
+  const blobs = [];
+  let seq = 0;
+
+  function make(x, y, r, vx = 0, vy = 0) {
+    const el = document.createElement('div');
+    el.className = 'blob';
+    const c = COLORS[seq++ % COLORS.length];
+    el.style.width = el.style.height = (r * 2).toFixed(0) + 'px';
+    el.style.background =
+      `radial-gradient(circle at 40% 38%, rgba(${c},.95), rgba(${c},.32) 60%, rgba(${c},0) 72%)`;
+    host.appendChild(el);
+    // hx/hy = 回填的目标位（先放在原地，随后 reshuffle 统一铺开）
+    // lazy  = 每滴的"懒散系数" → 回位速度各不相同，看着才随机
+    return { el, x, y, vx, vy, r, cool: 0, hx: x, hy: y, lazy: 0.55 + Math.random() * 0.9 };
+  }
+
+  for (let i = 0; i < N0; i++) {
+    // ⚠️ 2026-09-17 用户要求「尺寸调回来，大的更容易被挤破」—— 对的，两个原因：
+    //    ① 目标大 → 更容易被鼠标碰到；
+    //    ② pushed 的公式是 `(1 - d/(R_MOUSE + b.r)) * F_MOUSE`，**b.r 越大值越大**，
+    //       所以大油滴天然被推得更狠 → 更容易过 SPLIT_PUSH 那道坎。
+    //    半径 34~80（直径 68~160px），接近第一版的观感。
+    blobs.push(make(Math.random() * W(), Math.random() * H(), 28 + Math.random() * 38,
+      (Math.random() - .5) * .5, (Math.random() - .5) * .5));
+  }
+
+  // 鼠标自己也是一个油滴（紫色那个）—— 撑散别人的就是它
+  // ⚠️ 62 → 44：用户要「减小鼠标色坨的碰撞体积」，视觉上小一号也更贴手
+  const MR = 44;
+  const mEl = document.createElement('div');
+  mEl.className = 'blob m';
+  mEl.style.width = mEl.style.height = MR * 2 + 'px';
+  mEl.style.background =
+    'radial-gradient(circle at 42% 40%, rgba(128,90,255,.9), rgba(128,90,255,.28) 58%, rgba(128,90,255,0) 72%)';
+  host.appendChild(mEl);
+
+  let mx = W() / 2, my = H() / 2, tx = mx, ty = my;
+  let lastMove = performance.now();
+  addEventListener('mousemove', (e) => {
+    tx = e.clientX; ty = e.clientY; lastMove = performance.now();
+  }, { passive: true });
+
+  // ── 回填目标位：低差异序列（R2）能"均匀铺满"矩形，比纯随机更平摊、又不像网格那么死板 ──
+  function idealAt(rank) {
+    const g = 0.7548776662466927, a = 0.5698402909980532;
+    return { x: ((rank * g) % 1) * W(), y: ((rank * a) % 1) * H() };
+  }
+  let shuffleTimer = 0;
+  function reshuffle() {
+    // 洗牌 → 同一滴油每次拿到的目标位都不同，这就是"回得随机"的来源
+    const idx = blobs.map((_, i) => i);
+    for (let i = idx.length - 1; i > 0; i--) {
+      const j = (Math.random() * (i + 1)) | 0;
+      const t = idx[i]; idx[i] = idx[j]; idx[j] = t;
+    }
+    idx.forEach((bi, rank) => {
+      const p = idealAt(rank + 0.5), b = blobs[bi];
+      if (!b) return;
+      b.hx = p.x + (Math.random() - .5) * HOME_JIT * 2;
+      b.hy = p.y + (Math.random() - .5) * HOME_JIT * 2;
+    });
+    shuffleTimer = 420 + ((Math.random() * 420) | 0);   // 7~14 秒后自动再洗一次
+  }
+  reshuffle();
+  addEventListener('resize', reshuffle);
+
+  let mAct = 1;   // 鼠标"还在动"的程度：手停住 1.2 秒后渐隐到 0
+
+  // ── 玻璃高光：只有**面朝鼠标的那一侧边缘**亮 ──
+  //    用户原话：「给玻璃加上高光，只有面朝鼠标的一侧边缘有高光」。
+  //    做法把鼠标当光源：从卡片中心朝鼠标画一条线，与边框的交点就是高光中心。
+  //      ① 把鼠标换算成"相对卡片中心的归一化坐标" (ux,uy)：右下为正，边上的值是 ±1；
+  //      ② 除以 max(|ux|,|uy|) 就是把这条线推**到边框上**（这一步是关键，不然高光会飘在卡片里）；
+  //      ③ 鼠标越靠近卡片中心，方向越没意义 → 用 a 把强度收到 0，免得高光乱跳。
+  //    ⚠️ 整条渐变都在 JS 里拼好（含透明度），CSS 只负责 `var(--glare,none)` ——
+  //       CSS 里不出现任何 calc / 变量算式，避免"表达式非法 → 整条 background 作废"。
+  let glarePending = false;
+  function updateGlare() {
+    glarePending = false;
+    for (const el of document.querySelectorAll('.card, nav')) {
+      const r = el.getBoundingClientRect();
+      if (!r.width || r.bottom < -120 || r.top > innerHeight + 120) continue;  // 看不见的跳过
+      const ux = (tx - (r.left + r.width / 2)) / (r.width / 2);
+      const uy = (ty - (r.top + r.height / 2)) / (r.height / 2);
+      // （② 那步"把点推到边框上"是径向渐变时代算的 gx/gy，换成线性渐变后不再需要）
+      // ⚠️⚠️ 第十五版：改用**线性渐变**（前面几版都是径向渐变，做错了对象）。
+      //    径向渐变的圆心在边框上、半径向内铺开 → 看起来是"卡片里一块暗/一块亮"，
+      //    边框本身反而没变化（用户原话「边框好像没变化，但是色坨被压暗了」）。
+      //    线性渐变沿**鼠标轴**走：一端落在背光那条边上（压黑），
+      //    另一端落在面朝鼠标那条边上（纯白）—— 两端极值正好压在边框上，
+      //    所以变化发生在**边框**，这才是玻璃受光该有的样子。
+      // ── 强度 = 方向 × 距离衰减（第二十版）──
+      //    ⚠️ 用户要求「高光应该要随距离衰减」。原来那句 `Math.min(1, hypot*0.8)`
+      //       **只看方向**：鼠标一离开卡片中心就迅速饱和到满强度，
+      //       所以贴着卡片和隔半个屏幕，亮带一样亮 —— 看着假。
+      //    现在分成两个因子：
+      //      ① dir  —— 方向强度：卡片正中 0、边缘 1（正中心方向没有意义，收 0）；
+      //      ② fall —— **鼠标到卡片矩形的像素距离**上的衰减（1.5 次方，比线性略陡，
+      //                接近真实光照的感觉；380px 处约剩一半）。
+      const dir = Math.min(1, Math.hypot(ux, uy));
+      const ddx = Math.max(r.left - tx, 0, tx - r.right);
+      const ddy = Math.max(r.top - ty, 0, ty - r.bottom);
+      const fall = 1 / (1 + Math.pow(Math.hypot(ddx, ddy) / 380, 1.5));
+      const a = 0.98 * dir * fall;
+      // CSS 渐变角度：0deg 指向正上方，而屏幕 y 向下 → θ = atan2(dx, -dy)
+      const ang = ((Math.atan2(ux, -uy) * 180 / Math.PI) + 360) % 360;
+      // ⚠️ 第十九版：linear-gradient → **conic-gradient**。
+      //    线性渐变是一条直线，从卡片一侧直穿到另一侧 → 用户看着像"穿模"。
+      //    conic 是按角度绕圈的，天然**贴着边框拐弯**；外面的四条边 mask 再把
+      //    中间 66% 抹掉，于是就成了"沿边缘弯曲的一段高光"。
+      //    第十八版那条"整体压暗 + 只增亮"的思路保留（这里只负责增亮，没有黑色）。
+      const str = a < 0.02 ? 'none'
+        : `conic-gradient(from ${ang.toFixed(1)}deg at 50% 50%,`
+          + `rgba(255,255,255,${a.toFixed(3)}) 0deg,`                // 正对鼠标那一点最亮
+          + `rgba(255,255,255,${(a * .55).toFixed(3)}) 20deg,`
+          + `rgba(255,255,255,0) 66deg,`                              // 往两侧衰减掉
+          + `rgba(255,255,255,0) 294deg,`
+          + `rgba(255,255,255,${(a * .55).toFixed(3)}) 340deg,`
+          + `rgba(255,255,255,${a.toFixed(3)}) 360deg)`;
+      if (el._glare !== str) { el._glare = str; el.style.setProperty('--glare', str); }
+    }
+  }
+  const askGlare = () => {
+    if (!glarePending) { glarePending = true; requestAnimationFrame(updateGlare); }
+  };
+  addEventListener('mousemove', askGlare, { passive: true });
+  addEventListener('scroll', askGlare, { passive: true, capture: true });  // 滚动后方位会变
+  askGlare();   // 先按初始位置算一次（鼠标还没动过时也不至于完全没有高光）
+
+  (function tick() {
+    mx += (tx - mx) * 0.16;   // 鼠标油滴带点延迟跟随：直接跟手像光标，加惯性才像液体
+    my += (ty - my) * 0.16;
+    if (--shuffleTimer <= 0) reshuffle();
+
+    // ⚠️ 鼠标停住之后必须把力撤掉 —— 否则它会一直"顶"在原地，
+    //    那片空区就永远回填不了（用户报的「鼠标一挥中间就空了」，有一半是这个原因）。
+    const idle = performance.now() - lastMove;
+    mAct += ((idle < 1200 ? 1 : 0) - mAct) * 0.035;
+    mEl.style.opacity = (mAct * 0.62).toFixed(3);
+    mEl.style.transform = `translate3d(${(mx - MR).toFixed(1)}px,${(my - MR).toFixed(1)}px,0)`;
+
+    // ── ① 油滴之间：重叠就推开，挨得近就吸住 ──
+    for (let i = 0; i < blobs.length; i++) {
+      const a = blobs[i];
+      for (let j = i + 1; j < blobs.length; j++) {
+        const b = blobs[j];
+        let dx = b.x - a.x, dy = b.y - a.y;
+        let d = Math.hypot(dx, dy);
+        if (d < 0.01) { dx = Math.random() - .5; dy = Math.random() - .5; d = 0.01; }
+        const sum = a.r + b.r;
+        const ux = dx / d, uy = dy / d;
+        if (d < sum) {
+          // 重叠 → 强排斥；按半径分摊（大的更"沉"、推得少）
+          const f = ((sum - d) / sum) * F_REPEL;
+          const ma = b.r / sum, mb = a.r / sum;
+          a.vx -= ux * f * ma; a.vy -= uy * f * ma;
+          b.vx += ux * f * mb; b.vy += uy * f * mb;
+        } else if (d < sum + TENS_RANGE) {
+          // 表面张力：挨得近就互相吸 → 自己聚成团（互不相溶的油滴就是这样抱团的）
+          const f = F_TENS * (1 - (d - sum) / TENS_RANGE);
+          a.vx += ux * f; a.vy += uy * f;
+          b.vx -= ux * f; b.vy -= uy * f;
+        }
+      }
+    }
+
+    // ── ② 鼠标排斥 + ③ 阻尼/边界/分裂 ──
+    const born = [];
+    for (const b of blobs) {
+      if (b.cool > 0) b.cool--;
+      const dx = b.x - mx, dy = b.y - my;
+      const d = Math.hypot(dx, dy) || 1;
+      let pushed = 0;
+      if (d < R_MOUSE + b.r && mAct > 0.01) {
+        pushed = (1 - d / (R_MOUSE + b.r)) * F_MOUSE * mAct;
+        b.vx += (dx / d) * pushed;
+        b.vy += (dy / d) * pushed;
+      }
+      // ── 回填：鼠标影响范围之外，朝"摊匀位"缓缓漂回去 ──
+      //    ⚠️ 只在鼠标范围外施加，否则会和推挤打架（手感发黏、像被吸住）
+      if (pushed === 0) {
+        b.vx += (b.hx - b.x) * F_HOME * b.lazy;
+        b.vy += (b.hy - b.y) * F_HOME * b.lazy;
+      }
+      b.vx *= DAMP; b.vy *= DAMP;
+      b.x += b.vx; b.y += b.vy;
+      // ── 墙：比窗口大 18%，撞上去速度砍到 1/4 ──
+      //    ⚠️ 原来保留一半速度太弹：油滴会来回撞、越撞越往外，最后看不见。
+      const wl = -W() * PAD, wr = W() * (1 + PAD), wt = -H() * PAD, wb = H() * (1 + PAD);
+      if (b.x < wl) { b.x = wl; b.vx = Math.abs(b.vx) * WALL_DAMP; }
+      if (b.x > wr) { b.x = wr; b.vx = -Math.abs(b.vx) * WALL_DAMP; }
+      if (b.y < wt) { b.y = wt; b.vy = Math.abs(b.vy) * WALL_DAMP; }
+      if (b.y > wb) { b.y = wb; b.vy = -Math.abs(b.vy) * WALL_DAMP; }
+
+      // ── 视野回拉：已经飘到可见区外面了，轻轻拽回来一点 ──
+      //    ⚠️⚠️ 这不是"回原位"（那个方案被用户否掉了：「像橡皮筋固定在一个点」）。
+      //       它只干一件事：**保证你还能看见它**。力很小，而且只作用在
+      //       「超出可见圆」的那部分位移上 —— 留在屏幕里的油滴完全没感觉。
+      const ox = b.x - W() / 2, oy = b.y - H() / 2;
+      const od = Math.hypot(ox, oy) || 1;
+      const lim = Math.min(W(), H()) * 0.62;
+      if (od > lim) {
+        const pull = F_VIEW * ((od - lim) / lim);
+        b.vx -= (ox / od) * pull;
+        b.vy -= (oy / od) * pull;
+      }
+
+      // 分裂：够大 + 被推得够狠 + 不在冷却里 → 一分为二（质量守恒）
+      if (b.r > SPLIT_AT && pushed > SPLIT_PUSH && b.cool === 0 &&
+          b.r / Math.cbrt(2) > MIN_R &&
+          blobs.length + born.length < MAXN) {
+        const nr = b.r / Math.cbrt(2);
+        b.r = nr;
+        b.el.style.width = b.el.style.height = (nr * 2).toFixed(0) + 'px';
+        b.cool = 90; // 约 1.5 秒（60fps）内不再裂，免得一次推出一堆
+        const ang = Math.atan2(dy, dx) + Math.PI / 2;
+        born.push(make(b.x + Math.cos(ang) * nr * 1.2, b.y + Math.sin(ang) * nr * 1.2,
+          nr, Math.cos(ang) * 1.8, Math.sin(ang) * 1.8));
+      }
+      b.el.style.transform =
+        `translate3d(${(b.x - b.r).toFixed(1)}px,${(b.y - b.r).toFixed(1)}px,0)`;
+    }
+    if (born.length) blobs.push(...born);
+
+    // ── ④ 合并：挨得足够近就并回一个（「过一会儿自己合回一起」）──
+    for (let i = 0; i < blobs.length; i++) {
+      for (let j = i + 1; j < blobs.length; j++) {
+        const a = blobs[i], b = blobs[j];
+        if (Math.hypot(b.x - a.x, b.y - a.y) < (a.r + b.r) * MERGE_AT) {
+          const va = a.r ** 3, vb = b.r ** 3, vt = va + vb;
+          const big = a.r >= b.r ? a : b;
+          const small = big === a ? b : a;
+          big.x = (a.x * va + b.x * vb) / vt;   // 质心
+          big.y = (a.y * va + b.y * vb) / vt;
+          big.vx = (a.vx * va + b.vx * vb) / vt;
+          big.vy = (a.vy * va + b.vy * vb) / vt;
+          big.r = Math.cbrt(vt);               // 体积守恒
+          big.el.style.width = big.el.style.height = (big.r * 2).toFixed(0) + 'px';
+          small.el.remove();
+          blobs.splice(blobs.indexOf(small), 1);
+          j--;
+        }
+      }
+    }
+
+    requestAnimationFrame(tick);
+  })();
+})();
+
 
 async function api(path, opts) {
   const r = await fetch(path, opts);
