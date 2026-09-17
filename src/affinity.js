@@ -325,7 +325,11 @@ export function adjust(userId, delta, opts = {}) {
   // 单次幅度上限
   const capped = opts.force ? want : Math.sign(want) * Math.min(Math.abs(want), MAX_STEP);
   // 每天的总量上限（刷分保护）—— ⚠️ **按群各算各的**
-  const allowed = opts.force ? Math.abs(capped) : spend(id, capped, gid);
+  // ⚠️⚠️ 2026-09-17：**减分不占这个额度**。
+  //    缘由是用户那句「有人骂她那肯定得减，而且减2，因为加上来很容易」——
+  //    额度是防"刷分"的，减分不需要防；反倒是"今天已经和她聊满 8 分"的人
+  //    再骂她就减不动了，那等于「先聊熟、再随便骂」，正好是最该扣分的情形。
+  const allowed = opts.force || capped < 0 ? Math.abs(capped) : spend(id, capped, gid);
   const applied = Math.sign(capped) * allowed;
   const to = clamp(from + applied);
 

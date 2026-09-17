@@ -22,6 +22,22 @@ const LEARNED = 'learned.md';
  *       "全局知识"列表**天然看不见它**（不递归），不会混进去。
  */
 const GROUP_DIR = join(DIR, 'groups');
+/**
+ * 私聊记忆目录（2026-09-17 加）。
+ *
+ * 用户要求：「**机器人和群友的私聊也应该和群里一样，记下性格和事件**」（附了私聊截图）。
+ * 在此之前 `observe.js` 第 104 行直接 `if (message_type !== 'group') return;` ——
+ * 私聊里说过的话**一个字都不留**，所以她跟人私聊永远是"每次从零开始"。
+ *
+ * ⚠️ 这里**故意复用同一张 `groupFiles` 表**，key 用 `dm:<QQ号>`：
+ *    `selectFor()` / `knowledgeText()` 只认一个 `groupId` 参数，不关心它长什么样，
+ *    所以私聊记忆能白蹭整套注入逻辑（含「别的群标签块要摘掉」那套）。
+ *    另起一套并行的表只会让两边慢慢长歪。
+ *
+ * ⚠️⚠️ `knowledge/` 整个目录都在 live 的 `.gitignore` 里、导出时也被排除 ——
+ *    所以**真实的私聊内容不会进公开仓库**（这条比什么都重要）。
+ */
+const DM_DIR = join(DIR, 'dm');
 /** 群号 → { name, content }（`name` 是给人看的相对路径 `groups/<群号>.md`） */
 let groupFiles = new Map();
 
@@ -125,21 +141,29 @@ function load() {
     loadedAt = Date.now();
 
     // ── 群资料库（`knowledge/groups/<群号>.md`）────────────────
+    // ── 私聊记忆（`knowledge/dm/<QQ号>.md`）—— 2026-09-17 加，见 DM_DIR 的注释 ──
     const gmap = new Map();
-    try {
-      if (existsSync(GROUP_DIR)) {
-        for (const n of readdirSync(GROUP_DIR)) {
+    const scanDir = (dir, keyOf, nameOf) => {
+      try {
+        if (!existsSync(dir)) return 0;
+        let n0 = 0;
+        for (const n of readdirSync(dir)) {
           if (!n.toLowerCase().endsWith('.md')) continue;
-          const gid = n.replace(/\.md$/i, '').trim();
-          if (!gid) continue;
-          const content = readFileSync(join(GROUP_DIR, n), 'utf8').trim();
+          const id = n.replace(/\.md$/i, '').trim();
+          if (!id) continue;
+          const content = readFileSync(join(dir, n), 'utf8').trim();
           if (!content) continue;
-          gmap.set(gid, { name: `groups/${n}`, content });
+          gmap.set(keyOf(id), { name: nameOf(n), content });
+          n0++;
         }
+        return n0;
+      } catch (e) {
+        log.warn(`读 ${dir} 失败（当作没有）：${e.message}`);
+        return 0;
       }
-    } catch (e) {
-      log.warn(`读群资料库失败（当作没有）：${e.message}`);
-    }
+    };
+    scanDir(GROUP_DIR, (id) => id, (n) => `groups/${n}`);
+    const dmCount = scanDir(DM_DIR, (id) => `dm:${id}`, (n) => `dm/${n}`);
     groupFiles = gmap;
 
     log.info(
@@ -148,9 +172,12 @@ function load() {
     );
     if (groupFiles.size) {
       log.info(
-        `群资料库 ${groupFiles.size} 份（**只给对应的群用**）：${[...groupFiles.keys()].join(', ')}`,
+        `群资料库 ${groupFiles.size - dmCount} 份（**只给对应的群用**）：${[...groupFiles.keys()].filter((k) => !k.startsWith('dm:')).join(', ') || '（无）'}`,
       );
     }
+    // ⚠️ 私聊记忆**只报条数，不报 QQ 号** —— 这一行会进日志（用户可能截图分享），
+    //    里面混着真实 QQ 号不好看，而且和知识库那行的风格也对不上。
+    if (dmCount) log.info(`私聊记忆 ${dmCount} 份（**只在跟那个人私聊时注入**）`);
   } catch (e) {
     log.error(`加载知识库失败: ${e.message}`);
     files = [];

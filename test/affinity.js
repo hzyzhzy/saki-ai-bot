@@ -102,6 +102,26 @@ console.log('\n【3】★ 单次幅度和每日总量有上限（防"聊一句�
   check(aff.get(A) <= 50 + 8, `一天连调 20 次，总增量仍受每日上限约束（${aff.get(A)}）`);
 }
 
+console.log('\n【3b】★★ 减分**不占**每天的加分额度（2026-09-17 用户要求）');
+{
+  // 用户原话：「有人骂她那肯定得减，而且减2，因为加上来很容易」。
+  // 额度是防"刷分"的，而减分不需要防 —— 否则"今天已经和她聊满 8 分"的人
+  // 再骂她就减不动了，那等于「先聊熟、再随便骂」，正好是最该扣分的情形。
+  aff.__clear();
+  for (let i = 0; i < 20; i++) aff.adjust(A, 3); // 先把她聊熟，把额度用光
+  const used = aff.get(A);
+  check(used >= 58, `加分额度确实已经用满（${used}）`);
+  const r = aff.adjust(A, -2, { note: '骂了她（傻逼）' });
+  check(r.applied === -2, `额度用满之后**照样能扣 2**（实际 ${r.applied}）`);
+  check(aff.get(A) === used - 2, `分数确实掉了（${used} → ${aff.get(A)}）`);
+
+  // 连着骂也不受"每日 8 分"限制（只受单次 -3 那个幅度上限约束）
+  aff.__clear();
+  for (let i = 0; i < 10; i++) aff.adjust(A, -2);
+  check(aff.get(A) === 30, `连骂 10 次 → 50-20=30，没被"每日 8"卡住（${aff.get(A)}）`);
+  check(aff.get(A) >= 0, '不会掉到 0 以下');
+}
+
 console.log('\n【4】★ 落盘（重启不丢）');
 {
   aff.__clear();

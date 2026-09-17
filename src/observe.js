@@ -42,6 +42,7 @@ import { join } from 'node:path';
 import { config, ROOT, KNOWLEDGE_DIR } from './config.js';
 import { log } from './log.js';
 import { reloadKnowledge, groupFileName } from './knowledge.js';
+import { groupsOf } from './names.js';
 import { backupKnowledge } from './backup.js';
 import { streamChat } from './llm.js';
 
@@ -98,10 +99,41 @@ function saveState() {
   }
 }
 
-/** 记一条群消息（由 bot 在收到群消息时调用） */
+/**
+ * 这次观察该归到哪个作用域（2026-09-17 加）。
+ *
+ *   · 群聊 → 群号
+ *   · 私聊 → **他跟机器人共有的那个群**；一个共有群都没有才用 `dm:<QQ号>`
+ *
+ * ⚠️⚠️ 口径是用户定的（原话）：「我建议**私聊和群用一套**，也就是如果那个人在同一个群时，
+ *    现在不会有没有群只加好友的」「**同一套资料库**」。
+ *    为什么不能"私聊一律 dm:"：那样同一个人会有**两份记忆** ——
+ *    他在私聊里提过的事，到群里聊起来她就"不记得"，反过来也一样。
+ *
+ * ⚠️ 多个共有群时取第一个（`card` 的顺序 = 首次记录到的顺序，稳定）。
+ *    这个选择**只影响归属，不影响正确性** —— 无论归到哪个群，都是他自己的记忆。
+ */
+export function scopeFor(event) {
+  const mt = event?.message_type;
+  if (mt !== 'private') return String(event?.group_id ?? '');
+  try {
+    const gids = groupsOf(event?.user_id);
+    if (gids.length) return String(gids[0]);
+  } catch (e) {
+    log.debug(`查共有群失败（这次观察单独存）：${e.message}`);
+  }
+  return `dm:${event?.user_id}`;
+}
+
+/** 记一条消息（群消息 / 私聊，由 bot 在收到时调用） */
 export function note(event, text) {
   if (config.observe?.enable === false) return;
-  if (event?.message_type !== 'group') return;
+  // ⚠️ 2026-09-17：**私聊也观察**。
+  //    用户原话：「机器人和群友的私聊也应该和群里一样，记下性格和事件」——
+  //    在这之前这一行是 `if (message_type !== 'group') return;`，
+  //    所以私聊里说过的话一个字都不留，她跟人私聊永远是"每次从零开始"。
+  const mt = event?.message_type;
+  if (mt !== 'group' && mt !== 'private') return;
   if (!text || !text.trim()) return;
   // 机器人自己说的不算「观察对象」
   if (String(event.user_id) === String(event.self_id)) return;
@@ -111,7 +143,13 @@ export function note(event, text) {
     userId: String(event.user_id),
     // ⚠️ 2026-09-15 晚：**记住是哪个群的** —— 观察出来的东西要写进**那个群自己的资料库**
     //    （`knowledge/groups/<群号>.md`），别再往共享的 group-memory.md 里混。
-    groupId: String(event.group_id ?? ''),
+    // ⚠️⚠️ 2026-09-17：私聊**优先归到他跟机器人共有的那个群**（用户要求"私聊和群用一套
+    //    资料库"），见 `scopeForObservation` 的注释。查不到共有群才退回 `dm:<QQ号>`。
+    groupId: scopeFor(event),
+    // ⚠️ 2026-09-17：**记下这条是不是私聊来的**。
+    //    光看 `groupId` 分不出来（私聊归到群号之后，跟群消息长得一模一样），
+    //    但收尾选文件时必须分得清 —— 见 `targetFileFor` 里那段"绝不能掉回共享文件"。
+    fromPrivate: mt === 'private',
     text: String(text).slice(0, 200),
     at: Date.now(),
   });
@@ -132,12 +170,27 @@ export function status() {
   };
 }
 
-/** 这个群的观察该写进哪个文件：有群资料库就写它，没有才写共享的 group-memory.md */
-function targetFileFor(groupId) {
+/** 测试用：确认"私聊记忆到底会写到哪个文件"—— 写错地方 = 私聊内容泄漏给所有群 */
+export function __targetFileFor(groupId, fromPrivate = false) {
+  return targetFileFor(groupId, fromPrivate);
+}
+
+/** 这个群的观察该写进哪个文件：有群资料库就写它，私聊写 dm/，都没有才写共享的 group-memory.md */
+function targetFileFor(groupId, fromPrivate = false) {
   const gid = String(groupId ?? '').trim();
   if (gid) {
     const name = groupFileName(gid);
     if (name) return join(KNOWLEDGE_DIR, name);
+    // ⚠️ 2026-09-17：私聊的人**第一次**被总结时，`dm/<QQ号>.md` 还不存在，
+    //    而 `groupFileName()` 查的是**已加载**的表 → 查不到。
+    //    这里必须能把路径**算出来**，否则会掉进下面的 FILE 分支，
+    //    把**私聊内容写进共享的群记忆**里 —— 那是会被所有群看到的地方 ✗✗
+    if (gid.startsWith('dm:')) return join(KNOWLEDGE_DIR, 'dm', `${gid.slice(3)}.md`);
+    // ⚠️⚠️ 2026-09-17：**私聊归到群号、但那个群还没有自己的资料库文件** ——
+    //    这种情况**绝不能**掉回共享的 `group-memory.md`（所有群都看得到，等于泄漏）。
+    //    改成**就地给这个群建一份** `groups/<群号>.md`。
+    //    （这条是 `test/dm-memory.js` 【3】抓出来的 —— 我第一版就是这么漏的。）
+    if (fromPrivate) return join(KNOWLEDGE_DIR, 'groups', `${gid}.md`);
   }
   return FILE;
 }
@@ -150,7 +203,19 @@ function patchFile(body, file = FILE) {
   } catch (e) {
     // 群资料库第一次写：文件还不存在 → 用一份最小骨架起头
     if (file !== FILE) {
-      raw = '# 群资料（这个群自己的）\n\n> 这份**只给这个群用**，别的群看不到。\n';
+      // ⚠️ 2026-09-17：私聊记忆第一次写的时候 `knowledge/dm/` 目录还不存在 → 先建。
+      //    骨架也要跟群资料库分开（写错了的话，人一眼就能看出这是私聊的内容）。
+      const isDm = /[\\/]dm[\\/]/.test(file);
+      const isGroup = /[\\/]groups[\\/]/.test(file);
+      try {
+        mkdirSync(
+          isDm ? join(KNOWLEDGE_DIR, 'dm') : isGroup ? join(KNOWLEDGE_DIR, 'groups') : KNOWLEDGE_DIR,
+          { recursive: true },
+        );
+      } catch { /* 建不出来就等写盘那步自己报错 */ }
+      raw = isDm
+        ? '# 私聊记忆（跟这个人私聊时攒下来的）\n\n> 这份**只在跟这个人私聊时注入**，别的群、别的人都看不到。\n'
+        : '# 群资料（这个群自己的）\n\n> 这份**只给这个群用**，别的群看不到。\n';
     } else {
       log.warn(`[观察] 读不到 group-memory.md：${e.message}`);
       return false;
@@ -324,7 +389,7 @@ export async function summarize(opts = {}) {
     for (const [gid, list] of jobs) {
       const batch = list.slice(-threshold);
       for (const m of batch) done.add(m);
-      const file = targetFileFor(gid);
+      const file = targetFileFor(gid, list.some((m) => m.fromPrivate));
       const lines = batch
         .map((m) => `${m.name}：${m.text}`)
         .join('\n')
