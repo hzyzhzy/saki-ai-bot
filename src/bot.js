@@ -35,6 +35,7 @@ import * as followUp from './follow-up.js';
 import * as tic from './tic.js';
 import * as affinity from './affinity.js';
 import { detectInsult } from './insult.js';
+import * as repeat from './repeat.js';
 import * as quest from './quest.js';
 import * as friend from './friend.js';
 import * as storyline from './storyline.js';
@@ -768,6 +769,38 @@ export class Bot {
       digest.note(payload, { text });
       // 再喂给「暗中观察」：攒够一批就在后台总结群友性格和群里大事
       observe.note(payload, text);
+
+      // ── 复读机：群里刷同一句话时，她也跟一句 +1（2026-09-17 用户要求）──────
+      //
+      // 用户原话：「如果群友全部变成复读机（+1）时，机器人可以在复读到**第 3 句或更多**
+      //   时直接 +1，**第三句接复读概率最大，然后依次减小**，
+      //   注意**不要有人打断复读时还在接复读**」。
+      //
+      // 判定逻辑全在 `src/repeat.js`（那里解释了"打断 = 链断"和"一条链只接一次"）。
+      // ⚠️ 这里的两件事：① 把**群友**的消息喂进去（她自己发的要过滤，不然她的 +1
+      //    会被当成"复读又加了一层"）；② 掷骰子决定要不要跟。
+      // ⚠️ 用 `text`（已经剥掉 @ 的那份）—— 比对时 @某某 会干扰"是不是同一句"。
+      if (payload.message_type === 'group' && text) {
+        try {
+          repeat.observe(payload.group_id, text, {
+            isSelf: !!this.selfId && String(payload.user_id) === String(this.selfId),
+          });
+          const v = repeat.shouldJoin(payload.group_id, {
+            enable: config.repeat?.enable !== false,
+            cooldownMs: Number(config.repeat?.cooldownMs) || 5 * 60 * 1000,
+            probs: config.repeat?.probabilities,
+          });
+          if (v.join && Math.random() < v.chance) {
+            repeat.noteJoined(payload.group_id);
+            log.info(`[复读] 群 ${payload.group_id} 刷到第 ${v.count} 句 → 她也跟一句 +1（${v.why}）`);
+            this.sendToGroup(payload.group_id, '+1').catch((e) =>
+              log.debug(`接复读失败：${e.message}`),
+            );
+          }
+        } catch (e) {
+          log.debug(`复读判断失败：${e.message}`);
+        }
+      }
       // 记下「谁刚说了话」——用来识别「两个人在互相对话」，免得它插嘴
       this.noteSpeaker(payload, text);
       // ⚠️ 顺手记下「这个人叫什么」（群名片优先、其次昵称）——
@@ -4542,6 +4575,12 @@ export class Bot {
    * 服主/群主要用同级口吻，群友可以端着一点 —— 这是群主明确要求的。
    */
   speakerRole(event) {
+    // ⚠️ 2026-09-17：**必须容忍 event 为空**。
+    //    `buildSystemPrompt()` 有几个调用方（测试、界面预览）**不传 event**。
+    //    我把这里的调用从 `event?.sender?.role` 换成 `speakerRole(event)` 之后，
+    //    那几处直接 TypeError 崩了 —— `test/schedule.js` 抓到的。
+    //    拿不到身份时按**最保守**的来（对陌生人该有的态度），别默认成"主人"。
+    if (!event) return 'member';
     const uid = String(event.user_id);
     if (String(config.ownerQQ) === uid) return 'owner';
     if (event.message_type === 'private') return 'member';
@@ -5421,21 +5460,30 @@ export class Bot {
     if (hasKnowledge()) {
       // 按需挑库：闲聊时不必把服务器库和群记忆也塞进去（1.6 万字里能省一半）。
       // ⚠️ persona.md 永远读 —— 那是小祥这个人；learned.md（群主教的）也永远读。
+      // ⚠️ 2026-09-17：`role` 用 **`speakerRole()`**，不是 `event.sender.role`。
+      //    后者是 QQ 的群角色（owner/admin/member），而 `selectFor` 要判的是
+      //    「**是不是服主本人在跟我说话**」—— 只有那个才该读 `owner.md`。
+      //    `speakerRole()` 对私聊主人也返回 'owner'，正好覆盖用户要的两种情况。
+      // ⚠️ 而且这里的 `groupId` 必须和下面 `knowledgeText` 用**同一个** scopeId ——
+      //    不然"挑库"和"拼库"看的不是同一份资料（私聊时会差一个群）。
+      const scopeId = observe.scopeFor(event);
       const picked = knowledgeSelect(currentText, {
-        role: event?.sender?.role,
+        role: this.speakerRole(event),
         segments: event ? msg.toSegments(event.message) : [],
-        // ⚠️ 2026-09-15 晚：**带上群号** —— 用来①摘掉别的群的「群标签块」
-        //    ②带上这个群自己的资料库（`knowledge/groups/<群号>.md`）。
-        //    私聊没有群号（空 = 所有群标签块都摘掉，只留全局知识）。
-        groupId: event?.group_id,
+        groupId: scopeId,
       });
       const menu = faceMenuText();
       // 把表情清单填进人设里的占位标记
-      // ⚠️ 2026-09-17：用 `observe.scopeFor()` —— **和"攒观察"那边同一套归属规则**
-      //    （群聊 → 群号；私聊 → 他跟机器人共有的那个群，纯好友才 `dm:<QQ号>`）。
-      //    两处各写一套的话，**攒进去的和读出来的会对不上**（她明明记了却想不起来）。
-      const scopeId = observe.scopeFor(event);
-      let k = knowledgeText({ only: picked.names, groupId: scopeId });
+      // ★ 把「正在说话的这个人」也传下去：**群聊时要带上他自己的私聊记忆**
+      //   （用户 2026-09-17：「在群聊聊天时也调用正在对话的那个人的私聊库」）。
+      let k = knowledgeText({
+        only: picked.names,
+        groupId: scopeId,
+        dmUserId: event?.user_id,
+        // ⚠️ 2026-09-17：把对方说的话也传下去 —— `learnedText` 靠它**只挑沾边的那几条**
+        //    （原来那份 12.4K 是每次无条件全带的）。
+        text: currentText,
+      });
       if (menu) {
         k = k.replace(
           /<!-- FACES:BEGIN -->[\s\S]*?<!-- FACES:END -->/,
