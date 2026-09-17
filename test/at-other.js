@@ -3,7 +3,7 @@
  *
  * ## 真实 bug
  *
- *   落墨同学在群里发：「**@HZY** 给个服世界地图。」
+ *   某群友在群里发：「**@HZY** 给个服世界地图。」
  *   机器人接了，回「地图得找 HZY 要，我这儿没有」
  *   —— **人家本来就是在问 HZY**，机器人插嘴了。
  *
@@ -80,10 +80,10 @@ const { Bot } = await import('../src/bot.js');
 const evOf = (message) => ({
   message_type: 'group',
   group_id: GROUP,
-  user_id: '1453325399', // 落墨同学（不是机器人自己）
+  user_id: '10000003', // 某群友（不是机器人自己）
   self_id: BOT,
   message,
-  sender: { user_id: '1453325399', nickname: '落墨同学', role: 'member' },
+  sender: { user_id: '10000003', nickname: '某群友', role: 'member' },
 });
 
 /**
@@ -125,8 +125,8 @@ console.log('\n【2】★ 文本形态的 @ 别人 → 不接（这次修的 bug
   // 同一句话去掉 @ → 必须接
   check(wouldJoin([textSeg('给个服世界地图。')]) === true, '★ 对照：去掉 `@HZY` → 接');
   // 别的名字、别的句式也一样
-  check(wouldJoin([textSeg('@mmmawa 我看看有什么')]) === false, '文本 `@mmmawa …` → 不接');
-  check(wouldJoin([textSeg('@落墨同学 这题你会吗')]) === false, '文本 `@落墨同学 …` → 不接');
+  check(wouldJoin([textSeg('@某群友 我看看有什么')]) === false, '文本 `@某群友 …` → 不接');
+  check(wouldJoin([textSeg('@某同学 这题你会吗')]) === false, '文本 `@某同学 …` → 不接');
   check(wouldJoin([textSeg('@HZY')]) === false, '只有 `@HZY` 没正文 → 也不接');
 }
 
@@ -211,11 +211,11 @@ console.log('        「只有 @她 或者明确叫她名字时，才能把自�
   const gEv = (segs) => ({
     message_type: 'group',
     group_id: GROUP,
-    user_id: '1453325399',
+    user_id: '10000003',
     self_id: BOT,
     message_id: 'cur',
     message: segs,
-    sender: { nickname: '落墨同学', card: '' },
+    sender: { nickname: '某群友', card: '' },
   });
   /** 提示词里有没有"你不是主角"那一段 */
   const notMain = (segs, text) =>

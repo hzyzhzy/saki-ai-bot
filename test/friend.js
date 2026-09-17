@@ -296,7 +296,7 @@ console.log('\n【9】★★ 群友回应她 → 好感度 +1，而且**建议�
   b.selfId = '10000002';
   b._markSpoke('200000001', 'msg-1'); // 她刚说过话
 
-  const mk = (t, uid = '1453325399', nick = '落墨同学') => ({
+  const mk = (t, uid = '10000003', nick = '某群友') => ({
     message_type: 'group',
     group_id: '200000001',
     user_id: uid,
@@ -308,9 +308,9 @@ console.log('\n【9】★★ 群友回应她 → 好感度 +1，而且**建议�
   // ★ 用户原话里的例子：「群友告诉她下次外卖改个地址」
   const e1 = mk('你下次外卖改个地址吧');
   const G = '200000001'; // ⚠️ 好感度按群了（2026-09-15 晚），这些事件都在这个群
-  const before = aff.get('1453325399', G);
+  const before = aff.get('10000003', G);
   b.noteInteraction(e1, e1.message, '你下次外卖改个地址吧');
-  check(aff.get('1453325399', G) === before + 1, '★ 回应的那一下 +1 好感度', `${before} → ${aff.get('1453325399', G)}`);
+  check(aff.get('10000003', G) === before + 1, '★ 回应的那一下 +1 好感度', `${before} → ${aff.get('10000003', G)}`);
 
   const sug = sl.recent(10, '200000001').find((e) => /改个地址/.test(e.text));
   check(!!sug, '★★ 建议**写进了故事线**');
@@ -346,9 +346,9 @@ console.log('\n【9】★★ 群友回应她 → 好感度 +1，而且**建议�
     [{ type: 'at', data: { qq: '10000002' } }],
     '在吗',
   );
-  check(aff.get('1453325399', G) === 51, '★ @她 → 也 +1');
+  check(aff.get('10000003', G) === 51, '★ @她 → 也 +1');
   b3.noteInteraction(mk('后来呢'), [{ type: 'reply', data: { id: 'msg-9' } }], '后来呢');
-  check(aff.get('1453325399', G) === 52, '★ 回她那条消息 → 也 +1');
+  check(aff.get('10000003', G) === 52, '★ 回她那条消息 → 也 +1');
 
   // 接线：真的挂了钩子
   const botSrc = (await import('node:fs')).readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');

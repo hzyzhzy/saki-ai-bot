@@ -171,6 +171,18 @@
         所以 JS 里那个 ang 的算法不用改。 */
   .card::after,nav::after{content:'';position:absolute;inset:0;border-radius:inherit;
     background:var(--glare,none);pointer-events:none;
+    /* ⚠️⚠️ 2026-09-17（用户截图报的「红圈内的高光比鼠标旁更亮」）——
+       换过两版，记一下结论，别再走回头路：
+
+       ① **四层边带**（上/下/左/右各一层）：mask 默认相加，**角上两层重叠 alpha 翻倍** ✗
+       ② **单层椭圆**（`closest-side`）：不叠加了，但椭圆弧在中点和角之间**内凹** →
+          靠角处覆盖带更宽 → 用户反馈「高光面积又变大了」✗
+       ③ **回到四层边带**（就是现在这个）：覆盖宽度均匀，而且——
+          **真正的病根不在这儿，在 `--glare` 用的 `conic-gradient`**：
+          conic 按"角度"均匀，而**角上一小段角度只对应很短的一段边缘** →
+          同等亮度压在一个角上就显得比边上亮。改用 `radial-gradient` 之后
+          （见 `updateGlare`）亮度按**到圆心的实际距离**衰减，沿边缘是均匀的，
+          角上会自然衰减掉 —— 那时候四层边带在角上的那点叠加也就不明显了。 */
     -webkit-mask:
       linear-gradient(to bottom,#000 0,#000 7px,rgba(0,0,0,0) 34px) top/100% 34px no-repeat,
       linear-gradient(to top,#000 0,#000 7px,rgba(0,0,0,0) 34px) bottom/100% 34px no-repeat,
@@ -307,27 +319,46 @@
     box-shadow:inset 0 1px 0 rgba(255,255,255,.14),0 6px 24px -14px rgba(0,0,0,.7)}
   /* 卡片：折射带的六档全部换成低透明度（**顺序、spread、blur 一律不动**，
      只改 alpha —— 这样两种主题下的"厚度"是一致的） */
-  body.dark .card,body.dark nav{background:linear-gradient(135deg,rgba(255,255,255,.085) 0%,rgba(255,255,255,.02) 46%,rgba(255,255,255,.055) 100%)}
+  /* ⚠️⚠️ 2026-09-17（用户截图报的「高光在中间，鼠标在右边」）——
+     这条是**固定**的（`135deg` 的左上角最亮），它**不跟鼠标**。
+     深色下我把跟随鼠标的高光降到 0.5 之后，**这个固定亮部反而比它显眼了**，
+     看起来就像"高光不跟手 / 高光在中间"。
+     现在压平（三档都在 .035~.055，几乎均匀）→ **卡片上只剩跟随鼠标的那一道光**。
+     ⚠️ 浅色那份**不动**：那里跟随鼠标的高光是"拉满"的（0.98），
+        本来就盖得住这道底光，而且用户没报过浅色有这问题。 */
+  body.dark .card,body.dark nav{background:linear-gradient(135deg,rgba(255,255,255,.055) 0%,rgba(255,255,255,.035) 46%,rgba(255,255,255,.045) 100%)}
+  /* ⚠️⚠️ 2026-09-17（用户截图报的「夜间模式的高光可以薄一点，晚上有点晃眼睛」）——
+     原来的六档 alpha 是照浅色的比例配的，**放在暗背景上对比太强**，夜里刺眼。
+     现在整体降约 40%（最外那道亮线 .20 → .13 是主要刺眼源），
+     而且**顺序 / spread / blur 一律不动** —— 只改亮度，玻璃的"厚度"不变。
+     ⚠️ 浅色那份**故意不动**：那里的高光是用户明确要过"拉满"的效果，而且白底不刺眼。 */
   body.dark .card{box-shadow:
-      inset 0 0 0 2px rgba(255,255,255,.20),
-      inset 0 0 9px 3px rgba(255,255,255,.10),
-      inset 0 0 18px 8px rgba(255,255,255,.055),
-      inset 0 0 30px 15px rgba(255,255,255,.030),
-      inset 0 0 48px 24px rgba(255,255,255,.016),
-      inset 0 0 72px 36px rgba(255,255,255,.008),
-      inset 0 1px 0 rgba(255,255,255,.16),
-      0 0 0 1px rgba(255,255,255,.09),
+      inset 0 0 0 2px rgba(255,255,255,.13),
+      inset 0 0 9px 3px rgba(255,255,255,.060),
+      inset 0 0 18px 8px rgba(255,255,255,.032),
+      inset 0 0 30px 15px rgba(255,255,255,.016),
+      inset 0 0 48px 24px rgba(255,255,255,.009),
+      inset 0 0 72px 36px rgba(255,255,255,.004),
+      inset 0 1px 0 rgba(255,255,255,.10),
+      0 0 0 1px rgba(255,255,255,.06),
       0 10px 34px -10px rgba(0,0,0,.70),
       0 1px 2px rgba(0,0,0,.40)}
   body.dark nav{box-shadow:
-      inset 0 0 0 2px rgba(255,255,255,.18),
-      inset 0 0 9px 3px rgba(255,255,255,.09),
-      inset 0 0 18px 8px rgba(255,255,255,.050),
-      inset 0 0 30px 14px rgba(255,255,255,.026),
-      inset 0 0 48px 22px rgba(255,255,255,.013),
-      inset 0 1px 0 rgba(255,255,255,.15),
-      0 0 0 1px rgba(255,255,255,.08),
+      inset 0 0 0 2px rgba(255,255,255,.12),
+      inset 0 0 9px 3px rgba(255,255,255,.055),
+      inset 0 0 18px 8px rgba(255,255,255,.030),
+      inset 0 0 30px 14px rgba(255,255,255,.015),
+      inset 0 0 48px 22px rgba(255,255,255,.008),
+      inset 0 1px 0 rgba(255,255,255,.09),
+      0 0 0 1px rgba(255,255,255,.05),
       0 10px 34px -10px rgba(0,0,0,.70)}
+  /* ⚠️ 深色下还要把 `backdrop-filter` 的 **brightness 收回来**（2026-09-17）。
+     原来它沿用了浅色那份的 `brightness(1.06)`：那是**在提亮**。
+     白底上提亮看不出来，黑底上等于给整张卡片糊了一层灰白光 ——
+     比折射带更"闷"的晃眼源就是它。这里直接去掉 brightness（= 1.0）。 */
+  body.dark .card,body.dark nav{
+    backdrop-filter:blur(24px) saturate(2.3);
+    -webkit-backdrop-filter:blur(24px) saturate(2.3)}
   body.dark button.ghost{background:rgba(255,255,255,.07);border-color:rgba(255,255,255,.15)}
   body.dark button.act{color:#07101d}          /* 亮蓝底 → 深色字 */
   body.dark nav button:hover{background:rgba(255,255,255,.08)}
@@ -1119,6 +1150,12 @@ function applyTheme(dark) {
   document.body.classList.toggle('dark', !!dark);
   const b = document.getElementById('themeBtn');
   if (b) b.textContent = dark ? '浅色' : '深色';
+  // ⚠️ 2026-09-17：切完主题要让**高光**重算一次 ——
+  //    深色和浅色用的白色强度不一样（见 updateGlare 里的 `darkNow`），
+  //    而高光只在鼠标移动时刷新；切主题时鼠标通常正停着不动。
+  try {
+    window.dispatchEvent(new Event('saki-theme'));
+  } catch { /* 老浏览器不支持就算了，鼠标一动照样会重算 */ }
 }
 function toggleTheme() {
   const dark = !document.body.classList.contains('dark');
@@ -1351,22 +1388,38 @@ let STATE = null;
       const ddx = Math.max(r.left - tx, 0, tx - r.right);
       const ddy = Math.max(r.top - ty, 0, ty - r.bottom);
       const fall = 1 / (1 + Math.pow(Math.hypot(ddx, ddy) / 380, 1.5));
-      const a = 0.98 * dir * fall;
+      // ⚠️⚠️ 2026-09-17：深色的高光强度定在 **0.62**，这个数是两次反馈磨出来的：
+      //    · 用户先说「夜间模式的高光可以薄一点，晚上有点晃眼睛」→ 我从 0.98 收到 0.5；
+      //    · 结果用户又截图报「高光在中间，鼠标在右边」—— 因为 0.5 太弱，
+      //      **输给了卡片背景那道固定亮部**（它不是跟随鼠标的，见 CSS 里那段注释）。
+      //    所以两头一起改：**背景压平 + 这里回到 0.62**。
+      //    浅色保持 0.98 不动 —— 那个"拉满"是用户明确要过的。
+      const darkNow = document.body.classList.contains('dark');
+      const a = (darkNow ? 0.62 : 0.98) * dir * fall;
       // CSS 渐变角度：0deg 指向正上方，而屏幕 y 向下 → θ = atan2(dx, -dy)
-      const ang = ((Math.atan2(ux, -uy) * 180 / Math.PI) + 360) % 360;
-      // ⚠️ 第十九版：linear-gradient → **conic-gradient**。
-      //    线性渐变是一条直线，从卡片一侧直穿到另一侧 → 用户看着像"穿模"。
-      //    conic 是按角度绕圈的，天然**贴着边框拐弯**；外面的四条边 mask 再把
-      //    中间 66% 抹掉，于是就成了"沿边缘弯曲的一段高光"。
-      //    第十八版那条"整体压暗 + 只增亮"的思路保留（这里只负责增亮，没有黑色）。
+      // ⚠️⚠️ 2026-09-17：`conic-gradient` → **`radial-gradient`**。
+      //    这是用户那句「红圈里的高光比鼠标旁更亮」的**真正病根**，
+      //    前后换过三版（径向 → 四层 mask → 线性 → conic → 椭圆 mask）才定位到：
+      //
+      //    `conic-gradient` 是按**角度**均匀的，而**角上的一小段角度只对应
+      //    很短的一段边缘** → 同样的亮度压在一个角上，看起来就比铺在长边上的亮。
+      //    （边上同样的角度范围要铺几百像素，角上只铺几十像素 → 浓度差好几倍。）
+      //
+      //    `radial-gradient` 按**到圆心的实际距离**衰减，沿边缘是均匀的 →
+      //    角上离圆心远，会自然淡下去。圆心取"**边框上正对鼠标的那个点**"，
+      //    所以最亮的永远是朝鼠标那一侧。
+      //
+      //    ⚠️ 圆心在边框上、半径 300px，本来会铺进卡片内部（那是早期径向版被否的原因）；
+      //       现在外面有 mask 兜着（只保留边缘 34px），所以这个老毛病不存在了。
+      const kk = 1 / Math.max(Math.abs(ux), Math.abs(uy), 1e-4); // 把这条线推到边框上
+      const gx = (50 + ux * kk * 50).toFixed(1);
+      const gy = (50 + uy * kk * 50).toFixed(1);
       const str = a < 0.02 ? 'none'
-        : `conic-gradient(from ${ang.toFixed(1)}deg at 50% 50%,`
-          + `rgba(255,255,255,${a.toFixed(3)}) 0deg,`                // 正对鼠标那一点最亮
-          + `rgba(255,255,255,${(a * .55).toFixed(3)}) 20deg,`
-          + `rgba(255,255,255,0) 66deg,`                              // 往两侧衰减掉
-          + `rgba(255,255,255,0) 294deg,`
-          + `rgba(255,255,255,${(a * .55).toFixed(3)}) 340deg,`
-          + `rgba(255,255,255,${a.toFixed(3)}) 360deg)`;
+        : `radial-gradient(circle 300px at ${gx}% ${gy}%,`
+          + `rgba(255,255,255,${a.toFixed(3)}) 0%,`                       // 正对鼠标那一点
+          + `rgba(255,255,255,${(a * .42).toFixed(3)}) 26%,`
+          + `rgba(255,255,255,${(a * .12).toFixed(3)}) 52%,`
+          + `rgba(255,255,255,0) 76%)`;
       if (el._glare !== str) { el._glare = str; el.style.setProperty('--glare', str); }
     }
   }
@@ -1375,6 +1428,11 @@ let STATE = null;
   };
   addEventListener('mousemove', askGlare, { passive: true });
   addEventListener('scroll', askGlare, { passive: true, capture: true });  // 滚动后方位会变
+  // ⚠️ 2026-09-17：**切主题时也要重算** —— 深色下高光的白色强度是另一套
+  //    （见上面 `darkNow` 那行）。高光只在鼠标移动时刷新，而切主题时鼠标往往
+  //    正停在按钮上不动 → 会一直挂着上一个主题的亮度。
+  //    用自定义事件解耦：`applyTheme()` 派发，这里监听（两边不用互相 import）。
+  addEventListener('saki-theme', askGlare);
   askGlare();   // 先按初始位置算一次（鼠标还没动过时也不至于完全没有高光）
 
   (function tick() {

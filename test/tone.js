@@ -6,7 +6,7 @@
  *   原话：「和人交流的时候有时会出现这种**不断反驳**的情况，
  *   虽然这很符合一些人的真实状态，但是**我希望机器人对人更温柔**」。
  *
- *   截图里落墨同学在说自己买的 OPPO Watch：
+ *   截图里某群友在说自己买的 OPPO Watch：
  *
  *     对方：oppo watch 约等于手机了          → 她：那么小的屏，**打字不累吗**
  *     对方：为了买这个表我上交了半年的零花钱  → 她：半年零花钱**就换这个**？
@@ -75,14 +75,14 @@ const recent = await import('../src/recent.js');
 const { Bot } = await import('../src/bot.js');
 
 const GROUP = '200000001';
-const mkEvent = (userId = '1453325399') => ({
+const mkEvent = (userId = '10000003') => ({
   message_type: 'group',
   group_id: GROUP,
   user_id: userId,
   self_id: '10000002',
   message_id: String(Math.floor(Math.random() * 1e9)),
   message: [{ type: 'text', data: { text: 'x' } }],
-  sender: { user_id: userId, nickname: '落墨同学', role: 'member' },
+  sender: { user_id: userId, nickname: '某群友', role: 'member' },
 });
 
 /** 对方说一句 */
