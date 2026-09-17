@@ -536,7 +536,7 @@ node test/run-all.js
 > ℹ️ **少数套件要靠"你自己的内容"**：`teach` / `learned-edit` / `natural-teach` /
 >    `observe-compress` / `cs` / `sensitivity` / `monthly-report` 会读你的知识库和配置
 >    （真实群号、服务器地址、学到的东西）。所以**刚照模板起头的仓库里它们会挂** ——
->    把你自己的 `config.yml` 和 `knowledge/*.md` 填好后，47 个套件会全过。
+>    把你自己的 `config.yml` 和 `knowledge/*.md` 填好后，48 个套件会全过。
 
 ---
 
@@ -548,7 +548,7 @@ knowledge/      人设 / 群友 / 服务器资料 / 日常事件库 / 节日（�
 knowledge/groups/  群资料库：<群号>.md —— **只给那个群用**（别的群看不到那一份），
                   共享文件里也能写 `<!-- 群:群号 -->…<!-- /群 -->` 圈出"只给某个群看"的段落
 library/        表情库（index.json 登记 + 图片）
-test/           47 个套件（全部离线，node test/run-all.js 一把跑完）
+test/           48 个套件（全部离线，node test/run-all.js 一把跑完）
 tools/          运维小工具（协议端状态探针等）
 state/          运行期状态（好感度 / 故事线 / 待发箱…，落盘、不进仓库）
 logs/           日志与测试输出（不进仓库）
@@ -567,7 +567,7 @@ logs/           日志与测试输出（不进仓库）
 - **`AGENTS.md` 就是给 agent 的操作规程**：启动顺序、重启纪律（**一次重启 = 一次 QQ 登录**，
   别背靠背）、别用名字杀 node 进程、测试假模型的两个坑、交付前要跑哪些套件、
   哪些文件不许提交。agent 读完它就知道**哪些事不能干**。
-- **47 个离线套件**：`node test/run-all.js` 一把跑完（约 2.5 分钟）。
+- **48 个离线套件**：`node test/run-all.js` 一把跑完（约 2.5 分钟）。
   全部自己起假模型 + 假协议端 —— **不碰真 QQ、不花 API 钱**，改完立刻能验证对错。
 - **人设和知识库是纯文本**（`knowledge/*.md`）：改完在管理界面点保存就热重载，连重启都不用。
 - **代码注释里写的是「为什么这么做」**，不是「这行做了什么」—— 旧坑不会被再踩一遍。
@@ -587,7 +587,7 @@ logs/           日志与测试输出（不进仓库）
 ## 测试
 
 ```bash
-node test/run-all.js            # 全部 47 个套件（约 2.5 分钟）
+node test/run-all.js            # 全部 48 个套件（约 2.5 分钟）
 node test/run-all.js --jobs 1   # 串行（排查单个套件时用）
 node test/dialogue.js           # 单跑一个
 ```
