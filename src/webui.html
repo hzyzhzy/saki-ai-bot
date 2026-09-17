@@ -14,6 +14,9 @@
      ⚠️ 关键：卡片必须**半透明 + 毛玻璃**，否则渐变被卡片挡住，动效等于白做。
      ⚠️ 只改 CSS，**不碰任何类名**（HTML 和 JS 都依赖它们）。 */
   :root{
+    /* ⚠️ 2026-09-17：**必须声明 `color-scheme`** —— 见下面 `body.dark` 那段的长注释。
+       浅色主题这一份声明 light，深色那份覆盖成 dark。 */
+    color-scheme:light;
     --bg:#dfe9f7; --card:rgba(255,255,255,.34); --card2:rgba(255,255,255,.22);
     --line:rgba(20,50,90,.13); --text:#16233a; --dim:#5c6b82; --dim2:#8494a8;
     --accent:#3b6fb5; --accent-soft:rgba(59,111,181,.12); --accent-line:rgba(59,111,181,.45);
@@ -265,6 +268,17 @@
      ⚠️ 油滴必须单独调：它那套青/蓝/紫是给浅底调的，直接搬到黑底上会很跳。
      ══════════════════════════════════════════════════════════════ */
   body.dark{
+    /* ⚠️⚠️ 2026-09-17（用户截图报的：**深色模式下下拉框看不清**）——
+       `<select>` 点开后那个选项列表是**浏览器原生渲染**的，CSS 里
+       `body.dark select{color:...}` 只管得到**框本身**，管不到那个弹出层 →
+       结果是"浅色字 + 白底"，灰得几乎看不见。
+
+       **正解是 `color-scheme: dark`**：它告诉浏览器"这个页面是深色主题"，
+       浏览器会**连原生控件一起**换成深色（下拉列表、滚动条、日期选择器、复选框…）。
+       这比一条条去 style 原生控件靠谱得多 —— 那些东西本来就大半不受 CSS 管。
+
+       下面那两条 `option` 规则是**补充**：个别浏览器认 color-scheme 但 option 仍漏。 */
+    color-scheme:dark;
     --bg:#080b11;
     --card:rgba(255,255,255,.07); --card2:rgba(255,255,255,.05);
     --line:rgba(255,255,255,.11); --text:#e6edf7; --dim:#9aa8bf; --dim2:#6f7d93;
@@ -309,6 +323,9 @@
   body.dark textarea,body.dark select{
     background:linear-gradient(135deg,rgba(255,255,255,.09),rgba(255,255,255,.035));
     border-color:rgba(255,255,255,.16);color:var(--text)}
+  /* ⚠️ 兜底：`color-scheme:dark` 是主力（见上面那段注释），
+     但个别浏览器认了 color-scheme、`option` 却仍然用系统色 → 再钉一层。 */
+  body.dark select option,body.dark select optgroup{background:#141b29;color:var(--text)}
   body.dark .tbl th{background:rgba(255,255,255,.07)}
   body.dark .gr-row{background:rgba(255,255,255,.06)}
   body.dark .blob{opacity:.40;filter:blur(30px)}

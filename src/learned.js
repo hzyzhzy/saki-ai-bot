@@ -83,13 +83,67 @@ export function listEntries() {
   return parseEntries(extractBlock(text));
 }
 
-/** 给模型看的正文（只有条目部分，不含注释和维护说明） */
-export function learnedText() {
-  const text = read();
-  const block = extractBlock(text);
-  const entries = parseEntries(block);
+/**
+ * 这条知识跟当前这句话沾不沾边。
+ *
+ * 判据：**标题的连续片段出现在消息里**。
+ * 标题就是主题名（「OP获取链接」「大坝豆圣别名」「上浮的含义」），本身就带着查它的那个词。
+ *
+ * ⚠️⚠️ 2026-09-17：**第一版按标点拆标题，中文标题拆不开，等于没用**。
+ *    探针抓到的：「大坝豆圣是谁」对不上标题「大坝豆圣别名」
+ *    —— 因为它不含"大坝豆圣别名"这一整串，而我的拆分只得到这一整串。
+ *    所以改成**滑窗**：把标题切成所有 3~6 字的连续片段，任一命中就算沾边。
+ *
+ * ⚠️ 从 **2 字**起滑窗（第一版从 3 字起，探针立刻抓到：「上浮是什么意思」对不上标题
+ *    「上浮的含义」—— 因为"上浮"只有 2 字，3 字起的滑窗全落空了）。
+ *    代价是「机器人应答风格」这类标题里的"机器"会经常误命中，但那**只多带一条**
+ *    （约 200 字）；而漏掉一条她会**直接答错**。两边代价不对称，所以取宽的。
+ *    **宁可多带一条，也不能漏。**
+ */
+function entryMatches(entry, text) {
+  const hay = String(text).toLowerCase();
+  const title = String(entry.title ?? '').trim();
+  if (title.length < 2) return false;
+  // 标题本身很短（2~3 字）时直接整串比，别滑窗
+  if (title.length <= 3) return hay.includes(title.toLowerCase());
+
+  for (let len = Math.min(6, title.length); len >= 2; len--) {
+    for (let i = 0; i + len <= title.length; i++) {
+      if (hay.includes(title.slice(i, i + len).toLowerCase())) return true;
+    }
+  }
+  return false;
+}
+
+/** 把一条知识渲染成给模型看的样子 */
+const fmtEntry = (e) => `## ${e.title}\n\n${e.body}`;
+
+/**
+ * 给模型看的正文（只有条目部分，不含注释和维护说明）。
+ *
+ * ⚠️⚠️ 2026-09-17：**加了"按需挑"**（原来是无条件全带上，那份 12.4K）。
+ *
+ *    用户的担心是「上下文太长偶尔会漏掉某一条规则」—— 一份 12.4K 的补充知识
+ *    一直挂在提示词里，既稀释了真正该看的规则，也容易让话题被带偏。
+ *    而且它是**最高优先级、会覆盖别人**的，一直挂着反而会压住更该说的话。
+ *
+ *    · **给了 `text`** → 只带**沾边**的那几条（一条都不沾边就返回空串）；
+ *    · **没给 `text`** → 照旧全带上（兼容老调用点和界面预览）。
+ *
+ * @param {string} [text] 对方说的话（用来挑相关条目）
+ */
+export function learnedText(text = '') {
+  const entries = parseEntries(extractBlock(read()));
   if (!entries.length) return '';
-  return entries.map((e) => `## ${e.title}\n\n${e.body}`).join('\n\n');
+
+  const t = String(text ?? '').trim();
+  // 没给文本 = 老行为（全带）。⚠️ 界面上的"预览/统计"就是靠这条路径。
+  if (!t) return entries.map(fmtEntry).join('\n\n');
+
+  const hit = entries.filter((e) => entryMatches(e, t));
+  // ⚠️ 一条都没命中就返回空串 —— 返回全部的话，这次改造等于白做。
+  if (!hit.length) return '';
+  return hit.map(fmtEntry).join('\n\n');
 }
 
 /**

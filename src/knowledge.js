@@ -511,6 +511,47 @@ export function selectFor(text, opts = {}) {
   if (needAnime) picked.push('anime.md');
   else skipped.push('anime.md');
 
+  // ── `owner.md`：**只有跟主人说话时**才读（2026-09-17 用户定）──────────
+  //
+  // 用户原话：「**owner.md 不用合并，在我私聊和在群和机器人对话时调用**」。
+  //
+  // ⚠️⚠️ 在这之前这份文件**从来没被引用过** —— `selectFor` 里根本没有它，
+  //    也就是说写进去的东西（比如他朋友 MEI 的那几条）她**根本看不到**。
+  //    是探针跑出来的：随便说一句闲话注入 45K 字，里面却没有 owner.md 那 3K。
+  //
+  // ⚠️ **不能无条件读**：那是主人自己的私人资料（经历、身高、朋友…），
+  //    给群友看很怪，也白占提示词（用户一直在减提示词）。
+  // ⚠️ `role` 必须由调用方传 `bot.speakerRole()` 的结果 —— 那个函数
+  //    对**私聊主人**和**群里主人**都返回 `'owner'`，正好覆盖他要的两种情况；
+  //    千万别改成 `event.sender.role`（那是 QQ 的群角色，不是"是不是服主"）。
+  const needOwner = String(opts.role ?? '') === 'owner';
+  if (needOwner) picked.push('owner.md');
+  else skipped.push('owner.md');
+
+  // ── persona 的两份「按需分册」（2026-09-17 从 31.5K 的 persona.md 里切出来的）──
+  //
+  // ⚠️⚠️ 切它们的**目的不是省 token，是防"中段迷失"**：
+  //    规则太多挤在一起时，夹在中间的那些最容易被模型漏掉。
+  //    把"只有特定场合才用得上"的两大块拿走，常驻那份的规则密度就降下来了。
+  //
+  // 触发词**故意写得宽**（宁可多读 4~5K，也别在该用的时候没读到）。
+  // ⚠️⚠️ 触发词里**必须包含"红包/转账/代付/礼物"** ——
+  //    第一版我漏了它们，探针立刻抓出来：「给我发个红包行不行」没命中
+  //    → `persona-money.md` 不进提示词 → **红包禁令根本不在她眼前**
+  //    （只剩代码层那道拦截兜着）。这几条都是钱的同义词，一个都不能少。
+  const needMoney =
+    /工资|薪水|挣|赚|花了|花销|开销|余额|报账|账单|多少钱|钱|充值|充钱|穷|贵|红包|转账|代付|礼物|打赏|赞助|付款|买单/i.test(
+      t,
+    );
+  if (needMoney) picked.push('persona-money.md');
+  else skipped.push('persona-money.md');
+
+  const needMedia =
+    segs.some((s) => ['image', 'face', 'mface'].includes(String(s?.type))) ||
+    /表情|图片|照片|截图|这张图|那张图|发了张|看图|动态|说说|QQ空间/i.test(t);
+  if (needMedia) picked.push('persona-media.md');
+  else skipped.push('persona-media.md');
+
   return { names: picked, skipped };
 }
 
@@ -546,7 +587,21 @@ export function knowledgeText(opts = {}) {
     parts.push(['# 【这个群自己的资料】', '', gf.content].join('\n'));
   }
 
-  const learned = learnedText();
+  // ★★ 2026-09-17（用户要求）：「**在群聊聊天时也调用正在对话的那个人的私聊库**」。
+  //    私聊记忆如果已经归到某个群（`observe.scopeFor()` 的规则），上面那份里就有了，
+  //    不用重复；只有**纯好友**（`dm:<QQ号>`）才需要在这里额外带上。
+  //    ⚠️ **只带当前说话人这一个人**的 —— 不是所有人的
+  //    （那既会撑爆提示词，也是隐私问题：A 的私聊记忆不该让 B 看见）。
+  const dmId = String(opts.dmUserId ?? '').trim();
+  const dmKey = dmId ? `dm:${dmId}` : '';
+  if (dmKey && dmKey !== gid) {
+    const dm = groupFiles.get(dmKey);
+    if (dm) parts.push(['# 【你跟这个人的私聊记忆】', '', dm.content].join('\n'));
+  }
+
+  // ⚠️ 2026-09-17：`learnedText(text)` 现在**按需挑条目**（原来无条件全带 12.4K）。
+  //    传 `opts.text` 才会挑；不传（界面预览那种）仍然全带。
+  const learned = learnedText(opts.text ?? '');
   if (learned) {
     parts.push(
       [
