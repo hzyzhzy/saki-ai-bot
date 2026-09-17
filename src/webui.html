@@ -70,7 +70,7 @@
   .wrap{max-width:1320px;margin:0 auto;padding:22px 24px 60px;
     display:grid;grid-template-columns:190px minmax(0,1fr);gap:22px;align-items:start}
   nav{display:flex;flex-direction:column;gap:3px;grid-column:1;
-    position:sticky;top:76px;padding:13px 11px;border-radius:18px;
+    position:sticky;top:76px;padding:13px 0 13px 11px;border-radius:18px;
     /* 和 .card 同一套指数折射带（见 .card 的注释），只是窄一档 —— 侧栏是配角 */
     background:linear-gradient(135deg,rgba(255,255,255,.21),rgba(255,255,255,.03) 48%,rgba(255,255,255,.11));
     backdrop-filter:blur(24px) saturate(2.3) brightness(1.06);
@@ -86,7 +86,19 @@
       0 0 0 1px rgba(255,255,255,.30),
       0 10px 34px -10px rgba(31,38,135,.20)}
   nav button{background:transparent;border:0;padding:9px 12px;border-radius:8px;cursor:pointer;
-    font-size:13.5px;color:var(--dim);text-align:left;transition:background .12s,color .12s}
+    font-size:13.5px;color:var(--dim);text-align:left;
+    /* ── Dock 放大（2026-09-17 用户要求「macOS dock 那种悬停自动放大」）──
+       ⚠️ 用户后来纠正过两次，这两条都是他明确要的：
+         ① **必须等比缩放** —— 第一版我用 `scale(x, y)` 横竖给不同倍数，
+            结果**字体被拉变形了**（「不好看，我建议还是长宽比例不能变」）。
+         ② 等比之后横向就会顶出面板（「选择框有点出头了」），
+            所以**右留 24px 余量**：按钮平时窄一点，放大到 1.16 倍正好填满，
+            既明显、又不会溢到边框外面。
+       `transform-origin` 必须是**左边缘**：放大要"往右顶出去"，
+       用默认的 center 会两边一起撑，看着像抖。 */
+    transform-origin:left center;
+    margin-right:24px;
+    transition:transform .1s ease-out,background .12s,color .12s}
   nav button:hover{background:var(--accent-soft);color:var(--text)}
   nav button.on{background:var(--accent-soft);color:var(--accent);font-weight:600;
     box-shadow:inset 2px 0 0 var(--accent)}
@@ -1116,6 +1128,58 @@ function toggleTheme() {
 applyTheme((() => { try { return localStorage.getItem(THEME_KEY) === 'dark'; } catch { return false; } })());
 
 let STATE = null;
+
+// ── 左侧栏的 Dock 放大（2026-09-17 用户要求「macOS dock 那种悬停自动放大」）──
+//
+// ⚠️ 关键不是"悬停那个放大"，而是**邻近的也按距离衰减地放大** ——
+//    只有这样才像一整排东西被光标"抬"起来，而不是一个一个单独跳。
+//    所以离光标的距离要参与计算（平方衰减：近的涨得快、远的掉得快）。
+//
+// ⚠️⚠️ 距离必须用 **offsetTop / offsetHeight** 算，**不能用 getBoundingClientRect**：
+//    后者拿到的值是**已经被上一次 transform 缩放过的** → 用它会自我叠加、越抖越大。
+//    offsetTop/offsetHeight 完全不受 transform 影响，所以缓存一次就够了。
+(() => {
+  const nav = document.querySelector('nav');
+  if (!nav) return;
+  const RANGE = 110; // 光标上下多大范围内会受影响（px）
+  // ⚠️ 2026-09-17 用户纠正过两次，结论是「**等比缩放**、但要明显」：
+  //    第一版 `scale(x,y)` 横竖不同 → **字体被拉变形**（他明确说"长宽比例不能变"）；
+  //    第二版横向只给 6% → 他嫌"左右缩放太不明显"。
+  //    最终：**等比 16%**，同时靠 CSS 里那个 `margin-right:24px` 留出横向余量 ——
+  //    按钮平时窄 24px，放大 1.16 倍刚好填满侧栏，既不溢出、又看得出来。
+  const MAX = 0.16; // 离光标最近的那一项放大 16%（等比）
+  let items = [];
+
+  function collect() {
+    // 先清掉 transform 再量，免得量到缩放后的位置（虽然 offset* 不受影响，但求稳）
+    for (const b of nav.querySelectorAll('button')) b.style.transform = '';
+    items = [...nav.querySelectorAll('button')].map((b) => ({
+      b,
+      cy: b.offsetTop + b.offsetHeight / 2,
+    }));
+  }
+
+  function update(clientY) {
+    if (!items.length) collect();
+    const y = clientY - nav.getBoundingClientRect().top; // 换算成"相对侧栏"的 y
+    for (const it of items) {
+      const d = Math.abs(y - it.cy);
+      const t = Math.max(0, 1 - d / RANGE);
+      const k = t * t; // 平方衰减：近的涨得快、远的掉得快
+      const s = 1 + MAX * k; // ⚠️ **等比**：两个方向同一个倍数，文字才不会变形
+      it.b.style.transform = k > 0.002 ? `scale(${s.toFixed(3)})` : '';
+    }
+  }
+
+  function reset() {
+    for (const it of items) it.b.style.transform = '';
+  }
+
+  nav.addEventListener('mousemove', (e) => update(e.clientY), { passive: true });
+  nav.addEventListener('mouseleave', reset, { passive: true });
+  // 切页签时按钮会被重画 → 重新量一次
+  new MutationObserver(() => collect()).observe(nav, { childList: true });
+})();
 
 // ── 背景油滴（2026-09-17 第四版；用户连着纠正了三次）──
 //
