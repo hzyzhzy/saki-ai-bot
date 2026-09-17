@@ -143,7 +143,15 @@ console.log('\n【5】★ 界面/观察那边的接线（源码层面）');
   check(/群资料库 · \*\*只给群/.test(webui), '★ 界面上会标明"只给群 xxx 用"');
   const obs = readFileSync(join(ROOT, 'src', 'observe.js'), 'utf8');
   check(/function targetFileFor/.test(obs), '★★ 自动观察**按群**写文件（有群资料库就写它）');
-  check(/groupId: String\(event\.group_id/.test(obs), '★ 攒消息时就记下是哪个群的');
+  // ⚠️ 2026-09-17：这里原来钉的是 `groupId: String(event.group_id` 那行字面量，
+  //    后来改成走 `scopeFor(event)`（群→群号；私聊→他共有的那个群 / dm:），
+  //    所以断言跟着改成"**经 scopeFor 决定作用域**" + "scopeFor 里确实用了 group_id"。
+  //    ⚠️ 这类"读源码做断言"的写法天生脆弱（改实现就会假冒警报），
+  //    但它能挡住一件真事：**有人图省事把群号硬写死/忘了带群号**。
+  check(
+    /groupId: scopeFor\(event\)/.test(obs) && /String\(event\?\.group_id/.test(obs),
+    '★ 攒消息时就记下是哪个群的（走 scopeFor）',
+  );
   const know = readFileSync(join(ROOT, 'src', 'knowledge.js'), 'utf8');
   check(/scopeForGroup/.test(know), '★ 共享文件过一遍"群归属"过滤');
 }

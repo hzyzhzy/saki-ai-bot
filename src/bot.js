@@ -34,6 +34,7 @@ import * as monthly from './monthly-report.js';
 import * as followUp from './follow-up.js';
 import * as tic from './tic.js';
 import * as affinity from './affinity.js';
+import { detectInsult } from './insult.js';
 import * as quest from './quest.js';
 import * as friend from './friend.js';
 import * as storyline from './storyline.js';
@@ -5430,7 +5431,11 @@ export class Bot {
       });
       const menu = faceMenuText();
       // 把表情清单填进人设里的占位标记
-      let k = knowledgeText({ only: picked.names, groupId: event?.group_id });
+      // ⚠️ 2026-09-17：用 `observe.scopeFor()` —— **和"攒观察"那边同一套归属规则**
+      //    （群聊 → 群号；私聊 → 他跟机器人共有的那个群，纯好友才 `dm:<QQ号>`）。
+      //    两处各写一套的话，**攒进去的和读出来的会对不上**（她明明记了却想不起来）。
+      const scopeId = observe.scopeFor(event);
+      let k = knowledgeText({ only: picked.names, groupId: scopeId });
       if (menu) {
         k = k.replace(
           /<!-- FACES:BEGIN -->[\s\S]*?<!-- FACES:END -->/,
@@ -6616,14 +6621,20 @@ export class Bot {
             //    偏低档不 @ —— 那档只是随口提一句，每次都 @ 会变成骚扰。
             //    ⚠️ 2026-09-15 晚：偏低档已按用户要求**关掉**（`config.balance.low: 0`），
             //       所以现在实际只剩 @ 这一档；代码留着，改回正数就恢复。
-            await this.sendToGroup(g, c.line, {
+            // ⚠️ 2026-09-17：话术**先过一遍模型润色**（用户要求：「2块钱余额提醒的话术
+            //    出现几次雷同了，建议也加入 llm 润色」）。
+            //    失败或不合格（太长／没带 HZY／报了数字）会退回 `c.line` 那条写死的话术。
+            const line = await balance.phraseLine(c.tier, c.line);
+            await this.sendToGroup(g, line, {
               at: c.tier === 'critical' ? config.ownerQQ : '',
               atName: 'HZY',
             }).catch((e) =>
               log.warn(`抱怨余额失败（${g}）：${e.message}`),
             );
             // 记进上下文的内容**不带 @**（@ 只是提醒用的，不属于她说的话）
-            const remembered = c.line;
+            // ⚠️ 记的必须是**实际发出去的那句**（润色后的）——
+            //    记成兜底那句的话，别人接「你工资怎么了」她会跟自己的原话对不上。
+            const remembered = line;
             // ⚠️⚠️ **把自己抱怨的话记进群上下文**（用户要求 ④）。
             //     不记的话，别人接一句「你工资怎么了」它会答不上来 ——
             //     这个坑踩过（不记自己的发言，模型不知道上一句自己说了什么）。
@@ -6889,6 +6900,32 @@ export class Bot {
       if (event.message_type !== 'group') return;
       if (this.selfId && String(event.user_id) === String(this.selfId)) return;
       if (!text) return;
+
+      // ── ★ 骂她 → 好感度 -2（2026-09-17 用户要求）────────────────────
+      //
+      // 用户原话：「日常互动影响的好感度可以改改，不能每次和她说话都是加，
+      //   有人骂她那肯定得减，而且减2，因为加上来很容易。」
+      //
+      // ⚠️⚠️ 这一步必须在「她最近说过话」的窗口检查**之前** ——
+      //    骂人不需要她先开口：她可能一句话都没说，别人上来就骂。
+      //    而 +1 那种加分才必须卡窗口（否则群里随便一句都加分，几天刷满 90）。
+      // ⚠️ 命中之后**直接 return**：骂人的那条不加分（加和减不该在同一条消息上同时发生）。
+      // ⚠️ 判据在 `src/insult.js`：**既要有侮辱词、又必须指向她**，
+      //    宁可漏不可误伤 —— 别把「这服务器真垃圾」算成骂她。
+      const insult = detectInsult(segs, text, {
+        selfId: this.selfId,
+        names: [...(config.trigger?.callNames ?? []), ...(config.chat?.mention?.names ?? [])],
+      });
+      if (insult.insult) {
+        const r = affinity.adjust(event.user_id, -2, {
+          note: `骂了她（${insult.word}）`,
+          groupId: event.group_id,
+        });
+        if (r?.applied) {
+          log.info(`[好感度] ${event.user_id} 骂了她（${insult.word}／${insult.why}）→ ${r.from}→${r.to}`);
+        }
+        return;
+      }
 
       // ⚠️ key 必须和 `_markSpoke()` 用的一致（都是 `group:<群号>`）
       const key = `group:${event.group_id}`;

@@ -224,6 +224,29 @@ export function status() {
   return { nick: nick.size, groups: card.size, file: FILE };
 }
 
+/**
+ * 这个人在**哪些群**里露过面（2026-09-17 加）。
+ *
+ * 用途只有一个：**私聊时决定这次观察该归到哪套资料库**。
+ * 用户要求（原话）：「我建议私聊和群用一套，也就是如果那个人在同一个群时，
+ * 现在不会有没有群只加好友的」「**同一套资料库**」——
+ * 所以私聊优先归到他跟机器人**共有的群**，只有他一个群都没有（纯好友）才单独存。
+ *
+ * ⚠️ 依据是"他在这个群发过言 / 拿过群名片"。机器人**没有群成员的完整名单**
+ *    （`noteFromList` 只在少数时机被调用），所以这是**尽力而为**：
+ *    查不到就退回单独存 —— 宁可分裂一次，也**不能**把私聊内容写进一个他不在的群。
+ *
+ * @param {string|number} uid
+ * @returns {string[]} 群号数组（顺序 = 首次记录到的顺序，稳定）
+ */
+export function groupsOf(uid) {
+  const u = String(uid ?? '').trim();
+  if (!u) return [];
+  const out = [];
+  for (const [gid, m] of card) if (m.has(u)) out.push(gid);
+  return out;
+}
+
 /** 测试用 */
 export function __clear() {
   nick = new Map();

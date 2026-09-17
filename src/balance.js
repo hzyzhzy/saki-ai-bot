@@ -19,6 +19,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { dirname, join } from 'node:path';
 import { config, ROOT } from './config.js';
 import { log } from './log.js';
+import * as llm from './llm.js';
 
 // ⚠️ 测试/预览可以用 `QQBOT_BALANCE_FILE` 指向临时文件 ——
 //    这样能演示不同档位的话术，又**不会**动到真实的"已抱怨"状态
@@ -368,6 +369,63 @@ function pickLine(tier, seed) {
 /** 档位里有几句话（测试/预览用） */
 export function lineCount(tier) {
   return (tier === 'critical' ? 6 : 5);
+}
+
+/**
+ * 余额提醒的话术 —— **交给模型润色**（2026-09-17 用户要求）。
+ *
+ * 用户原话：「2块钱余额提醒的话术出现几次雷同了，建议也加入 llm 润色」。
+ * 原来是从写死的 5~6 条里随机挑一条（`pickLine`）—— 同一个群连着看几次就是复读。
+ *
+ * ⚠️ **兜底必须有**：`llm.phrase()` 任何失败都返回空串，那时退回写死的那条。
+ *    宁可说法死板，也不能不提醒 —— 账上真没钱了，整个机器人就停了。
+ *
+ * ⚠️ 三道验收（**短 / 带 HZY / 不报数字**）一条都不能省：
+ *    · 太长 → 像系统通知，不像群里随口一句话；
+ *    · 没有「HZY」→ 群里没人知道在跟谁说（用户 2026-09-13 定的规矩）；
+ *    · 出现数字 → 那是**报账**的口径，余额提醒本来就不该报数。
+ *
+ * @param {string} tier `'critical'`（见底）/ `'low'`（偏低）
+ * @param {string} [fallback] 兜底话术（调用方已经挑好的那条）
+ * @returns {Promise<string>}
+ */
+export async function phraseLine(tier, fallback) {
+  const fb = String(fallback ?? '').trim() || pickLine(tier);
+  try {
+    const crit = tier === 'critical';
+    const out = await llm.phrase({
+      system: [
+        llm.PERSONA_LINE,
+        '',
+        `现在你要在 QQ 群里**提醒服主 HZY 充钱**（你的账户余额${crit ? '已经见底了' : '不太够了'}）。`,
+        '',
+        '硬要求：',
+        '· 两句话以内，像随口说的一句话，**不要像系统通知**；',
+        '· **必须出现「HZY」** —— 群里说话得有指向，光说"你"别人不知道在跟谁说；',
+        '· 🚫 **不许出现任何数字**（尤其不许报余额）；',
+        '· 🚫 不许说"这个月"（余额是随用随充，没有月度概念）；',
+        '· 🚫 不要卖惨、别写"别等我断了"这种狠话；',
+        '· ⚠️ **换个跟前几次不一样的说法** —— 这已经是第好几次提醒了，别老是同一句。',
+        '',
+        '直接输出那句话本身：不要引号、不要解释、不要括号动作。',
+      ].join('\n'),
+      user: `参考语气（**别照抄，换个说法**）：${pickLine(tier, 0)} ／ ${pickLine(tier, 1)}`,
+      maxTokens: 120,
+      timeoutMs: 12000,
+    });
+    const line = String(out ?? '')
+      .replace(/[\r\n]+/g, ' ')
+      .replace(/^[\s"'"'「『]+|[\s"'"'」』]+$/g, '')
+      .trim();
+    if (!line) return fb;
+    if (line.length > 60) return fb; // 太长：读起来像通知
+    if (!line.includes('HZY')) return fb; // 没指向
+    if (/[0-9０-９]/.test(line)) return fb; // 报数了
+    return line;
+  } catch (e) {
+    log.debug(`余额提醒润色失败（用兜底话术）：${e.message}`);
+    return fb;
+  }
 }
 
 /** 把某档所有话术列出来（预览用，不走随机） */
