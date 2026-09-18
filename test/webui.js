@@ -138,11 +138,20 @@ async function main() {
   console.log('\n[2] 首页与状态接口');
   const page = await fetch(BASE + '/');
   const html = await page.text();
-  check(page.status === 200 && html.includes('客服小祥'), '首页能打开且内容正确');
+  // ⚠️ 2026-09-17 用户要求「把 webui 上小祥的名字也统一一下，改成 Saki」——
+  //    界面标题从「客服小祥 · 管理台」改成了「客服 Saki · 管理台」，这条断言跟着改。
+  //    ⚠️ 别把别处的「小祥」也一起改掉：那些是**她被人这么叫**的识别逻辑
+  //    （`trigger.callNames` / 骂人词表 / 人设关键词），动了她就不认这个名字了。
+  check(page.status === 200 && html.includes('客服 Saki'), '首页能打开且内容正确');
   // ★★ 页面版本号：界面靠它发现"我这个标签页是旧的"（2026-09-15 加）
   const pv0 = await api('/api/pagever');
   check(/^\d+$/.test(String(pv0.ver ?? '')), `★ 有页面版本接口 /api/pagever → ${pv0.ver}`);
   check(!html.includes('__PAGE_VER__'), '★★ 服务端把版本号**填进了页面**里（占位符不残留）');
+  // ⚠️ 2026-09-17 用户反馈：「二级剧情状态不会自动随着群里消息更新」→ 给剧情页加了轮询。
+  //    那页显示的全是**群里正在发生的事**（攒了几条回复、她接的话、第几段、还有几分钟自动推），
+  //    只在切页时拉一次等于看不见。
+  check(/startQuestPoll\(\)/.test(html), '★ 剧情页开着时会自己刷新（群里的动静不用手动 F5）');
+  check(/el\.classList\.contains\('hidden'\)/.test(html), '★ 切走就停（不在别的页白轮询）');
 
   const st = await api('/api/state');
   check(st.ok === true, '状态接口返回 ok');
@@ -345,6 +354,18 @@ async function main() {
     check(!/只在一个群里跑/.test(html), '★★ 旧文案「每条剧情只在一个群里跑」已经改掉');
     check(/每个群各跑一条/.test(html), '★★ 新文案写清了「每个群各跑一条」');
     check(/每个群各记各的故事线/.test(html) || /每个群有自己的故事线/.test(html), '★ 日常事件卡片也说明了"各记各的故事线"');
+    // ★★ 2026-09-18：压缩的结果提示**必须写在独立容器里**。
+    //     以前写进 `#sl-entries`，而 renderStoryline() 结尾正好重写/清空它
+    //     → 用户看不到"压好了/没压成"，界面像"点了没反应"（踩过几次）。
+    check(/id="sl-msg"/.test(html), '★★ 压缩结果有**独立提示位** #sl-msg（不会被 renderStoryline 吃掉）');
+    check(
+      /\$\('sl-msg'\)/.test(html),
+      '★★ slCompress 把结果写进 #sl-msg（不是写进 #sl-entries）',
+    );
+    check(
+      /slOpenGroup = String\(groupId\)/.test(html),
+      '★★ 压完**自动展开那个群**（点一次就马上看到结果）',
+    );
 
     // ④ ⚠️ 「挡位 2 不能进事件系统，只有 1 才能设置」（HZY 2026-09-15）
     const lifeMod = await import('../src/life.js');

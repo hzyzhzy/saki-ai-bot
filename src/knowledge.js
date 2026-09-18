@@ -7,6 +7,9 @@ import { join } from 'node:path';
 import { ROOT, KNOWLEDGE_DIR } from './config.js';
 import { log } from './log.js';
 import { learnedText, listEntries } from './learned.js';
+// ⚠️ 2026-09-17 加：群友常**@着某人**问「介绍一下他」，而文本里**没有名字** ——
+//    得靠 at 段的 QQ 号反查出群名片，才能判断"这是在说资料里的某个人"。
+import * as names from './names.js';
 
 /** ⚠️ 走 `config.js` 的 `KNOWLEDGE_DIR`（测试可以用 `QQBOT_KNOWLEDGE_DIR` 整份搬走） */
 const DIR = KNOWLEDGE_DIR;
@@ -372,9 +375,26 @@ export function castRosterBrief() {
 //   anime.md 1,019（6%，聊二次元才需要）
 // 闲聊时后三个基本用不上，白白占着提示词还会稀释真正重要的规则。
 
-/** 这个文件名是「永远要读」的人设库吗 */
+/**
+ * 这个文件名是「永远要读」的人设库吗。
+ *
+ * ⚠️⚠️ 2026-09-17 修：**只认 `persona.md` 本身**。
+ *
+ *    原来写的是 `startsWith('persona')` —— 那会把 `persona-money.md` /
+ *    `persona-media.md` 也当成"永远读"的人设，于是**上午拆出去的按需分册
+ *    一次都没省下来**（闲聊时它们照样躺在提示词里，白占约 7000 字）。
+ *    「拆分 + 按需加载」那件事等于白做了一半。
+ *
+ *    这个错直到用探针把系统提示词整个打出来才现形：
+ *    「今天好累啊」的 `picked.names` 明明白白是「（仅人设）」，
+ *    可正文里赫然有「零一、你的『工资』」和「八、你会发表情包」。
+ *    ⚠️ 教训：**光看"挑中了哪些"不算验证，要把真正拼出来的提示词看一遍。**
+ *
+ *    ⚠️ 改成精确匹配之后，那两份分册仍然会**按需**进来 ——
+ *       聊到钱走 `needMoney`，带图/表情走 `needMedia`，功能一点没丢。
+ */
 function isPersona(name) {
-  return String(name).toLowerCase().startsWith('persona');
+  return String(name).toLowerCase() === 'persona.md';
 }
 
 /**
@@ -445,6 +465,50 @@ function mentionsSomeone(text, content) {
  * @param {{role?:string, segments?:Array, groupId?:string}} [opts] 说话的人是谁、消息里有什么、**在哪个群**
  * @returns {{names:string[], skipped:string[]}}
  */
+/**
+ * 「他是谁」迷你摘要（2026-09-17 用户报的）。
+ *
+ * 用户原话：「刚才喵喵三三这个人在剧情也说了很多话，**不可能什么印象都没有吧**」。
+ *
+ * ⚠️ 探针查过的结论（别照直觉猜）：群资料**确实进了提示词**
+ *    （`selectFor` 挑中了 `groups/200000006.md`，拼出来 42167 字，里面就有
+ *    「| **喵喵三三** | 最活跃的话痨之一… |」那一行）。
+ *    她是**在 4 万字的中间没翻到** —— 就是项目里反复踩的「中段迷失」。
+ *
+ * 所以这里把**被问到的那个人**那一条**单独拎出来**，让调用方放到提示词**靠后**的位置
+ * （离用户提问越近，越不容易被漏）。
+ *
+ * @param {string} text 对方说的话
+ * @param {string} groupId
+ * @returns {string} 空串 = 这条消息没提到资料里记的人
+ */
+export function whoIsBrief(text, groupId = '') {
+  const t = String(text ?? '');
+  const gf = groupFiles.get(String(groupId ?? '').trim());
+  if (!t || !gf?.content) return '';
+  const lines = gf.content.split('\n');
+  const hits = [];
+  // ⚠️ 只认**加粗的名字** —— 群资料里群友就是这么写的（`| **喵喵三三** | … |`）。
+  //    不去猜"哪几个字是人名"，那样误命中率太高（「群里」「大家」都会被当成名字）。
+  for (const m of gf.content.matchAll(/\*\*(.{2,12}?)\*\*/g)) {
+    const name = m[1].trim();
+    if (!name || !t.includes(name)) continue;
+    const line = lines.find((l) => l.includes(`**${name}**`) && l.trim().startsWith('|'));
+    if (line && !hits.includes(line)) hits.push(line);
+  }
+  if (!hits.length) return '';
+  return [
+    '## 📇 你手里正好有这个群几个人的资料（就在下面，**直接用**）',
+    '',
+    '| 群友 | 特点 / 怎么打交道 |',
+    '| --- | --- |',
+    ...hits,
+    '',
+    '⚠️ 他说到的人**就在上面** —— 照这些说，**别说"不熟""不知道"**。',
+    '⚠️ 但**别把整条念出来**（那是档案，不是人话）：挑一两句像"认识这个人"的话就够。',
+  ].join('\n');
+}
+
 export function selectFor(text, opts = {}) {
   const t = String(text ?? '');
   const role = String(opts.role ?? 'member');
@@ -471,11 +535,32 @@ export function selectFor(text, opts = {}) {
   if (needServer) picked.push('hzymtr-server.md');
   else skipped.push('hzymtr-server.md');
 
+  // ⚠️⚠️ 2026-09-17 修（HZY 报的：「699 群有群友让机器人介绍另一个群友，但是机器人说不知道。
+  //    **应该先对应上名字**，直接调用群知识库来回答」）。
+  //    日志里的原样是 `at <- 能介绍一下 嘛` —— **名字是空的**：
+  //    群友是 @着那个人问的，而 @ 走的是 **at 段**，`extractText` 出来的文本里没有名字，
+  //    于是下面 `mentionsSomeone(text)` 永远不命中 ⇒ 群资料压根没进上下文 ⇒ 她只能说"不知道"。
+  //    这里把人名从 at 段反查出来（`names.label` 优先取**这个群的群名片**），拼进判据文本。
+  const atNames = (segs ?? [])
+    .filter((s) => s.type === 'at')
+    .map((s) => String(s.data?.qq ?? ''))
+    .filter(Boolean)
+    .map((q) => {
+      try {
+        return names.label(q, gid);
+      } catch {
+        return '';
+      }
+    })
+    .filter(Boolean);
+  // ⚠️ 只在 at 段确实带出人名时才拼，纯文本时 `probe` 就等于 `t`（不会更差）
+  const probe = atNames.length ? `${t}　${atNames.join('　')}` : t;
+
   const gm = files.find((f) => f.name.includes('group-memory'));
   const needGroup =
     !!gm &&
-    (/你还记得|上次那个|记得那次|群里|群友|大家|谁是谁|群主|服主|腐竹/.test(t) ||
-      mentionsSomeone(t, gm.content));
+    (/你还记得|上次那个|记得那次|群里|群友|大家|谁是谁|群主|服主|腐竹/.test(probe) ||
+      mentionsSomeone(probe, gm.content));
   if (needGroup) picked.push(gm.name);
   else if (gm) skipped.push(gm.name);
 
@@ -488,9 +573,9 @@ export function selectFor(text, opts = {}) {
   const gf = groupFiles.get(gid);
   if (gf) {
     const needMine =
-      /你还记得|上次那个|记得那次|群里|群友|大家|谁是谁|群主|服主|腐竹/.test(t) ||
-      mentionsSomeone(t, gf.content) ||
-      mentionsAnyTerm(t, gf.name);
+      /你还记得|上次那个|记得那次|群里|群友|大家|谁是谁|群主|服主|腐竹/.test(probe) ||
+      mentionsSomeone(probe, gf.content) ||
+      mentionsAnyTerm(probe, gf.name);
     if (needMine) picked.push(gf.name);
     else skipped.push(gf.name);
   }

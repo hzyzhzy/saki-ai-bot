@@ -38,6 +38,36 @@ export const MAX_STAGES = 10;
 export const BEST_STAGES = 3;
 
 /**
+ * 群里"够热情"的默认门槛（2026-09-17 用户要求）。
+ *
+ * 用户原话：「如果出现**群友非常热情**的情况，**段数太少的情况下可以自动增加 2-3 段**，
+ *   然后**缩短等待推下一段时间**」。
+ *
+ * ⚠️ 为什么真需要：模型自己定的 `plannedStages` 常常很短 —— 实测 2026-09-17 那条
+ *    只计划了 **2 段**，而群里那会儿已经回了 **12 条**。按 2 段就收掉，太可惜了，
+ *    而且群友正聊得起劲。
+ */
+export const WARM_COUNT = 4;
+/** 热情时最多多演几段 */
+export const WARM_EXTRA_STAGES = 3;
+
+/**
+ * 数一下这一批回应有多热。
+ *
+ * ⚠️ 只看**条数**，不要求"人多"：实际群里经常是**一个人特别起劲**
+ *    （2026-09-17 那条就是「喵喵三三」连着引用、接话好几条），
+ *    要求 ≥2 人会把这种最典型的热情漏掉。人数只记下来放日志/界面看。
+ *
+ * @param {Array<{userId?:string}>} list
+ * @returns {{count:number, people:number}}
+ */
+export function warmthOf(list) {
+  const arr = Array.isArray(list) ? list : [];
+  const people = new Set(arr.map((x) => String(x?.userId ?? '')).filter(Boolean));
+  return { count: arr.length, people: people.size };
+}
+
+/**
  * **某个群**的二级剧情参数（全局 `config.quest` + `groupParams["<群号>"].quest` 的覆盖）。
  *
  * ⚠️⚠️ 2026-09-16：界面上能按群设概率/每周上限/每段等待/段数/好感度增减 ——
@@ -548,11 +578,64 @@ export function isPlotReply(p = {}) {
 // 提示词
 // ─────────────────────────────────────────────────────────────
 
+/**
+ * 题材素材池 —— 从 `knowledge/quest-ideas.md` **现读**（2026-09-18 用户要求「挪吧」）。
+ *
+ * ⚠️ 为什么不写死在提示词里：用户要**自己往里加素材**
+ *    （「现在只能手动往里加，重复剧情会很奇怪」「再多加多加」）。
+ *    放到外面那个文件，他直接改就行，而且**不用重启机器人** ——
+ *    这里每次都重新读盘（一周才开 3 次剧情，读文件的成本可以忽略）。
+ */
+function questIdeas() {
+  try {
+    const p = join(ROOT, 'knowledge', 'quest-ideas.md');
+    if (!existsSync(p)) return '';
+    const t = readFileSync(p, 'utf8').trim();
+    return t ? `\n\n# 剧情素材池（挑一条改一改就用，别照抄、别连着用同一类）\n\n${t}` : '';
+  } catch (e) {
+    log.debug(`剧情素材池读取失败（这次不拼）：${e.message}`);
+    return '';
+  }
+}
+
 const QUEST_SYSTEM = `你在给一个角色扮演机器人**编一条主线剧情**（不是日常闲聊）。
 
 ⚠️ 这是「二级事件」—— 要能**改变这条世界线**的关键事件，不是今天午饭吃什么。
 
 硬规矩：
+
+1b. ⚠️ **题材要够分量** —— 2026-09-17 用户要求：「**剧情还可以再爆点，毕竟几率很小**」。
+   · 他说的前提是真的：这条剧情**一周最多开 3 次**，而且每次都是掷骰子
+     （chance 一成）命中才开，还**会顶掉一条日常事件**。所以题材配不上这个额度，
+     就等于白占了一周三次里的一个坑。
+   · ✅ 该往这些方向挑（都在她的生活半径里，不用超自然就已经够狠）：
+     **跟人的关系急转**（误会、站队、说错话、被瞒着、当面被下不来台）、
+     **过去找上门**（老同学、CRYCHIC 的旧事、家里的事）、
+     **工作上的难堪**（被换班 / 被客人刁难 / 同事之间的事）、
+     **意外**（丢了要紧的东西、赶不上、撞见不该看的）。
+   · 🎬⚠️ **多借社区二创的味道**（2026-09-18 用户点名要求：
+     「剧情还是有点枯燥」「多参考一点 **B 站上的二创**，mygo 和 avemujica
+     能这么火一大半都得靠社区的二创」）。二创真正抓人的是这几样，照着学：
+     · **关系里的"刺"**：嘴上不认、背地里在意；一句玩笑正好戳到旧伤；
+     · **群像**：别老她一个人扛 —— 让**别人**之间也有戏（谁跟谁站一边、谁在中间难做）；
+     · **身份反差**：把"客服小祥"这个身份玩起来（工位、单子、同事、刁难的客人
+       ↔ 她原本的出身和教养）；这是**只有她这个设定才有的**素材；
+     · **If / 平行感**：某件旧事**换个走向**重演一次（但她自己要意识到"这次不一样"）；
+     · **小事失控**：一件很小的事，因为她的性子被推到收不了场。
+   · 📚 **题材素材池在你后面那一段**（标题是「剧情素材池」，一百来条，按类别分好了）——
+     从里面**挑一条**改一改就写，别照抄；一条剧情**只挑一条**，别把几条缝在一起。
+     用完一类就换一类（重复的剧情很难看）。
+   · 🚫⚠️ **同一个套路不许连着来**（2026-09-18 用户原话：
+     「我模拟剧情的时候看到**好几次**她们合租的房子要被卖掉了」）：
+     上面"你最近在这个群里讲过的事"里出现过的**同一类麻烦**，这次**必须换一类**。
+     **尤其「住处 / 房租 / 房子要被卖掉 / 被赶出去」这一路，短期内不许再用第二次。**
+   · 🚫 **别写成日常琐事**：买菜、做饭、下雨没带伞、谁顺手拿了外卖 ——
+     这种留给一级事件（日常）就够了，**不值得占一周三次的额度**。
+   · ⚠️ 但"爆"≠ 乱来：**不要超自然、不要车祸 / 绝症 / 失忆、不要跟原作设定打架**
+     （见下面"不要魔法"那条）。
+   · ⚠️ **也别写成卖惨** —— 她的基调是**遇到事就继续去做、硬扛**，语气平淡里带刺，
+     不是哭诉。真出事的时候她反而更冷静，这个反差才是她的味道。
+   · ⚠️ **一次只炸一件事**：丢钱 + 被辞 + 被撞堆在一段里，一眼就是编的。
 
 1. **视角是祥子**（第一人称）。发到群里的那句话是**她自己在说**，
    像随手在群里说一句，不是写小说、不是旁白、**不要括号动作描写**。
@@ -595,6 +678,26 @@ const QUEST_SYSTEM = `你在给一个角色扮演机器人**编一条主线剧�
    可以是小事滚大（被缠上、帮了个人结果那人不简单、跟队友闹了个别扭），但**别离谱**
    （不要魔法、不要突然出现超自然设定、不要跟原作设定打架）。
 6. 基调：**她不诉苦**。遇到事就是继续去做、硬扛，语气平淡里带刺、偶尔自嘲。
+6b. ⚠️⚠️ **每一段都要有"事情在变"的感觉，中后段更是 —— 不是只有开头爆**
+   （2026-09-17 用户要求「可以加点意外转折」；2026-09-18 又补：
+    「剧情推进的时候还有点平淡，**不是只有开头很爆，转折的时候也要爆**」）。
+   · 每写一段先问自己：**这一段跟上一段比，什么变了？**
+     关系变了 / 事情的性质变了 / 她的处境变了 / 有人的立场翻了 —— 至少得变一样。
+   · ⚠️ **中间那几段最容易水**（开头有冲击、结尾有收束，中间最容易写成"她又去处理了一下"）——
+     那一段就是不合格的：**中段必须出转折**，哪怕小一点，也要让群友看出"事态变了"。
+   · 转折要**落在现实里**：误会、时间来不及、东西坏了、人临时变卦、本来答应的事黄了、
+     她自己判断错了一次 —— 这些都行。
+   · 🚫 不要超自然、不要失忆 / 车祸 / 绝症、不要冒出原作里没有的设定（见上面"不要魔法"那条）。
+   · ⚠️ **别为了转折而转折**：它得能**把这件事往前推**、或者**改变她和某个人的关系**；
+     单纯吓一跳然后什么都没变，读起来就是凑字数。
+   · ⚠️ 但一段里**只放一个**转折，落在这一段靠后的位置最好 —— 正好勾着群友想接下一句。
+6c. ⚠️⚠️ **群友说的话要真的算数**（2026-09-18 用户要求：
+   「让群友能感受到**自己真的参与进了剧情**」）。
+   · 上面给你的【这一阶段群里说的话】**不是背景音** —— 下一段里必须看得出
+     哪一句**真的起了作用**（她改了主意 / 多了一个人 / 事情因此转向）。
+   · 群友**猜错**也可以算数：她照着他的猜测去做，结果真出事了 —— 那也是他推的。
+   · 🚫 最忌"群友说了 A，下一段完全没提" —— 那他就白参与了，下次就不看了。
+   · 但也**别当复读机**：不是把他那句话原样回一遍，是让它**改变后来发生的事**。
 7. 🚫 不要破折号、不要 markdown、不要书名号。标点只用：。 ， ？ ！ ……
 
 8. 🚫 **同上：别让群友"听 / 看 / 试 / 评价"她做的东西，也别承诺发文件、发录音、拍视频** ——
@@ -602,26 +705,215 @@ const QUEST_SYSTEM = `你在给一个角色扮演机器人**编一条主线剧�
 8. 只输出要求的 JSON，不要解释、不要代码围栏。`;
 
 /** 阶段越往后，"该收了"的压力越大（用户要求：>3 段后逐级加重，但不能生硬） */
-export function endPressure(stageIndex, plannedStages = BEST_STAGES) {
+export function endPressure(stageIndex, plannedStages = BEST_STAGES, extra = 0) {
   const parts = [];
-  const over = stageIndex - BEST_STAGES;
+  // ⚠️ 2026-09-17：`extra` = 因为"群里热情"而**加演**的段数 —— 把"该收了"那道坎
+  //    整体往后挪。不挪的话，模型一边被这里催着收、一边被 `warmHint` 叫着继续，
+  //    会写出精神分裂的段落（我们压住 done 也救不回那段文本）。
+  const best = BEST_STAGES + extra;
+  const plan = plannedStages + extra;
+  const over = stageIndex - best;
   if (over <= 0) {
-    if (stageIndex >= plannedStages) {
+    if (stageIndex >= plan) {
       parts.push(`计划就是 ${plannedStages} 段，现在到第 ${stageIndex} 段了 —— 如果剧情自然，就该收了。`);
     }
     return parts.join('\n');
   }
   if (over === 1) {
-    parts.push('⚠️ 已经 4 段了，**接下来一两段内应该收尾**。收得自然一点，别突然截断。');
+    parts.push(`⚠️ 已经 ${best + 1} 段了，**接下来一两段内应该收尾**。收得自然一点，别突然截断。`);
   } else if (over === 2) {
-    parts.push('⚠️⚠️ 5 段了，**这一段之后就该给出结局**。');
+    parts.push(`⚠️⚠️ ${best + 2} 段了，**这一段之后就该给出结局**。`);
   } else {
     parts.push('⚠️⚠️⚠️ 已经拖得够长了，**这一段必须是最后一段**，必须给一个结局（done 设成 true）。');
   }
-  if (stageIndex >= plannedStages) {
+  if (stageIndex >= plan) {
     parts.push(`（计划 ${plannedStages} 段，已经超了 —— 别再拖。）`);
   }
   return parts.join('\n');
+}
+
+/**
+ * 群里热情时给模型的提示（2026-09-17 用户要求）。
+ *
+ * ⚠️ 真正管用的是**生成前就告诉它别收**（这一条），而不是事后把 `done` 按回去：
+ *    那样模型已经把这一段**写成收尾**了，我们再硬说"没收"，剧情会断在那儿。
+ *    代码层那处兜底只在模型没听的时候救一次。
+ */
+export function warmHint(q, next = 0) {
+  const w = q?.warmth;
+  if (!w?.warm) return '';
+  const used = Number(q?.extraStages ?? 0);
+  // ⚠️⚠️ 2026-09-17 修（HZY 截图：「**已经 6/5 了，什么时候发剧情总结**」）：
+  //    已经**超出计划段数**时，这里必须**闭嘴** ——
+  //    否则它跟 `endPressure` 那句「这一段必须是最后一段」**直接打架**，
+  //    而模型实测会听这句"先别收" ⇒ 剧情永远不收尾、**结局播报也永远发不出来**
+  //    （用户就是这么被卡在 6/5 的）。
+  const willWrite = Number(next) > 0 ? Number(next) : Number(q?.stageIndex ?? 0) + 1;
+  if (willWrite > Number(q?.plannedStages ?? 0)) return '';
+  return [
+    '',
+    `🔥 **这个群特别热情**（上一段有 ${w.count} 条回应、${w.people} 个人接话）——`,
+    used > 0
+      ? `已经为你**加演了 ${used} 段**，接着自然往下写就行，别硬凑，也别急着收。`
+      : '**这一段先别收**，顺着他们的话往下演，让他们有得接。',
+    '⚠️ 但**别为了长而长**：真走到头了就大方收，收的时候给足反应的时间，别一句话带过。',
+    '💡 加演出来的段落**最怕原地打转** —— 每一段都得有**新东西**：',
+    '   一个意外转折、一条被揭开的信息、或者某个人改了主意（用户要求：「可以加点意外转折」）。',
+  ].join('\n');
+}
+
+/**
+ * 群里热情 → **把计划段数真的涨上去**（2026-09-17 用户要求）。
+ *
+ * 用户原话：「如果出现群友非常热情的情况，**段数太少的情况下可以自动增加 2-3 段**」，
+ * 后来专门澄清了一句：**「我是说计划段数」**。
+ *
+ * ⚠️ 这一句很关键 —— 我第一版只在内部把"该收了"的坎往后挪，**没动 `plannedStages`**，
+ *    结果 webui 上永远显示「计划 2 段」，用户以为没生效。他要的是**看得见**：
+ *    「计划 2 段 → 5 段」。
+ *
+ * ⚠️ 只加**一次**（`warmBumped`）：不加这道闸的话，每推进一段都会再 +3，永远收不了。
+ * ⚠️ 涨不过 `MAX_STAGES`（10）—— 那是硬上限。
+ *
+ * @param {object} q 剧情（会被就地修改）
+ * @returns {number} 实际加了几段（0 = 没加）
+ */
+export function bumpPlanned(q) {
+  if (!q?.warmth?.warm || q.warmBumped) return 0;
+  const now = Number(q.plannedStages ?? 0) || 0;
+  const add = Math.min(WARM_EXTRA_STAGES, Math.max(0, MAX_STAGES - now));
+  if (add <= 0) return 0;
+  q.plannedStages = now + add;
+  q.warmBumped = true;
+  log.info(
+    `[剧情] 群 ${q.groupId} 够热情（${q.warmth.count} 条 / ${q.warmth.people} 人）` +
+      `→ 计划段数 ${now} → ${q.plannedStages}（+${add}）`,
+  );
+  return add;
+}
+
+/**
+ * 给**聊天**用的剧情摘要（2026-09-17 修）。
+ *
+ * ⚠️ 修的是什么：HZY 拿截图报「群友问『@saki 找到药了吗』，她答『什么药啊，你哪不舒服了』」
+ *    —— 她**根本不知道自己在演什么**。上一段她刚说过"这会儿我在给她翻药箱"。
+ *
+ *    查下来：二级剧情的接线一直是**单向**的（群友的话 → 记进剧情），
+ *    **从来没有反过来把剧情注入她的聊天提示词**。所以群友顺着剧情追问时，她一脸茫然。
+ *    重启之后尤其明显 —— `recent` 一空，她连自己刚发的那段都看不到了。
+ *
+ * ⚠️ 只给**摘要**（起因 + 进度 + 最近两段），别把整条塞进提示词：
+ *    提示词越长，"中间那些规则被漏掉"的风险越大（这个项目为此专门把铁律放在两头）。
+ *
+ * @param {string|number} groupId
+ * @returns {string} 空串 = 这个群没有在跑的剧情
+ */
+/**
+ * 「他在你正讲的这件事里做过什么」（2026-09-17 用户要求）。
+ *
+ * 用户原话：「我觉得**在查人时应该也要特别查一下故事线**，可行吗」。
+ *
+ * ⚠️ 缘由（他拿截图报的）：群里问「@saki 喵喵三三是谁」，
+ *    而那个人**刚在这条剧情里说了十几句话**（`pending` 里全是他的发言），
+ *    她的回答却是「就刚发啧那个，别的我也不熟」——
+ *    既没翻到群资料，也完全没用上剧情里刚发生的事。
+ *
+ * ⚠️ 数据现成的：`pending`（攒着还没消化的发言）和 `stages[].replies`（各段收到的回复）
+ *    都带 `name` / `userId`，不用额外存。
+ *
+ * @param {string} text 群友说的话
+ * @param {string} groupId
+ * @returns {string} 空串 = 这条消息没提到剧情里的参与者
+ */
+export function whoInQuest(text, groupId = '') {
+  const t = String(text ?? '');
+  const q = current(groupId);
+  if (!t || !q || q.endedAt) return '';
+
+  // 把这条剧情里出现过的人名收起来（攒着的 + 各段收到的）
+  const byName = new Map();
+  const push = (name, said) => {
+    const n = String(name ?? '').trim();
+    const s = String(said ?? '').trim();
+    if (!n || !s) return;
+    if (!byName.has(n)) byName.set(n, []);
+    byName.get(n).push(s.slice(0, 60));
+  };
+  for (const x of q.pending ?? []) push(x.name, x.text);
+  for (const st of q.stages ?? []) for (const r of st.replies ?? []) push(r.name, r.text);
+
+  const hits = [...byName.entries()].filter(([name]) => t.includes(name));
+  if (!hits.length) return '';
+  const lines = hits
+    .slice(0, 3)
+    .map(([name, said]) => `- **${name}**：${said.slice(-3).map((s) => `「${s}」`).join('　')}`);
+
+  return [
+    `## 🎬 你正讲的这件事里，「${hits.map(([n]) => n).join('、')}」是参与的人`,
+    '',
+    ...lines,
+    '',
+    '⚠️ 他**不是陌生人** —— 你们刚一起经过了这件事，你说得出他当时说了什么。',
+    '⚠️ 但**别把这段当剧情正文往下讲**：现在是在**回答群友的提问**，一两句带过就行。',
+  ].join('\n');
+}
+
+export function briefFor(groupId = '') {
+  const q = current(groupId);
+  if (!q || q.endedAt) return '';
+  const now = Date.now();
+  /** 相对时间：让摘要里每一段都带"多久以前"，别让她把过去当成现在 */
+  const ago = (at) => {
+    const d = now - Number(at ?? 0);
+    if (!Number.isFinite(d) || d < 0) return '';
+    const min = Math.round(d / 60000);
+    if (min < 2) return '刚刚';
+    if (min < 60) return `${min} 分钟前`;
+    const h = Math.round(min / 60);
+    if (h < 24) return `${h} 小时前`;
+    return `${Math.round(h / 24)} 天前`;
+  };
+  const recent = (q.stages ?? [])
+    .slice(-2)
+    .map((s) => ({ at: s?.at ?? 0, text: String(s?.text ?? '').trim() }))
+    .filter((s) => s.text);
+  return [
+    '## 📖 你最近在这个群里讲过的一件事',
+    `起因：${q.premise}`,
+    `进度：第 ${q.stageIndex} 段，计划 ${q.plannedStages} 段`,
+    recent.length
+      ? `你之前在这个群里讲过（**不是现在**）：${recent
+          .map((s) => `「${s.text}」${ago(s.at) ? `（${ago(s.at)}）` : ''}`)
+          .join('　')}`
+      : '',
+    '',
+    // ⚠️⚠️ 2026-09-17 HZY 报的（原话：「如果剧情出现**去吃饭**这种时间事件，
+    //    祥子会**一直处于要去吃饭的状态**，而且有人叫她去吃饭她**可能又会一起吃**」）：
+    //    根因就是上面那行原来**只给内容、不给时间** ⇒ 她以为剧情里那句"我去吃饭了"
+    //    是**此刻**发生的事，于是整个人卡在那个状态里；别人再叫她吃饭，她又答应一次。
+    '⚠️⚠️ 上面那些是**过去**讲过的事，**不是你现在的状态**：',
+    '   · 别一直停在那个状态里 —— 剧情里说了"去吃饭"，**不等于你现在还要去吃饭**；',
+    '   · 群友现在说什么、叫你做什么，**按现在这一刻答**，别拿几小时前那句话当挡箭牌；',
+    '   · 真有人现在叫你一起吃饭，那是**新的一件事**，正常答应就行。',
+    '',
+    '⚠️ 群友可能**顺着这件事追问**（「后来呢」「找到了吗」「那个谁怎么样了」）——',
+    '那是在问你刚讲的事，**不是新话题**。接着讲，别装不知道，也别把它当成别人的事。',
+    '',
+    // ⚠️⚠️ 2026-09-17 HZY 截图报的：「**把群友当成剧情中出现的人了**」——
+    //    一个群友发完表情，她引用那张图回了句剧情里的台词
+    //    （「不好意思就直说啊，塞两份饭转身就跑算什么（」），
+    //    等于把那个群友当成了剧情里"塞饭的人"。
+    //    根因：这一段只说"你在讲一件事 + 群友在追问"，**没说清群里的人是谁**。
+    //    剧情那边的 system prompt 有"收信人永远是群友"那条，聊天这边没有 ⇒ 补上。
+    '⚠️⚠️ **但群里这些人不是那件事里的人**：',
+    '   · 你是**在群里跟大家讲**你生活里发生的事，群友是**听你讲的人**，不是故事里的角色；',
+    '   · 群里谁说了什么、发了什么表情，那都是"群友在跟你说话"，',
+    '     **别把它当成那件事里某个人的台词或行为**；',
+    '   · 那件事里的人（初华、睦、海铃…）**不在这个群里**，你提到他们时是在**转述**。',
+    '⚠️ 但**别主动把后面的发展抖出来**（你自己也不知道会怎么走），也别在别的群提这件事。',
+  ]
+    .filter(Boolean)
+    .join('\n');
 }
 
 /**
@@ -694,7 +986,15 @@ function buildSystem(extra = '') {
   try {
     cast = castRosterBrief();
   } catch {}
-  return [persona, cast ? `# 出场人物名册（编剧情时只能用这里有的名字）\n\n${cast}` : '', QUEST_SYSTEM, extra]
+  return [
+    persona,
+    cast ? `# 出场人物名册（编剧情时只能用这里有的名字）\n\n${cast}` : '',
+    QUEST_SYSTEM,
+    // ⚠️ 素材池**现读现拼**（2026-09-18 挪到 knowledge/quest-ideas.md：
+    //    用户要自己加素材，放文件里他直接改就行，而且**不用重启**）
+    questIdeas(),
+    extra,
+  ]
     .filter(Boolean)
     .join('\n\n---\n\n');
 }
@@ -711,11 +1011,23 @@ function buildSystem(extra = '') {
  *    · 群友经常连着说好几句，攒着一起看，模型才看得懂完整意思
  * ⚠️ 攒在 `quest.pending` 里并**落盘** —— 掉线/重启不能把群友说过的话弄丢。
  */
-export function noteReply(quest, { userId = '', name = '', text = '', at = Date.now() } = {}) {
+export function noteReply(quest, { userId = '', name = '', text = '', at = Date.now(), why = '' } = {}) {
   if (!quest || quest.endedAt) return false;
   const t = String(text ?? '').trim();
   if (!t) return false;
-  quest.pending = [...(quest.pending ?? []), { userId: String(userId), name: String(name || userId || '群友'), text: t.slice(0, 200), at }].slice(-12);
+  // ⚠️ 2026-09-17 加 `why`（用户要求：「这个等下一段的状态可以细化一点，**分开推进剧情的和闲聊的**」）。
+  //    判据是 `isPlotReply()` 早就算出来的，原来**没往这儿带** —— 于是界面上四条全标"等下一段"，
+  //    里面混着"我感觉和真人聊天好累""包的"这种纯闲聊。
+  quest.pending = [
+    ...(quest.pending ?? []),
+    {
+      userId: String(userId),
+      name: String(name || userId || '群友'),
+      text: t.slice(0, 200),
+      at,
+      why: String(why || ''),
+    },
+  ].slice(-12);
   save();
   return true;
 }
@@ -993,6 +1305,17 @@ export async function advance(quest, p = {}) {
     : (quest.pending ?? [])
   ).slice(0, 12);
   quest.pending = [];
+  // ⚠️ 2026-09-17 用户要求：群友非常热情时**自动加演 2~3 段、并缩短等下一段的时间**。
+  //    热度必须**在这里**算 —— `pending` 上一行刚被清空，过后就没数据了。
+  //    结果挂在 `quest.warmth` 上，`due()` 和 `warmHint()` / 下面那处兜底都读它。
+  {
+    const w = warmthOf(replies);
+    const need = Math.max(1, num(cfgFor(quest.groupId).warmCount, WARM_COUNT));
+    quest.warmth = { ...w, warm: w.count >= need, at: Date.now() };
+    // ⚠️ 热情就把**计划段数真涨上去**（用户澄清过："我是说计划段数"）——
+    //    只挪内部的坎是不够的，界面得看得见「2 段 → 5 段」。
+    bumpPlanned(quest);
+  }
   // 模拟面板点「强制好/坏结局」时走这条（好让你两种结局都能看到）
   const forceEnd = ['good', 'bad'].includes(String(p.forceEnd)) ? String(p.forceEnd) : null;
   // ⚠️ 是 `>=` 不是 `>`（2026-09-15 测试抓到的差一位）：
@@ -1023,7 +1346,9 @@ export async function advance(quest, p = {}) {
       ? endingForceHint(forceEnd)
       : hardStop
         ? '⚠️⚠️ 已经到硬上限了，**这一段必须是最后一段**，必须给结局（done: true）。'
-        : endPressure(next, quest.plannedStages),
+        // ⚠️ `extra` 传 0：热情带来的"多演几段"现在**真的涨在 `plannedStages` 上**
+        //    （见上面那句 `bumpPlanned`）。这里再挪一次就成了两道坎叠加，会拖到 9 段才收。
+        : endPressure(next, quest.plannedStages, 0) + warmHint(quest, next),
     '',
     `现在写**第 ${next} 段**。`,
     '⚠️ 群里的话如果是在给她建议/劝她，她**可以改主意** —— 改了就体现在这一段里。',
@@ -1069,6 +1394,31 @@ export async function advance(quest, p = {}) {
   //    模拟面板就是要"确定能看到坏结局"，不能靠模型配合。
   let done = forceEnd ? true : j?.done === true || hardStop;
   let ending = forceEnd ?? (['good', 'bad'].includes(String(j?.ending)) ? String(j.ending) : null);
+
+  // ⚠️⚠️ 2026-09-17 用户要求：「群友非常热情的情况，**段数太少**的情况下可以**自动增加 2-3 段**」。
+  //    这里只是**兜底**：真正管用的是生成前那句 `warmHint`（模型听劝就压根走不到这里）。
+  //    走到这里说明它已经把这一段**写成收尾**了，我们只能把它按回去 ——
+  //    所以下一段的提示里得让它自然接上，别硬掰（`warmHint` 已经交代了）。
+  if (done && !forceEnd && !hardStop && quest.warmth?.warm) {
+    const used = Number(quest.extraStages ?? 0);
+    // ⚠️⚠️ 2026-09-17 修（HZY：「已经 **7/5** 了，还没播报」）：
+    //    **必须跟 `warmHint()` 用同一条边界** —— 超出计划段数之后就不能再把模型的
+    //    `done` 按回去了。上一版只改了提示词那一半（`warmHint`），**漏了这里**，
+    //    结果模型明明给了 `done: true`，被这一行按掉（日志：「这次不收尾，加演第 2 段」）
+    //    → 跟 `endPressure` 的"必须是最后一段"打架 → 剧情永远收不了尾、
+    //    **结局播报也永远发不出来**。
+    const plan = Number(quest.plannedStages ?? 0);
+    // ⚠️ 硬上限照旧是 `MAX_STAGES` —— 不能因为热情就突破它
+    if (next <= plan && used < WARM_EXTRA_STAGES && next < MAX_STAGES) {
+      done = false;
+      ending = null;
+      quest.extraStages = used + 1;
+      log.info(
+        `[剧情] 群 ${quest.groupId} 够热情（上一段 ${quest.warmth.count} 条 / ${quest.warmth.people} 人）` +
+          `→ 这次不收尾，加演第 ${quest.extraStages} 段`,
+      );
+    }
+  }
   if (done && !ending) ending = 'bad'; // 没收明白就当坏结局（保守）
 
   recordStage(quest, { i: next, text, event, replies, auto: replies.length === 0 }, now());
@@ -1081,7 +1431,9 @@ export async function advance(quest, p = {}) {
 
 /** 把这一段落进 quest（内部） */
 function recordStage(quest, s, now) {
-  quest.stages = [...(quest.stages ?? []), s];
+  // ⚠️ 2026-09-17：补上 `at` —— 界面的剧情时间线要按时间排，
+  //    而原来这里只存了 `{i, text, event, replies, auto}`，没有时间戳 ⇒ 时间线上排不了。
+  quest.stages = [...(quest.stages ?? []), { ...s, at: Number(s?.at ?? 0) || now }];
   quest.stageIndex = s.i;
   quest.awaitingSince = now;
   if (s.replies?.length) {
@@ -1173,7 +1525,20 @@ export function settle(q, ending, adjust) {
     if (typeof adjust !== 'function') break;
     try {
       const r = adjust(userId, delta, { note });
-      applied.push({ userId, delta, ok: r?.ok !== false, value: r?.value ?? r?.v ?? null });
+      // ⚠️⚠️ 2026-09-17 修：这里原来取的是 `r?.value ?? r?.v`，
+      //    而 `affinity.adjust()` 返回的是 `{ ok, from, to, applied, ... }` ——
+      //    **根本没有 `value` / `v`**，所以那个字段一直是 null（没人用，就没发现）。
+      //    做结局播报要显示"谁加了多少"，必须拿到**实际**变化：
+      //    `applied` 会被单次幅度上限和每日额度夹住，跟请求的 `delta` 不一定相等。
+      applied.push({
+        userId,
+        delta,
+        ok: r?.ok !== false,
+        from: r?.from ?? null,
+        to: r?.to ?? null,
+        got: r?.applied ?? null,
+        value: r?.to ?? r?.value ?? r?.v ?? null,
+      });
     } catch (e) {
       applied.push({ userId, delta, ok: false, error: e.message });
     }
@@ -1182,6 +1547,55 @@ export function settle(q, ending, adjust) {
     `[剧情] 结算：${ending === 'good' ? '好' : '坏'}结局，好感度 ${delta >= 0 ? '+' : ''}${delta} × ${cast.length} 人`,
   );
   return { ending, delta, cast, applied };
+}
+
+/**
+ * 结局播报等多久再发（毫秒）。
+ *
+ * ⚠️ 用户要求（2026-09-17）：「加一个二级剧情结局展示，**跟在机器人发的剧情
+ *    最后一句话之后一秒钟发送**」。这一秒是故意的：她刚说完最后一句，
+ *    立刻补一条"结算"像系统公告；隔一秒像是她顺手报的。
+ */
+export const ENDING_REPORT_DELAY_MS = 1000;
+
+/**
+ * 结局播报的文案（2026-09-17 用户要求）。
+ *
+ * 用户原话：「内容首先展示本次剧情结束，这次是好/坏结局，
+ *   哪些人加/减了多少好感度」。
+ *
+ * ⚠️ 这是**机器格式**，跟 `/好感度` 排行榜一个路子：
+ *    · 用 `sendToGroup` 发、**不进聊天上下文** —— 否则她下次说话会把这行
+ *      当成群里聊过的内容（`/好感度` 那条踩过这个坑）；
+ *    · **不 @ 任何人** —— @ 会弹通知，那个口子只留给"余额见底催充值"。
+ *
+ * ⚠️ 名字由调用方注入（`nameOf`）：这个模块不认识群名片，保持纯函数才好离线测。
+ *
+ * @param {{ending?:string, delta?:number, applied?:Array}} result `settle()` 的返回
+ * @param {(userId:string)=>string} nameOf
+ * @returns {string} 文案；**没人参与时返回空串**（那时没什么可播报的）
+ */
+export function endingReport(result, nameOf = (id) => String(id)) {
+  const applied = Array.isArray(result?.applied) ? result.applied : [];
+  if (!applied.length) return '';
+  const good = result.ending === 'good';
+  const sign = Number(result.delta) >= 0 ? '+' : '';
+  const lines = applied.map((x, i) => {
+    const name = String(nameOf(x.userId) ?? x.userId);
+    // 拿不到前后值（`adjust` 抛了 / 好感度功能关着）→ 至少把名字列出来，别丢人
+    if (x?.from === null || x?.from === undefined || x?.to === null || x?.to === undefined) {
+      return `${i + 1}. ${name}`;
+    }
+    // ⚠️ 数字没动不是"没参与"，是**今天的加分额度用完了**（减分不占额度，
+    //    所以这半句实际上只会出现在好结局里）。说清楚，不然群友以为漏算了他。
+    const tail = x.to === x.from ? '（没变，今天的额度用完了）' : '';
+    return `${i + 1}. ${name}　${x.from} → ${x.to}${tail}`;
+  });
+  return [
+    `【本次剧情结束 · ${good ? '好结局' : '坏结局'}】`,
+    `好感度 ${sign}${result.delta}（参与 ${applied.length} 人）：`,
+    ...lines,
+  ].join('\n');
 }
 
 /** 收尾 */
@@ -1251,7 +1665,14 @@ export function abort(groupId) {
 export function due(now = Date.now(), groupId = '') {
   const q = gbucket(groupId)?.current;
   if (!q || q.endedAt) return false;
-  const wait = Math.max(60000, num(cfgFor(groupId).waitMs, 30 * 60 * 1000));
+  const base = Math.max(60000, num(cfgFor(groupId).waitMs, 30 * 60 * 1000));
+  // ⚠️ 2026-09-17 用户要求：「群友非常热情……然后**缩短等待推下一段时间**」——
+  //    默认 30 分钟，正好聊热了却要干等，节奏就凉了。
+  //    热情时走 `warmWaitMs`（默认 waitMs 的三分之一 = 10 分钟）。
+  const warm = q.warmth?.warm === true;
+  const wait = warm
+    ? Math.max(60000, num(cfgFor(groupId).warmWaitMs, Math.round(base / 3)))
+    : base;
   return now - (q.awaitingSince ?? q.startedAt) >= wait;
 }
 
@@ -1358,12 +1779,44 @@ export function status(groupId) {
      * ⚠️ 2026-09-15 晚加：界面要显示"**还等着谁说什么**"，
      *    光给一个条数（`pending`）不够 —— 用户要求"剧情发展呈现在 webui 上更详细一点"。
      */
-    pendingList: (q?.pending ?? []).map((x) => ({ name: x.name, text: x.text, at: x.at })),
+    pendingList: (q?.pending ?? []).map((x) => ({
+      name: x.name,
+      text: x.text,
+      at: x.at,
+      // ⚠️ 判据一起给界面：`at`/`reply`/`suggest`/`question` = 真在推剧情，`loose` = 随口一句。
+      //    界面上要**分开显示**（2026-09-17 用户要求）。
+      why: x.why ?? '',
+    })),
     /** 她在这条剧情里**顺口接过的话**（不是分段）—— 时间线上要显示出来 */
     interludes: (q?.interludes ?? []).map((x) => ({ text: x.text, at: x.at })),
+    /**
+     * ⚠️ 2026-09-17 加（HZY 报「图二的阶段信息没有进 webui」）：
+     *    界面上原来只有「等下一段」（`pendingList`）和「插曲」（`interludes`），
+     *    而**她真正发出去的那几段剧情本身反而看不见** —— 明明那才是最该看的。
+     */
+    stages: (q?.stages ?? []).map((s) => ({
+      i: s?.i ?? 0,
+      text: s?.text ?? '',
+      at: s?.at ?? 0,
+      event: s?.event ?? '',
+      // ⚠️ 前端 `questDevHtml()` 会把她那一段收到的群友回复也列出来（`↳ 谁：说了什么`），
+      //    所以这里必须一起带过去 —— 只给 text 的话那段就丢了一半信息。
+      replies: (s?.replies ?? []).map((r) => ({ name: r?.name ?? '', text: r?.text ?? '' })),
+    })),
     /** 这一段的等待窗口：`awaitingSince + waitMs` 到点就会自动推下一段（界面显示倒计时用） */
     awaitingSince: q?.awaitingSince ?? 0,
-    waitMs: num(cfgFor(only ? groupId : repGid).waitMs, 30 * 60 * 1000),
+    // ⚠️ 2026-09-17：这里必须给**实际会用到**的等待时长 —— 群里热情时 `due()` 走的是
+    //    `warmWaitMs`（默认 waitMs 的三分之一）。给错的话界面倒计时会跟真实推进对不上
+    //    （显示还有 20 分钟，结果 8 分钟就推了）。
+    waitMs: (() => {
+      const c = cfgFor(only ? groupId : repGid);
+      const base = num(c.waitMs, 30 * 60 * 1000);
+      return q?.warmth?.warm ? Math.max(60000, num(c.warmWaitMs, Math.round(base / 3))) : base;
+    })(),
+    /** 这一段群里热不热（界面能看出来；热的话会加演、而且等得短） */
+    warmth: q?.warmth ?? null,
+    /** 因为"群里热情"已经加演了几段（上限 `WARM_EXTRA_STAGES`） */
+    extraStages: q?.extraStages ?? 0,
     questId: q?.id ?? '',
     /** 这条的题材（界面显示用；原来只有"总览"那个分支带它） */
     topicLabel: q?.topicLabel ?? '',

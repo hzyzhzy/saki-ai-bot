@@ -92,7 +92,9 @@ const llmCfg = () => config.llm;
  * 调用 OpenAI 兼容接口，流式产出文本增量。
  * @param {{role:string, content:string}[]} messages
  * @param {AbortSignal} [outerSignal]
- * @param {{maxTokens?:number}} [opts] 按次覆盖参数（解题模式要更大的上限）
+ * @param {{maxTokens?:number, timeoutMs?:number, thinking?:object}} [opts]
+ *        按次覆盖参数：解题模式要更大的上限；`thinking:{type:'disabled'}`
+ *        用来**关掉思考链**（压缩故事线就靠它 —— 见 2026-09-18 那条注释）
  * @returns {AsyncGenerator<string>}
  */
 export async function* streamChat(messages, outerSignal, opts = {}) {
@@ -117,10 +119,13 @@ export async function* streamChat(messages, outerSignal, opts = {}) {
   //    上限 `llm.timeoutMax`（默认 180 秒）。普通回复（8000）→ 仍是 60 秒左右；
   //    解题（24000）→ 放宽到 ~72 秒以上。
   const estMs = Math.ceil(maxTokens / 1000) * 3000;
-  const timeoutMs = Math.min(
-    Math.max(llm.timeout, estMs),
-    Number(llm.timeoutMax) > 0 ? Number(llm.timeoutMax) : 180000,
-  );
+  const timeoutMs =
+    Number(opts.timeoutMs) > 0
+      ? Number(opts.timeoutMs) // 按次指定（压缩故事线要等它把几千字写完）
+      : Math.min(
+          Math.max(llm.timeout, estMs),
+          Number(llm.timeoutMax) > 0 ? Number(llm.timeoutMax) : 180000,
+        );
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(new Error('LLM 请求超时')), timeoutMs);
@@ -135,6 +140,9 @@ export async function* streamChat(messages, outerSignal, opts = {}) {
   //    而 finally 是 try 的**兄弟作用域**，看不到 try 块里声明的变量。
   //    （第一版就写在了 try 里面 → `ReferenceError: usage is not defined`。）
   let usage = null;
+  // ⚠️ 收尾原因，同样要声明在 try 外面 —— `length` = **被 max_tokens 截断**，
+  //    `finally` 里要拿它报警（2026-09-18 那次"日志里什么都没有"的故障就靠这个说清）
+  let finishReason = '';
 
   try {
     const res = await llmFetch(`${llm.baseURL.replace(/\/+$/, '')}/chat/completions`, {
@@ -148,6 +156,9 @@ export async function* streamChat(messages, outerSignal, opts = {}) {
         messages,
         temperature: llm.temperature,
         max_tokens: maxTokens,
+        // ⚠️ 关掉思考链（2026-09-18）：flash 的**思考链计入 completion_tokens**，
+        //    压缩故事线时它烧掉 7479/8000，正文只写了 819 字就被截断 → 整次作废。
+        ...(opts.thinking ? { thinking: opts.thinking } : {}),
         stream: true,
         // ⚠️ 加了这行，流式响应才会在**最后一块**带 `usage`
         //    （记账要用它，见 spend.js；不加的话只能估算）
@@ -202,6 +213,10 @@ export async function* streamChat(messages, outerSignal, opts = {}) {
           //    （请求里要带 `stream_options:{include_usage:true}`，见下面 body。）
           if (json.usage) usage = json.usage;
 
+          // ⚠️ 收尾原因也要抓（这一块常常没有 delta，所以要放在下面 `continue` 之前）
+          const fr = json.choices?.[0]?.finish_reason;
+          if (fr) finishReason = String(fr);
+
           const delta = json.choices?.[0]?.delta;
           if (!delta) continue;
           // 推理模型的思维链单独放在 reasoning_content 里，不发给用户。
@@ -238,6 +253,20 @@ export async function* streamChat(messages, outerSignal, opts = {}) {
     // ⚠️ **记账**（2026-09-13）：把这次的 token 用量记下来
     //    （用户要"问它今天花了多少钱 / 这个月用了多少 token"）。
     //    放在 finally：**报错也要记** —— 失败的调用同样烧 token。
+    // ⚠️⚠️ **被截断必须报警**（2026-09-18 踩的，属于"日志里什么都没有"的故障）：
+    //    压缩故事线时思考链烧掉 7479/8000 token，正文只写了 819 字就被切断，
+    //    JSON 自然不完整 → 调用方只能报「模型没给可解析的 JSON」，
+    //    而真正的线索（`finish_reason=length`）**一个字都没记**，白查半天。
+    //    注意：下面 `sawAny` 那条只在"正文**完全为空**"时报警，救不了这种情况。
+    if (finishReason === 'length') {
+      const rt = usage?.completion_tokens_details?.reasoning_tokens;
+      log.warn(
+        `LLM 输出被 max_tokens(${maxTokens}) 截断了` +
+          (rt ? `（其中思考链吃了 ${rt} token）` : '') +
+          ' —— 这一次的结果是**不完整的**（调用方多半会说"格式不对"，其实是没写完）',
+      );
+    }
+
     if (usage) {
       try {
         spend.record({ model: llm.model, usage });

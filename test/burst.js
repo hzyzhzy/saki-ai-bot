@@ -311,6 +311,17 @@ console.log('\n【8】代码层：这两处别再被改回去');
     /this\.charPlayParts\(event, decision, rawReplyText\)/.test(src),
     '★ 发送路径接了「一个字一条」的彩蛋（一行一个气泡）',
   );
+  // ★★ 2026-09-18 用户截图：她引用了小泥的「而且只要二十多」，正文回的却是 @她的那位。
+  //    根因是合并批次时拿"最后一条"当当前消息（`回复时引用它`），
+  //    而叫她的那条往往不是最后一条（她生成时别人又插话）。
+  check(
+    /const caller = \[\.\.\.items\]\.reverse\(\)\.find\(callsMe\) \?\? last/.test(src),
+    '★★ 合并批次时**优先拿"叫她的那条"当当前消息**（引用才会挂对人）',
+  );
+  check(
+    /msg\.isAt\(segs, this\.selfId\)[\s\S]{0,80}?this\.isQuoteOfMe\(e, segs\)/.test(src),
+    '★ 判据是「@她 / 引用她」两种',
+  );
   check(
     /【他在一个字一个字跟你说话】/.test(src) && /event\._charBurst/.test(src),
     '★ 提示词那段（可以一个字一行回）与 `_charBurst` 标记都还在',

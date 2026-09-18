@@ -56,9 +56,9 @@ import { log } from './log.js';
 import { streamChat } from './llm.js';
 
 /** 把流式输出收成一段文本（和 observe.js 一样） */
-async function collect(messages) {
+async function collect(messages, opts) {
   let out = '';
-  for await (const d of streamChat(messages)) out += d;
+  for await (const d of streamChat(messages, undefined, opts)) out += d;
   return out;
 }
 
@@ -328,21 +328,94 @@ export function status(groupId) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// 压缩：按重要度 + 时间把一级条目压短/合并；二级只许精简
+// 压缩：把流水账改写成**轻小说式的章节**（一章 = 一件事）；二级只许精简
 // ─────────────────────────────────────────────────────────────
+
+/**
+ * 时间戳（喂给模型的那种）。
+ *
+ * ⚠️ 2026-09-17 加的：以前喂给模型的条目**不带时间** ——
+ *    模型既认不出"同一天 / 同一件事"，更写不出章节的日期。
+ */
+function stamp(at) {
+  const d = new Date(at);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/**
+ * 章节标题里的日期 —— **由代码写，不许模型自己编**（用户 2026-09-17：
+ * 「每一章要记日期」）。正文里禁止模型写日期，这里拿这一章覆盖的
+ * **最早那条**的真实时间拼上去，所以盘上的日期一定是真的。
+ */
+function dayLabel(at) {
+  const d = new Date(at);
+  const y = d.getFullYear() === new Date().getFullYear() ? '' : `${d.getFullYear()}年`;
+  return `${y}${d.getMonth() + 1}月${d.getDate()}日`;
+}
+
+/** 一章正文最多留多少字（比单条宽一点 —— 一章要装下几件事） */
+const CHAPTER_MAX = 800;
+
+/**
+ * 压缩这一次给模型多大的输出上限。
+ *
+ * ⚠️ 2026-09-18 加的：主模型默认 `maxTokens` 是 8000，而"把 89 条流水账
+ *    改写成章节"的输出比它长 —— 一旦被 `finish_reason: length` 截断，
+ *    JSON 就不完整、整次作废（症状是「模型没给可解析的 JSON」）。
+ */
+const COMPRESS_MAX_TOKENS = 16000;
 
 export const COMPRESS_PROMPT = `你在帮一个角色扮演机器人**整理它的"故事线"**。
 
 这些是「祥子」这条世界线上已经发生过的事（她自己的生活小事 + 主线剧情）。
-你的任务：**把它整理得更省地方**，让以后生成新事件时还能当参考。
+你的任务：把流水账**改写成轻小说式的章节** —— **一章 = 一件事**。
+这样以后生成新事件时更好参考，也更省地方。
 
-⚠️⚠️ 三条铁律：
+⚠️⚠️ 五条铁律：
 
-1. **标了"锁定"的条目，一条都不许删、不许合并到别的条目里。**
+1. **标了"锁定"的条目，一条都不许删、不许合并、不许写进章节里。**
    那些是主线剧情，是世界线的骨架。你**只能**把它们写得更短
    （去掉修辞、心理描写、重复的修饰），**起因 / 转折 / 结果 / 造成的影响必须留着**。
-2. 没标锁定的（日常小事）：可以合并成一条、也可以删掉最不重要的。
-3. **不许编**。只能压缩已有的内容，不能添加任何没发生过的事。
+2. **一章 = 一件事**。把讲同一件事（或同一条线索上接连发生的几件事）的普通条目
+   合成一章。**不同的事、隔了好几天的条目不许硬凑成一章** ——
+   每一章都要经得起"这是哪一天、发生的哪一件事"。
+3. **日常章节缺东西时，可以补"合理的连接"**：
+   ✅ 为了让一章读得顺、像小说，可以补**不跟已有事实冲突**的小细节 ——
+      天气、地点、当时的心情、为什么要那样做、两段之间怎么过渡。
+   ❌ 但不许改**已经写下的事实**（谁做了什么、结果是什么），
+      不许凭空加**新事件 / 新人物 / 新结局**，不许写成夸张的戏
+      （车祸、绝症、超能力这类一律不许）。
+   ⚠️ **标了"锁定"的条目一个字都不许补** —— 那是刚跑完的主线，只许变短。
+   ⚠️ 补得越少越好：只有缺了它读不通、或者读起来像流水账时才补。
+4. **正文里不要写日期**，日期由系统按真实时间替你加，你写了反而会打架。
+5. **纯闲聊直接删掉**（放进 drop）：跟服务器、跟祥子本人、跟"这机器人在干什么"
+   都无关的闲扯（比如「今天天气怎么样」）对以后回答没用。
+   ⚠️ 判据（**别偷懒删、也别一条不删**）：**这条以后能让她的回答更准 / 更像吗？**
+      能 → 并进章节；不能 → drop。
+   ✅ 典型该留：她对群友的要求 / 偏好、她和群友之间的相处事实、群里的大事、
+      群友围着她那件事说的话。
+   ❌ 典型该删：群友在讨论"这个机器人在干什么"、测试她的功能、
+      跟她那件事无关的插科打诨。
+
+### ✍️ 文风：日式轻小说，不是小学生作文
+
+- **短句为主**，长短句交替；一句一个动作或一个念头，别一逗到底。
+- **情绪不要直说**：不许写"她非常难过 / 特别开心"——
+  用动作、细节、沉默、天气带出来（比如「她把筷子放平，那碗饭没动」）。
+- **少用程度副词**：非常、特别、十分、无比、极其 —— 不要堆。
+- **对话只写原条目里已经有的**，用「」包起来，**不许自己编新台词**。
+- 别用「然后……然后……」「接着……接着……」这种流水账连接；
+  用时间推进、场景切换来分段。
+- 🚫 **不要只罗列群友的发言**（「喵喵三三连发几条：『找到初华了吗』『…』」
+  「她又接一句」这种报菜名）—— 要写成**场景里的对话**：
+  谁在场、手上在做什么、这句话是怎么说出口的（哪怕只是转个身、停了一下）。
+- ⚠️ 但**不许因为"这种素材不好编进小说"就把它 drop 掉**：
+  日常记录是章节的**素材**，默认都要并进某一章（见铁律 5）。
+- 每章 **100~250 字**最合适：原条目的意思一个不少，但读起来像小说里的一节。
+- 🚫 作文腔一句都不要：「今天真是难忘的一天」「我明白了一个道理」
+  「心情久久不能平静」「这让我想起了」。
+- ✅ 可以有的：一个具体的动作、一个具体的物件、一句短对白、一段留白。
 
 输出**只用一个 JSON 对象**，不要解释、不要 markdown 代码围栏：
 
@@ -350,27 +423,76 @@ export const COMPRESS_PROMPT = `你在帮一个角色扮演机器人**整理它�
   "keep": [
     { "id": 12, "text": "（这条的新写法；锁定条目必须变短或不变）" }
   ],
-  "merge": [
-    { "ids": [3, 4, 5], "text": "（合并成一条的新写法）" }
+  "chapters": [
+    { "ids": [3, 4, 5], "title": "拼好饭被偷了", "text": "（这一章的正文，叙事体）" }
   ],
   "drop": [7, 8]
 }
 
+- keep：**单条**保留的普通条目 + **全部锁定条目**。
+- chapters：合并成**一章**的普通条目；ids 里**绝不许**出现锁定条目。
+  title 要短（一句话说清这一章是哪件事），正文用叙事体写。
+- drop：删掉不要的普通条目 id（**只有点名要删的才会被删**）。
+- 既没写进 keep / chapters、也没写进 drop 的普通条目，**会按原文保留** ——
+  所以想把几条并成一章，就必须写进 chapters，别指望"不提它就没了"。
+
 ⚠️ **keep 里必须包含每一个锁定条目的 id**（一个都不能漏），
 漏一个你这次的整理就整个作废。`;
 
-/** 容错地抠出 JSON（模型爱加围栏和客套话） */
-function parseJson(raw) {
+/**
+ * 把 JSON **字符串里**的裸控制字符转义掉。
+ *
+ * ⚠️⚠️ 2026-09-18 踩的：模型写长正文时会在字符串里**直接换行**，
+ *    而 JSON 不允许裸换行 → `JSON.parse` 直接失败 →
+ *    症状就是「模型没给可解析的 JSON」（明明它有好好输出）。
+ *    压缩改成章节体之后正文变长，这个错就浮出来了。
+ */
+function escapeRawControls(s) {
+  let out = '';
+  let inStr = false;
+  let esc = false;
+  for (const ch of s) {
+    if (esc) {
+      out += ch;
+      esc = false;
+      continue;
+    }
+    if (ch === '\\') {
+      out += ch;
+      esc = true;
+      continue;
+    }
+    if (ch === '"') {
+      inStr = !inStr;
+      out += ch;
+      continue;
+    }
+    if (inStr && (ch === '\n' || ch === '\r' || ch === '\t')) {
+      out += ch === '\t' ? '\\t' : '\\n';
+      continue;
+    }
+    out += ch;
+  }
+  return out;
+}
+
+/** 容错地抠出 JSON（模型爱加围栏、客套话，还爱在字符串里裸换行）
+ *  ⚠️ 导出是给测试和探针用的（`test/storyline.js` 直接盯"裸换行能不能救回来"） */
+export function parseJson(raw) {
   let t = String(raw ?? '').trim();
   t = t.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '');
   const i = t.indexOf('{');
   const j = t.lastIndexOf('}');
   if (i < 0 || j <= i) return null;
+  const body = t.slice(i, j + 1);
   try {
-    return JSON.parse(t.slice(i, j + 1));
-  } catch {
-    return null;
-  }
+    return JSON.parse(body);
+  } catch {}
+  // 第二道：把字符串里的裸换行 / 制表符转义掉再试一次
+  try {
+    return JSON.parse(escapeRawControls(body));
+  } catch {}
+  return null;
 }
 
 /**
@@ -410,24 +532,44 @@ export async function compress(opts = {}) {
     const before = [{ role: 'system', content: COMPRESS_PROMPT }];
     const rows = [...b.entries]
       .sort((a, x) => a.at - x.at)
-      .map((e) => `[id=${e.id}${e.locked ? ' 锁定' : ''} 重要度=${e.imp}] ${e.text}`)
+      .map((e) => `[id=${e.id}${e.locked ? ' 锁定' : ''} 重要度=${e.imp} 时间=${stamp(e.at)}] ${e.text}`)
       .join('\n');
     before.push({ role: 'user', content: `故事线（共 ${b.entries.length} 条）：\n\n${rows}` });
 
-    const parsed = parseJson(await collect(before));
+    // ★★ 关掉思考链（2026-09-18 查清的真因，别删）：
+    //    实测 89 条故事线时，flash 的思考链烧掉 **7479/8000** token，
+    //    正文只写了 819 字就被 `finish_reason: length` 切断 ——
+    //    JSON 不完整 → 整次作废，而症状只是"模型没给可解析的 JSON"，极难查。
+    //    关掉之后：6 秒、思考链 0 字、正文 2283 字、`finish_reason: stop`。
+    //    压缩只是"整理已有内容"，本来也不需要深推理。
+    const raw = await collect(before, {
+      maxTokens: COMPRESS_MAX_TOKENS,
+      timeoutMs: 150000,
+      thinking: { type: 'disabled' },
+    });
+    const parsed = parseJson(raw);
     if (!parsed) {
       stats.lastError = '模型没给可解析的 JSON';
-      log.warn(`[故事线] 群 ${gid} 压缩作废：${stats.lastError}`);
+      // ⚠️ 必须把**原始输出**留一点在日志里 —— 不然下次还是只能看到这一句，
+      //    根本分不清是"被截断了"还是"格式错了"（2026-09-18 就卡在这儿）。
+      log.warn(
+        `[故事线] 群 ${gid} 压缩作废：${stats.lastError}` +
+          `（原始输出 ${raw.length} 字；末尾：…${raw.slice(-200).replace(/\s+/g, ' ')}）`,
+      );
       return { ok: false, message: stats.lastError };
     }
 
     const lockedIds = b.entries.filter((e) => e.locked).map((e) => e.id);
     const keep = Array.isArray(parsed.keep) ? parsed.keep : [];
     const keepIds = new Set(keep.map((k) => Number(k?.id)).filter(Boolean));
+    // ⚠️ 章节（一章 = 一件事）。`merge` 是**老格式**，照样收 ——
+    //    当成"没有标题的章节"处理（老测试/老提示词回的内容还能用）。
+    const chapters = [
+      ...(Array.isArray(parsed.chapters) ? parsed.chapters : []),
+      ...(Array.isArray(parsed.merge) ? parsed.merge : []),
+    ];
     const mergedIds = new Set(
-      (Array.isArray(parsed.merge) ? parsed.merge : []).flatMap((m) =>
-        Array.isArray(m?.ids) ? m.ids.map(Number) : [],
-      ),
+      chapters.flatMap((m) => (Array.isArray(m?.ids) ? m.ids.map(Number) : [])),
     );
 
     // ★★ 这一条是整套东西的命门
@@ -439,42 +581,68 @@ export async function compress(opts = {}) {
     }
 
     const byId = new Map(b.entries.map((e) => [e.id, e]));
-    const next = [];
 
-    // 先按原顺序重建 keep（保住时间正序）
-    for (const e of [...b.entries].sort((a, x) => a.at - x.at)) {
-      const k = keep.find((x) => Number(x?.id) === e.id);
-      if (!k) continue;
-      let text = String(k.text ?? '').trim() || e.text;
-      // ⚠️ 锁定条目：只许变短，模型想加长就按原样留着（"最小限度精简"）
-      if (e.locked && text.length >= e.text.length) text = e.text;
-      next.push({ ...e, text: text.slice(0, 600) });
-    }
-    // 再放合并出来的新条目（归到被合并条目里最早的时间）
-    for (const m of Array.isArray(parsed.merge) ? parsed.merge : []) {
-      const ids = Array.isArray(m?.ids) ? m.ids.map(Number) : [];
-      const src = ids.map((i) => byId.get(i)).filter(Boolean);
-      if (!src.length || src.some((s) => s.locked)) continue; // 合并里不许掺锁定条目
-      const text = String(m?.text ?? '').trim();
-      if (!text) continue;
-      next.push({
-        id: b.nextId++,
-        at: Math.min(...src.map((s) => s.at)),
-        tier: 1,
-        imp: Math.max(...src.map((s) => s.imp)),
-        text: text.slice(0, 600),
-        tags: [...new Set(src.flatMap((s) => s.tags))].slice(0, 6),
-        locked: false,
-        questId: '',
-        stage: 0,
-      });
-    }
     // drop 掉模型点名要删的（锁定条目忽略）
     const dropIds = new Set(
       (Array.isArray(parsed.drop) ? parsed.drop : []).map(Number).filter(Boolean),
     );
     for (const id of dropIds) if (byId.get(id)?.locked) dropIds.delete(id);
-    const finalList = next.filter((e) => !dropIds.has(e.id));
+
+    // ★ 先挑出**真正能成章**的那些：掺了锁定 id 的、正文空的 → 整章丢掉。
+    //    ⚠️ 只有"真的成了章"的条目才算被吸收 —— 一章被整章丢掉时，
+    //       它里面那些普通条目必须**按原文留下**，不许跟着一起蒸发。
+    const okChapters = [];
+    for (const m of chapters) {
+      const ids = Array.isArray(m?.ids) ? m.ids.map(Number) : [];
+      const src = ids.map((i) => byId.get(i)).filter(Boolean);
+      if (!src.length || src.some((s) => s.locked)) continue; // 章节里不许掺锁定条目
+      const body = String(m?.text ?? '').trim();
+      if (!body) continue;
+      okChapters.push({ m, ids, src, body });
+    }
+    const absorbedIds = new Set(okChapters.flatMap((c) => c.ids));
+
+    const next = [];
+
+    // 先按原顺序重建 keep（保住时间正序）
+    for (const e of [...b.entries].sort((a, x) => a.at - x.at)) {
+      if (dropIds.has(e.id)) continue; // 模型点名要删的
+      if (absorbedIds.has(e.id)) continue; // 真的被并进某一章了
+      const k = keep.find((x) => Number(x?.id) === e.id);
+      if (!k) {
+        // ⚠️ 模型**没提到**的普通条目：按原文留着（绝不许静默丢）。
+        //    模型漏一条不该等于把那条抹掉 —— 想删就得在 drop 里点名。
+        //    （锁定条目走不到这里：上面 lostLocked 那一关早就整次作废了。）
+        if (!e.locked) next.push({ ...e });
+        continue;
+      }
+      let text = String(k.text ?? '').trim() || e.text;
+      // ⚠️ 锁定条目：只许变短，模型想加长就按原样留着（"最小限度精简"）
+      if (e.locked && text.length >= e.text.length) text = e.text;
+      next.push({ ...e, text: text.slice(0, 600) });
+    }
+    // 再放章节（一章 = 一件事；归到这一章里最早那条的时间）
+    let chaptersMade = 0;
+    for (const { m, src, body } of okChapters) {
+      const at = Math.min(...src.map((s) => s.at));
+      const title = String(m?.title ?? '').trim();
+      // ⚠️ 日期**由代码加**（模型自己写的日期不算数）；
+      //    老格式的 merge 没有 title，就只有日期没有标题。
+      const head = title ? `【${dayLabel(at)} · ${title}】` : `【${dayLabel(at)}】`;
+      next.push({
+        id: b.nextId++,
+        at,
+        tier: 1,
+        imp: Math.max(...src.map((s) => s.imp)),
+        text: `${head}${body}`.slice(0, CHAPTER_MAX),
+        tags: [...new Set(src.flatMap((s) => s.tags))].slice(0, 6),
+        locked: false,
+        questId: '',
+        stage: 0,
+      });
+      chaptersMade++;
+    }
+    const finalList = next;
 
     // 兜底再核一次（上面任何一步写错都不许写盘）
     const finalLocked = new Set(finalList.filter((e) => e.locked).map((e) => e.id));
@@ -492,7 +660,7 @@ export async function compress(opts = {}) {
     const afterChars = b.entries.reduce((s, e) => s + e.text.length, 0);
     log.info(
       `[故事线] 群 ${gid} 压缩完成：${beforeChars} → ${afterChars} 字，` +
-        `${finalList.length} 条（锁定 ${lockedIds.length} 条一条没少）`,
+        `${finalList.length} 条（写成 ${chaptersMade} 章，锁定 ${lockedIds.length} 条一条没少）`,
     );
     return {
       ok: true,
@@ -502,6 +670,7 @@ export async function compress(opts = {}) {
       kept: finalList.length,
       locked: lockedIds.length,
       dropped: dropIds.size,
+      chapters: chaptersMade,
     };
   } catch (e) {
     stats.lastError = e.message;

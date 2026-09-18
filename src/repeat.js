@@ -1,5 +1,9 @@
 /**
- * 复读机：群里一堆人刷同一句话时，她也跟着 **+1**（2026-09-17 用户要求）。
+ * 复读机：群里一堆人刷同一句话时，她也**跟着复读那句话**（2026-09-17 用户要求）。
+ *
+ * ⚠️⚠️ 「+1」说的是**群友的行为**（一群人复读同一句话），**不是让她发字面的 "+1"**。
+ *    2026-09-18 用户纠正：「不是直接发+1，而是**复述前面几个人正在复述的内容**」。
+ *    所以她发出去的是链上那句**原话** —— `shouldJoin()` 返回的 `say`。
  *
  * 用户原话：
  *   「如果群友全部变成复读机（+1）时，机器人可以在复读到**第 3 句或更多**时直接 +1，
@@ -71,7 +75,7 @@ export function reset(groupId) {
 /**
  * 记一条**群友**发的消息，返回它把这条复读链推到了第几层。
  *
- * ⚠️ 机器人自己说的话**不要喂进来** —— 她的 +1 不该被算成"复读又加了一层"。
+ * ⚠️ 机器人自己说的话**不要喂进来** —— 她自己的复读不该被算成"复读又加了一层"。
  *    （接线的地方会先按 selfId 过滤；这里也可以靠 `opts.isSelf` 兜一道。）
  *
  * @param {string|number} groupId
@@ -91,11 +95,16 @@ export function observe(groupId, text, opts = {}) {
 
   const prev = chains.get(gid);
   let next;
+  // ⚠️⚠️ `text` 是**归一化**过的（只用于比对"是不是同一句"），
+  //    `raw` 才是**要发出去的原话** —— 她跟的是那句被复读的内容，
+  //    **不是**字面的「+1」（2026-09-18 用户纠正：「不是直接发+1，
+  //    而是**复述前面几个人正在复述的内容**」）。
+  const raw = String(text).trim().slice(0, 200);
   if (prev && prev.text === t) {
-    next = { text: t, count: prev.count + 1, joined: prev.joined, at: Date.now() };
+    next = { text: t, raw, count: prev.count + 1, joined: prev.joined, at: Date.now() };
   } else {
     // 新的一句 / 被打断 → 重新起链。**打断后计数回 1，所以不可能"接着旧链接"**。
-    next = { text: t, count: 1, joined: false, at: Date.now() };
+    next = { text: t, raw, count: 1, joined: false, at: Date.now() };
   }
 
   // 简单限容：超了就丢最早的那批（Map 保序）
@@ -124,7 +133,7 @@ export function markJoined(groupId) {
 }
 
 /**
- * 第 `count` 句时她跟一句 "+1" 的概率。
+ * 第 `count` 句时她**跟着复读**的概率。
  *
  * 用户的规矩：**第三句最大，然后依次减小**。
  * 默认表 `[0.6, 0.4, 0.25, 0.15]`（第 3 / 4 / 5 / 6+ 句），可以在 config 里覆盖。
@@ -142,20 +151,28 @@ export function joinChance(count, probs) {
 /**
  * 该不该接这条复读 —— 把三件事一起判了，接线的地方只需要看 `.join`。
  *
- * @returns {{count:number, chance:number, join:boolean, why:string}}
+ * ⚠️ 返回值里的 **`say` 是要跟着复读的那句话本身**（`raw`），
+ *    **不是字面 "+1"** —— 2026-09-18 用户纠正过：「不是直接发+1，
+ *    而是**复述前面几个人正在复述的内容**」。接线的地方直接发 `say`。
+ *
+ * @returns {{count:number, chance:number, join:boolean, why:string, say:string}}
  */
 export function shouldJoin(groupId, opts = {}) {
   const count = current(groupId);
-  if (opts.enable === false) return { count, chance: 0, join: false, why: '功能关了' };
-  if (count < 3) return { count, chance: 0, join: false, why: `才第 ${count} 句` };
-  if (hasJoined(groupId)) return { count, chance: 0, join: false, why: '这条链已经接过一次' };
+  const say = chains.get(key(groupId))?.raw ?? '';
+  const no = (why) => ({ count, chance: 0, join: false, why, say });
+  if (opts.enable === false) return no('功能关了');
+  if (count < 3) return no(`才第 ${count} 句`);
+  if (hasJoined(groupId)) return no('这条链已经接过一次');
   // 冷却：同一个群刚接过就先别接（哪怕是另一条链）
   const cd = Number(opts.cooldownMs) || 0;
   if (cd > 0 && Date.now() - (lastJoinAt.get(key(groupId)) ?? 0) < cd) {
-    return { count, chance: 0, join: false, why: '这个群刚接过，冷却中' };
+    return no('这个群刚接过，冷却中');
   }
   const chance = joinChance(count, opts.probs);
-  return { count, chance, join: chance > 0, why: `第 ${count} 句，概率 ${chance}` };
+  // ⚠️ 没有可复述的原话就别发（免得发一条空消息出去）
+  if (!say) return no('这条链没有可复述的原话');
+  return { count, chance, join: chance > 0, why: `第 ${count} 句，概率 ${chance}`, say };
 }
 
 /**

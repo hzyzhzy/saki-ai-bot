@@ -560,6 +560,203 @@ console.log('\n【18】★★ 结局结算：只给参与过的人加，二级�
   check(res.applied[0].ok === false, '失败的那条记了 ok:false');
 }
 
+console.log('\n【18b】★ 结局播报的文案（2026-09-17 用户要求）');
+{
+  // 用户原话：「加一个二级剧情结局展示，**跟在机器人发的剧情最后一句话之后
+  //   一秒钟发送**，内容首先展示本次剧情结束，这次是好/坏结局，
+  //   哪些人加/减了多少好感度」。
+  const nameOf = (uid) => ({ u1: '群友1', u2: '群友2' })[uid] ?? uid;
+
+  // ① 好结局：第一行是"本次剧情结束 + 好结局"，然后逐人写前后分数
+  const good = {
+    ending: 'good',
+    delta: 3,
+    applied: [
+      { userId: 'u1', from: 62, to: 65, got: 3 },
+      { userId: 'u2', from: 50, to: 53, got: 3 },
+    ],
+  };
+  const t = quest.endingReport(good, nameOf);
+  check(t.startsWith('【本次剧情结束'), '★ 第一行就是「本次剧情结束」（用户要求"首先展示"）');
+  check(/好结局/.test(t), '★ 写了是好结局');
+  check(t.includes('群友1') && t.includes('群友2'), '★ 列出参与的人（用群名片名字，不是 QQ 号）');
+  check(/62 → 65/.test(t) && /50 → 53/.test(t), '★ 写了每个人加之前 → 加之后');
+  check(!/@/.test(t), '⚠️ 不 @ 任何人（@ 会弹通知，那道口子只留给"余额见底催充值"）');
+
+  // ② 坏结局：负号要出来
+  const bad = quest.endingReport(
+    { ending: 'bad', delta: -2, applied: [{ userId: 'u1', from: 62, to: 60, got: -2 }] },
+    nameOf,
+  );
+  check(/坏结局/.test(bad) && /好感度 -2/.test(bad), '★ 坏结局写 −2（不是 +）');
+  check(/62 → 60/.test(bad), '扣完的分数也对');
+
+  // ③ 数字没动 ≠ 没参与，是**今天的加分额度用完了**（减分不占额度，所以只出现在好结局）
+  const capped = quest.endingReport(
+    { ending: 'good', delta: 3, applied: [{ userId: 'u1', from: 50, to: 50, got: 0 }] },
+    nameOf,
+  );
+  check(/没变/.test(capped) && /额度/.test(capped), '★★ 加了但没动 → 说明是额度用完了（别让人以为漏算了他）');
+
+  // ④ 边界：没人参与就没什么可播报的
+  check(quest.endingReport({ ending: 'good', delta: 3, applied: [] }, nameOf) === '', '没人参与 → 返回空串（不白发一条）');
+  check(quest.endingReport(null, nameOf) === '', 'null 安全');
+  check(quest.endingReport({ ending: 'bad', delta: -2 }, nameOf) === '', '没有 applied 字段也不炸');
+
+  // ⑤ 拿不到前后值（`adjust` 抛了 / 好感度功能关着）也要把名字列出来
+  const broken = quest.endingReport(
+    { ending: 'good', delta: 3, applied: [{ userId: 'u1', from: null, to: null, ok: false }] },
+    nameOf,
+  );
+  check(broken.includes('群友1'), '★ 结算失败也列名字（不然群友以为没算他）');
+
+  // ⑥ 延迟是常量，且正好一秒
+  check(quest.ENDING_REPORT_DELAY_MS === 1000, `★ 延迟 1000ms（当前 ${quest.ENDING_REPORT_DELAY_MS}）`);
+
+  // ⑦ ★★ 结算结果必须带**实际**变化 —— 原来取 `r.value`，而 `affinity.adjust`
+  //    返回的是 `{ ok, from, to, applied }`，**根本没有 value**，所以一直是 null。
+  const real = quest.settle({ groupId: '', cast: ['u1'] }, 'good', () => ({
+    ok: true,
+    from: 50,
+    to: 53,
+    applied: 3,
+  }));
+  check(
+    real.applied[0].from === 50 && real.applied[0].to === 53 && real.applied[0].got === 3,
+    '★★ applied 带上 from/to/got（修掉"取 .value 永远是 null"那个坑）',
+  );
+}
+
+console.log('\n【18c】★ 群里热情 → 自动加演 + 缩短等待（2026-09-17 用户要求）');
+{
+  // 用户原话：「如果出现**群友非常热情**的情况，**段数太少的情况下可以自动增加 2-3 段**，
+  //   然后**缩短等待推下一段时间**」。
+  //
+  // 触发场景是实测的（2026-09-17 晚，群 200000006）：模型那条只计划了 **2 段**，
+  // 而群里已经回了 **12 条** —— 按 2 段就收掉太可惜，而且群友正聊得起劲。
+
+  // ① 热度怎么算：数条数，也数人
+  const w1 = quest.warmthOf([{ userId: 'u1' }, { userId: 'u1' }, { userId: 'u2' }, { userId: 'u1' }]);
+  check(w1.count === 4 && w1.people === 2, `★ 条数和人数都数（${w1.count} 条 / ${w1.people} 人）`);
+  check(quest.warmthOf([]).count === 0, '空列表安全');
+  check(quest.warmthOf(null).count === 0, 'null 安全');
+  // ⚠️ 只看条数、**不要求人多** —— 实际群里常常是"一个人特别起劲"连着引用、接话
+  //    （用户截图那次就是「喵喵三三」一个人连发好几条），要求 ≥2 人会漏掉最典型的热情
+  check(
+    quest.warmthOf([{ userId: 'u1' }, { userId: 'u1' }, { userId: 'u1' }, { userId: 'u1' }]).count >= 4,
+    '★ 一个人连回 4 条也算热情（不强制要求多个人）',
+  );
+
+  // ② 加演之后，"该收了"那道坎要跟着往后挪
+  //    不挪的话：`endPressure` 一边催收、`warmHint` 一边叫继续 → 模型写出精神分裂的段落
+  check(/该收了/.test(quest.endPressure(3, 3, 0)), '第 3 段（没加演）时提示该收了');
+  check(quest.endPressure(3, 3, 3) === '', '★ 加演 3 段后，第 3 段**不再催收**（坎挪到第 6 段）');
+  check(/该收了/.test(quest.endPressure(6, 3, 3)), '到第 6 段（= 3 + 加演 3）时才又开始催');
+
+  // ③ 热情时生成前就要告诉它别收（比事后把 done 按回去管用）
+  const hint = quest.warmHint(
+    { warmth: { warm: true, count: 6, people: 2 }, extraStages: 0, plannedStages: 5, stageIndex: 2 },
+    3,
+  );
+  check(/先别收/.test(hint), '★ 热情时提示"这一段先别收"');
+  check(/6 条回应/.test(hint), '提示里带了实际的热度（不是空泛地说"热闹"）');
+  check(/别为了长而长/.test(hint), '⚠️ 同时提醒别硬凑（不然会注水）');
+  check(quest.warmHint({ warmth: { warm: false, count: 1, people: 1 } }) === '', '不热情 → 一个字都不加');
+  check(quest.warmHint({}) === '', '没有热度数据也不炸');
+  check(
+    /加演了 1 段/.test(
+      quest.warmHint(
+        { warmth: { warm: true, count: 5, people: 2 }, extraStages: 1, plannedStages: 5, stageIndex: 3 },
+        4,
+      ),
+    ),
+    '已经加演过的话，提示会说清加到第几段',
+  );
+  // ★★ 已经超出计划段数时**必须闭嘴**（2026-09-17 HZY 截图：「已经 6/5 了，什么时候发剧情总结」）
+  //    它跟 `endPressure` 的"这一段必须是最后一段"打架，模型会听"别收" ⇒ 永远不收尾、
+  //    结局播报也永远发不出来。
+  check(
+    quest.warmHint(
+      { warmth: { warm: true, count: 9, people: 3 }, extraStages: 3, plannedStages: 5, stageIndex: 5 },
+      6,
+    ) === '',
+    '★★ 超出计划段数 → 不再叫它"先别收"（把收尾权交回 endPressure）',
+  );
+  check(
+    /先别收/.test(
+      quest.warmHint({ warmth: { warm: true, count: 9, people: 3 }, plannedStages: 5, stageIndex: 4 }, 5),
+    ),
+    '刚好第 5 段（= 计划）时还能劝一次别收',
+  );
+
+  // ④ 上限：不能因为热情就无限拖
+  check(quest.WARM_EXTRA_STAGES === 3, `★ 最多加演 3 段（当前 ${quest.WARM_EXTRA_STAGES}）`);
+  check(quest.WARM_COUNT === 4, `默认 4 条算热情（当前 ${quest.WARM_COUNT}）`);
+
+  // ⑤ ★★ 计划段数要**真的涨**（用户专门澄清过：「我是说计划段数」）
+  //    第一版只在内部把"该收了"的坎往后挪、没动 plannedStages —— 界面上永远显示"计划 2 段"，
+  //    用户以为没生效。
+  const qa = { plannedStages: 2, warmth: { warm: true, count: 12, people: 3 } };
+  check(quest.bumpPlanned(qa) === 3 && qa.plannedStages === 5, `★ 热情 → 计划段数 2 → 5（+3），实际 ${qa.plannedStages}`);
+  check(quest.bumpPlanned(qa) === 0 && qa.plannedStages === 5, '★ 只加一次（否则每推进一段都 +3，永远收不了）');
+  const qb = { plannedStages: 9, warmth: { warm: true } };
+  check(quest.bumpPlanned(qb) === 1 && qb.plannedStages === 10, `涨不过 10 段硬上限（${qb.plannedStages}）`);
+  check(quest.bumpPlanned({ plannedStages: 2, warmth: { warm: false } }) === 0, '不热情 → 一段都不加');
+  check(quest.bumpPlanned({}) === 0, '没有剧情对象也不炸');
+
+  // ⑥ 意外转折的写作要求（2026-09-17 用户要求：「可以加点意外转折」）
+  const src = readFileSync(join(ROOT, 'src', 'quest.js'), 'utf8');
+  check(/意外转折/.test(src), '★ 提示词里加了"意外转折"这条');
+  check(/别为了转折而转折/.test(src), '★ 同时提醒别硬凑（不然就是注水凑字数）');
+  check(/不要超自然/.test(src), '⚠️ 转折必须落在现实里（不超自然、不车祸绝症）');
+}
+
+console.log('\n【18d】★ 剧情要进她的聊天提示词（2026-09-17 修）');
+{
+  // HZY 截图：「@saki 找到药了吗」→ 她答「什么药啊，你哪不舒服了」——
+  // 而她上一段刚在群里说过"这会儿我在给她翻药箱"。
+  //
+  // 根因：二级剧情的接线一直是**单向**的（群友的话 → 记进剧情），
+  // **从来没有反过来把剧情注入她的聊天提示词**。重启后 `recent` 一空更明显。
+  check(typeof quest.briefFor === 'function', '★ 有 briefFor()（给聊天用的剧情摘要）');
+  check(quest.briefFor('这个群没有剧情') === '', '没有剧情 → 返回空串（一个字都不注入）');
+  // ⚠️ 这里**不能**断言"一定是空串"：不传群号时它会去查"没指定群"那个桶
+  //    （`current('')`），而套件里造过的剧情可能正好落在那里（第一版就是这么挂的）。
+  //    要断言的是**安全**（不抛错、返回字符串）。
+  check(typeof quest.briefFor() === 'string', '不传群号也安全（返回字符串，不抛错）');
+
+  const botSrc2 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  check(/quest\.briefFor\(event\.group_id\)/.test(botSrc2), '★★ buildSystemPrompt 里真的注入了（按群）');
+  check(
+    /event\?\.message_type === 'group'/.test(botSrc2),
+    '★ 只在群里注入（私聊没有"群剧情"这回事）',
+  );
+  check(/别主动把后面的发展抖出来/.test(botSrc2) === false, '（提示词文案在 quest.js 里，不在 bot.js）');
+  check(/别主动把后面的发展抖出来/.test(readFileSync(join(ROOT, 'src', 'quest.js'), 'utf8')),
+    '★ 摘要里提醒了"别主动抖后面的发展"（她自己也不知道会怎么走）');
+  // ★★ 摘要必须带时间、并说清"那是过去的事"（2026-09-17 HZY 报的：
+  //    「剧情出现去吃饭这种时间事件，祥子会**一直处于要去吃饭的状态**，
+  //      而且有人叫她去吃饭她**可能又会一起吃**」）
+  const qs2 = readFileSync(join(ROOT, 'src', 'quest.js'), 'utf8');
+  check(/不是你现在的状态/.test(qs2), '★★ 摘要里说清了"那是过去的事，不是你现在的状态"');
+  check(/不等于你现在还要去吃饭/.test(qs2), '★ 而且拿"去吃饭"当反例点了名');
+  check(/ago\(s\.at\)/.test(qs2), '★ 每一段都带相对时间（几分钟前 / 几小时前）');
+
+  // ★ 「等下一段」要能分开"真在推剧情"和"随口一句"（2026-09-17 用户要求）
+  //   原来四条全标"等下一段"，里面混着"我感觉和真人聊天好累""包的"这种闲聊。
+  const qSrc2 = readFileSync(join(ROOT, 'src', 'quest.js'), 'utf8');
+  check(/why: String\(why/.test(qSrc2), '★ noteReply 把判据 why 存下来了');
+  check(/why: x\.why \?\? ''/.test(qSrc2), '★ status() 把 why 给了界面');
+  check(/verdict\.why/.test(botSrc2), '★ bot.js 收集群友发言时把判据一起传进去');
+  const html = readFileSync(join(ROOT, 'src', 'webui.html'), 'utf8');
+  // ⚠️ 界面**不再分第二类** —— 能进 pending 的都已经过了 isPlotReply 那道筛，
+  //    再分一类等于自己又加判据（HZY 指出过这一点）。现在只标"它是怎么进来的"。
+  // ⚠️ 用 `>顺口说的<` 精确匹配**标签**本身 —— 注释里提到这四个字不算（第一版就是这么假失败的）
+  check(!/>顺口说的</.test(html), '★ 标签里不再有"顺口说的"这一类（那等于自己又加判据）');
+  check(/在问剧情/.test(html) && /给了建议/.test(html) && /叫了她/.test(html),
+    '★ 括号里写清了是靠哪条判据进来的（叫了她 / 给了建议 / 在问剧情…）');
+}
+
 console.log('\n【19】★ 接线与发送：源码层面确认那几根线都接上了');
 {
   const idx = readFileSync(join(ROOT, 'src', 'index.js'), 'utf8');
@@ -569,6 +766,27 @@ console.log('\n【19】★ 接线与发送：源码层面确认那几根线都�
   check(/quest\.coldStop\(Date\.now\(\), gid\)/.test(idx), '★ 冷场先判（一个人都没回就收）');
   check(/quest\.rememberHerMsg\(/.test(idx), '★ 发出后记下 message_id（"回复她"要用）');
   check(/quest\.settle\(/.test(idx), '★ 结局会结算好感度');
+  check(/quest\.endingReport\(/.test(idx), '★ 自动跑完会播报结局（2026-09-17 用户要的"结局展示"）');
+  check(/quest\.ENDING_REPORT_DELAY_MS/.test(idx), '★ 播报是隔 1 秒发的（"最后一句话之后一秒钟"）');
+  // ⚠️ 2026-09-17：热情 → 加演 + 缩短等待。这几根线都在 src/quest.js 里，单独读它断言。
+  const questSrc = readFileSync(join(ROOT, 'src', 'quest.js'), 'utf8');
+  check(/q\.warmth\?\.warm === true/.test(questSrc), '★★ due() 热情时缩短等待（读的是上一段的热度）');
+  check(/warmWaitMs/.test(questSrc), '★ 缩短后的等待可配（warmWaitMs，默认 waitMs 的 1/3）');
+  check(/used < WARM_EXTRA_STAGES/.test(questSrc), '★★ 加演有上限（不会因为热情一直拖下去）');
+  check(/next < MAX_STAGES/.test(questSrc), '★★ 加演也不许突破 10 段硬上限');
+  // ★★★ 压住 `done` 的兜底**必须跟 `warmHint` 用同一条边界** ——
+  //    2026-09-17 只改了提示词那一半，模型给的 done 被这行按了回去，
+  //    剧情卡在 7/5 永远收不了尾、结局播报也发不出来（HZY 报的）。
+  check(/next <= plan/.test(questSrc), '★★★ 压住 done 的兜底也受计划段数约束（不能只改提示词那一半）');
+  // ★ 题材要够分量（2026-09-17 用户：「剧情还可以再爆点，毕竟几率很小」）
+  check(/题材要够分量/.test(questSrc), '★ 提示词里要求剧情题材够分量（一周才三次，别写日常琐事）');
+  check(/别写成日常琐事/.test(questSrc), '★ 并举例排除了买菜 / 做饭那类（那些留给一级事件）');
+  check(/也别写成卖惨/.test(questSrc), '⚠️ 但"爆"≠卖惨 —— 她的基调是遇到事硬扛（这条别丢）');
+  check(/extraStages/.test(questSrc), '★ 加演了几段记在剧情状态里（落盘、界面能看）');
+  check(
+    /quest\.endingReport\(/.test(readFileSync(join(ROOT, 'src', 'webui.js'), 'utf8')),
+    '★ 面板手动推进也会播报（群友看到的是同一条，不是只在面板里）',
+  );
   check(/questRollFromLife/.test(idx), '★ 一级事件的槽位会先掷骰（一成走二级）');
   check(
     // ⚠️ 2026-09-16 分群改造：tick 变成**挨个群问**（`life.plan(..., g)`），

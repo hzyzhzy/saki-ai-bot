@@ -233,6 +233,59 @@ export function clausesOf(text) {
   return out;
 }
 
+/**
+ * 已经确认过的「口癖词」（2026-09-17 加）。
+ *
+ * ⚠️ 只放**用户亲自报过的**。判断标准不是"这个词不好"，而是
+ *    "**它在她的话里出现得太顺嘴了**" —— 同一个语气词反复用，听的人一眼就记住。
+ *    所以往这里加词之前，先确认真实聊天里确实高频，别凭感觉塞。
+ */
+const DEFAULT_WORDS = ['倒是'];
+
+/** 口癖词表：`config.yml` 的 `tic.words` 优先，否则用默认表 */
+function ticWords() {
+  const w = cfg().words;
+  if (Array.isArray(w)) {
+    const list = w.map((x) => String(x ?? '').trim()).filter(Boolean);
+    if (list.length) return list;
+  }
+  return DEFAULT_WORDS;
+}
+
+/**
+ * 取一句话里命中的**口癖词**（第三层，2026-09-17 加）。
+ *
+ * ## 为什么还要这一层
+ *
+ * 用户原话：「先把这个 **倒是** 这个词频率修一下，感觉很高」。
+ * 实例：「还没呢，等交完班再说。**你倒是**先吃上了（」
+ *
+ * 「倒是」正好卡在前两层机制的缝里：
+ *   · 它在**句中** → `headOf` 只看开头 4 个字，抓不到；
+ *   · 它**每条回复里只出现一次** → `clausesOf` 要求"同一回复里跨 ≥2 句重复"，也抓不到。
+ *
+ * 前两层管的是"**每次都这么开口**"和"**一句话里反复说同一个词**"；
+ * 这一类是"**每条只说一次，但好多条都在说**" ——
+ * 它不是"重复得太密"，是"**用得太多**"。
+ *
+ * ## 为什么不自动统计所有词
+ *
+ * 试过会更糟：中文里两字常用词太多（「什么」「这个」「就是」「一个」…），
+ * 自动统计必然把它们一起算成口癖，然后提示词里塞一堆"别说什么什么"，
+ * 那会把她的话拧成另一种怪。所以这里用**小词表**。
+ *
+ * @param {string} text
+ * @returns {string[]} 命中的词（去重、保持词表顺序）
+ */
+export function wordsOf(text) {
+  const t = String(text ?? '');
+  if (!t) return [];
+  const out = [];
+  for (const w of ticWords()) {
+    if (w && t.includes(w) && !out.includes(w)) out.push(w);
+  }
+  return out;
+}
 
 /**
  * 记一句机器人说过的话。
@@ -263,6 +316,9 @@ export function note(groupId, text) {
   // ② 句中重复的短串（2026-09-14 加，管「哪看到的」这种）
   for (const g of clausesOf(text)) fresh.push({ g, kind: 'clause', at: now });
 
+  // ③ 句中口癖词（2026-09-17 加，管「倒是」这种"每条只说一次、但好多条都在说"的）
+  for (const g of wordsOf(text)) fresh.push({ g, kind: 'word', at: now });
+
   if (!fresh.length) return;
 
   const list = store.get(key) ?? [];
@@ -273,6 +329,32 @@ export function note(groupId, text) {
   );
   save();
 }
+
+/**
+ * 每一类口癖各自的阈值。
+ *
+ * ⚠️ 口癖词（`word`）默认 **2 次**，比另外两类低一档：
+ *    它本来就"每条回复最多出现一次"，凑到 3 次要好几条回复，
+ *    等提醒出来的时候用户早就记住了（他的原话就是"感觉很高"）。
+ *    代价可控 —— 提醒只是往提示词里加一句"换个说法"，不是禁用某个词。
+ */
+const limitOf = (kind) => {
+  if (kind === 'word') {
+    const v = Number(cfg().wordLimit);
+    return Number.isFinite(v) && v > 0 ? v : 2;
+  }
+  return repeatLimit();
+};
+
+/**
+ * 平票时先提哪一条。
+ *
+ * ⚠️ 2026-09-14 起 `clause` 优先于 `head`：同一个说法可以同时是开头和句中
+ *    （用户报的「哪看来的」正是这样），句中那条对应的提示更准。
+ * ⚠️ 2026-09-17 起 `word` 排最前：那是**用户亲自点过名**的词，
+ *    比自动发现的更该先改。
+ */
+const KIND_RANK = { word: 2, clause: 1, head: 0 };
 
 /**
  * 有没有哪个词/开场白最近说得太多了？
@@ -296,7 +378,7 @@ export function repeated(groupId) {
 
   let worst = null;
   for (const e of tally.values()) {
-    if (e.count < repeatLimit()) continue;
+    if (e.count < limitOf(e.kind)) continue;
     if (!worst) {
       worst = { ...e };
       continue;
@@ -311,7 +393,7 @@ export function repeated(groupId) {
     //    它对应的提示是「这个说法别再用」，而 head 那条说的是
     //    「别用这个开头」——后者会漏掉"句中又说了两次"这个事实。
     if (e.count > worst.count) worst = { ...e };
-    else if (e.count === worst.count && e.kind === 'clause' && worst.kind === 'head') {
+    else if (e.count === worst.count && KIND_RANK[e.kind] > KIND_RANK[worst.kind]) {
       worst = { ...e };
     }
   }
@@ -334,21 +416,30 @@ export function ticHint(groupId) {
     .filter((x) => x.g === r.g)
     .map((x) => `「${x.g}」`);
 
+  const isWord = r.kind === 'word';
   const isClause = r.kind === 'clause';
+  const title = isWord
+    ? '## ⚠️ 你最近老用同一个词（换个说法）'
+    : isClause
+      ? '## ⚠️ 你最近老用同一句措辞（换个说法）'
+      : '## ⚠️ 你最近老这么开口（换个说法）';
   return [
-    isClause ? '## ⚠️ 你最近老用同一句措辞（换个说法）' : '## ⚠️ 你最近老这么开口（换个说法）',
+    title,
     '',
     `你最近 **${r.count} 次**都用了这个说法：${samples.slice(0, 4).join('、')}`,
     '',
-    '**这就是口癖** —— 同一个人反复用同一句话，听着特别假，也没意思。',
-    '用户的原话是：**「不是说完全不能说，而是遣词造句要有一点变化」** ——',
-    '意思是：**这个意思你可以表达，但每次换个说法**。',
+    '**这就是口癖** —— 不是不能说，是**说得太顺嘴了**：同一个词、同一种说法反复出现，',
+    '听的人一眼就记住。用户的原话是：',
+    '**「不是说完全不能说，而是遣词造句要有一点变化，要不然我不会记忆这么深刻」**。',
     '',
-    isClause
-      ? '- 🚫 这次**别再用这个说法**了 —— 换个词、换个句式都行'
-      : '- 🚫 这次**别再用这个开头**了（换个说法，或者直接说事）',
-    '- ✅ 最好的做法是**开口就正面回答**，把话说明白',
-    '- ⚠️ 别只是"换一句同样味道的套话" —— 换掉的是**那个姿态**，不是那几个字',
+    isWord
+      ? `- 🚫 **从现在起别再出现「${r.g}」这个字** —— 这个语气照样要表达，换成别的词或换个句式（⚠️ 这是用户专门点过名的字，再冒出来就是口癖，下面几条回复都算）`
+      : isClause
+        ? '- 🚫 这次**别再用这个说法**了 —— 换个词、换个句式都行'
+        : '- 🚫 这次**别再用这个开头**了（换个说法，或者直接说事）',
+    '- ✅ 最好的做法是**直接说事 / 正面回答**，把话说明白',
+    '- ⚠️ 别换成另一个同样顺嘴的语气词顶上，也别只"换一句同样味道的套话" ——',
+    '  要换掉的是**那个姿态**，不是那几个字',
   ].join('\n');
 }
 
@@ -360,6 +451,8 @@ export function status(groupId) {
     records: [...store.values()].reduce((n, l) => n + l.length, 0),
     windowMs: windowMs(),
     repeatLimit: repeatLimit(),
+    wordLimit: limitOf('word'),
+    words: ticWords(),
     repeated: groupId === undefined ? null : repeated(groupId),
     recent: list.slice(-8).map((x) => x.g),
   };

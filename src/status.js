@@ -215,10 +215,18 @@ function selfPing(addr, port, timeoutMs = 12000) {
       try {
         j = JSON.parse(jsonStr);
       } catch {
+        // ⚠️ 2026-09-17 临时诊断（查 cs 那条"玩家名单"偶发）
+        log.debug(
+          `[MC] JSON 解析失败 buf=${view.length} 头=${head.size}+${head.value} 串长=${jsonStr.length} 前 60 字=${jsonStr.slice(0, 60)}`,
+        );
         // 解不出来就别当成本次的结果 —— 丢掉这包，等下一包（别静默死等）
         buf = view.subarray(head.size + head.value);
         return;
       }
+      // ⚠️ 2026-09-17 临时诊断：看这次到底拿到没有名单
+      log.debug(
+        `[MC] 解析成功 buf=${view.length} 串长=${jsonStr.length} 在线=${j.players?.online}/${j.players?.max} 名单=${(j.players?.sample ?? []).length} 人`,
+      );
       done(resolve, {
         online: true,
         version: j.version?.name ?? '',

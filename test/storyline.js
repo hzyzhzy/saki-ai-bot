@@ -254,6 +254,126 @@ console.log('\n【9】★ compress 提示词里必须写死"锁定条目不许�
   );
 }
 
+console.log('\n【10】★ 压缩成"轻小说章节"：**一章 = 一件事**，日期由代码加（模型编的不算）');
+{
+  reset();
+  const k = sl.note({ tier: 2, text: '主线：她在雨里宣布退队' });
+  const ids = [];
+  for (let i = 0; i < 10; i++) ids.push(sl.note({ tier: 1, text: `琐事 ${i}` }).id);
+  const ats = sl.recent(50).filter((e) => !e.locked).map((e) => e.at);
+  nextReply = JSON.stringify({
+    keep: [{ id: k.id, text: k.text }],
+    chapters: [
+      { ids: ids.slice(0, 4), title: '拼好饭被偷了', text: '中午的饭被人拎走了，她饿了一下午。' },
+      // ⚠️ 想把锁定条目偷偷并进章节 → 整章必须被丢（不许绕过铁律）
+      { ids: [k.id, ids[4]], title: '偷塞主线', text: '想把她那条主线吞掉' },
+    ],
+    drop: ids.slice(8),
+  });
+  const r = await sl.compress({ force: true });
+  check(r.ok === true, '压缩通过', JSON.stringify(r));
+  check(r.chapters === 1, '★ 只成了 1 章（掺了锁定 id 的那章被丢掉）', `chapters=${r.chapters}`);
+
+  const today = `${new Date().getMonth() + 1}月${new Date().getDate()}日`;
+  const ch = sl.recent(50).find((e) => /拼好饭被偷了/.test(e.text));
+  check(!!ch, '★ 章节写进了故事线');
+  check(
+    String(ch?.text) === `【${today} · 拼好饭被偷了】中午的饭被人拎走了，她饿了一下午。`,
+    '★★ 标题 = 【真实日期 · 标题】（日期是代码按条目时间拼的，不是模型写的）',
+    String(ch?.text),
+  );
+  check(ch?.tier === 1 && ch?.locked === false, '章节是普通条目（不是锁定的）');
+  check(
+    Number(ch?.at) === Math.min(...ats.slice(0, 4)),
+    '★ 章节的时间 = 它覆盖的最早那条的时间（谁也没编）',
+  );
+  check(!sl.recent(50).some((e) => /琐事 0/.test(e.text)), '被并进章节的 4 条不再单条出现');
+  check(!sl.recent(50).some((e) => /琐事 8/.test(e.text)), 'drop 点名的被删了');
+  check(
+    sl.recent(50).some((e) => /琐事 4/.test(e.text)),
+    '★★ 模型**没提到**的普通条目按原文留着（漏一条 ≠ 抹掉一条）',
+  );
+  check(
+    sl.recent(50).some((e) => e.id === k.id && e.locked && /退队/.test(e.text)),
+    '★★ 锁定条目还在原地（没被吸进章节、也没被改写）',
+  );
+  check(!/想把她那条主线吞掉/.test(JSON.stringify(sl.recent(50))), '那章"偷塞主线"一个字都没落下');
+}
+
+console.log('\n【11】★ 提示词：章节体的规矩都写死了');
+{
+  check(/一章 = 一件事/.test(sl.COMPRESS_PROMPT), '「一章 = 一件事」写进了提示词');
+  check(
+    /可以补/.test(sl.COMPRESS_PROMPT),
+    '★ 允许为观感补"合理的连接"（2026-09-17 用户放宽：缺东西影响观感就可以补）',
+  );
+  check(
+    /一个字都不许补/.test(sl.COMPRESS_PROMPT),
+    '★★ 但**锁定条目一个字都不许补**（主线只许变短 —— 补料会污染骨架）',
+  );
+  check(
+    /不许凭空加/.test(sl.COMPRESS_PROMPT),
+    '★ 补的边界写死了：不许改已成事实、不许加新事件 / 新人物 / 新结局',
+  );
+  check(
+    /正文里不要写日期/.test(sl.COMPRESS_PROMPT),
+    '★★ 禁止模型自己写日期（日期由代码加 —— 这就是"日期不许编"的落地）',
+  );
+  check(/chapters/.test(sl.COMPRESS_PROMPT), '输出格式里给了 chapters');
+  check(
+    /时间=/.test(prompts.at(-1)?.user ?? ''),
+    '★ 喂给模型的条目**带上了时间**（不然它认不出同一件事、也写不出章节）',
+  );
+  check(
+    /日式轻小说/.test(sl.COMPRESS_PROMPT),
+    '★ 要求日式轻小说的文风（用户：「不要压得像小学生作文」）',
+  );
+  check(/不要只罗列群友的发言/.test(sl.COMPRESS_PROMPT), '★ 不许「某某连发几条」式报菜名');
+  check(
+    /能让她的回答更准 \/ 更像吗/.test(sl.COMPRESS_PROMPT),
+    '★★ 给了"该删还是该留"的判据（用户原话：能让她的回答更准 / 更像吗）',
+  );
+  check(
+    /不许自己编新台词/.test(sl.COMPRESS_PROMPT),
+    '对话只许写原有的（编出来的台词会被当成她真说过）',
+  );
+}
+
+console.log('\n【12】★★ JSON 容错：裸换行 / 围栏 / 客套话，都要能解析');
+{
+  // ① 字符串里**裸换行** —— 模型写长正文时最爱犯的错（JSON 不允许）
+  const rawNl =
+    '{\n' +
+    '  "keep": [],\n' +
+    '  "chapters": [\n' +
+    '    { "ids": [1, 2], "title": "标题", "text": "第一行\n第二行\n第三行" }\n' +
+    '  ],\n' +
+    '  "drop": []\n' +
+    '}';
+  let stdOk = true;
+  try {
+    JSON.parse(rawNl);
+  } catch {
+    stdOk = false;
+  }
+  check(stdOk === false, '（前置）这份用标准 JSON.parse 是**解不开**的');
+  const a = sl.parseJson(rawNl);
+  check(!!a, '★ 裸换行的 JSON 被救回来了');
+  const esc = String(a?.chapters?.[0]?.text ?? '');
+  check(/第二行/.test(esc), '★ 三行正文一个字没丢');
+  check(esc.split('\n').length === 3, '★ 换行还在（被转义保留，不是被吃掉）', JSON.stringify(esc));
+
+  // ② 围栏 + 前后客套话（模型的老毛病）
+  const wrapped =
+    '好的，我整理好了：\n```json\n{ "keep": [{ "id": 3, "text": "x" }], "chapters": [], "drop": [] }\n```\n希望有帮助！';
+  check(sl.parseJson(wrapped)?.keep?.[0]?.id === 3, '★ 围栏 + 前后客套话也抠得出来');
+
+  // ③ 真坏了就返回 null（不许返回半个对象骗人）
+  check(sl.parseJson('这根本不是 JSON') === null, '★ 完全不是 JSON → null（不抛异常）');
+  check(sl.parseJson('') === null, '★ 空串 → null');
+  check(sl.parseJson('{"keep": [}') === null, '★ 坏掉的 JSON → null');
+}
+
 // ─────────────────────────────────────────────────────────────
 console.log('\n【★】★★ 分群：A 群的条目绝不许串到 B 群（HZY：「知识库调用时一定要分清」）');
 {

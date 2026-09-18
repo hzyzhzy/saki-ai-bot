@@ -97,21 +97,34 @@ console.log('\n【1】★ 排行榜口径：**最近有变化的 10 个**，再�
     // 让分数错开（u1 最低、u12 最高）
     aff.adjust(`u${i}`, i - 1, { force: true });
   }
-  const top = aff.recentTop(10);
+  const top = aff.top(10);
   check(top.length === 10, `只取 10 个（实际 ${top.length}）`);
   check(
     top.every((x, i) => i === 0 || top[i - 1].score >= x.score),
     '★ 按分数从高到低排好了',
     top.map((x) => x.score).join(','),
   );
-  // 最早变的 u1、u2 应该被挤出去（因为只留"最近的 10 个"）
+  // ⚠️ 2026-09-18 口径改成**纯按分数**了（用户：「只按从高到低排序，排前 10 个」）：
+  //    u1..u12 的分数是 0..11 → 取前 10 名 = u12(11) … u3(2)，
+  //    分数最低的 u1(0)、u2(1) 被挤出去。
   const ids = top.map((x) => x.userId);
-  check(!ids.includes('u1'), '★★ 最早变的那个**被挤出去了**（口径是"最近有变化的"，不是"分数最高的"）');
-  check(ids.includes('u12'), '最近变的在里面');
+  check(!ids.includes('u1') && !ids.includes('u2'), '★★ 分数最低的两个被挤出去（榜是**高分榜**）');
+  check(ids[0] === 'u12', '★★ 第一名就是分数最高的（不再看谁最近变过）');
+  check(ids.includes('u12'), '分数最高的在里面');
+
+  // ★ 2026-09-18 新加的「全部榜」：12 个人**一个都不落**（top 只取 10 个）
+  const every = aff.all();
+  check(every.length === 12, `★ all() 返回全部有变化的 12 个人（实际 ${every.length}）`);
+  check(
+    every[0].userId === 'u12' && every[every.length - 1].userId === 'u1',
+    '★ 全部榜也是分数从高到低',
+    `${every[0].userId}…${every[every.length - 1].userId}`,
+  );
 
   // 全空时不炸
   aff.__clear();
-  check(Array.isArray(aff.recentTop(10)) && aff.recentTop(10).length === 0, '没人时不炸，返回空数组');
+  check(Array.isArray(aff.top(10)) && aff.top(10).length === 0, '没人时不炸，返回空数组');
+  check(Array.isArray(aff.all()) && aff.all().length === 0, '★ 全部榜空的时候也是空数组');
 }
 
 console.log('\n【2】★★ 到线判定：只有**刚越过**才算，不是 >= 就一直算');
@@ -231,10 +244,19 @@ console.log('\n【8】★★ 接线：三根线都接上了');
       '★ 处理完就不走后面的流程（`/好感度` 不进聊天上文、也不分条）',
     );
   check(
-    /好感度排行榜/.test(botSrc) && /sendToGroup\(event\.group_id, text\)/.test(botSrc),
-    '★★ 排行榜用 `sendToGroup`（**整条发、不分条** —— 它是机器格式的）',
+    /好感度排行榜/.test(botSrc) && /sendToGroup\(event\.group_id/.test(botSrc),
+    '★★ 排行榜走 `sendToGroup`（**不是** `sendChatLike` 的分条 —— 那会把每条都算成"她说过的话"）',
   );
-  check(/boardSize/.test(botSrc) && /affinity\.recentTop/.test(botSrc), '★ 用的是 recentTop 那个口径');
+  check(/boardSize/.test(botSrc) && /affinity\.top\(/.test(botSrc), '★ 榜用 `affinity.top`（按分数取前 N）');
+  // ★ 2026-09-18 用户新加的两个东西：纯按分数排 + `/全部好感度`
+  check(
+    /全\s*部\s*好\s*感\s*度/.test(botSrc) && /affinity\.all\(/.test(botSrc),
+    '★★ 有 `/全部好感度` 命令（`affinity.all()` —— 所有有变化过的人）',
+  );
+  check(
+    /const chunks = \[\]/.test(botSrc) && /chunks\.length > 1/.test(botSrc),
+    '★★ 全部榜人多时会**自己分条**（不然一条消息塞不下几十人）',
+  );
 
   // ② 回应 → 好感度
   check(/this\.noteInteraction\(event, segs, realText\);/.test(botSrc), '★ 回应她 → 加分 的钩子挂着');

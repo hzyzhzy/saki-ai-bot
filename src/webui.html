@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>客服小祥 · 管理台</title>
+<title>客服 Saki · 管理台</title>
 <style>
-  /* ── 配色：蓝白 + 祥子代表色 ──
+  /* ── 配色：蓝白 + Saki 代表色 ──
      ⚠️ 2026-09-17（用户要求「模仿 NapCat 的 webui，蓝白动态渐变、鼠标周围扰乱色调」）：
         查过了：NapCat 的 webui 是 HeroUI（主色 `#0072f5`），它自己**没有**这个动效 ——
         这是用户想要的效果，不是照抄。所以这里自己实现：
@@ -380,7 +380,7 @@
      里面的色坨由 JS 生成并逐帧算位置 —— 写死在 HTML 里没法做物理。 -->
 <div class="bgfx" id="bgfx"></div>
 <header>
-  <h1>客服小祥 · 管理台</h1>
+  <h1>客服 Saki · 管理台</h1>
   <span class="sub" id="hdr"></span>
   <span class="spacer"></span>
   <!-- 深色模式开关（2026-09-17 加）：文案由 JS 按当前主题写（开着显示"浅色"） -->
@@ -509,7 +509,7 @@
         </label>
         <label class="rad">
           <input type="radio" name="respondTo" value="2">
-          <div><div class="t">② 只回跟服务器有关、或聊到它的消息（推荐）</div><div class="d">有人问服务器的事它主动答；有人聊「小祥」它出来接话。普通闲聊不插嘴。</div></div>
+          <div><div class="t">② 只回跟服务器有关、或聊到它的消息（推荐）</div><div class="d">有人问服务器的事它主动答；有人聊「Saki」它出来接话。普通闲聊不插嘴。</div></div>
         </label>
         <label class="rad">
           <input type="radio" name="respondTo" value="1">
@@ -689,7 +689,7 @@
   <section id="tab-qzone" class="hidden">
     <div class="card">
       <h2>QQ空间</h2>
-      <p class="hint">让客服小祥把群里的趣事、服务器近况、自己的感想发到 QQ 空间。
+      <p class="hint">让客服 Saki 把群里的趣事、服务器近况、自己的感想发到 QQ 空间。
         自动模式会定期看一遍攒下来的群消息，<b>觉得值得发才发</b>；觉得没什么可发的就什么都不做。</p>
       <div id="qzone-status" class="kvs"></div>
     </div>
@@ -750,7 +750,7 @@
     <div class="card">
       <h2>日常事件（一级）</h2>
       <p class="hint">
-        让祥子像真人一样，在一天里随机发生些小事（拼好饭被偷、没赶上末班地铁…），
+        让 Saki 像真人一样，在一天里随机发生些小事（拼好饭被偷、没赶上末班地铁…），
         她用自己的口气吐槽/炫耀，主动发到 <b>1 档群</b>。
         节奏是「<b>随机 + 冷却</b>」，不是计划表。<br>
         ⚠️ 同一件事<b>只润色一次</b>、发给所有 1 档群，但<b>每个群各记各的故事线</b>
@@ -817,8 +817,14 @@
         她在这条世界线上发生过什么 —— 一级日常 + 二级主线，全是<b>按群分开存</b>的。
         这里的数字就是"生成新事件/剧情时喂给模型的那份记忆"。<br>
         ⚠️ <b>带「锁定」的主线条目永远不会被删</b>，压缩时只允许变短；
-        模型想删掉任何一条锁定的，整次压缩作废、一个字都不写。
+        模型想删掉任何一条锁定的，整次压缩作废、一个字都不写。<br>
+        📖 压缩会把流水账改写成<b>轻小说式的章节 —— 一章 = 一件事</b>，
+        章节标题前面那个日期是<b>代码按真实时间加的</b>（模型不许自己写日期）；
+        模型没提到的日常条目会<b>按原文留着</b>，只有它点名要删的才删。
       </p>
+      <!-- ⚠️ 压缩的结果提示写在这里（独立容器）—— `#sl-entries` 会被
+           renderStoryline() 重写/清空，提示放那儿等于写完就被吃掉（踩过） -->
+      <div id="sl-msg"></div>
       <div id="sl-total" class="kvs"></div>
       <div id="sl-groups" style="margin-top:10px"></div>
       <div id="sl-entries" style="margin-top:10px"></div>
@@ -991,9 +997,11 @@
     <div class="card">
       <h2>排行榜预览</h2>
       <p class="hint">
-        口径：<b>最近好感度有过变化的 10 个</b>，再按分数从高到低。
-        ⚠️ 不是"分数最高的 10 个" —— 那样榜会永远被同一批老面孔占着。
-        群里发 <span class="mono">/好感度</span> 就会发这个（<b>不进聊天上文</b>，也不分条）。
+        口径：<b>分数从高到低的前 10 名</b>（2026-09-18 改的 ——
+        原来是"最近有变化的 10 个再按分排"，那会让高分但今天没变化的人掉出榜）。<br>
+        群里发 <span class="mono">/好感度</span> 发这个；发
+        <span class="mono">/全部好感度</span> 看<b>所有有过变化的人</b>（人多会自动分条）。
+        两个都<b>不进聊天上文</b>，也不调模型。
       </p>
       <div id="aff-board" class="kvs"></div>
       <div class="btns"><button class="ghost" onclick="renderAffinity()">刷新</button></div>
@@ -1019,7 +1027,7 @@
         <div><label>到</label><input type="number" id="f-to" min="1" max="24"></div>
         <div><label>同一个好友至少隔（小时）</label><input type="number" id="f-gapHours" min="1" step="1"></div>
       </div>
-      <label>到线通知的固定模板（<span class="mono">{at}</span> 是 @，别加祥子的口气）</label>
+      <label>到线通知的固定模板（<span class="mono">{at}</span> 是 @，别加 Saki 的口气）</label>
       <textarea id="f-notice" rows="2"></textarea>
       <div class="btns">
         <button class="act" onclick="saveAffinity()">保存</button>
@@ -1611,7 +1619,8 @@ document.querySelectorAll('nav button').forEach(b => {
     if (b.dataset.tab === 'groups') { loadGroupRespond(); fillStrictForGroup(); }
     if (b.dataset.tab === 'qzone') renderQzone();
     if (b.dataset.tab === 'life') renderLife();
-    if (b.dataset.tab === 'quest') { renderQuest(); renderStoryline(); }
+    if (b.dataset.tab === 'quest') { renderQuest(); renderStoryline(); startQuestPoll(); }
+    else stopQuestPoll();
     // ⚠️ 2026-09-16：按群设定自己一页了（原来挤在二级剧情页里）
     if (b.dataset.tab === 'groupcfg') renderGroupParams();
     if (b.dataset.tab === 'affinity') renderAffinity();
@@ -2021,14 +2030,23 @@ function questDevHtml(s) {
       ),
     });
   }
+  // ⚠️ 2026-09-17 用户要求："等下一段"要能看出**每一条是靠哪条判据进来的**。
+  //    ⚠️⚠️ 但**不再分第二类** —— HZY 当时追问了一句很关键的话：
+  //    「**现在不是本来就会筛选一部分消息进入影响剧情的范围吗**」。
+  //    对：能进 `pending` 的每一条都已经过了 `isPlotReply()` 那道筛
+  //    （`at`/`reply`/`suggest`/`question`/`loose` 五档**都算**"可能改变走向"）。
+  //    我上一版把 `loose` 挑出来标成"顺口说的"，是**自己又加了一道判据**，跟设计打架。
+  //    所以这里只做一件事：标签统一「等下一段」，括号里写清它是**怎么进来的**。
+  const WHY_LABEL = { at: '叫了她', reply: '回她的话', suggest: '给了建议', question: '在问剧情', loose: '随口提了一句' };
   for (const x of s.pendingList || []) {
+    const tag =
+      '<span style="background:#fef3c7;color:#92400e;border-radius:3px;padding:1px 4px;font-size:11.5px">等下一段</span>';
+    const sub = WHY_LABEL[x.why]
+      ? `<span style="color:#9ca3af;font-size:11.5px">（${WHY_LABEL[x.why]}）</span>`
+      : '';
     rows.push({
       at: Number(x.at ?? 0),
-      html: row(
-        x.at,
-        `<span style="background:#fef3c7;color:#92400e;border-radius:3px;padding:1px 4px;font-size:11.5px">等下一段</span>
-         ${esc(x.name)}：${esc(x.text)}`,
-      ),
+      html: row(x.at, `${tag} ${sub}${esc(x.name)}：${esc(x.text)}`),
     });
   }
   if (!rows.length) return '';
@@ -2036,6 +2054,39 @@ function questDevHtml(s) {
 }
 
 // ── 二级剧情 ──
+
+/**
+ * 剧情页的自动刷新（2026-09-17 用户反馈：「二级剧情状态不会自动随着群里消息更新」）。
+ *
+ * ⚠️ 原来只在**切到这一页时**拉一次 `renderQuest()` —— 可是这一页显示的东西
+ *    （群友回复攒了几条、她顺口接的话、推进到第几段、还有几分钟自动推）
+ *    **全是群里正在发生的事**。停在页面上不动就等于看不见，得手动按 F5。
+ *
+ * ⚠️ 只在这一页**开着的时候**轮询：切走就停（别在别的页白打接口）。
+ * ⚠️ 焦点在这一页的输入框里时**跳过这一轮** —— 回填会把人打了一半的字冲掉。
+ */
+let questPoll = null;
+function stopQuestPoll() {
+  if (questPoll) {
+    clearInterval(questPoll);
+    questPoll = null;
+  }
+}
+function startQuestPoll() {
+  stopQuestPoll();
+  questPoll = setInterval(() => {
+    const el = $('tab-quest');
+    if (!el || el.classList.contains('hidden')) {
+      stopQuestPoll();
+      return;
+    }
+    const act = document.activeElement;
+    if (act && el.contains(act) && /INPUT|TEXTAREA|SELECT/.test(act.tagName)) return;
+    renderQuest();
+    renderStoryline();
+  }, 5000);
+}
+
 async function renderQuest() {
   const el = $('quest-status');
   if (!el) return;
@@ -2304,7 +2355,7 @@ function renderSim(s) {
     (s.transcript || []).map((x) => {
       if (x.role === 'saki') {
         return `<div style="padding:6px 0;border-bottom:1px dashed var(--line)">
-          <b style="color:#5b7fd4">祥子（第 ${x.stage} 段）</b>　${esc(x.text)}
+          <b style="color:#5b7fd4">Saki（第 ${x.stage} 段）</b>　${esc(x.text)}
           ${x.event ? `<div style="color:#6b7280;font-size:12.5px">（世界：${esc(x.event)}）</div>` : ''}</div>`;
       }
       if (x.role === 'skip') {
@@ -2437,20 +2488,25 @@ async function slView(groupId, keepOpen) {
 
 /** 压缩**某一个群**（会真的调模型，整次可能作废 —— 失败原因会原样显示出来） */
 async function slCompress(groupId) {
-  if (!confirm(`压缩群 ${groupId} 的故事线？\n\n（会调一次模型；带「锁定」的主线条目只允许变短，\n  模型想删掉任何一条都会整次作废、一个字都不写）`)) return;
-  const box = $('sl-entries');
-  box.innerHTML = `<p class="hint">正在压缩群 ${esc(groupId)}…（可能要十几秒）</p>`;
+  if (!confirm(`压缩群 ${groupId} 的故事线？\n\n（会调一次模型：把流水账改写成「一章一件事」的章节，\n  日期由代码按真实时间加；带「锁定」的主线条目只允许变短，\n  模型想删掉任何一条都会整次作废、一个字都不写）`)) return;
+  // ⚠️⚠️ 结果必须写进**独立的提示位**（`#sl-msg`）：
+  //    以前写进 `#sl-entries`，而 `renderStoryline()` 结尾正好会重写/清空那个容器
+  //    → 用户**看不到"压好了"还是"没压成"**，界面看着就像"点了没反应"（踩过几次）。
+  const msg = $('sl-msg');
+  msg.innerHTML = `<p class="hint">⏳ 正在压缩群 ${esc(groupId)}…（要十几秒，别关这个页面）</p>`;
   const r = await api('/api/storyline/compress', {
     method: 'POST', headers: {'Content-Type':'application/json'},
     body: JSON.stringify({ groupId, force: true }),
   });
   if (r.ok) {
-    box.innerHTML = `<p class="hint">✅ 群 ${esc(groupId)} 压缩完成：${r.result.before} → ${r.result.after} 字，
-      ${r.result.kept} 条（锁定 ${r.result.locked} 条一条没少）</p>`;
+    msg.innerHTML = `<p class="hint">✅ 群 ${esc(groupId)} 压缩完成：${r.result.before} → ${r.result.after} 字，
+      ${r.result.kept} 条（写成 <b>${r.result.chapters || 0}</b> 章，锁定 ${r.result.locked} 条一条没少）</p>`;
+    // ★ 压完**直接展开这个群** —— 用户点一次就要马上看到结果，不用再点「看内容」
+    slOpenGroup = String(groupId);
   } else {
-    box.innerHTML = `<p class="hint">❌ 没压成：${esc((r.result && r.result.message) || r.error || '未知原因')}</p>`;
+    msg.innerHTML = `<p class="hint">❌ 没压成：${esc((r.result && r.result.message) || r.error || '未知原因')}</p>`;
   }
-  renderStoryline();
+  await renderStoryline();
 }
 
 // ── 按群设定（HZY：「参数也可以分群设定」）──
