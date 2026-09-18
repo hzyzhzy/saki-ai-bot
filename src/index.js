@@ -336,6 +336,17 @@ if (true) {
         const plan = life.plan(Date.now(), Math.random, g);
         if (!plan.fire) continue; // 这个群没到点 / 今天发完 / 不在时段 —— 静默
 
+        // ⚠️⚠️ 2026-09-18 修（用户截图：「**二级剧情进行时，一级事件不应该插进来**」）：
+        //    下面那次掷骰只管"**这一格**要不要开新剧情"，它**不知道这个群已经有一条在跑** ——
+        //    于是剧情演到第 2、3 段时，后面那些格子照样掷骰、照样发日常，
+        //    结果就是「她刚说完换班的事，紧跟着又冒出一句放学去打工」。
+        //    所以先加一道：**这个群有在跑的剧情 → 整格让给它**（不消费槽位、不记账、不写故事线）。
+        //    ⚠️ 用 `quest.current(g)`：同步、无副作用、不额外调模型。
+        if (quest.current(g)) {
+          log.debug(`[日常] 群 ${g} 有正在跑的剧情 → 这一格不插日常`);
+          continue;
+        }
+
         // ★ 先掷骰：这个群这一格是一级还是二级？
         //   ⚠️ 每个 1 档群**各掷各的**（HZY 选的是"每个群各跑一条"）。
         //      中了骰子的群这一格走剧情、**不再发日常事件**。
@@ -522,17 +533,21 @@ startOutboxTick();
       return;
     }
 
-    if (!quest.due(Date.now(), gid)) return; // 还没等够 30 分钟
+    if (!quest.due(Date.now(), gid)) return; // 还没等够（默认 30 分钟 / warm 时 10 分钟）
     // 掉线时先不推进：发不出去，推进了这一段就白生成了
     // （下一轮 tick 会再看一次；`due()` 不会因为等更久而失效）
     if (!bot.selfId) {
-      log.debug('[剧情] 到点了但还没登录 QQ，先不推进');
+      // ⚠️ 2026-09-18 从 debug 提到 **info**（用户报「正在跑的剧情卡住不动」）：
+      //    `logLevel` 是 info，**debug 根本不写盘**，所以"剧情为什么没推进"查不到 ——
+      //    那天翻日志只看到"每 60 秒检查一次"，别的什么都没有，只能靠猜。
+      log.info(`[剧情] 群 ${gid} 到点了，但还没登录 QQ → 先不推进`);
       return;
     }
 
     const r = await quest.advance(q, { ask });
     if (!r.ok) {
-      log.debug(`[剧情] 群 ${gid} 这次没推进：${r.reason}`);
+      // ⚠️ 同上：这条也提到 info —— 它是"剧情卡住"最可能的原因，必须看得见。
+      log.info(`[剧情] 群 ${gid} 到点了但这次没推进：${r.reason}`);
       return;
     }
     await sendQuestLine(q, r.text);
@@ -622,6 +637,17 @@ startOutboxTick();
     try {
       if (config.friend?.enable === false) return;
       if (!bot.selfId) return; // 没登录就别算
+      // ⚠️⚠️ 2026-09-18（用户报「好感度到 90 了，发了好友邀请但没自动通过」）：
+      //    顺手扫一遍**可疑好友申请** —— QQ 会把一部分好友申请判成"可疑"，
+      //    那类**不走标准的 `friend_add` 通知**（NapCat 日志里因此一条都没有，
+      //    而 `friend.json` 的 friends 也是空的），得主动去那个队列里拿。
+      //    只通过**好感度已经到线**的人，没到线的原样留着（那个队列里也有广告）。
+      try {
+        const r = await friend.sweepDoubtRequests((action, params) => bot.call(action, params));
+        if (r?.approved) log.info(`[好友] 可疑申请扫了 ${r.total} 条 → 通过 ${r.approved} 条`);
+      } catch (e) {
+        log.debug(`[好友] 扫可疑申请出错：${e.message}`);
+      }
       const pick = friend.pickForToday();
       if (!pick.userId) {
         if (pick.skip && !/今天已经挑过|没中/.test(pick.skip)) log.debug(`[好友] 今天不发：${pick.skip}`);

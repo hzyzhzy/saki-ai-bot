@@ -2168,8 +2168,18 @@ async function renderQuest() {
     }
     if (s.recent && s.recent.length) {
       html += '<div style="margin-top:10px"><b style="font-size:13px">最近几条</b>' +
-        s.recent.map((x) => `<div style="font-size:12.5px;color:#6b7280;padding:2px 0">
-          ${x.ending === 'good' ? '🟢' : '🔴'} ${esc(x.premise || '')}（${x.stages} 段）</div>`).join('') + '</div>';
+        // ⚠️⚠️ 2026-09-18 修（用户报「最终一共多少段和 webui 上的数字没对上」）：
+        //    `recent[]` 里存的是**整个 quest 对象**，所以 `x.stages` 是**每段的数组**
+        //    （不是段数！）—— 原来直接 `${x.stages}` 会渲染成一串 `[object Object]`。
+        //    同时把"实际段数 vs 原计划段数"一起显示：两者**本来就可能不等**
+        //    （她会提前收尾、也会因为群里热情而加演），标出来就不会再被当成 bug。
+        s.recent.map((x) => {
+          const n = Array.isArray(x.stages) ? x.stages.length : Number(x.stages) || 0;
+          const plan = Number(x.plannedStages) || 0;
+          const tail = plan && plan !== n ? `，原计划 ${plan} 段` : '';
+          return `<div style="font-size:12.5px;color:#6b7280;padding:2px 0">
+          ${x.ending === 'good' ? '🟢' : '🔴'} ${esc(x.premise || '')}（${n} 段${tail}）</div>`;
+        }).join('') + '</div>';
     }
     el.innerHTML = html;
 
@@ -2398,7 +2408,10 @@ async function simNext(silent, forceEnd) {
   if (r.ok) {
     if (!silent) $('qs-reply').value = '';
     flash(el, true, r.done
-      ? `剧情结束：${r.ending === 'good' ? '好结局' : '坏结局'}（好感度 +${r.ended ? r.ended.delta : '?'}）`
+      // ⚠️ 2026-09-18 修（用户报「模拟收成坏结局，但还是加了好感度」）：
+      //    这里原来写死了 `好感度 +${delta}` —— 坏结局的 delta 是**负数**，
+      //    显示出来却是「好感度 +-10」，一眼就像"加了"。改成按符号显示。
+      ? `剧情结束：${r.ending === 'good' ? '好结局' : '坏结局'}（好感度 ${r.ended ? (r.ended.delta >= 0 ? '+' : '') + r.ended.delta : '?'}）`
       : '已生成下一段');
   } else {
     flash(el, false, '失败：' + r.error);

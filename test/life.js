@@ -459,6 +459,27 @@ console.log('\n【13】★ 改了「每日条数」要**当天就生效**（2026
   config.life.maxPerDay = keepHi;
 }
 
+console.log('\n【★】2026-09-18：剧情在跑时不许插日常 + 别自己加场景细节');
+{
+  const srcIndex = readFileSync(join(ROOT, 'src', 'index.js'), 'utf8');
+  const srcLife = readFileSync(join(ROOT, 'src', 'life.js'), 'utf8');
+  // ★ 用户截图：「二级剧情进行时，一级事件不应该插进来」
+  check(
+    /if \(quest\.current\(g\)\) \{[\s\S]{0,120}?continue;/.test(srcIndex),
+    '★★ 这个群有在跑的剧情 → **整格不发日常**',
+  );
+  check(
+    /quest\.current\(g\)[\s\S]{0,600}?questRollFromLife/.test(srcIndex),
+    '★ 这道闸排在"掷骰开新剧情"**之前**（先看有没有在跑的，再决定开不开新的）',
+  );
+  // ★ 用户截图：「为什么感觉这个事件有点怪」（围裙 / 粉笔灰）
+  check(
+    /别自己往上加职业 \/ 场景的细节/.test(srcLife),
+    '★★ 提示词钉了"别自己加职业/场景细节"（围裙、粉笔灰那种）',
+  );
+  check(/不是后厨、食堂那类地方/.test(srcLife), '★ 并点明她的打工地点是**客服室**');
+}
+
 try {
   server.close();
   for (const f of [CFG_REL, LIFE_REL, STORY_REL]) rmSync(join(ROOT, f), { force: true });

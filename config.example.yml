@@ -299,7 +299,11 @@ affinity:
   friendThreshold: 90
 friend:
   enable: true
-  notice: '@{at} 恭喜你的好感度到达90!达到加好友的标准,同意之后有几率主动发消息过来'
+  # ⚠️⚠️ 文案必须说清**谁加谁**（2026-09-18 修）：
+  #    协议层**发不了**加好友申请（NapCat 没有那个 action），所以只能
+  #    **对方来加机器人**，机器人收到申请后自动通过（`set_friend_add_request`）。
+  #    原来那句「同意之后有几率主动发消息过来」没说清动作，群友会卡在"谁加谁"上。
+  notice: '@{at} 我这边没法主动加人，你来加我吧（点头像→加好友）'
   dailyChance: 0.35
   dayFromHour: 9
   dayToHour: 22

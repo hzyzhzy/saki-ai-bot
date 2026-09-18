@@ -245,10 +245,10 @@ const DEFAULT_WORDS = ['倒是'];
 /** 口癖词表：`config.yml` 的 `tic.words` 优先，否则用默认表 */
 function ticWords() {
   const w = cfg().words;
-  if (Array.isArray(w)) {
-    const list = w.map((x) => String(x ?? '').trim()).filter(Boolean);
-    if (list.length) return list;
-  }
+  // ⚠️⚠️ 2026-09-18：**显式给空数组 = 真的不要词表**。用户拍板「倒」这个口癖不修了、
+  //    改成在人设里承认它 —— 那么代码层就必须能**真关掉**，而不是"空了就回退到默认表"
+  //    （那样 `words: []` 等于没写，人设说"这是口头禅"、代码还在注入"别再用"）。
+  if (Array.isArray(w)) return w.map((x) => String(x ?? '').trim()).filter(Boolean);
   return DEFAULT_WORDS;
 }
 

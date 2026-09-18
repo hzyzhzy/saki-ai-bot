@@ -58,10 +58,24 @@ let bot = null;
 //   ⚠️ 必须 `finally` 恢复：中间抛错也得退出来，
 //      否则机器人会一直停在沙箱里（不落盘、不写故事线），那是最糟的失败模式。
 
-/** 用真模型跑一次（把流式输出收成一段文本） */
+/** 用真模型跑一次（把流式输出收成一段文本）
+ *
+ *  ⚠️⚠️ 2026-09-18 修（用户报「**剧情模拟的开始等待时间太久**」）：
+ *    原来就是一个裸的 `streamChat(messages)` —— **思考链是开着的**，
+ *    跟压缩故事线那次是同一个病：flash 的思考链**计入 completion_tokens**，
+ *    开着它这里要白等几十秒（实测"开始→出第一段"就是一分钟上下），
+ *    还可能把 8000 token 吃光、正文写不完。
+ *    剧情生成是"照着设定和素材写一段"，**不需要深推理** → 关掉。
+ */
 async function llmAsk(messages) {
   let out = '';
-  for await (const d of streamChat(messages)) out += d;
+  for await (const d of streamChat(messages, undefined, {
+    maxTokens: 16000,
+    timeoutMs: 150000,
+    thinking: { type: 'disabled' },
+  })) {
+    out += d;
+  }
   return out;
 }
 
