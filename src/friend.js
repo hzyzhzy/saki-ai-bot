@@ -151,6 +151,82 @@ export function friendList() {
   }));
 }
 
+/**
+ * 「可疑好友申请」里**已经到线的人** → 自动通过（2026-09-18 用户要求，选项 C）。
+ *
+ * ## 为什么需要它
+ *
+ * 用户报「喵喵三三好感度到 90 了，向机器人发了好友邀请，但是没有自动通过」。
+ * 查下来：**NapCat 日志里根本没有 `friend_add` 事件** —— 因为 QQ 会把一部分
+ * 好友申请判成**「可疑好友申请」**，那类**不走标准的 `friend_add` 通知**，
+ * 而是进另一个队列（NapCat 的 `get_doubt_friends_add_request` / 非标准 action，
+ * 源码里 actionSummary 写的是「获取可疑好友申请」）。
+ * 所以光挂 `friend_add` 是不够的，**这个队列也得扫**。
+ *
+ * ## ⚠️ 为什么不是"全自动通过"
+ *
+ * 那个队列里什么都有（广告、陌生人）。这里**只通过好感度已经到线的人**，
+ * 口径跟"到线通知"完全一致（`threshold`，默认 90）；
+ * 没到线的**原样留着**（记一条日志）—— 既不误放陌生人，也不把人家的申请弄丢。
+ *
+ * ⚠️ `call` 由调用方注入（跟 `quest.settle(q, ending, adjust)` 一个路子）——
+ *    免得这个模块反过来依赖 `bot.js`。
+ *
+ * @param {(action:string, params:object)=>Promise<any>} call 一般是 `bot.call`
+ * @param {{threshold?:number, max?:number}} [opts]
+ * @returns {Promise<{ok:boolean,total:number,approved:number,approvedIds:string[],skipped:string[],reason?:string}>}
+ */
+export async function sweepDoubtRequests(call, opts = {}) {
+  const none = { ok: false, total: 0, approved: 0, approvedIds: [], skipped: [] };
+  if (cfg().enable === false) return { ...none, reason: '好友功能没开' };
+  if (typeof call !== 'function') return { ...none, reason: '没有注入 call' };
+
+  const threshold = num(opts.threshold ?? cfg().friendThreshold ?? config.affinity?.friendThreshold, 90);
+  let list = [];
+  try {
+    const r = await call('get_doubt_friends_add_request', { count: num(opts.max, 50) });
+    list = Array.isArray(r) ? r : Array.isArray(r?.data) ? r.data : [];
+  } catch (e) {
+    // ⚠️ 这不是标准 OneBot11 action，别的协议端可能没有 → 安静降级，别刷日志
+    return { ...none, reason: `查可疑好友申请失败：${e.message}` };
+  }
+  if (!list.length) return { ...none, ok: true };
+
+  const approvedIds = [];
+  const skipped = [];
+  for (const x of list) {
+    const uid = String(x?.user_id ?? '').trim();
+    const flag = String(x?.flag ?? '').trim();
+    if (!uid || !flag) continue;
+    // 「到线」按**任意一个群**算（跟"到线通知"同一个口径）
+    let hit = false;
+    try {
+      for (const gid of affinity.groupIds()) {
+        if (affinity.get(uid, gid) >= threshold) {
+          hit = true;
+          break;
+        }
+      }
+    } catch {}
+    if (!hit) {
+      skipped.push(uid);
+      continue;
+    }
+    try {
+      await call('set_doubt_friends_add_request', { flag, approve: true });
+      markFriend(uid, Date.now());
+      approvedIds.push(uid);
+      log.info(`[好友] ★ 自动通过了 ${uid} 的**可疑**好友申请（好感度已到 ${threshold}）`);
+    } catch (e) {
+      log.warn(`[好友] 通过 ${uid} 的可疑申请失败：${e.message}`);
+    }
+  }
+  if (skipped.length) {
+    log.info(`[好友] 可疑申请里 ${skipped.length} 个还没到线，先留着：${skipped.join('、')}`);
+  }
+  return { ok: true, total: list.length, approved: approvedIds.length, approvedIds, skipped };
+}
+
 // ─────────────────────────────────────────────────────────────
 // ③ 每天白天，按概率主动私聊**一个**好友
 // ─────────────────────────────────────────────────────────────

@@ -8,7 +8,7 @@ const DEFAULT_STRICTNESS = 50;
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs';
 import { extname, join } from 'node:path';
 import { log } from './log.js';
-import { streamChat, quickAck } from './llm.js';
+import { streamChat, quickAck, phrase } from './llm.js';
 import * as msg from './message.js';
 import * as history from './history.js';
 import { knowledgeText, hasKnowledge, selectFor as knowledgeSelect, mentionsAnyTerm, whoIsBrief } from './knowledge.js';
@@ -34,6 +34,9 @@ import * as monthly from './monthly-report.js';
 import * as followUp from './follow-up.js';
 import * as tic from './tic.js';
 import * as meal from './meal.js';
+// ⚠️ 2026-09-18 用户要求：「做一个她**人位置在哪里，正在做什么事**的状态机」
+//    （日程算默认值，她说过的话可以覆盖它，覆盖最多活 2 小时）
+import * as whereState from './where.js';
 import * as affinity from './affinity.js';
 import { detectInsult } from './insult.js';
 import * as repeat from './repeat.js';
@@ -673,8 +676,14 @@ export class Bot {
       //    要通过得把里面的 `flag` 原样回给 `set_friend_add_request`。
       //    ⚠️ 协议层**发不了**加好友申请（NapCat 没有那个 action），
       //       所以"到 90 分"那件事是在群里 @ 他、让他来加 —— 见 sendFriendNotice。
+      // ⚠️⚠️ 2026-09-18 用户报「喵喵三三好感度到 90 了，发了好友邀请但没自动通过」：
+      //    这里原来记的是 `log.debug`，而 `logLevel` 是 info ⇒ **debug 不写盘** ⇒
+      //    "好友申请为什么没通过"一个字都查不到（只有成功那条 `log.info` 可见）。
+      //    改成 info：**收到申请**这件事本身就该在日志里（否则无法判断是
+      //    "NapCat 没推事件"还是"推了但我们处理失败"）。
       if (payload.notice_type === 'friend_add') {
-        this.autoApproveFriend(payload).catch((e) => log.debug(`[好友] 自动通过失败：${e.message}`));
+        log.info(`[好友] 收到加好友申请 ← ${payload.user_id}（flag=${String(payload.flag ?? '').slice(0, 12)}…）`);
+        this.autoApproveFriend(payload).catch((e) => log.warn(`[好友] 自动通过失败：${e.message}`));
       }
       return;
     }
@@ -2948,6 +2957,14 @@ export class Bot {
           // ⚠️ 只改 `text` 就行 —— `promptText` 是**下面**（2852 行附近）从 text 派生的，
           //    在这里给它赋值会踩 TDZ（"Cannot access before initialization"）被 catch 吞掉。
           text = said;
+          // ⚠️⚠️ 2026-09-18 修（用户截图：HZY 先问「你怎么知道我天天跑那边」她没答，
+          //    接着只 @ 了她一下 → 她回「**你@我半天不说话，想干嘛**」）。
+          //    根因：续接**确实生效了**（`text` 已经变成上一条），但**提示词里没有告诉她
+          //    "这条是我替他补上的"** —— 她看到的最近一条是"@她但一个字都没有"，
+          //    于是把火撒在"你 @ 我不说话"上 ✗
+          //    所以挂个标记，让 `buildSystemPrompt` 把这件事讲清楚
+          //    （跟 `event._charBurst` 一个路子：提示词要用的临时信息挂在 event 上）。
+          event._chaseFrom = said;
           log.info(
             `[${history.sessionKey(event)}] 只 @ 了她、没打字 → **接着回答上一条**：「${said.slice(0, 40)}」`,
           );
@@ -5928,6 +5945,28 @@ export class Bot {
       const brief = quest.briefFor(event.group_id);
       if (brief) parts.push(brief);
     }
+    // ⚠️ 2026-09-18：「她人在哪 / 在做什么」（用户要求的状态机）——
+    //    有覆盖时**放在日程那段的后面**：它是"她今天亲口说的"，**压过**按小时算的日程。
+    if (event?.message_type === 'group') {
+      const whereHint = whereState.hint();
+      if (whereHint) parts.push(whereHint);
+    }
+    // ⚠️⚠️ 2026-09-18：「他这条只是 @ 了她、一个字都没打」→ 那是**在催她回上一条**
+    //    （用户截图：HZY 问「你怎么知道我天天跑那边」她没答，接着只 @ 了她一下，
+    //     她回「**你@我半天不说话，想干嘛**」）。
+    //    `handle()` 里已经把 `text` 续接成上一条了，但**得把这件事告诉她** ——
+    //    否则她看到的最近一条就是"@她但没内容"，会把火撒错地方。
+    if (event?._chaseFrom) {
+      parts.push(
+        [
+          '## ⚠️ 他这条只是 **@ 了你一下、一个字都没打**',
+          '',
+          `那不是跟你打招呼，是**在催你回上面这句**：「${String(event._chaseFrom).slice(0, 120)}」`,
+          '⚠️ 所以：**直接把那句话答了**就行 —— 那才是他要的。',
+          '🚫 不许回「你@我半天不说话」「@我想干嘛」这类 —— 他问过了，**是你还没回**。',
+        ].join('\n'),
+      );
+    }
     // ⚠️ 吃饭状态（2026-09-17 用户要求：「下次有人喊她，他自己就知道吃过没有了」）——
     //    她说过的"去吃饭了"是有**寿命**的状态（默认 10 分钟），到点自动算吃完。
     //    ⚠️ 状态本身不分群（她是一个人），但只在群里注入：私聊里没人喊她"一起吃饭"。
@@ -6939,7 +6978,88 @@ export class Bot {
    * @param {string} text
    * @returns {Promise<Array>} 每条发出去的结果（带 message_id，剧情要用）
    */
+  /**
+   * 把消息里的**手机号 / 身份证号**打码 —— **她的话里不许出现真实号码**。
+   *
+   * ⚠️⚠️ 2026-09-18 加（用户截图）：她为了把剧情推下去，在群里报了
+   *    「**13876432901**，快打，我这电真撑不住了」—— 那是**编的号码**，
+   *    可 11 位手机号**很可能对应真人** ✗ 发到群里 = 让人去骚扰一个真实的人。
+   *
+   * ⚠️ 为什么必须有这一层（而不只是提示词）：提示词里已经写了"不许编名单/编号"，
+   *    但**剧情需要她交出联系方式**时，模型**一定会**编一个出来 ——
+   *    这类"可能伤到真人"的风险**只能由代码兜住**。
+   *
+   * ⚠️ 替换而不是拦下：直接不发送会变成"她说了话但群里什么都没有"（更怪）。
+   */
+  maskPhone(text) {
+    return String(text ?? '')
+      // 手机号：1 开头 + 10 位（允许中间有 - 或空格）
+      .replace(/(?<!\d)1[3-9]\d(?:[-\s]?\d){8}(?!\d)/g, '（号码我就不发群里了）')
+      // 身份证号（18 位，末位可能是 X）
+      .replace(/(?<!\d)\d{17}[\dXx](?!\d)/g, '（这个我也不发群里）');
+  }
+
+  /**
+   * 判断她刚说的这句话有没有改变"她在哪 / 在做什么"，有就落到 `where.js`。
+   *
+   * ⚠️ 用户 2026-09-18 拍板：「**用模型判断**应不应该改，**判定松一点**，**上限 2 小时**」——
+   *    · **为什么用模型**：位置类说法穷举不完（「我出后门了」「这就往地铁口去」「我得先回一趟」），
+   *      写词表必然漏（`meal.js` 那边是"吃"这种封闭动作，位置不是）；
+   *    · **松** = 拿不准就改 —— 宁可多改，也别让日程和剧情打架；
+   *    · **2 小时上限**在 `where.js` 里（到点自动回落到日程，防"卡在某个状态里出不来"）。
+   *
+   * ⚠️ 按群**节流**（`where.judgeMs`，默认 5 分钟）：位置不是每条消息都会变，
+   *    没必要每条都花一次调用。
+   */
+  async judgeWhere(groupId, text) {
+    const gid = String(groupId ?? '');
+    const t = String(text ?? '').trim();
+    if (!t) return;
+    if (config.where?.enable === false) return;
+    this._whereJudgeAt ??= {};
+    const gap = Math.max(0, Number(config.where?.judgeMs) || 5 * 60 * 1000);
+    if (gap && Date.now() - (this._whereJudgeAt[gid] ?? 0) < gap) return;
+    this._whereJudgeAt[gid] = Date.now();
+
+    const out = await phrase({
+      system:
+        '你在判断一个人刚说的这句话，有没有透露**她此刻在哪 / 正在做什么**。\n' +
+        '只输出一个 JSON，不要解释、不要围栏：{"change":true,"where":"","doing":""}\n' +
+        '· **判定松一点**：只要话里透出位置或正在做的事，就 change=true ——\n' +
+        '  「我出后门了」「这就往地铁口去」「我得先回一趟」「还在工位上」都算；\n' +
+        '· 完全没有位置信息的（闲聊、回答问题、吐槽、只是在讲别人的事）→ change=false；\n' +
+        '· where / doing 都用**短词**：在校 / 教室 / 客服室 / 家 / 外面 / 地铁口 / 便利店；\n' +
+        '  上课 / 打工 / 找人 / 回家路上 / 吃饭。\n' +
+        '⚠️ 只按**她这句话本身**判断，别猜日程、别补设定、别编地点。',
+      user: `她刚说：「${t.slice(0, 200)}」`,
+      maxTokens: 120,
+    });
+    const m = /\{[\s\S]*\}/.exec(String(out ?? ''));
+    if (!m) return;
+    let j;
+    try {
+      j = JSON.parse(m[0]);
+    } catch {
+      return;
+    }
+    if (j?.change !== true) return;
+    const w = String(j.where ?? '').trim().slice(0, 40);
+    const doing = String(j.doing ?? '').trim().slice(0, 60);
+    if (!w && !doing) return;
+    whereState.apply({ where: w, doing, source: `群${gid}` });
+  }
+
   async sendChatLike(groupId, text, opts = {}) {
+    // ⚠️⚠️ 2026-09-18：任何路径说出去的话，先把号码打掉（见上面 maskPhone 的注释）。
+    //    放在**这里**是因为它是她所有发言的**唯一出口**（主聊天 / 剧情 / 日常事件都走它）。
+    const masked = this.maskPhone(text);
+    if (masked !== text) {
+      log.warn(`[安全] 她的话里带真实号码/证件号 → 已打码（群 ${groupId}）：${String(text).slice(0, 60)}`);
+    }
+    text = masked;
+    // ⚠️ 2026-09-18：「她人在哪 / 在做什么」的状态机（用户要求）——
+    //    判断**不 await**（别拖住发送），而且它内部按群节流（默认 5 分钟一次）。
+    this.judgeWhere(groupId, text).catch((e) => log.debug(`位置判断失败：${e.message}`));
     const parts = splitChatText(text);
     if (!parts.length) return [];
     // ⚠️ 2026-09-17 用户要求加「吃饭状态机」（原话：「有什么影响吃饭的事件会被计入，

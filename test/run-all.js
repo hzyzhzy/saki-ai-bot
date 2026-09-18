@@ -62,6 +62,8 @@ const SUITES = [
   'follow-up',
   'tic',
   'meal',
+  // ⚠️ 2026-09-18：「她人在哪 / 在做什么」的状态机（跟 meal 同一类东西）
+  'where',
   'cooldown',
   // ⚠️ 2026-09-16 加：连发碎片自动续窗（「你/可/以/一/个/一/个/字/说/话/吗」那种一个字一条
   //    的消息，整串当成一句话只回一次；私聊也走合并；正常消息与 @她 的短窗口没被拖慢）
@@ -163,6 +165,8 @@ function isolatedStateEnv(name) {
     QQBOT_MONTHLY_FILE: p('monthly'),
     QQBOT_TIC_FILE: p('tic'),
     QQBOT_MEAL_FILE: p('meal'),
+    // ⚠️ 2026-09-18：不加这条，`test/where.js` 就会去写真实的 `state/where.json`
+    QQBOT_WHERE_FILE: p('where'),
     // ⚠️ 2026-09-17：`recent.js` 也会落盘了（"重启不丢上下文"）——
     //    套件必须各写各的，否则会互相串、也会污染真实的 state/recent.json
     QQBOT_RECENT_FILE: p('recent'),
