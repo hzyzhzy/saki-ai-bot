@@ -47,9 +47,17 @@ function Get-LastLoginAt {
   $m = [regex]::Match($hit.Line, '^\[(\d{2}):(\d{2}):(\d{2})\]')
   if (-not $m.Success) { return $null }
   $t = Get-Date
-  return (Get-Date -Year $t.Year -Month $t.Month -Day $t.Day `
+  $last = Get-Date -Year $t.Year -Month $t.Month -Day $t.Day `
       -Hour ([int]$m.Groups[1].Value) -Minute ([int]$m.Groups[2].Value) `
-      -Second ([int]$m.Groups[3].Value))
+      -Second ([int]$m.Groups[3].Value)
+  # ⚠️⚠️ 2026-09-19 修（用户抓到的：凌晨一点时它还说「距现在 0 分 0 秒」）：
+  #    日志行里**只有 HH:MM:SS、没有日期**，所以上面那句永远按"今天"拼。
+  #    **跨过午夜**之后，昨天 23:57 被拼成"今天 23:57" —— 那是个**未来**时刻，
+  #    `$now - $last` 变成负数，而下面那句 `if ($gap -lt 0) { $gap = 0 }` 把它当"刚刚" →
+  #    于是每次刚过午夜都会**一直显示 0 分 0 秒、一直拒绝重启**（我因为这个栽了两次，
+  #    还据此算错了时间）。正确做法：**拼出来的时间比现在晚 → 那行是昨天的 → 减一天**。
+  if ($last -gt (Get-Date)) { $last = $last.AddDays(-1) }
+  $last
 }
 
 $last = Get-LastLoginAt

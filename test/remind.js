@@ -203,7 +203,58 @@ console.log('\n【时间歧义】');
   ok(remind.resolveWhen({}, N) === 0, '只说「晚点」→ 算不出来（上层会问她一句几点）');
 }
 
-// ── ⑩ 上限：挂太多就拒绝 ──────────────────────────────────────────
+// ── ⑩ 补充式追加 / 修改 / 取消（用户要求）─────────────────────────
+console.log('\n【补充式修改】');
+{
+  remind.__clear();
+  const made = remind.add({
+    at: Date.now() + 30 * MIN,
+    what: '起床',
+    by: '30003',
+    byName: 'HZY',
+    targets: [],
+    groupId: '20002',
+  });
+  const id = made.item.id;
+  ok(remind.latest({ by: '30003', groupId: '20002' })?.id === id, '能找到他最近定下的那条');
+  ok(remind.latest({ by: '30003', groupId: '99999' }) === null, '别的会话里找不到（只能在原地改）');
+
+  const t2 = Date.now() + 60 * MIN;
+  const u = remind.amend(id, { at: t2, targets: [{ uid: '30004', name: 'MEI' }] });
+  ok(u.ok && u.item.at === t2, '「顺便改成五点」→ 时间改了');
+  ok(u.item.targets.length === 1 && u.item.targets[0].uid === '30004', '「也提醒一下MEI」→ 人加上了');
+  ok(u.item.what === '起床', '他没说改内容 → 事情不动');
+
+  remind.amend(id, { targets: [{ uid: '30004', name: 'MEI' }] });
+  ok(remind.latest({ by: '30003', groupId: '20002' }).targets.length === 1, '同一个人说两遍不会 @ 两次');
+  ok(remind.amend(id, { at: Date.now() - MIN }).ok === false, '改成已经过去的时间 → 拒绝');
+  ok(remind.cancel(id) === true && remind.pending().length === 0, '「不用提醒了」→ 真的删掉');
+}
+
+// ── ⑪ 进聊天上下文（用户反馈：「提醒不会进聊天上下文」）────────────
+console.log('\n【进上下文】');
+{
+  remind.__clear();
+  remind.add({
+    at: Date.now() + 3 * 3600 * 1000,
+    what: '起床',
+    by: '30003',
+    byName: 'HZY',
+    targets: [{ uid: '30004', name: 'MEI' }],
+    groupId: '20002',
+  });
+  const h = remind.hint('20002');
+  ok(h.includes('起床'), '这个群挂着的提醒会进提示词');
+  ok(h.includes('MEI'), '连"还要一并提醒谁"一起说清楚');
+  ok(remind.hint('88888') === '', '别的群里**不提** A 群定的提醒');
+  ok(remind.hint('') === '', '私聊会话也不串味');
+  remind.add({ at: Date.now() + 60 * 1000, what: '交作业', by: '30003', groupId: '20002' });
+  ok(remind.hint('20002').indexOf('交作业') > 0, '同一会话里多条都在');
+  remind.__clear();
+  ok(remind.hint('20002') === '', '一条都没有时**不注入**（别给提示词塞空段）');
+}
+
+// ── ⑫ 上限：挂太多就拒绝 ──────────────────────────────────────────
 console.log('\n【上限】');
 {
   remind.__clear();

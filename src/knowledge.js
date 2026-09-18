@@ -482,19 +482,60 @@ function mentionsSomeone(text, content) {
  * @param {string} groupId
  * @returns {string} 空串 = 这条消息没提到资料里记的人
  */
+/**
+ * `owner.md` / `relationship.md` 这类**人的资料**（2026-09-19 加）。
+ *
+ * ⚠️ 为什么需要：`whoIsBrief()` 原来**只扫群资料** `groups/<群号>.md` ——
+ *    而「**MEI**（他现实里的朋友；也在群里，是你的好友）」记在 `owner.md` 里，
+ *    所以在群里问「还记得 mei 吗」时**永远扫不到** ✗
+ *    （用户 9/17 就为同一件事截过图，`persona.md` 里还留着那次的
+ *     「我翻了翻，没这个人」/「MEI？……真没什么印象」）。
+ *
+ * ⚠️ 这两个文件都只有几 K，读起来很便宜；**故意不缓存**（知识库是热重载的，
+ *    缓存反而容易读到过期内容，得不偿失）。
+ */
+const EXTRA_PEOPLE_FILES = ['owner.md', 'relationship.md', 'group-memory.md'];
+function extraPeopleContent() {
+  let out = '';
+  for (const f of EXTRA_PEOPLE_FILES) {
+    try {
+      const p = join(DIR, f);
+      if (existsSync(p)) out += `\n${readFileSync(p, 'utf8')}`;
+    } catch {
+      /* 读不到就算了，不影响主流程 */
+    }
+  }
+  return out;
+}
+
 export function whoIsBrief(text, groupId = '') {
   const t = String(text ?? '');
+  if (!t) return '';
   const gf = groupFiles.get(String(groupId ?? '').trim());
-  if (!t || !gf?.content) return '';
-  const lines = gf.content.split('\n');
+  const sources = [];
+  if (gf?.content) sources.push(gf.content);
+  const extra = extraPeopleContent();
+  if (extra) sources.push(extra);
+  if (!sources.length) return '';
   const hits = [];
-  // ⚠️ 只认**加粗的名字** —— 群资料里群友就是这么写的（`| **喵喵三三** | … |`）。
-  //    不去猜"哪几个字是人名"，那样误命中率太高（「群里」「大家」都会被当成名字）。
-  for (const m of gf.content.matchAll(/\*\*(.{2,12}?)\*\*/g)) {
-    const name = m[1].trim();
-    if (!name || !t.includes(name)) continue;
-    const line = lines.find((l) => l.includes(`**${name}**`) && l.trim().startsWith('|'));
-    if (line && !hits.includes(line)) hits.push(line);
+  for (const src of sources) {
+    const lines = src.split('\n');
+    // ⚠️ 只认**加粗的名字** —— 群资料/人资料里就是这么写的（`| **喵喵三三** | … |`、
+    //    `- **MEI**（他现实里的朋友…）`）。
+    //    不去猜"哪几个字是人名"，那样误命中率太高（「群里」「大家」都会被当成名字）。
+    for (const m of src.matchAll(/\*\*(.{2,12}?)\*\*/g)) {
+      const name = m[1].trim();
+      // ⚠️⚠️ 2026-09-19：**大小写不敏感**（用户打的是小写「mei」，资料里写的是
+      //    「**MEI**」—— 区分大小写的 `includes` 直接判不中，这也是他这次问
+      //    「还记得mei吗」却得到「不认识」的直接原因之一）。
+      if (!name || !t.toLowerCase().includes(name.toLowerCase())) continue;
+      // ⚠️ 2026-09-19：原来只认表格行（`|` 开头），而 `owner.md` 里的人是用
+      //    **列表行**写的（`- **MEI**（…）：`）→ 于是 MEI 被过滤掉了 ✗ 两种都收。
+      const line = lines.find(
+        (l) => l.includes(`**${name}**`) && (l.trim().startsWith('|') || l.trim().startsWith('-')),
+      );
+      if (line && !hits.includes(line)) hits.push(line.slice(0, 300));
+    }
   }
   if (!hits.length) return '';
   return [

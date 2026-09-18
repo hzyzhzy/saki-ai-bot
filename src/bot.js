@@ -2931,7 +2931,9 @@ export class Bot {
     // ⚠️ 2026-09-18：**定时提醒**（用户要求）—— 听懂「几点提醒我干什么」并记下来。
     //    放在 `decide()` 之前、而且要 **await**：下面提示词里注入的那段必须是
     //    **已经存好了的事实** —— 否则她答应了、其实没存上（用户最怕的就是这个）。
-    await this.maybeRemind(event);
+    //    ⚠️ 但**先同步粗筛**（`wantsRemind`）：不命中的消息连 await 点都不产生
+    //       （否则会给每条消息加一个微任务延迟，把对时序敏感的套件带抖，见那个方法的注释）。
+    if (this.wantsRemind(event)) await this.maybeRemind(event);
     const decision = this.decide(event, voluntary);
     if (!decision) return;
 
@@ -2958,35 +2960,17 @@ export class Bot {
       //    有就把那句**当成本次的问题接着答**（走正常生成）；真没话可说时才回 opener。
       //    ⚠️ `messagesSinceBotLast()` 返回 -1 表示"她在这个会话还没说过话" ——
       //       那种情况不接（免得把别人的闲聊当成对她的提问）。
-      try {
-        const since = recent.messagesSinceBotLast(event.group_id ?? '');
-        const lastHuman = recent.lastHumanMessage(event.group_id ?? '');
-        const said = String(lastHuman?.text ?? '').trim();
-        if (since > 0 && said) {
-          // ⚠️ 只改 `text` 就行 —— `promptText` 是**下面**（2852 行附近）从 text 派生的，
-          //    在这里给它赋值会踩 TDZ（"Cannot access before initialization"）被 catch 吞掉。
-          text = said;
-          // ⚠️⚠️ 2026-09-18 修（用户截图：HZY 先问「你怎么知道我天天跑那边」她没答，
-          //    接着只 @ 了她一下 → 她回「**你@我半天不说话，想干嘛**」）。
-          //    根因：续接**确实生效了**（`text` 已经变成上一条），但**提示词里没有告诉她
-          //    "这条是我替他补上的"** —— 她看到的最近一条是"@她但一个字都没有"，
-          //    于是把火撒在"你 @ 我不说话"上 ✗
-          //    所以挂个标记，让 `buildSystemPrompt` 把这件事讲清楚
-          //    （跟 `event._charBurst` 一个路子：提示词要用的临时信息挂在 event 上）。
-          event._chaseFrom = said;
-          log.info(
-            `[${history.sessionKey(event)}] 只 @ 了她、没打字 → **接着回答上一条**：「${said.slice(0, 40)}」`,
-          );
-        }
-      } catch (e) {
-        log.debug(`[续接] 取上一条失败：${e.message}`);
-      }
-      if (!text) {
-        // 回一句短的自然反应，别用客服腔，也别问「有什么可以帮你」那种话。
-        const opener = ['嗯？', '在。', '说。', '怎么了'][Math.floor(Math.random() * 4)];
-        await this.sendText(event, opener, { reply: true }).catch(() => {});
-        return;
-      }
+      // ⚠️⚠️ 2026-09-19（用户要求，改掉前面几版的"只接上一条"）：
+      //    「不止看上一条，这样太少了，**直接和正常回复一样的过程**，
+      //      就当收到了『看看消息，回一下』的消息」。
+      //    所以这里**只塞一句引子**，剩下的全交给正常流程 ——
+      //    她会拿到完整群聊上下文（谁说了什么、有没有人问了没被答的），
+      //    自己挑该接的话，而不是被我钉死在"上一条"上。
+      //    ⚠️ 引子写成"一句话"是故意的（它就是这次要回应的内容）；
+      //      提示词里会讲明**这不是他打的字**（见 `_chaseFrom` 注入段）。
+      text = '（他 @ 了你一下，没打字。他是想让你看看最近的消息，回他一句。）';
+      event._chaseFrom = true;
+      log.info(`[${history.sessionKey(event)}] 只 @ 了她、没打字 → 让她**自己看消息挑要回的**`);
     }
 
     const key = history.sessionKey(event);
@@ -5960,6 +5944,14 @@ export class Bot {
       const whereHint = whereState.hint();
       if (whereHint) parts.push(whereHint);
     }
+    // ⚠️⚠️ 2026-09-18（用户反馈「提醒不会进聊天上下文」）：**挂着的提醒每次都要带上** ——
+    //    原来只在他说那句话的那一轮注入（`event._remind`），下一轮她就不知道有这回事了 ✗。
+    //    ⚠️ 私聊也要（所以不放在上面那个 `message_type === 'group'` 里）；
+    //       `hint()` 只给**这个会话**的提醒（A 群定的不在 B 群说）。
+    {
+      const remindHint = remind.hint(event?.message_type === 'group' ? String(event.group_id ?? '') : '');
+      if (remindHint) parts.push(remindHint);
+    }
     // ⚠️⚠️ 2026-09-18：「他这条只是 @ 了她、一个字都没打」→ 那是**在催她回上一条**
     //    （用户截图：HZY 问「你怎么知道我天天跑那边」她没答，接着只 @ 了她一下，
     //     她回「**你@我半天不说话，想干嘛**」）。
@@ -5970,9 +5962,15 @@ export class Bot {
         [
           '## ⚠️ 他这条只是 **@ 了你一下、一个字都没打**',
           '',
-          `那不是跟你打招呼，是**在催你回上面这句**：「${String(event._chaseFrom).slice(0, 120)}」`,
-          '⚠️ 所以：**直接把那句话答了**就行 —— 那才是他要的。',
-          '🚫 不许回「你@我半天不说话」「@我想干嘛」这类 —— 他问过了，**是你还没回**。',
+          '那不是跟你打招呼，意思是「**看看最近的消息，回我一句**」。',
+          '⚠️ 所以你要**自己看上面的聊天记录**，挑该接的话接：',
+          '· 有人**问了你什么、还没被你回答** → 就答那句（**最常见**，优先答这个）；',
+          '· 有人在说跟你有关的事、或者提到你 → 接那个；',
+          '· 实在没什么可接的 → 就随口说一句你此刻想说的（别问「怎么了」「有什么事」）。',
+          '',
+          '⚠️ 本次要回应的那条「（他 @ 了你一下…）」**不是他打的字**，是给你的说明 ——',
+          '   🚫 别复述它、别引用它、别拿它当他的话说。',
+          '🚫 不许回「你@我半天不说话」「@我想干嘛」这类 —— 他就是要你说话。',
         ].join('\n'),
       );
     }
@@ -5982,7 +5980,56 @@ export class Bot {
     //       那样就成了系统消息，不是"她答应的"；而且她可能在应声里答别的事（自相矛盾）。
     if (event?._remind) {
       const r = event._remind;
-      if (r.fail === 'time') {
+      // "要一并提醒的人"那几句（找到了 / 没找到）—— 新定、改，两种都要用
+      const whoLines = (t) => {
+        const hit = (t ?? []).filter((x) => x.uid);
+        const miss = (t ?? []).filter((x) => !x.uid);
+        const out = [];
+        if (hit.length) {
+          out.push(`✅ 一并提醒 ${hit.map((x) => x.name).join('、')} —— **找到了**，到点会一起 @。`);
+        }
+        if (miss.length) {
+          out.push(
+            `⚠️ 他还要提醒 ${miss.map((x) => `「${x.name}」`).join('、')}，但你**没找到叫这个名字的人**` +
+              `（${event?.message_type === 'group' ? '这个群里' : '你认识的人里'}没有）`,
+            '→ **必须如实说没找到**（「没看到叫这个的」），让他确认下名字、或者让那个人自己冒个泡。',
+            '🚫 不许当作找到了，更不许随便 @ 一个可能是他的人。',
+          );
+        }
+        return out;
+      };
+      if (r.cancelled) {
+        parts.push(
+          [
+            '## ⏰ 他让你**取消**刚才那条提醒',
+            '',
+            `· 原来那条：${r.atText} 提醒他${r.what}`,
+            '· **已经取消了。**',
+            '⚠️ 这一句就应一声（「行，不提醒了」）—— 🚫 别问原因、别挽留、别复述太多。',
+          ].join('\n'),
+        );
+      } else if (r.updated) {
+        parts.push(
+          [
+            '## ⏰ 他**改了**刚才那条提醒（**已经改好了**）',
+            '',
+            `· 现在：${r.atText} 提醒他${r.what}`,
+            ...whoLines(r.targets),
+            '',
+            '⚠️ 这一句：应一声 + 把**改成什么样**说清楚（改了时间就报新时间）。',
+            '🚫 别只回「记下了」然后说旧的那条 —— 他要的是**新的那个**。',
+          ].join('\n'),
+        );
+      } else if (r.fail === 'noPrev') {
+        parts.push(
+          [
+            '## ⏰ 他在改 / 取消一条提醒，但**你手里没有这条**',
+            '',
+            '⚠️ 你**没给他定过**提醒 → **如实说一句**（「你没让我提醒过什么呀」）。',
+            '🚫 别假装取消了，也别顺手新定一条。',
+          ].join('\n'),
+        );
+      } else if (r.fail === 'time') {
         parts.push(
           [
             '## ⏰ 他刚让你提醒他一件事，但**你没听清是什么时候**',
@@ -6051,6 +6098,24 @@ export class Bot {
       const wq = quest.whoInQuest(currentText, event.group_id);
       if (wq) whoParts.push(wq);
       if (whoParts.length) parts.push(whoParts.join('\n\n'));
+    }
+    // ⚠️⚠️ 2026-09-19（用户截图：他问「还记得mei吗」，她答「mei？没听过这名字，不认识」）：
+    //    根因不是"她忘了" —— 是**她根本看不到名字表**（`state/names.json` 是程序用的）。
+    //    群里有个人的群名片就叫 "MEI"，但聊天记录里没人这么叫过，
+    //    于是她真的"不认识" ✗。这里把"他这句话里提到、而且群成员名单里确实有"的人交给她。
+    //    ⚠️ 只在他**确实提到表里的人**时才注入（绝大多数消息不会）。
+    if (currentText) {
+      const named = names.mentioned(currentText, event?.group_id ?? '');
+      if (named.length) {
+        parts.push(
+          [
+            '## 👤 他这句话里提到的人，**群成员名单里有**',
+            ...named.map((x) => `· ${x.name}`),
+            '⚠️ 所以**别再说「不认识」「没听过这名字」** —— 你知道群里有这个人（名字就是这么写的）。',
+            '  至于熟不熟、聊过什么，按上面的资料说；没资料就只说"群里见过这名字"。',
+          ].join('\n'),
+        );
+      }
     }
 
     // 联网搜索结果
@@ -7055,6 +7120,26 @@ export class Bot {
    * ⚠️ 替换而不是拦下：直接不发送会变成"她说了话但群里什么都没有"（更怪）。
    */
   /**
+   * **同步**粗筛：这条消息有没有可能是在让她定提醒。
+   *
+   * ⚠️ 为什么单独拆一个同步方法（2026-09-18 实测踩的）：
+   *    原来直接在 `handle()` 里 `await this.maybeRemind(event)` —— 对**不命中**的消息
+   *    （99.9%）也会产生**一个 await 点**（微任务延迟）。看着无害，但
+   *    `test/cs.js` 那种"等到某个请求出现就断言"的套件因此开始偶发挂
+   *    （「实时结果里带上了在线玩家名单」，连挂两次；把这里改成同步短路后恢复）。
+   *    所以：**同步能排掉的，绝不进异步**。真正的判断仍在 `maybeRemind()` 里。
+   */
+  wantsRemind(event) {
+    try {
+      if (config.remind?.enable === false) return false;
+      const said = msg.tidy(msg.extractText(msg.toSegments(event.message), { atPlaceholder: '' })).trim();
+      return said.length >= 4 && /提醒|叫我|喊我|记得/.test(said);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * **定时提醒**的识别与记录（2026-09-18 用户要求）。
    *
    * ## 用户原话（照抄，四条要求都对着它写）
@@ -7101,6 +7186,23 @@ export class Bot {
         `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ` +
         `${pad(now.getHours())}:${pad(now.getMinutes())}（${'日一二三四五六'[now.getDay()]}）`;
 
+      // ⚠️⚠️ 2026-09-18：**把他上一句也带上** —— 这是"补充式"说法的关键。
+      //    实测（真模型）：单看「顺便改成五点吧」「不用提醒了」，模型一律判 `remind:false`
+      //    （它们确实不像"提醒请求"）；但接着上一条说就非常清楚。
+      //    ⚠️ 只带**他最近一条有内容的消息**（`lastHumanMessage` 现在会跳过纯 @ 的占位符）。
+      let prevSaid = '';
+      try {
+        const lastHuman = recent.lastHumanMessage(isGroup ? gid : '', {
+          excludeIds: [String(event.message_id ?? '')],
+        });
+        prevSaid = String(lastHuman?.text ?? '')
+          .replace(/[（(][^）)]*[）)]/g, '')
+          .trim()
+          .slice(0, 120);
+      } catch {
+        /* 拿不到就算了，不影响主流程 */
+      }
+
       const out = await phrase({
         system:
           '你在看一个人刚说的一句话，判断他是不是**让你在某个时间提醒他做某件事**。\n' +
@@ -7130,8 +7232,19 @@ export class Bot {
           '     例：「四点提醒我起床，除了我，还要在四点提醒MEI」→ `what`="起床"、`who`=["MEI"]\n' +
           '     ✓ 名字可能是拼音/英文/缩写（"mei"、"wang"），也可能带称谓（"老王"、"三三"）。\n' +
           '  ❌ "提醒我"里提到的第三方（"提醒我他找我"）不算；\n' +
-          '  ❌ 只是**说起**某人（"提醒我别忘了他的事"）不算。',
-        user: `现在：${nowText}\n他说：「${said.slice(0, 300)}」`,
+          '  ❌ 只是**说起**某人（"提醒我别忘了他的事"）不算。\n' +
+          '· `amend`：⚠️ **先判断他是在"新定一条"还是在"补充/改刚才那条"**：\n' +
+          '  · 新定一条（话里有"提醒我干什么"）→ `""`；\n' +
+          '  · **补充或修改已经定好的那条** → `"update"`。\n' +
+          '    触发说法：「顺便改成五点」「改成明天」「也提醒一下老王」「还要提醒某某」「别忘了叫上谁」。\n' +
+          '    ⚠️ 判据：他这句**自己没说要做什么事**（没有新的"提醒我干什么"），只是改动上一条 → update。\n' +
+          '    ⚠️ 这时 `hour/minute/period/day/who` **只填他这次新说的**，没说的一律留空，\n' +
+          '       🚫 别把原来那条的内容再抄一遍。\n' +
+          '  · **不要了 / 取消**（「不用提醒了」「算了别提醒了」）→ `"cancel"`。\n' +
+          '  ⚠️ 判断时**要结合他上一句**：上一句是在让你提醒他做什么，这一句只是补充/修改\n' +
+          '    （改时间、加人、说不要了）→ 那**仍然是这个 JSON**（`amend` 填 update 或 cancel），\n' +
+          '    🚫 别因为"这一句单看不像提醒"就给 `remind:false`。',
+        user: `现在：${nowText}\n他上一句：「${prevSaid || '（没有，这句是他在这个群说的第一句）'}」\n他说：「${said.slice(0, 300)}」`,
         maxTokens: 200,
       });
       const m = /\{[\s\S]*\}/.exec(String(out ?? ''));
@@ -7162,16 +7275,13 @@ export class Bot {
         const am = /^(\d{4})-(\d{1,2})-(\d{1,2})[ T](\d{1,2}):(\d{2})/.exec(String(j.at ?? '').trim());
         if (am) at = new Date(+am[1], +am[2] - 1, +am[3], +am[4], +am[5], 0, 0).getTime();
       }
-      if (!what || !at) {
-        // ⚠️ 听不出时间就**别默默算了** —— 告诉她"没听懂时间"，让她问一句（见注入段）
-        if (what && !at) {
-          event._remind = { fail: 'time', what };
-          log.info(`[提醒] 他说了事但没听出时间 → 让她问一句：「${what}」`);
-        }
-        return;
-      }
+      const fmtAt = (t) => {
+        const d = new Date(t);
+        return `${d.getMonth() + 1}月${d.getDate()}日 ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+      };
 
-      // 找"另外那个人"：先查已知名字，群里查不到就**拉一次群成员名单**再查
+      // 找"另外那个人"：先查已知名字，群里查不到就**拉一次群成员名单**再查。
+      // ⚠️ 提到下面 amend 分支**之前** —— 改上一条时也要找（「也提醒一下老王」）。
       const targets = [];
       for (const raw of (Array.isArray(j.who) ? j.who : []).slice(0, 3)) {
         const name = String(raw ?? '').trim().slice(0, 40);
@@ -7189,6 +7299,52 @@ export class Bot {
           }
         }
         targets.push({ uid, name });
+      }
+
+      // ⚠️⚠️ 2026-09-18 用户要求：「**补充式的追加/修改**」也要支持 ——
+      //    他常接着说「顺便改成五点」「也提醒一下老王」，那时他是在说**刚才那条**，
+      //    不是又要定一条新的。原来这种会变成**第二条**：4 点被提醒两次、时间也改不掉 ✗
+      //    （他真实踩过：「除了提醒我，还要在四点提醒mei」被存成了单独一条「提醒mei」）。
+      const amend = String(j.amend ?? '').trim().toLowerCase();
+      if (amend === 'cancel' || amend === 'update') {
+        const cur = remind.latest({ by: String(event.user_id ?? ''), groupId: isGroup ? gid : '' });
+        if (!cur) {
+          // ⚠️ 没有可改的**不能装作改了** —— 让他知道"你没让我提醒过什么"
+          event._remind = { fail: 'noPrev', amend };
+          log.info(`[提醒] 他说要${amend === 'cancel' ? '取消' : '改'}提醒，但没定过 → 让她如实说`);
+          return;
+        }
+        if (amend === 'cancel') {
+          remind.cancel(cur.id);
+          event._remind = { ok: true, cancelled: true, what: cur.what, atText: fmtAt(cur.at) };
+          log.info(`[提醒] 取消了一条：${fmtAt(cur.at)}「${cur.what}」`);
+          return;
+        }
+        const patch = {};
+        if (at) patch.at = at;
+        if (targets.length) patch.targets = targets;
+        const up = remind.amend(cur.id, patch);
+        if (!up.ok) {
+          event._remind = { fail: 'add', what: cur.what, reason: up.reason };
+          log.info(`[提醒] 改不了（${up.reason}）`);
+          return;
+        }
+        const it2 = up.item;
+        event._remind = { ok: true, updated: true, what: it2.what, atText: fmtAt(it2.at), targets: it2.targets };
+        log.info(
+          `[提醒] 改了一条 → ${fmtAt(it2.at)}「${it2.what}」` +
+            `${it2.targets.length ? ` 一并提醒 ${it2.targets.map((t) => t.name || t.uid).join('、')}` : ''}`,
+        );
+        return;
+      }
+
+      if (!what || !at) {
+        // ⚠️ 听不出时间就**别默默算了** —— 告诉她"没听懂时间"，让她问一句（见注入段）
+        if (what && !at) {
+          event._remind = { fail: 'time', what };
+          log.info(`[提醒] 他说了事但没听出时间 → 让她问一句：「${what}」`);
+        }
+        return;
       }
 
       const r = remind.add({

@@ -489,6 +489,13 @@ export function lastHumanMessage(groupId, opts = {}) {
     if (m.self) continue; // 跳过自己说的
     if (m.messageId && exclude.includes(String(m.messageId))) continue;
     const text = String(m.text ?? '').trim();
+    // ⚠️⚠️ 2026-09-18 修（用户截图：他**只 @ 了她一下**，她回「嗯？」而没接上一条）：
+    //    「只 @ 她、一个字没打」的消息在缓冲里存成的是**占位符**「（@了机器人）」——
+    //    它**不是空串**（6 个字 ≥ 4），于是把**真正有内容的那条挡住了**
+    //    （他上一条是「起来看日出」，追接逻辑却拿到「（@了机器人）」→ 她当然只能回「嗯？」）✗
+    //    修法：**去掉括号里的东西就什么都不剩**的，一律当成"没内容"跳过
+    //    （「（图片）」「（表情）」这类也一并跳过 —— 它们同样不是可以接的话）。
+    if (!text.replace(/[（(][^）)]*[）)]/g, '').trim()) continue;
     // 太短的（「对」「嗯」）不像知识内容
     if (text.length < 4) continue;
     if (text.length > maxChars * 2) continue;
