@@ -340,6 +340,54 @@ console.log('\n【14】开头和句中是两类，互不覆盖');
   check(tic.ticHint(G4).includes('你最近老这么开口'), 'head 类用"老这么开口"的措辞');
 }
 
+console.log('\n【15】★ 口癖词：「倒是」（2026-09-17 用户反馈）');
+{
+  // 用户原话：「先把这个 **倒是** 这个词频率修一下，感觉很高」。
+  // 实例：「还没呢，等交完班再说。**你倒是**先吃上了（」
+  //
+  // ⚠️ 它同时卡在前两层机制的盲区里 —— 这两条断言就是"为什么还要第三层"的证据：
+  fresh();
+  check(
+    tic.headOf('还没呢，你倒是先吃上了') !== '倒是',
+    '它在句中 → headOf（只看开头 4 字）抓不到',
+  );
+  check(
+    tic.clausesOf('还没呢，等交完班再说。你倒是先吃上了').length === 0,
+    '每条只出现一次 → clausesOf（要求跨句重复）也抓不到',
+  );
+
+  tic.note(G, '还没呢，等交完班再说。你倒是先吃上了（');
+  check(tic.repeated(G) === null, '说 1 次：不提醒（这个词本身是正常语气，不是脏话）');
+
+  tic.note(G, '你倒是说说看，这图哪来的');
+  const r = tic.repeated(G);
+  check(
+    !!r && r.g === '倒是' && r.kind === 'word' && r.count === 2,
+    `★ 说 2 次就判定为口癖（${r?.g} / ${r?.kind} / ${r?.count} 次）`,
+  );
+
+  const hint = tic.ticHint(G);
+  check(hint.includes('倒是'), '提示里点名了「倒是」');
+  check(/同一个词/.test(hint), '措辞说的是"老用同一个词"（不是"老这么开口"）');
+  check(/不是说完全不能说|遣词造句/.test(hint), '仍然带了"不是禁言"的意思（用户的原话）');
+  check(!/禁止说|不许说|绝对不能说/.test(hint), '措辞不是硬禁令');
+
+  // ⚠️ 反向：正常用这个词不该被"见到就拦" —— 拦的是**高频**，不是词本身
+  check(tic.wordsOf('这倒是真的').length === 1, '命中就是命中，频率交给阈值管');
+}
+
+console.log('\n【16】口癖词表可以改，表外的词不乱抓');
+{
+  fresh();
+  const before = config.tic.words;
+  config.tic.words = ['貌似', '倒是'];
+  check(tic.wordsOf('他貌似不太高兴').includes('貌似'), 'config 里加的词生效');
+  check(tic.wordsOf('这倒是真的').includes('倒是'), '表里原有的词仍在');
+  check(tic.wordsOf('他好像不太高兴').length === 0, '表里没有的词不抓（不自动统计所有词）');
+  check(tic.status(G).words.includes('貌似'), 'status() 能列出当前词表（管理界面/自检要看）');
+  config.tic.words = before;
+}
+
 try {
   rmSync(TIC_PATH, { force: true });
   rmSync(join(ROOT, CFG_REL), { force: true });

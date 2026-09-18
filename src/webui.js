@@ -1145,6 +1145,16 @@ const routes = {
     if (r.done) {
       try {
         settled = quest.settle(q, r.ending, (uid, d, o) => affinity.adjust(uid, d, { ...o, groupId: q.groupId }));
+        // ⚠️ 手动推进也要播报（2026-09-17 用户要的"结局展示"是**群里**看到的那条，
+        //    不是面板里的）。这一段刚刚已经用 `sendChatLike` 发到群了，
+        //    所以同样隔 1 秒，和自动那些走一样的手感。
+        const report = quest.endingReport(settled, (uid) => names.label(uid, q.groupId));
+        if (report) {
+          setTimeout(
+            () => bot.sendToGroup(gid, report).catch((e) => log.warn(`[剧情] 结局播报发送失败：${e.message}`)),
+            quest.ENDING_REPORT_DELAY_MS,
+          ).unref?.();
+        }
       } catch (e) {
         log.warn(`手动推进后结算失败：${e.message}`);
       }
@@ -1288,7 +1298,7 @@ const routes = {
         friendList: withName(st.friendList ?? []),
       },
       /** ★ 排行榜预览（和 `/好感度` 命令用的是同一个口径；**按群**） */
-      board: withName(affinity.recentTop(config.affinity?.boardSize ?? 10, gid)),
+      board: withName(affinity.top(config.affinity?.boardSize ?? 10, gid)),
       scores: affinity.status(gid),
     });
   },

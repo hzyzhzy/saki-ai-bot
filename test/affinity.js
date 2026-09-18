@@ -148,10 +148,10 @@ console.log('\n【4.五】★★ 好感度**按群各记各的**（HZY：「好�
   check(aff.get(U, G2) === 48, `★★ 在 B 群 48 —— 两边互不影响（拿到 ${aff.get(U, G2)}）`);
   check(aff.get(U, '999999') === 50, '★ 没去过的群 = 默认 50');
   check(
-    aff.recentTop(10, G1).every((x) => x.userId !== 'nobody'),
+    aff.top(10, G1).every((x) => x.userId !== 'nobody'),
     '★ 榜单只列那个群的人',
   );
-  check(aff.recentTop(10, G1).length === 1 && aff.recentTop(10, G2).length === 1, '★ 两个群各有一份榜');
+  check(aff.top(10, G1).length === 1 && aff.top(10, G2).length === 1, '★ 两个群各有一份榜');
   check(aff.groupIds().includes(G1) && aff.groupIds().includes(G2), '★ groupIds() 报得出有数据的群');
 
   // 每天的额度也按群算（在 A 群刷满了，去 B 群照样能加）
@@ -205,7 +205,10 @@ console.log('\n【7】档位描述随数值变（高/中/低要说不一样的�
   aff.adjust(B, -300, { force: true });
   const lo = aff.promptLine(B, { name: 'X' });
   check(hi !== lo, '高好感度和低好感度的注入内容**不一样**');
-  check(/很熟|喜欢/.test(hi), '高的时候描述偏正面');
+  // ⚠️ 2026-09-17：`promptLine` 新加了 90 那一档（"非常亲近（已经是熟人 / 朋友那种）"，
+  //    为的是"好感度到 90 以上就不用再推开'宝宝'这种称呼"）——
+  //    那一档的措辞里没有"很熟/喜欢"，所以把"亲近"也认成正面描述。
+  check(/很熟|喜欢|亲近/.test(hi), '高的时候描述偏正面');
   check(/不耐烦|不想理/.test(lo), '低的时候描述偏冷');
 }
 

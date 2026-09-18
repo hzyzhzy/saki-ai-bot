@@ -57,12 +57,25 @@ repeat.reset();
 repeat.observe(G, 'x');
 repeat.observe(G, 'x');
 repeat.observe(G, 'x');
-check(repeat.shouldJoin(G, { cooldownMs: 0 }).join === true, '第 3 句时可以接');
+const v3 = repeat.shouldJoin(G, { cooldownMs: 0 });
+check(v3.join === true, '第 3 句时可以接');
+// ★★ 2026-09-18 用户纠正：「不是直接发+1，而是复述前面几个人正在复述的内容」
+check(v3.say === 'x', '★★ 她跟的是被复读的**原话**（不是 "+1"）', JSON.stringify(v3.say));
 repeat.noteJoined(G);
 check(repeat.shouldJoin(G, { cooldownMs: 0 }).join === false, '★ 接过了就不再接（同一条链）');
 repeat.observe(G, 'x');
 repeat.observe(G, 'x');
 check(repeat.shouldJoin(G, { cooldownMs: 0 }).join === false, '★ 链继续到第 4、5 句也不接');
+
+console.log('\n【5b】★★ 复读发的是**原话**（归一化只用来比对，不用来发送）');
+repeat.reset();
+repeat.observe(G, '  原神，启动！  ');
+repeat.observe(G, '原神，启动！');
+repeat.observe(G, '原神，启动！');
+const vv = repeat.shouldJoin(G, { cooldownMs: 0 });
+check(vv.join === true, '第 3 句还是能接');
+check(vv.say === '原神，启动！', '★★ 发出去的是原文（首尾空格去掉）', JSON.stringify(vv.say));
+check(vv.say !== '+1', '★★ 不是 "+1"（用户 2026-09-18 纠正过）');
 
 console.log('\n【6】冷却（按群各算各的）');
 repeat.reset();

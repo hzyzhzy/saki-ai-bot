@@ -78,6 +78,14 @@ console.log('\n【2】★★ 这个点她在哪（截图那两个错就是这里
   check(/教室/.test(morning), '★ 周三上午 → **在教室**', morning.split('\n')[1] ?? '');
   check(!/客服室/.test(morning.split('\n')[1] ?? ''), '★ 上午那条**不说**客服室（那个点在教室）');
 
+  // ★★ 2026-09-18 用户报「为什么这个时候还在上课」：中午 12 点是**午休**，
+  //    而原来 `hh < 15` 一律写成"在教室上课"——她 12:39 刚说去吃饭，12:41 又说在上课。
+  const noon = whereAmI(wed(12)).line;
+  check(/午休/.test(noon), '★★ 周三 12:00 → **午休**（不是"在教室上课"）', noon.split('\n')[1] ?? '');
+  check(!/上课/.test(noon.split('\n')[1] ?? ''), '★★ 午休那条**不许**出现"上课"');
+  check(/上课/.test(whereAmI(wed(13)).line), '★ 13:00 回到上课');
+  check(/上课/.test(whereAmI(wed(11)).line), '★ 11:00 还在上课（午休只从 12 点开始）');
+
   const after = whereAmI(wed(16)).line;
   check(/客服室/.test(after), '★ 周三 16:00 → **放学后到客服室**');
 

@@ -61,6 +61,7 @@ const SUITES = [
   'friend',
   'follow-up',
   'tic',
+  'meal',
   'cooldown',
   // ⚠️ 2026-09-16 加：连发碎片自动续窗（「你/可/以/一/个/一/个/字/说/话/吗」那种一个字一条
   //    的消息，整串当成一句话只回一次；私聊也走合并；正常消息与 @她 的短窗口没被拖慢）
@@ -161,6 +162,10 @@ function isolatedStateEnv(name) {
     QQBOT_BALANCE_FILE: p('balance'),
     QQBOT_MONTHLY_FILE: p('monthly'),
     QQBOT_TIC_FILE: p('tic'),
+    QQBOT_MEAL_FILE: p('meal'),
+    // ⚠️ 2026-09-17：`recent.js` 也会落盘了（"重启不丢上下文"）——
+    //    套件必须各写各的，否则会互相串、也会污染真实的 state/recent.json
+    QQBOT_RECENT_FILE: p('recent'),
     QQBOT_QZONE_FILE: p('qzone'),
     QQBOT_DIGEST_FILE: p('digest'),
     QQBOT_AFFINITY_FILE: p('affinity'),

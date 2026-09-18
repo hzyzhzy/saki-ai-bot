@@ -11,7 +11,7 @@ import { log } from './log.js';
 import { streamChat, quickAck } from './llm.js';
 import * as msg from './message.js';
 import * as history from './history.js';
-import { knowledgeText, hasKnowledge, selectFor as knowledgeSelect, mentionsAnyTerm } from './knowledge.js';
+import { knowledgeText, hasKnowledge, selectFor as knowledgeSelect, mentionsAnyTerm, whoIsBrief } from './knowledge.js';
 import * as mclog from './mc-log.js';
 import * as observe from './observe.js';
 import { queryServer, describe } from './status.js';
@@ -33,6 +33,7 @@ import * as bilibili from './bilibili.js';
 import * as monthly from './monthly-report.js';
 import * as followUp from './follow-up.js';
 import * as tic from './tic.js';
+import * as meal from './meal.js';
 import * as affinity from './affinity.js';
 import { detectInsult } from './insult.js';
 import * as repeat from './repeat.js';
@@ -188,6 +189,11 @@ export function whereAmI(now = new Date()) {  const hh = now.getHours();
   if (schoolDay) {
     if (hh < 7) where = '在家（还没起 / 刚起）';
     else if (hh < 8) where = '在家准备出门上学';
+    // ⚠️⚠️ 2026-09-18 用户报「为什么这个时候还在上课」：
+    //    中午 12 点是**午休**，而原来 `hh < 15` 一律写成"在教室上课"——
+    //    她 12:39 刚在群里说去吃饭，12:41 又说"我在上课"，两句当场打架。
+    //    所以 12 点这一档必须单独拆出来。
+    else if (hh === 12) where = '**午休**（在教室吃午饭、趴一会儿；手机能看，回得快）';
     else if (hh < 15) where = '**在羽丘的教室里上课** —— 手机静音，回得慢、有时候干脆看不到';
     else if (hh < 18) where = '**放学后刚到客服室**（排班打工，有同事、有交班）';
     else if (hh < 22) where = '**在客服室**（排班/晚班）';
@@ -754,7 +760,10 @@ export class Bot {
       const withoutAt = segs.filter(
         (s) => !(s.type === 'at' && (String(s.data?.qq) === this.selfId || s.data?.qq === 'all')),
       );
-      const text = msg.tidy(msg.extractText(withoutAt));
+      // ⚠️ 2026-09-17：这里还要**剥掉开头的文本形式 @**（`@saki酱saki酱… 这是什么猫`那种）。
+      //    那串名字只是"在叫她"，不是消息内容 —— 不剥的话她会答「连发五遍名字做什么」。
+      //    ⚠️ 它和下面 handle 里那处（L2396 附近）是**同一套算法**，必须一起改。
+      const text = msg.stripLeadingAt(msg.tidy(msg.extractText(withoutAt)));
       recent.remember(payload, {
         text,
         isAtMe: this.selfId ? msg.isAt(segs, this.selfId) : false,
@@ -770,14 +779,19 @@ export class Bot {
       // 再喂给「暗中观察」：攒够一批就在后台总结群友性格和群里大事
       observe.note(payload, text);
 
-      // ── 复读机：群里刷同一句话时，她也跟一句 +1（2026-09-17 用户要求）──────
+      // ── 复读机：群里刷同一句话时，她也**跟着复读那句原话**（2026-09-17 用户要求）──
       //
       // 用户原话：「如果群友全部变成复读机（+1）时，机器人可以在复读到**第 3 句或更多**
       //   时直接 +1，**第三句接复读概率最大，然后依次减小**，
       //   注意**不要有人打断复读时还在接复读**」。
       //
+      // ⚠️⚠️ 这里的「+1」说的是**群友的行为**（一群人复读同一句话），
+      //    **不是让她发字面的 "+1"** —— 2026-09-18 用户纠正：
+      //    「不是直接发+1，而是**复述前面几个人正在复述的内容**」。
+      //    所以要发的是 `v.say`（那条链上被复读的原话）。
+      //
       // 判定逻辑全在 `src/repeat.js`（那里解释了"打断 = 链断"和"一条链只接一次"）。
-      // ⚠️ 这里的两件事：① 把**群友**的消息喂进去（她自己发的要过滤，不然她的 +1
+      // ⚠️ 这里的两件事：① 把**群友**的消息喂进去（她自己发的要过滤，不然她的复读
       //    会被当成"复读又加了一层"）；② 掷骰子决定要不要跟。
       // ⚠️ 用 `text`（已经剥掉 @ 的那份）—— 比对时 @某某 会干扰"是不是同一句"。
       if (payload.message_type === 'group' && text) {
@@ -790,10 +804,12 @@ export class Bot {
             cooldownMs: Number(config.repeat?.cooldownMs) || 5 * 60 * 1000,
             probs: config.repeat?.probabilities,
           });
-          if (v.join && Math.random() < v.chance) {
+          if (v.join && v.say && Math.random() < v.chance) {
             repeat.noteJoined(payload.group_id);
-            log.info(`[复读] 群 ${payload.group_id} 刷到第 ${v.count} 句 → 她也跟一句 +1（${v.why}）`);
-            this.sendToGroup(payload.group_id, '+1').catch((e) =>
+            log.info(
+              `[复读] 群 ${payload.group_id} 刷到第 ${v.count} 句 → 她也复读「${v.say.slice(0, 24)}」（${v.why}）`,
+            );
+            this.sendToGroup(payload.group_id, v.say).catch((e) =>
               log.debug(`接复读失败：${e.message}`),
             );
           }
@@ -1547,9 +1563,38 @@ export class Bot {
       //    所以只有这个群是 1 档时才把滑块值交给 judge；
       //    2/3 档传 strictnessOnlyLevel1:false，judge 那边就不带那段标准。
       const isLevel1 = this.resolveRespondTo(event) === 1;
+      // ⚠️⚠️ 2026-09-17 修（HZY 截图）：群里在演剧情时，群友那几句**是在跟她说剧情**，
+      //    可说话判断只看到"群友之间在说话" → 直接被下面那个代码层短路按死。
+      //    实测就是这么被拦掉的：「所以是谁拿的」「那我怎么攻略」判成"别人在聊天"，
+      //    紧接着群里直接有人问「你为啥不理他」。
+      //    做法：这条若命中**剧情发言**判据（跟收集进剧情用的是同一条），
+      //    就不让"别人在说话"短路，并把剧情摘要一起交给判断。
+      const questTalk = (() => {
+        try {
+          if (event?.message_type !== 'group') return '';
+          const gid = String(event.group_id ?? '');
+          const q = quest.current(gid);
+          if (!q || q.endedAt) return '';
+          if (!q.groupId || String(q.groupId) !== gid) return '';
+          const v = quest.isPlotReply({
+            segs: Array.isArray(event.message) ? event.message : [],
+            text: this._textOf(event),
+            selfId: this.selfId,
+            herIds: q.herMsgIds ?? [],
+          });
+          return v?.hit ? quest.briefFor(gid) : '';
+        } catch (e) {
+          log.debug(`剧情发言判据出错（当没命中）：${e.message}`);
+          return '';
+        }
+      })();
+
       verdict = await judgeSpeak(event, {
         context,
-        recentFromOthers: this.isOthersTalking(event),
+        // ⚠️ 剧情摘要（命中剧情发言时才有）
+        questBrief: questTalk,
+        // ⚠️ 命中剧情发言时**不能**按"别人在聊天"短路 —— 那正是被拦掉的原因
+        recentFromOthers: this.isOthersTalking(event) && !questTalk,
         // followUp（接着它刚说的话）不算「别人在聊天」
         voluntary: join.mode === 'followUp' ? null : join.mode,
         // ⚠️ 「他刚才就在跟我说话，这是他接着说」—— 这是个很强的信号：
@@ -1946,6 +1991,30 @@ export class Bot {
       return `${s}@${history.sessionKey(event)}`;
     } catch {
       return s;
+    }
+  }
+
+  /**
+   * 她刚在某个群发完话 → **清掉这个群的判断节流**。
+   *
+   * ⚠️⚠️ 2026-09-18 加的（用户截图）：她回完「十点？…我明天可没这福气」，
+   *    群里紧接着跟一句「那你这么晚还不睡」，却因为 `judgeThrottleMs`(5 秒)
+   *    被"判断节流"直接吞掉 —— 那条消息**压根没被拿去问模型**
+   *    （日志里只剩一行「判断节流中…这条没问她，不接」，看着像"她觉得无关"）。
+   *    她刚说完话后紧跟的那一条，最可能是冲她来的，**必须过判断**。
+   *
+   * ⚠️ 代价可控：清掉之后**最多多一次判断**（下一条判完又会重新计时），
+   *    不会把节流整个废掉 —— 群里刷屏那部分省钱效果还在。
+   *
+   * ⚠️ 按群清（`bucket` 形如 `followUp@group:200000006`）——
+   *    别把别的群的节流一起清了（那会白花别的群的调用）。
+   */
+  clearJudgeThrottle(groupId) {
+    if (!this.lastJudgeAt) return;
+    const gid = String(groupId ?? '');
+    if (!gid) return;
+    for (const k of Object.keys(this.lastJudgeAt)) {
+      if (k.endsWith(':' + gid)) delete this.lastJudgeAt[k];
     }
   }
 
@@ -2393,7 +2462,11 @@ export class Bot {
     const withoutAt = segments.filter(
       (s) => !(s.type === 'at' && (String(s.data?.qq) === this.selfId || s.data?.qq === 'all')),
     );
-    const text = msg.tidy(msg.extractText(withoutAt));
+    // ⚠️ 2026-09-17：剥掉开头的**文本形式 @**（「@saki酱saki酱… 这是什么猫」那种）——
+    //    那串名字只是"在叫她"，不是消息内容。不剥的话她会答「连发五遍名字做什么」。
+    //    ⚠️ 和上面 `recent.remember` 那处必须一致（不一致的话，当前这条会被
+    //       重复当成上文里别人说过的话，导致答非所问 —— 那个坑注释在上面）。
+    const text = msg.stripLeadingAt(msg.tidy(msg.extractText(withoutAt)));
     // 给模型看的是**带占位符的原样**（它需要知道对方发了图），
     // 但「空不空」的判断要用剥掉占位符后的 realText —— 表情包消息 realText 才是空的。
     const realText = msg.stripPlaceholders(text);
@@ -2806,10 +2879,26 @@ export class Bot {
     const st = this.batchState?.get(bkey);
     if (!st || st.pending || !st.items.length) return;
     const items = st.items.splice(0);
-    // 用最后一条做「当前消息」（回复时引用它），内容把这一串拼起来
+    // ⚠️⚠️ 2026-09-18 用户截图报的「引用挂错人」：
+    //    原来**拿最后一条当"当前消息"**（老注释原话：「用最后一条做当前消息，回复时引用它」）——
+    //    可"生成期间新来的"这几条里，**叫她的那条往往不是最后一条**
+    //    （她还在生成的时候，别人又插了两句），于是引用框挂到了插话的人身上。
+    //    截图：她引用了小泥的「而且只要二十多」，正文回的却是 @她的那位。
+    //    所以：**批次里明确叫了她的（@她 / 引用她）就拿它当"当前消息"**，
+    //    没有才退回最后一条。
     const last = items[items.length - 1];
+    const callsMe = (e) => {
+      try {
+        const segs = msg.toSegments(e?.message);
+        if (this.selfId && msg.isAt(segs, this.selfId)) return true;
+        return this.isQuoteOfMe(e, segs);
+      } catch {
+        return false;
+      }
+    };
+    const caller = [...items].reverse().find(callsMe) ?? last;
     const merged = {
-      ...last,
+      ...caller,
       message: items.flatMap((e) => e.message ?? []),
       _sources: items.map((e) => srcOf(e)),
     };
@@ -3370,6 +3459,26 @@ export class Bot {
       const cands = recent.recentImages(event.group_id, {
         excludeIds: [String(event.message_id)],
         maxAgeMs: 5 * 60 * 1000,
+        // ⚠️⚠️ 2026-09-17 用户截图报的「机器人直接发上一张图的回答」——
+        //    原来是 `limit: 2`，一次捞**最近两张**图。
+        //    场景：mmmawa 先发一张**白猫**、@她问「这是什么猫」→ 她答了；
+        //    接着又发一张**像素风动漫图**、同样 @她问「这是什么猫」→
+        //    **她答的还是白猫**（「刚说过了啊，白的」）。
+        //    因为新图是**单独一条消息**（图、问话分两次发），当前消息不带图 →
+        //    走"捡上下文里刚发过的图"这条路 → 两张图的描述一起塞给模型 →
+        //    问题问的是"这是什么猫"，她就就近抓了第一张。
+        //
+        //    ⚠️ 为什么 `limit: 1` 仍然够用：当初加这个机制是为了修
+        //    「A 发图 → B 说『神了』 → 她接话但没看到图」那个场景，
+        //    而那张图离当前消息**只隔一条**，取最近一张正好命中。
+        //    取两张换不来任何好处，只会让"新图"和"旧图"混在一起。
+        //
+        // ⚠️⚠️ 2026-09-18 用户截图**又把它打回来了**：群里小泥连着发了三张图
+        //    （「这个好可爱口牙[图片]」/「而且只要二十多」/「[表情包]」），
+        //    她只看到一张 → 回了一句「二十多……**什么二十多**」。
+        //    所以改成 2 张，**并且把"谁发的"标出来**（见下面那段）——
+        //    标发送者正是为了不再踩"就近抓错图"那个坑：
+        //    模型能看出"二十多"是小泥说的、对应小泥那张图。
         limit: 2,
       });
       if (cands.length) {
@@ -3378,9 +3487,22 @@ export class Bot {
           const cached = visionCache.cachedDescriptions(cands.map((c) => c.file));
           if (cached.length) {
             vision = visionCache.visionBlock(cached);
+            // ⚠️ 2026-09-18：**把"谁发的"标上** —— 群里同时有好几张图时，
+            //    她得知道"二十多"说的是谁发的那张（用户截图：她答"什么二十多"）。
+            const byFile = new Map(cands.map((c) => [c.file, c.name]));
+            vision +=
+              '\n（这几张图的来源：' +
+              cached
+                .map((c) => `${byFile.get(c.file) ?? '某人'}发的——${String(c.desc ?? '').slice(0, 24)}`)
+                .join('；') +
+              '）';
             log.info(
               `[${who}] 上下文里有 ${cached.length} 张刚发过的图（描述已缓存）→ 一起带给模型`,
             );
+            // ⚠️ 2026-09-17 加（诊断用）：把**描述内容**也记下来。
+            //    用户报「认不出手机」时，光看"有几张"根本判断不了是
+            //    「识图没读对」还是「读对了但模型没用」—— 记前 400 字就够区分。
+            log.info(`[识图·缓存] ${cached.map((c) => c.desc).join(' ⏐ ').slice(0, 400)}`);
           }
         }
         // ② 没缓存、且明显在指代 → 识别
@@ -3399,6 +3521,8 @@ export class Bot {
                 log.info(
                   `[${who}] 当前消息在说前面的图 → 补识图 ${seen.length} 张（${cands.map((c) => c.name).join('、')} 发的）`,
                 );
+                // ⚠️ 2026-09-17 加（诊断用）：同上，把描述内容记下来
+                log.info(`[识图·补做] ${seen.map((s) => s.desc).join(' ⏐ ').slice(0, 400)}`);
               }
             } catch (e) {
               log.debug(`补识图失败：${e.message}`);
@@ -3946,6 +4070,13 @@ export class Bot {
       // 记下「刚回过话」，之后同一会话的新消息会被当成对话延续接住
       if (event.message_type === 'group') {
         this.touchConversation(event);
+        // ⚠️⚠️ 她刚说完话 → **清掉这个群的判断节流**（2026-09-18 用户截图要求）。
+        //    经过：她回完「十点？…我明天可没这福气」，群里紧接着跟一句
+        //    「那你这么晚还不睡」，却因为 `judgeThrottleMs`(5 秒) 被"判断节流"
+        //    直接吞掉 —— 那条消息**压根没被拿去问模型**，日志里只剩一行
+        //    「判断节流中…这条没问她，不接」，看着像"她觉得无关"，其实没问过。
+        //    她刚说完话后紧跟的那一条最可能是冲她来的，**必须过判断**。
+        this.clearJudgeThrottle(event.group_id);
         // ⚠️ 但**对方是明确找它**（@它 / 叫它名字）时，续话计数归零 ——
         //    那是正经对话，不该被"防刷屏"的计数器拦住（2026-09-13）。
         //    只有「它**自己主动**接话」才累加计数。
@@ -5788,6 +5919,37 @@ export class Bot {
 
     // 识图结果：这一条消息最直接的内容，放在上下文之后
     if (vision) parts.push(vision);
+    // ⚠️⚠️ 2026-09-17 修（HZY 截图：「@saki 找到药了吗」→ 她答「什么药啊，你哪不舒服了」）：
+    //    二级剧情的接线一直是**单向**的 —— 群友的话会记进剧情，
+    //    但**剧情从来没进过她的聊天提示词**。所以群友顺着剧情追问时，她完全不知道在说什么。
+    //    ⚠️ 只在她**正在跑剧情的那个群**注入，而且只给摘要（起因 + 进度 + 最近两段）。
+    //    ⚠️ 位置放在这里（靠后）：群友追问时，这段离他要回的那句话更近。
+    if (event?.message_type === 'group') {
+      const brief = quest.briefFor(event.group_id);
+      if (brief) parts.push(brief);
+    }
+    // ⚠️ 吃饭状态（2026-09-17 用户要求：「下次有人喊她，他自己就知道吃过没有了」）——
+    //    她说过的"去吃饭了"是有**寿命**的状态（默认 10 分钟），到点自动算吃完。
+    //    ⚠️ 状态本身不分群（她是一个人），但只在群里注入：私聊里没人喊她"一起吃饭"。
+    if (event?.message_type === 'group') {
+      const mealHint = meal.hint();
+      if (mealHint) parts.push(mealHint);
+    }
+    // ⚠️⚠️ 「他是谁」迷你摘要（2026-09-17 用户报的：「**不可能什么印象都没有吧**」）。
+    //    群资料确实进了提示词，但整份 4 万字里它在**中段**，她没翻到（中段迷失）。
+    //    所以把被问到的那个人那一条**单独拎一份贴在这儿**（提示词靠后 = 离提问最近）。
+    if (event?.message_type === 'group' && currentText) {
+      // ⚠️ 再叠一层：查人时**也要看他在剧情里做过什么**（2026-09-17 用户要求：
+      //    「我觉得在查人时应该也要特别查一下故事线」）——
+      //    那个人可能刚跟她一起演完一段事（他报的场景：问"喵喵三三是谁"时，
+      //    那人刚在剧情里说了十几句话，而她的回答是"就刚发啧那个，别的我也不熟"）。
+      const whoParts = [];
+      const who = whoIsBrief(currentText, event.group_id);
+      if (who) whoParts.push(who);
+      const wq = quest.whoInQuest(currentText, event.group_id);
+      if (wq) whoParts.push(wq);
+      if (whoParts.length) parts.push(whoParts.join('\n\n'));
+    }
 
     // 联网搜索结果
     if (webSearch) parts.push(webSearch);
@@ -6001,7 +6163,10 @@ export class Bot {
           const th = tic.ticHint(event.group_id);
           if (th) {
             parts.push('\n' + th);
-            log.info(`[口癖] 注入抑制提示：${tic.status(event.group_id).repeated?.head}…`);
+            // ⚠️ 2026-09-17 修：这里原来取的是 `.repeated?.head`，而 `tic.status()` 给的是
+            //    `{g, kind, count}`（`head` 是**老格式**的字段名）—— 于是日志一直打
+            //    「注入抑制提示：undefined…」，看着像口癖功能坏了（其实是找不到字段）。
+            log.info(`[口癖] 注入抑制提示：${tic.status(event.group_id).repeated?.g}…`);
           }
         } catch (e) {
           log.debug(`口癖提示生成失败：${e.message}`);
@@ -6407,14 +6572,22 @@ export class Bot {
         }
       }
       // 表情单独一条，不带 reply 引用，也不带文字
-      for (const m of keepMarkers.slice(0, 2)) {
+      //
+      // ⚠️⚠️ 2026-09-17 用户报「怎么发表情包会连发两个」——
+      //    原来这里写的是 `slice(0, 2)`，**允许一条回复发两张表情**。
+      //    今天把 `faces.sendEvery` 从 9 降到 6 之后，闸放行得更频繁，
+      //    模型一条回复里写两个 `[表情:x]` 的情况就露出来了，
+      //    观感就是"连着甩两张图"。
+      //    真人在群里一次只发一张表情（真要发第二张，也会先补一句话）——
+      //    所以现在**只发第一个**，多余的丢掉（下面有 debug 日志记着丢了几张）。
+      for (const m of keepMarkers.slice(0, 1)) {
         await sleep(280);
         await this.sendFace(event, m.tag);
       }
       if (keepMarkers !== markers && markers.length) {
         log.debug(`表情频率闸挡掉了 ${markers.length} 个标记`);
       }
-      if (markers.length > 2) log.debug(`一条回复里出现 ${markers.length} 个表情，只发了前 2 个`);
+      if (markers.length > 1) log.debug(`一条回复里出现 ${markers.length} 个表情，只发了第 1 个`);
       return sentText || (keepMarkers.length ? '' : null);
     } catch (e) {
       log.error(`发送失败: ${e.message}`);
@@ -6769,6 +6942,15 @@ export class Bot {
   async sendChatLike(groupId, text, opts = {}) {
     const parts = splitChatText(text);
     if (!parts.length) return [];
+    // ⚠️ 2026-09-17 用户要求加「吃饭状态机」（原话：「有什么影响吃饭的事件会被计入，
+    //    下次有人喊她，他自己就知道吃过没有了」）。这里是她**所有自己说的话**的统一出口
+    //    （剧情、日常事件、主聊天回复都走它），所以在这一处记账就够，不会漏。
+    //    ⚠️ 只记**她自己说的** —— 这个函数的调用方全是"她发出去"，群友的话不走这里。
+    try {
+      meal.note(text, `群${groupId}`);
+    } catch (e) {
+      log.debug(`吃饭状态记账失败：${e.message}`);
+    }
     const delay = Math.max(0, Number(config.chunking?.delayMs) || 650);
     const sent = [];
     /** 没出去的那几条原文 —— 等通道正常了补发（见 src/outbox.js） */
@@ -6904,15 +7086,20 @@ export class Bot {
   /**
    * `/好感度` —— 群里查好感度排行榜。
    *
-   * ⚠️⚠️ 用户定的口径（2026-09-15）：
-   *   「在群里发送"斜杠好感度"可以查看好感度排行榜，**只输出十个最近好感度有变化的**群友数据，
-   *     然后**从高到低排序**。**注意这个排行榜消息不要融进聊天上文**。」
+   * ⚠️⚠️ 口径（2026-09-18 用户改过，**别再按老的来**）：
+   *   · `/好感度`     → **按分数从高到低的前 10 名**
+   *   · `/全部好感度` → **这个群里所有有过变化的人**（分数从高到低，人多会分条发）
+   *   用户原话：「还是把好感度排行改成**只按从高到低排序**吧，排前 10 个，
+   *     再加个 `/全部好感度` 的指令，直接显示**全部好感度有变化过的**数据」。
+   *   ⚠️ 老口径是"先取最近变化的 10 个、再按分排"——那正是
+   *     「喵喵三三为什么在好感度排行找不到了」的成因（她 82 分最高、却被时间戳截掉）。
    *
-   * 所以这里有三件事和普通回复**不一样**：
+   * 另有两条用户定的规矩（2026-09-15）：
    *   ① **不进聊天上文** —— 不调 `history.remember` / `recent.rememberBot`。
    *      否则她下一次说话会把这串名字当成"刚聊的内容"，那就露馅了。
-   *   ② **不分条**（整条发）—— 排行榜是机器格式的东西，见 `sendChatLike` 的说明。
-   *   ③ **不调模型** —— 纯拼字符串，省一次调用、也不给它发挥的空间。
+   *   ② **不调模型** —— 纯拼字符串，省一次调用、也不给它发挥的空间。
+   *   ⚠️ 榜单是**机器格式**，一律走 `sendToGroup`（不能走 `sendChatLike` 的分条 ——
+   *      那条路径会把每一条都算成"她说过的话"）；`/全部好感度` 人多时**在这里自己分条**。
    *
    * ⚠️⚠️ 调用点（2026-09-15 改）：**`onRaw` 里、群白名单之后的第一件事**。
    *   它**不能**挂在 `shouldJoinChat()` 那种"要不要主动搭话"的判断里 ——
@@ -6924,22 +7111,26 @@ export class Bot {
   tryAffinityBoard(event, segs) {
     try {
       const raw = String(msg.extractText(segs) ?? '').trim();
-      const m = /^[\/／]\s*好\s*感\s*度\s*$/.exec(raw);
-      if (!m) return false;
+      // ⚠️ 两个命令。`/好感度` 的正则匹配不到 `/全部好感度`（中间隔着"全部"），
+      //    所以先判长的那个更稳。
+      const mAll = /^[\/／]\s*全\s*部\s*好\s*感\s*度\s*$/.exec(raw);
+      const mOne = mAll ? null : /^[\/／]\s*好\s*感\s*度\s*$/.exec(raw);
+      if (!mAll && !mOne) return false;
       if (event.message_type !== 'group') return true; // 私聊里不发（用户说的是"在群里发送"）
 
+      const showAll = !!mAll;
       const n = Math.max(1, Number(config.affinity?.boardSize) || 10);
-      // ⚠️ 排行榜**按群**（2026-09-15 晚）：这个群里的人、这个群里的分
-      const list = affinity.recentTop(n, event.group_id);
+      // ⚠️ 两个榜都**按群**（2026-09-15 晚）：这个群里的人、这个群里的分
+      const list = showAll ? affinity.all(event.group_id) : affinity.top(n, event.group_id);
       if (!list.length) {
         // ⚠️⚠️ 空榜也要**回一句**，而且**必须留日志**。
         //    2026-09-15：HZY 报「发了 /好感度 没有回复」，而这条路径原来是
         //    **完全静默**的（只有非空时才 log.info）—— 查的时候只能靠猜。
         //    命令有没有被认出来、回没回，日志里都得看得见。
-        log.info(`[好感度] 排行榜为空（还没有人有过变化）→ 群 ${event.group_id}，已回提示`);
+        log.info(`[好感度] 榜为空（还没有人有过变化）→ 群 ${event.group_id}，已回提示`);
         this.sendToGroup(
           event.group_id,
-          '好感度排行榜（最近有变化的）\n暂时没有，现在所有人都是 50。',
+          '好感度排行榜\n暂时没有，现在所有人都是 50。',
         ).catch((e) => log.warn(`排行榜发送失败：${e.message}`));
         return true;
       }
@@ -6948,11 +7139,48 @@ export class Bot {
         //    2026-09-15 用户：「30003 是谁？建议直接改成以 QQ 昵称显示」——
         //    光看号码没人认得出来。见 `src/names.js`。
         const name = names.label(x.userId, event.group_id);
-        return `${i + 1}. ${name}　${x.score}`;
+        // ⚠️ 2026-09-17 用户要求：标出「今天加满了」的人。
+        //    缘由是「喵喵三三为什么在好感度排行找不到了」——她 82 分全群最高却不在榜上，
+        //    因为她今天 +8 的额度用完了：加不进去 ⇒ 连时间戳都不更新 ⇒ 永远排在第 12 位被截掉。
+        //    不标的话，群友只会看到"我聊了半天分为什么不动"。
+        const tail = x.left === 0 ? '　（今日已满）' : '';
+        return `${i + 1}. ${name}　${x.score}${tail}`;
       });
-      const text = ['好感度排行榜（最近有变化的）', ...lines].join('\n');
-      this.sendToGroup(event.group_id, text).catch((e) => log.warn(`排行榜发送失败：${e.message}`));
-      log.info(`[好感度] 排行榜已发 → 群 ${event.group_id}（${list.length} 人）`);
+      const head = showAll
+        ? `好感度（全部 ${list.length} 个有变化的）`
+        : `好感度排行榜（前 ${list.length} 名，按分数）`;
+      // ⚠️ 全部榜可能几十人 → 一条消息塞不下（QQ 会截断甚至发不出去），
+      //    按**字符数**切条（名字长短差很多，按"每 N 人"切不准）。
+      const chunks = [];
+      let cur = [];
+      let len = 0;
+      for (const line of lines) {
+        if (cur.length && len + line.length > 1200) {
+          chunks.push(cur);
+          cur = [];
+          len = 0;
+        }
+        cur.push(line);
+        len += line.length + 1;
+      }
+      if (cur.length) chunks.push(cur);
+
+      // ⚠️ **串行**发（等上一条回来再发下一条）—— 同时发的话 QQ 那边顺序会乱。
+      //    自执行的 async 函数：不阻塞 `return true`，但内部保证顺序。
+      (async () => {
+        for (let i = 0; i < chunks.length; i++) {
+          const t = chunks.length > 1 ? `${head}（${i + 1}/${chunks.length}）` : head;
+          try {
+            await this.sendToGroup(event.group_id, [t, ...chunks[i]].join('\n'));
+          } catch (e) {
+            log.warn(`排行榜发送失败（第 ${i + 1}/${chunks.length} 条）：${e.message}`);
+          }
+        }
+      })();
+      log.info(
+        `[好感度] ${showAll ? '全部榜' : '排行榜'}已发 → 群 ${event.group_id}` +
+          `（${list.length} 人，${chunks.length} 条）`,
+      );
       return true;
     } catch (e) {
       log.warn(`好感度排行榜出错：${e.message}`);
@@ -7226,6 +7454,9 @@ export class Bot {
         userId: String(event.user_id),
         name: event.sender?.card || event.sender?.nickname || String(event.user_id),
         text,
+        // ⚠️ 判据一起存下来 —— 界面上要按它**分开显示**"真在推剧情"和"随口一句"
+        //    （2026-09-17 用户要求：「这个等下一段的状态可以细化一点」）。
+        why: verdict.why,
       });
       log.info(`[剧情] 记下一条可能改变走向的发言（${verdict.why}）：${text.slice(0, 30)}`);
     } catch (e) {
@@ -7271,7 +7502,8 @@ export class Bot {
       if (last && last.text && last.time > stageAt) {
         const dup = (q.pending ?? []).some((p) => p.userId === last.userId && p.text === last.text);
         if (!dup) {
-          quest.noteReply(q, { userId: last.userId, name: last.name, text: last.text, at: last.time });
+          // ⚠️ 这条是"她刚回复过的那条真人消息"——判据记成 `reply`（那确实是冲她来的）
+          quest.noteReply(q, { userId: last.userId, name: last.name, text: last.text, at: last.time, why: 'reply' });
           log.info(`[剧情] 她接了话 → 把「${last.text.slice(0, 24)}」也补记成群友发言（原来会被漏掉）`);
         }
       }

@@ -200,6 +200,31 @@ console.log('\n【7】★★ judge 机制通检（2026-09-15 用户要求「再�
   );
 }
 
+console.log('\n【8】★★ 她刚说完话 → 立刻清掉这个群的判断节流（2026-09-18 用户截图）');
+{
+  // ⚠️ `src` 是【7】那个块里的（块作用域），这里要自己读一份
+  const src = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  // 症状：她回完「十点？…我明天可没这福气」，群里紧接着跟一句
+  //   「那你这么晚还不睡」→ 日志里只有「判断节流中…这条没问她，不接」，
+  //   那条消息**压根没被拿去问模型**，看着却像"她觉得无关"。
+  check(
+    /clearJudgeThrottle\(event\.group_id\)/.test(src),
+    '★★ 她回复成功后**调了 clearJudgeThrottle**（不然紧跟的那条会被节流吞掉）',
+  );
+  check(
+    /clearJudgeThrottle\(groupId\)\s*\{/.test(src),
+    '★ 方法确实定义了',
+  );
+  check(
+    /k\.endsWith\(':' \+ gid\)/.test(src),
+    '★★ 按**群**清桶（`followUp@group:xxx`）—— 不许把别的群的节流一起清掉',
+  );
+  check(
+    /Number\(config\.chat\?\.judgeThrottleMs\) \|\| 5000/.test(src),
+    '★ 判断节流本身还在（只清"她刚说完话"这一次，刷屏省钱的效果没废）',
+  );
+}
+
 try {
   rmSync(join(ROOT, CFG_REL), { force: true });
 } catch {}

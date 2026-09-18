@@ -25,6 +25,13 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 //    于是"旧行为下测试也该红"这件事我验了三轮都是假绿。
 //    要让调用方能覆盖：没设才给默认值。
 process.env.QQBOT_CONFIG ??= 'config.yml';
+// ⚠️⚠️ 2026-09-17 加：`recent.js` 现在会**落盘**（"重启不丢上下文"），
+//    所以这个套件**必须**指向独立文件 —— 它用的是真实 `config.yml`（故意的，见上），
+//    文件名里没有 test，靠配置名自动隔离**挡不住它**。
+//    第一版就是这么污染的：那条"重启恢复"测试直接往真实 `state/recent.json`
+//    里塞了一句「我吃四份牛肉丼」（群号还是真实群），机器人下次重启就把它读进上下文了。
+//    同样留着让调用方覆盖的口子（`??=`）。
+process.env.QQBOT_RECENT_FILE ??= 'logs/__test-context-recent.json';
 
 let failures = 0;
 const check = (ok, label, extra = '') => {
@@ -140,6 +147,31 @@ console.log('\n【6】清空');
   check(recent.contextText(G) === '', 'clear(群) 之后上下文为空');
   recent.clearAll();
   check(recent.contextText(G) === '' && recent.contextText(OTHER) === '', 'clearAll 之后所有群都空');
+}
+
+console.log('\n【7】★ 落盘：重启不丢上下文（2026-09-17 用户要求）');
+{
+  // 用户原话：「**重启能不能保留上下文**」。
+  // 他遇到的场景：群里先聊过「@某某 能介绍一下嘛」，重启之后再问，她答"不知道" ——
+  // 因为那条记录**连同被介绍人的名字**一起没了（机器人一天要重启好几次）。
+  const fs = await import('node:fs');
+  const p = recent.path();
+  check(!/[\\/]state[\\/]recent\.json$/.test(p), `用的不是真实 state/recent.json（${p.split(/[\\/]/).pop()}）`);
+  check(typeof recent.reload === 'function', '导出了 reload()');
+
+  // 造一条，等节流写盘（3 秒）
+  say(G, '甲', '30001', '我吃四份牛肉丼');
+  await new Promise((r) => setTimeout(r, 3600));
+  check(fs.existsSync(p), '★ 3 秒内落盘了（节流写，不是每条都写）');
+  const j = JSON.parse(fs.readFileSync(p, 'utf8'));
+  check(!!j.groups?.[G]?.length, '★ 文件里有那个群');
+  check(j.groups[G].some((x) => String(x.text).includes('牛肉丼')), '★ 内容也在');
+
+  // 清空内存再 reload —— 模拟一次重启
+  recent.clear(G);
+  check(!/牛肉丼/.test(recent.contextText(G)), '清空后内存里确实没有了');
+  recent.reload();
+  check(/牛肉丼/.test(recent.contextText(G)), '★★ reload 之后又回来了（这就是"重启不丢"）');
 }
 
 console.log(`\n结果: ${failures === 0 ? '全部通过 ✅' : `${failures} 项失败 ❌`}\n`);

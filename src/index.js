@@ -12,6 +12,7 @@ import * as life from './life.js';
 import * as storyline from './storyline.js';
 import * as quest from './quest.js';
 import * as affinity from './affinity.js';
+import * as names from './names.js';
 import * as friend from './friend.js';
 // ⚠️ 待发箱（2026-09-15 用户要求：没发出去的，通道正常之后自动补发）
 import * as outbox from './outbox.js';
@@ -470,11 +471,38 @@ startOutboxTick();
     }
   };
 
-  /** 结算：结局 → 好感度（只有参与过的人加） */
+  /**
+   * 结局播报（2026-09-17 用户要求）。
+   *
+   * 用户原话：「加一个二级剧情结局展示，**跟在机器人发的剧情最后一句话之后
+   *   一秒钟发送**，内容首先展示本次剧情结束，这次是好/坏结局，
+   *   哪些人加/减了多少好感度」。
+   *
+   * ⚠️ 用 `sendToGroup`（**不进聊天上下文**）—— 跟 `/好感度` 排行榜一个路子。
+   *    进上下文的话，她下次说话会把这一整块当成群里聊过的内容。
+   * ⚠️ 也**不 @ 任何人**：@ 会弹通知，那道口子只留给"余额见底催充值"。
+   */
+  const reportEnding = (q, r) => {
+    const text = quest.endingReport(r, (uid) => names.label(uid, q.groupId));
+    if (!text) return; // 一个人都没参与 → 没什么可播报的
+    const gid = q.groupId || life.targetGroups()[0];
+    if (!gid) return;
+    setTimeout(() => {
+      bot
+        .sendToGroup(gid, text)
+        .catch((e) => log.warn(`[剧情] 结局播报发送失败：${e.message}`));
+      log.info(
+        `[剧情] 结局播报 → 群 ${gid}（${r.ending === 'good' ? '好' : '坏'}结局，${r.applied.length} 人）`,
+      );
+    }, quest.ENDING_REPORT_DELAY_MS).unref?.();
+  };
+
+  /** 结算：结局 → 好感度（只有参与过的人加），随后播报结局 */
   const settleQuest = (q, ending) => {
     // ⚠️ 剧情结局的加减分**记在这个剧情所在的群**（好感度 2026-09-15 晚起按群）
     const r = quest.settle(q, ending, (uid, d, o) => affinity.adjust(uid, d, { ...o, groupId: q.groupId }));
     if (r.cast.length) log.info(`[剧情] ${ending === 'good' ? '好' : '坏'}结局，给 ${r.cast.length} 人各 +${r.delta} 好感度`);
+    reportEnding(q, r);
     return r;
   };
 

@@ -6,11 +6,116 @@
  * 回答时一起给模型，让它知道来龙去脉。
  *
  * 只在内存里，重启就清空 —— 这是「当前话题上下文」，不是长期记忆。
+ *
+ * ⚠️⚠️ 2026-09-17 改：**现在会落盘了**（见下面「落盘」那一节）。
+ *    用户原话：「**重启能不能保留上下文**」—— 他说的场景是：
+ *    群里先聊过「@某某 能介绍一下嘛」，重启之后再问，她答"不知道"，
+ *    因为那条聊天记录**连同被介绍人的名字**一起没了。
+ *    机器人一天要重启好几次（改代码 / 看门狗补起 / NapCat 掉线），
+ *    每重启一次群里就失忆一次，代价太大。
+ *    ⚠️ 但仍然**不是长期记忆**：只存 12 小时以内、每群最多 300 条。
  */
-import { config } from './config.js';
+import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync } from 'node:fs';
+import { join, basename } from 'node:path';
+import { config, ROOT, CONFIG_FILE } from './config.js';
+import { log } from './log.js';
 
 /** group_id -> [{ name, userId, text, at, atMe, time }] */
 const store = new Map();
+
+// ─────────────────────────────────────────────────────────────
+// 落盘（2026-09-17 加，见顶部注释）
+// ─────────────────────────────────────────────────────────────
+
+const STATE_DIR = join(ROOT, 'state');
+
+/**
+ * 状态文件落在哪 —— 沿用 `tic.js` / `meal.js` 那套三步优先：
+ *   ① `QQBOT_RECENT_FILE` 显式指定（单测）
+ *   ② 配置文件带 `test` → 隔离到 `state/__test-*.json`（跑套件自动生效）
+ *   ③ 否则才是真实的 `state/recent.json`
+ */
+function recentStateFile() {
+  const explicit = process.env.QQBOT_RECENT_FILE;
+  if (explicit) return join(ROOT, explicit);
+  const cfgName = basename(CONFIG_FILE ?? '');
+  if (/test/i.test(cfgName)) {
+    return join(STATE_DIR, `__test-${cfgName.replace(/\.ya?ml$/i, '')}-recent.json`);
+  }
+  return join(STATE_DIR, 'recent.json');
+}
+
+const RECENT_FILE = recentStateFile();
+
+/** 测试/自检用：看它把状态落在哪了 */
+export function path() {
+  return RECENT_FILE;
+}
+
+let saveTimer = null;
+
+function saveNow() {
+  try {
+    mkdirSync(STATE_DIR, { recursive: true });
+    const groups = {};
+    for (const [k, list] of store) {
+      if (list.length) groups[k] = list.slice(-BUFFER_MAX);
+    }
+    const tmp = `${RECENT_FILE}.tmp`;
+    writeFileSync(tmp, JSON.stringify({ at: Date.now(), groups }), 'utf8');
+    renameSync(tmp, RECENT_FILE);
+  } catch (e) {
+    log.debug(`上下文写盘失败：${e.message}`);
+  }
+}
+
+/**
+ * 节流写。
+ *
+ * ⚠️ 群消息很密，**每条都落盘会拖慢主流程** —— 所以合并成"最多每 3 秒写一次"。
+ *    代价：进程被强杀时最多丢 3 秒的消息（这个代价可以接受）。
+ */
+function scheduleSave() {
+  if (saveTimer) return;
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    saveNow();
+  }, 3000);
+  saveTimer.unref?.();
+}
+
+/**
+ * 从磁盘恢复 —— **模块加载时**调（和 `tic.js` / `meal.js` 同一个做法）。
+ * 不在这里恢复的话，重启后 `store` 仍是空的，落盘就白做了。
+ */
+export function reload() {
+  try {
+    if (!existsSync(RECENT_FILE)) return;
+    const j = JSON.parse(readFileSync(RECENT_FILE, 'utf8'));
+    const maxAge = bufferMaxAge();
+    const now = Date.now();
+    const next = new Map();
+    for (const [k, list] of Object.entries(j?.groups ?? {})) {
+      if (!Array.isArray(list)) continue;
+      const keep = list
+        .filter((x) => x && typeof x.text === 'string')
+        // ⚠️ 只恢复 12 小时以内的 —— 再多就成"假长期记忆"了（那该由群记忆负责）
+        .filter((x) => now - (Number(x.time) || 0) < maxAge)
+        .slice(-BUFFER_MAX);
+      if (keep.length) next.set(String(k), keep);
+    }
+    store.clear();
+    for (const [k, v] of next) store.set(k, v);
+    const n = [...next.values()].reduce((a, l) => a + l.length, 0);
+    if (n) log.info(`[上下文] 重启恢复：${next.size} 个群 / ${n} 条（只恢复 12 小时内的）`);
+  } catch (e) {
+    log.debug(`上下文读取失败（当作空的）：${e.message}`);
+  }
+}
+
+// ⚠️ 模块加载时就恢复（和 `tic.js` / `meal.js` 同一个做法）——
+//    不在这里调的话，重启后 `store` 仍是空的，上面那段落盘就白做了。
+reload();
 
 /**
  * 语气记录：`group_id -> { challenges, at }`
@@ -209,6 +314,7 @@ export function remember(event, parsed = {}) {
   const now = Date.now();
   const trimmed = list.filter((m) => now - m.time < maxAge).slice(-BUFFER_MAX);
   store.set(key, trimmed);
+  scheduleSave();
 }
 
 /**
@@ -295,6 +401,7 @@ export function rememberBot(event, text, messageId = '') {
   const maxAge = bufferMaxAge();
   const now = Date.now();
   store.set(key, list.filter((m) => now - m.time < maxAge).slice(-BUFFER_MAX));
+  scheduleSave();
 }
 
 /**
