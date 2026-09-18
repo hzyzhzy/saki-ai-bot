@@ -132,10 +132,20 @@ export function faceDetailText() {
     .join('\n');
 }
 
-/** 从一段文本里抽出所有 [表情:xxx] 标记 */
+/**
+ * 从一段文本里抽出所有 `[表情:xxx]` 标记。
+ *
+ * ⚠️⚠️ 2026-09-18 放宽：**`[表情:xx]` 和裸的 `[xx]` 都认**。
+ *    起因（用户截图）：她回了「行，锅给新号背了 **[得意]**」—— 标记写漏了「表情:」，
+ *    于是一个都解析不出来，**原样当文字发到群里**，看着像表情没发出来。
+ *    为什么会写漏：`[图片]` / `[表情包]` 是**另一种**标记（描述**别人发的**消息），
+ *    模型见过那个格式，就照抄成了 `[得意]`。
+ *    ⚠️ 放宽是**安全**的：下面 `if (facePath(tag))` 只让**真在表情库里的 tag** 过去，
+ *       所以 `[图片]` / `[表情包]` / `[引用#123]` 这些**照旧不会被当成表情**。
+ */
 export function pickMarkers(text) {
   const out = [];
-  const re = /\[\s*表情\s*[:：]\s*([^\]\s]+)\s*\]/g;
+  const re = /\[\s*(?:表情\s*[:：]\s*)?([^\]\s]+)\s*\]/g;
   let m;
   while ((m = re.exec(text)) !== null) {
     const tag = m[1].trim();
@@ -146,7 +156,13 @@ export function pickMarkers(text) {
 
 /** 把标记从文本里去掉（发给人看的文字不该带标记） */
 export function stripMarkers(text) {
-  return text.replace(/\[\s*表情\s*[:：][^\]]*\]/g, '');
+  return (
+    String(text ?? '')
+      // ① 标准写法：只要长得像就剥（哪怕 tag 已从库里删掉，也别把标记漏出去）
+      .replace(/\[\s*表情\s*[:：][^\]]*\]/g, '')
+      // ② 裸标签：**只剥真的是表情 tag 的**（`[图片]` / `[表情包]` 这种要留着）
+      .replace(/\[\s*([^\]\s]+)\s*\]/g, (raw, tag) => (facePath(tag) ? '' : raw))
+  );
 }
 
 export function reload() {

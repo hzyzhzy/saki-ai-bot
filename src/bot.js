@@ -37,6 +37,7 @@ import * as meal from './meal.js';
 // ⚠️ 2026-09-18 用户要求：「做一个她**人位置在哪里，正在做什么事**的状态机」
 //    （日程算默认值，她说过的话可以覆盖它，覆盖最多活 2 小时）
 import * as whereState from './where.js';
+import * as remind from './remind.js';
 import * as affinity from './affinity.js';
 import { detectInsult } from './insult.js';
 import * as repeat from './repeat.js';
@@ -2923,6 +2924,14 @@ export class Bot {
     // ⚠️ 「补看」回来的消息：这条其实是几分钟前发的（掉线期间漏掉的）。
     //    提示词里要**说清这个时间差**，别让她当成"刚刚发的"来答。
     const lateMs = Number(meta.lateMs) || 0;
+    // ⚠️⚠️ 2026-09-18：**语音消息 → 文字**（QQ 官方的语音转文字，实测可用）。
+    //    放在 `decide()` **之前**：把 `record` 段换成 `text` 段，后面所有逻辑照旧 ——
+    //    就当她"听到"了那句话（不然语音对她就是空气，@她也答不上来）。
+    await this.understandVoice(event);
+    // ⚠️ 2026-09-18：**定时提醒**（用户要求）—— 听懂「几点提醒我干什么」并记下来。
+    //    放在 `decide()` 之前、而且要 **await**：下面提示词里注入的那段必须是
+    //    **已经存好了的事实** —— 否则她答应了、其实没存上（用户最怕的就是这个）。
+    await this.maybeRemind(event);
     const decision = this.decide(event, voluntary);
     if (!decision) return;
 
@@ -5967,6 +5976,60 @@ export class Bot {
         ].join('\n'),
       );
     }
+    // ⚠️⚠️ 2026-09-18：**定时提醒**（用户要求）—— `maybeRemind()` 刚把这条记下来了，
+    //    这里把"**已经记下了**"这个事实告诉她，让她**当场应一声**（用户要的"先答应"）。
+    //    ⚠️ 为什么要告诉她而不是让程序自己回一句：
+    //       那样就成了系统消息，不是"她答应的"；而且她可能在应声里答别的事（自相矛盾）。
+    if (event?._remind) {
+      const r = event._remind;
+      if (r.fail === 'time') {
+        parts.push(
+          [
+            '## ⏰ 他刚让你提醒他一件事，但**你没听清是什么时候**',
+            '',
+            `· 要提醒的事：${r.what}`,
+            '⚠️ 这一句：**先应下来 + 问一句几点**（「行，几点？」）—— 🚫 别装已经记下了。',
+          ].join('\n'),
+        );
+      } else if (r.fail) {
+        parts.push(
+          [
+            '## ⏰ 他刚让你提醒他一件事，但这个时间**你记不了**',
+            '',
+            `· 要提醒的事：${r.what}`,
+            `· 原因：${r.reason}`,
+            '⚠️ 如实说一句（那个点已经过了 / 太远了），然后问他换个时间。',
+          ].join('\n'),
+        );
+      } else {
+        const hit = (r.targets ?? []).filter((t) => t.uid);
+        const miss = (r.targets ?? []).filter((t) => !t.uid);
+        const lines = [
+          '## ⏰ 他刚让你**到点提醒他**，这条**已经记下了**',
+          '',
+          `· 时间：${r.atText}`,
+          `· 提醒他：${r.what}`,
+          '',
+          '⚠️ 这一句只做一件事：**应一声**（「行，我到点@你」这种口气）。',
+          '🚫 别复述整句、别报日期和数字、别说「我记性不好」「别指望我」这类。',
+        ];
+        if (hit.length) {
+          lines.push(
+            `✅ 他还让你一并提醒 ${hit.map((t) => t.name).join('、')} —— **找到了**，到点你会一起 @ 上。`,
+          );
+        }
+        if (miss.length) {
+          lines.push(
+            `⚠️ 他还说了要提醒 ${miss.map((t) => `「${t.name}」`).join('、')}，` +
+              `但你**没找到叫这个名字的人**` +
+              `（${event?.message_type === 'group' ? '这个群里' : '你认识的人里'}没有）`,
+            '→ **必须如实说没找到**（「没看到叫这个的」），让他确认下名字、或者让那个人自己冒个泡。',
+            '🚫 不许当作找到了，更不许随便 @ 一个可能是他的人。',
+          );
+        }
+        parts.push(lines.join('\n'));
+      }
+    }
     // ⚠️ 吃饭状态（2026-09-17 用户要求：「下次有人喊她，他自己就知道吃过没有了」）——
     //    她说过的"去吃饭了"是有**寿命**的状态（默认 10 分钟），到点自动算吃完。
     //    ⚠️ 状态本身不分群（她是一个人），但只在群里注入：私聊里没人喊她"一起吃饭"。
@@ -6991,6 +7054,247 @@ export class Bot {
    *
    * ⚠️ 替换而不是拦下：直接不发送会变成"她说了话但群里什么都没有"（更怪）。
    */
+  /**
+   * **定时提醒**的识别与记录（2026-09-18 用户要求）。
+   *
+   * ## 用户原话（照抄，四条要求都对着它写）
+   *
+   * > 「加一个定时提醒功能，当我说**在几点提醒我干什么**的时候，机器人**先答应**，
+   * >   然后**真的在那个时候 @ 我**、并**用机器人自己的话**提醒我那件事，
+   * >   如果还说了**提醒我和另外一个人**的话，就**先找出另外一个人是谁**，
+   * >   然后把那个人提醒时**也 @**，**如果没找到就要说没找到**。
+   * >   然后**只在我发消息的那个地方**提醒我。」
+   *
+   * 这个函数负责**听懂 + 记下来**（第 2/3/4 条的一半）；"先答应"那一声由
+   * `buildSystemPrompt()` 里注入的 `event._remind` 段落交给她自己说；
+   * 到点真的发出去在 `sendReminder()`（`index.js` 每分钟喊一次）。
+   *
+   * ## ⚠️ 为什么"听懂"必须用模型
+   *
+   * 用户说时间是**花样**的：「明天早上八点」「八点半」「晚上吃完饭」「22:40」
+   * 「下周一上午」——正则迟早漏，而漏一条的后果是**他以为定了、到时候没人喊他**
+   * （比没有这功能更糟）。所以让模型输出**绝对时间**，代码只做校验。
+   *
+   * ## ⚠️ 为什么"先答应"要绕一圈告诉她
+   *
+   * 解析是异步的、她的回复也是异步的 —— 如果只是默默存下来，
+   * 她这一句可能答的是别的（甚至根本没意识到自己答应了），而用户看到的
+   * 是"她答应了" 或 "她压根没吭声"（他没法分辨）。所以把**已经记下来的事实**
+   * 塞进她的提示词：她照着应一声就行 —— 这样"答应"和"真的定了"永远一致。
+   *
+   * @returns {Promise<object|undefined>} 记下了就返回这条提醒（也挂在 `event._remind`）
+   */
+  async maybeRemind(event) {
+    try {
+      if (config.remind?.enable === false) return;
+      const said = msg.tidy(msg.extractText(msg.toSegments(event.message), { atPlaceholder: '' })).trim();
+      if (said.length < 4) return;
+      // ⚠️ 粗筛：没有这两个字眼的**绝大多数消息**不必花一次调用（省钱 + 更快）。
+      //    粗筛只放行"可能是提醒"的，真正的判断仍交给模型（宁可多放几条过去）。
+      if (!/提醒|叫我|喊我|叫我一声|记得/.test(said)) return;
+
+      const now = new Date();
+      const gid = String(event.group_id ?? '');
+      const isGroup = event.message_type === 'group';
+      const pad = (n) => String(n).padStart(2, '0');
+      const nowText =
+        `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ` +
+        `${pad(now.getHours())}:${pad(now.getMinutes())}（${'日一二三四五六'[now.getDay()]}）`;
+
+      const out = await phrase({
+        system:
+          '你在看一个人刚说的一句话，判断他是不是**让你在某个时间提醒他做某件事**。\n' +
+          '只输出一个 JSON，不要解释、不要围栏：\n' +
+          '{"remind":true,"hour":8,"minute":0,"period":"","day":"","what":"","who":[]}\n' +
+          '· `remind`：**只有"让我到点提醒他"才算 true**。\n' +
+          '  ✅「明天早上八点提醒我交作业」「八点半喊我一声」「晚上记得叫我吃药」「22:40 提醒我和老王开会」\n' +
+          '  ❌ 随口说的（「你倒是提醒我了」「怎么不提醒我」）→ false\n' +
+          '  ❌ 提醒**别人**做事、他自己会去做的（「提醒他明天别迟到」）→ false\n' +
+          '  ❌ 只是问你几点、只是聊天 → false\n' +
+          '· 时间分四格填，⚠️ **照他说的记，绝对不要替他判断是早上还是晚上**：\n' +
+          '  · `hour`：他说的那个**钟点数**（0-23）。「八点」→8、「八点半」→8、「晚上八点」→8、\n' +
+          '    「22:40」→22、「20点」→20。⚠️ 不要说不出就编一个。\n' +
+          '  · `minute`：分钟。「八点半」→30，没提→0。\n' +
+          '  · `period`：他说了**早上/上午/凌晨**→"am"；说了**晚上/下午/傍晚/半夜**→"pm"；\n' +
+          '    ⚠️ **什么都没说就填空字符串 ""**（"八点"就是空 —— 别自己补"早上"或"晚上"，这一步由程序算）。\n' +
+          '  · `day`：说了「今天」→"today"；「明天」→"tomorrow"；\n' +
+          '    说了具体日子（「下周一」「9月20日」「周五」）→**算成** `YYYY-MM-DD`；\n' +
+          '    ⚠️ 什么都没说 → ""（别自己推"应该是明天"）。\n' +
+          '  ⚠️ 只说了"晚点""有空""回头"这种**没有钟点**的 → `hour` 留空。\n' +
+          '· `what`：**提醒他干什么**，一句话，尽量用他自己说的那个说法，\n' +
+          '  🚫 别加细节、别加地点、别改写他的事（他说的就是全部）。\n' +
+          '· `who`：**除了他自己以外**还要一并提醒的人，数组，**原文里怎么称呼就怎么写**\n' +
+          '  （"喵喵三三"、"老王"都是原样）；没有就 `[]`。\n' +
+          '  ⚠️ 只有"提醒我**和**某人""也提醒一下某人"这种**别人也在内**的才算；\n' +
+          '  "提醒我"里提到的第三方（"提醒我他找我"）不算。',
+        user: `现在：${nowText}\n他说：「${said.slice(0, 300)}」`,
+        maxTokens: 200,
+      });
+      const m = /\{[\s\S]*\}/.exec(String(out ?? ''));
+      if (!m) return;
+      let j;
+      try {
+        j = JSON.parse(m[0]);
+      } catch {
+        return;
+      }
+      if (j?.remind !== true) return;
+
+      const what = String(j.what ?? '').trim().slice(0, 200);
+      // ⚠️⚠️ 2026-09-18（用户补充要求）：**换算时间这一步不许模型做** ——
+      //    「早上8点 / 只说8点（=今晚20点）/ 过了今晚8点就说明早8点」这几条歧义，
+      //    由 `remind.resolveWhen()` 按 now 一次算清（规则和单测都在那边）。
+      //    模型只填四格：hour / minute / period / day —— 它一换算就会漂。
+      const hasHour =
+        j.hour !== undefined && j.hour !== null && j.hour !== '' && Number.isFinite(Number(j.hour));
+      let at = hasHour
+        ? remind.resolveWhen(
+            { hour: Number(j.hour), minute: j.minute, period: j.period, day: j.day },
+            Date.now(),
+          )
+        : 0;
+      // 兜底：万一模型还是给了绝对时间（旧格式），也别把这条提醒丢了
+      if (!at) {
+        const am = /^(\d{4})-(\d{1,2})-(\d{1,2})[ T](\d{1,2}):(\d{2})/.exec(String(j.at ?? '').trim());
+        if (am) at = new Date(+am[1], +am[2] - 1, +am[3], +am[4], +am[5], 0, 0).getTime();
+      }
+      if (!what || !at) {
+        // ⚠️ 听不出时间就**别默默算了** —— 告诉她"没听懂时间"，让她问一句（见注入段）
+        if (what && !at) {
+          event._remind = { fail: 'time', what };
+          log.info(`[提醒] 他说了事但没听出时间 → 让她问一句：「${what}」`);
+        }
+        return;
+      }
+
+      // 找"另外那个人"：先查已知名字，群里查不到就**拉一次群成员名单**再查
+      const targets = [];
+      for (const raw of (Array.isArray(j.who) ? j.who : []).slice(0, 3)) {
+        const name = String(raw ?? '').trim().slice(0, 40);
+        if (!name) continue;
+        let uid = names.findByName(name, gid);
+        if (!uid && isGroup) {
+          try {
+            const list = await this.call('get_group_member_list', { group_id: gid });
+            if (Array.isArray(list)) {
+              names.noteFromList(gid, list);
+              uid = names.findByName(name, gid);
+            }
+          } catch (e) {
+            log.debug(`[提醒] 拉群成员名单没成：${e.message}`);
+          }
+        }
+        targets.push({ uid, name });
+      }
+
+      const r = remind.add({
+        at,
+        what,
+        by: String(event.user_id ?? ''),
+        byName: names.of(event.user_id, gid),
+        targets,
+        groupId: isGroup ? gid : '',
+        now: Date.now(),
+      });
+      if (!r.ok) {
+        event._remind = { fail: 'add', what, reason: r.reason };
+        log.info(`[提醒] 没记下（${r.reason}）：「${what}」`);
+        return;
+      }
+
+      const d = new Date(at);
+      const atText = `${d.getMonth() + 1}月${d.getDate()}日 ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+      event._remind = { ok: true, at, atText, what, targets };
+      const found = targets.filter((t) => t.uid).map((t) => `${t.name}(${t.uid})`);
+      const miss = targets.filter((t) => !t.uid).map((t) => t.name);
+      log.info(
+        `[提醒] 记下一条：${atText} 提醒 ${event.user_id ?? ''}「${what}」` +
+          `${isGroup ? `（群 ${gid}）` : '（私聊）'}` +
+          `${found.length ? ` 还提醒 ${found.join('、')}` : ''}` +
+          `${miss.length ? ` ⚠️没找到：${miss.join('、')}` : ''}`,
+      );
+      return event._remind;
+    } catch (e) {
+      log.debug(`[提醒] 识别出错：${e.message}`);
+    }
+  }
+
+  /**
+   * 到点了 → **真的发出去**（用户要求：@ 他 + 用机器人自己的话提醒那件事）。
+   *
+   * ## 三条讲究
+   *
+   * 1. **用她自己的话**（用户原话）—— 所以过一次模型重写成"祥子的口吻"，
+   *    而不是把 `what` 原样贴出去（那读起来像系统的闹钟，不像她）。
+   *    ⚠️ 但**事情本身一个字都不许改**：提示词里钉死了"只改说法、别加内容"，
+   *    改写失败就退回一句**不改写**的模板（宁可生硬，也不能提醒错事）。
+   * 2. **@ 到位** —— `at` 必须是**独立消息段**（`sendToGroup` 的注释里写过：
+   *    塞进文本里只会显示成 `@123` 这串字，**不会真的提醒到人**）。
+   *    他本人 + 找到了的"另外那个人"各一段；**没找到的那个不 @**（上层已如实说过没找到）。
+   * 3. **只在原地**（用户原话）—— 群里定的就发群里，私聊定的就发私聊。
+   *
+   * ⚠️ 也要过 `maskPhone` / `softenDao`：这条不走 `sendChatLike()`，
+   *    但那两道闸（不许发真实号码、"倒"口癖降频）是**所有出口**的规矩。
+   *
+   * @returns {Promise<boolean>} 发出去了没有
+   */
+  async sendReminder(item) {
+    const gid = String(item?.groupId ?? '');
+    const isGroup = !!gid;
+    const by = String(item?.by ?? '').trim();
+    const what = String(item?.what ?? '').trim();
+    if (!what || !by) return false;
+
+    let line = '';
+    // ⚠️ `remind.rewrite: false` = 不改写、直接用下面那句模板。
+    //    给两种场景：① 不想为这个多花一次调用；② **模型不可用/超时**时也照发
+    //    （提醒这件事的底线是"按时说出口"，而不是"说得好听"）。
+    try {
+      if (config.remind?.rewrite === false) throw new Error('按配置跳过改写');
+      const out = await phrase({
+        system:
+          '你是丰川祥子，在 QQ 上提醒一个人他之前让你提醒的事。\n' +
+          '写**一句**话（15~40 字），用你自己的口吻，像真的惦记着这件事。\n' +
+          '⚠️ 只改**说法**，**不许改事情本身**：他让你提醒什么，你就提醒什么。\n' +
+          '🚫 不许加他没说的内容（地点、时间、人物、理由都不许自己补）；\n' +
+          '🚫 不许说"系统提醒""已为您""定时任务"这类机器腔；\n' +
+          '🚫 不要写 @ 谁（@ 由程序加），不要用括号解释，不要用破折号。\n' +
+          '只输出这一句话，不要引号、不要别的。',
+        user: `他让你提醒他的事：「${what}」`,
+        maxTokens: 120,
+        timeoutMs: 30000,
+      });
+      line = String(out ?? '').trim().split(/\n+/)[0].trim();
+    } catch (e) {
+      log.debug(`[提醒] 重写提醒话术失败（退回模板）：${e.message}`);
+    }
+    line = line.replace(/^[「『"']+|[」』"']+$/g, '').trim().slice(0, 200);
+    if (!line) line = `到点了，你不是说要${what}吗。`;
+
+    const segs = [];
+    const seen = new Set();
+    for (const t of [{ uid: by, name: item?.byName }, ...(item?.targets ?? [])]) {
+      const uid = String(t?.uid ?? '').trim();
+      if (!uid || seen.has(uid)) continue;
+      seen.add(uid);
+      segs.push({ type: 'at', data: { qq: uid, name: names.of(uid, gid) || String(t?.name ?? '') } });
+    }
+    if (segs.length) segs.push({ type: 'text', data: { text: ' ' } });
+    segs.push({ type: 'text', data: { text: this.maskPhone(tic.softenDao(line)) } });
+
+    if (isGroup) {
+      const r = await this.call('send_group_msg', { group_id: gid, message: segs });
+      this._markSpoke(gid, r?.message_id);
+      return true;
+    }
+    // 私聊：@ 段没意义（也没有别人），去掉再发
+    await this.call('send_private_msg', {
+      user_id: by,
+      message: segs.filter((s) => s.type !== 'at'),
+    });
+    return true;
+  }
+
   maskPhone(text) {
     return String(text ?? '')
       // 手机号：1 开头 + 10 位（允许中间有 - 或空格）
@@ -7049,6 +7353,56 @@ export class Bot {
     whereState.apply({ where: w, doing, source: `群${gid}` });
   }
 
+  /**
+   * 收到**语音** → 用 QQ 官方的转写把它变成文字（**把 `record` 段换成 `text` 段**）。
+   *
+   * ## 为什么能这么做（2026-09-18 查证 + 实测）
+   *
+   * NapCat 的 `fetch_ptt_text` 调的是 **QQ 客户端自己的** `MsgService.translatePtt2Text`
+   * （源码 `napcat.mjs:80296`）—— 也就是手机上"长按语音条 → 转文字"那套，
+   * **不是第三方 ASR、不花钱**。实测：私聊发一条「听得到吗？」，转出来一字不差。
+   *
+   * ## ⚠️ 为什么必须"失败重试一次"
+   *
+   * 实测**第一次调用经常超时**（NapCat 给它的超时是 `baseTimeout` = 10 秒，
+   * 而首次转写 QQ 那边要建一次会话，赶不上）→ 返回 `retcode=1200`；
+   * 紧接着重试就成功（我连着调三次全成功）。所以这里重试一次就够，不用退避。
+   *
+   * ⚠️ 换段而不是加字段：后面的 `decide()` / `extractText()` / 提示词全都只认
+   *    `text` 段，换掉就等于"她听到了" —— 不用在十几个地方各加一个分支。
+   *
+   * @returns {Promise<boolean>} 有没有真的转成功
+   */
+  async understandVoice(event) {
+    try {
+      const segs = Array.isArray(event?.message) ? event.message : [];
+      if (!segs.some((s) => s?.type === 'record')) return false;
+      const mid = String(event?.message_id ?? '').trim();
+      if (!mid) return false;
+
+      let text = '';
+      for (let i = 0; i < 2 && !text; i++) {
+        try {
+          const r = await this.call('fetch_ptt_text', {
+            message_id: /^\d+$/.test(mid) ? Number(mid) : mid,
+          });
+          text = String(r?.text ?? '').trim();
+        } catch (e) {
+          if (i === 0) log.debug(`[语音] 第一次转文字没成（${e.message}）→ 重试一次`);
+          else log.warn(`[语音] 转文字失败：${e.message}`);
+        }
+      }
+      if (!text) return false;
+
+      event.message = segs.map((s) => (s?.type === 'record' ? { type: 'text', data: { text } } : s));
+      log.info(`[语音] 收到语音并转成文字（${event.user_id ?? ''}）：「${text.slice(0, 60)}」`);
+      return true;
+    } catch (e) {
+      log.debug(`[语音] 处理出错：${e.message}`);
+      return false;
+    }
+  }
+
   async sendChatLike(groupId, text, opts = {}) {
     // ⚠️⚠️ 2026-09-18：任何路径说出去的话，先把号码打掉（见上面 maskPhone 的注释）。
     //    放在**这里**是因为它是她所有发言的**唯一出口**（主聊天 / 剧情 / 日常事件都走它）。
@@ -7057,6 +7411,15 @@ export class Bot {
       log.warn(`[安全] 她的话里带真实号码/证件号 → 已打码（群 ${groupId}）：${String(text).slice(0, 60)}`);
     }
     text = masked;
+    // ⚠️⚠️ 2026-09-18 用户拍板：**「倒」这个口癖硬降频**（90% 概率替换/删掉）。
+    //    原话：「倒是真的还是出现的太频繁了，这样肯定不行。直接检测到倒和倒是
+    //    就以百分之 90 的概率去替换其他词吧」。
+    //    ⚠️ 放在这里（发言出口）而不是提示词里 —— 前面两轮提示词都没压住。
+    const softened = tic.softenDao(text);
+    if (softened !== text) {
+      log.debug(`[口癖] 「倒」→ 降频改写：${String(text).slice(0, 40)} ⇒ ${String(softened).slice(0, 40)}`);
+    }
+    text = softened;
     // ⚠️ 2026-09-18：「她人在哪 / 在做什么」的状态机（用户要求）——
     //    判断**不 await**（别拖住发送），而且它内部按群节流（默认 5 分钟一次）。
     this.judgeWhere(groupId, text).catch((e) => log.debug(`位置判断失败：${e.message}`));
