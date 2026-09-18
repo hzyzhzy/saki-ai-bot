@@ -277,6 +277,48 @@ function ticWords() {
  * @param {string} text
  * @returns {string[]} 命中的词（去重、保持词表顺序）
  */
+/**
+ * 「倒」这个口癖**硬降频**（2026-09-18 用户拍板）。
+ *
+ * 用户原话：「倒是真的还是出现的太频繁了，这样肯定不行。
+ *   **直接检测到倒和倒是就以百分之 90 的概率去替换其他词吧**」。
+ *
+ * ⚠️ 为什么从"提示词"改成"代码替换"：前面试过两轮提示词（先是词表提醒、
+ *    后来干脆改成"承认这是她的口头禅"），**都没压住** ——
+ *    口癖这种事靠"求模型别说"是不行的，只能在她的**发言出口**上动。
+ *
+ * ⚠️⚠️ 替换策略**保守优先**（改错一句话，比少说一个语气词糟糕得多）：
+ *   · **固定搭配**（倒不如 / 反倒 / 我倒觉得）→ 换成等价说法，换了不会错；
+ *   · **「倒是」** → 按概率**直接删**（它多半是可有可无的语气词：
+ *     「你倒是先吃上了」→「你先吃上了」，语法照样完整）；
+ *   · **单独用的「倒」** → 只在**明显的语气位置**（倒也是 / 倒也不 / 倒还挺 / 倒先…）
+ *     才动手；**「摔倒 / 倒闭 / 倒计时 / 倒吸 / 倒影 / 倒车」一个都不许碰**。
+ *
+ * @param {string} text
+ * @param {() => number} [rng] 测试用（注入固定值）
+ * @returns {string}
+ */
+export function softenDao(text, rng = Math.random) {
+  let t = String(text ?? '');
+  if (!t.includes('倒')) return t;
+  const v = Number(cfg().daoReplaceChance);
+  const chance = Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 0.9;
+
+  // ① 固定搭配：换成等价说法（这些换了不会错）
+  t = t.replace(/倒不如/g, '不如').replace(/反倒是/g, '反而是').replace(/反倒/g, '反而');
+  t = t.replace(/([我你他她])倒(是)?觉得/g, '$1觉得');
+
+  // ② 「倒是」：多半是可省的语气词 → 按概率删掉
+  t = t.replace(/倒是/g, (m) => (rng() < chance ? '' : m));
+
+  // ③ 单独用的「倒」：**白名单式**，只在语气位置动手
+  t = t.replace(/倒(?=(也|还|挺|先|想|像|不|蛮|颇|算|真|有点|有意思))/g, () =>
+    rng() < chance ? '' : '倒',
+  );
+
+  return t;
+}
+
 export function wordsOf(text) {
   const t = String(text ?? '');
   if (!t) return [];

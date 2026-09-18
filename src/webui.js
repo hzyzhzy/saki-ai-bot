@@ -703,6 +703,25 @@ const routes = {
     send(res, 200, { ok: r.ok, message: r.message ?? '', hasImage: !!f && !f.stale });
   },
 
+  // 把一条**语音消息**转成文字 —— QQ 官方的 `translatePtt2Text`（NapCat 的 `fetch_ptt_text`）。
+  //
+  // ⚠️ 2026-09-18 加：用户问「语音转文字有 QQ 官方的对吧」→ **有**，而且**不花钱**
+  //    （走 QQ 客户端自己的 MsgService，不是第三方 ASR —— 源码 `napcat.mjs:80296`）。
+  //    加这个**只读**接口是为了先验证这条路通不通（真发一条语音、拿 message_id 调一下
+  //    看返回什么），通了再决定要不要接进"她听懂语音"的流程。
+  // ⚠️ 不改任何状态：只是问 NapCat 要一下转写结果。
+  'GET /api/qq/ptt-text': async (req, res) => {
+    try {
+      const u = new URL(req.url, 'http://127.0.0.1');
+      const id = String(u.searchParams.get('messageId') ?? '').trim();
+      if (!id) return send(res, 200, { ok: false, error: '缺少 messageId' });
+      const r = await bot.call('fetch_ptt_text', { message_id: /^\d+$/.test(id) ? Number(id) : id });
+      send(res, 200, { ok: true, result: r });
+    } catch (e) {
+      send(res, 200, { ok: false, error: e.message });
+    }
+  },
+
   // 让 NapCat 重启（掉线后重新出码）。会断一下 OneBot 连接，看门狗/机器人会自己重连。
   //
   // ⚠️⚠️ 2026-09-17 修（用户报「**重启 NapCat 按钮还是没用，那两个窗口没动静**」）：

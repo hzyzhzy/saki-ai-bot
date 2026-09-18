@@ -220,6 +220,42 @@ export function noteFromList(groupId, list) {
   return n;
 }
 
+/**
+ * **反查**：名字 → QQ 号（2026-09-18 加，定时提醒要用）。
+ *
+ * ⚠️ 为什么之前没有：这套表一直是**单向**的（`uid → 名字`，为了"喊得出人"）。
+ *    定时提醒反过来 —— 用户说「提醒**我和喵喵三三**」，我手里只有**名字**，
+ *    得翻出 QQ 号才能 @ 到人。
+ *
+ * ⚠️ 两级匹配，**先准后松**：
+ *    ① 完全相等（忽略大小写/首尾空格）—— 这是绝大多数情况，也最不会认错人；
+ *    ② 包含（"喵喵三三" ↔ "喵喵三三。"）；⚠️ 放第二级是因为它**可能认错人**
+ *      （"小" 会命中 "小明"），所以只在前一级没结果时才用。
+ *
+ * ⚠️ **查不到就返回空串，绝不给一个"大概是谁"** —— 上层会如实告诉用户
+ *    "没找到这个人"（用户的要求），乱 @ 一个人比说没找到糟糕得多。
+ *
+ * @param {string} name 用户嘴里那个名字
+ * @param {string} [groupId] 有群号就先在**这个群的群名片**里找
+ * @returns {string} QQ 号；查不到返回空串
+ */
+export function findByName(name, groupId = '') {
+  const q = String(name ?? '').trim().toLowerCase().replace(/^@/, '');
+  if (!q) return '';
+  const g = String(groupId ?? '').trim();
+  const pools = [];
+  const m = g ? card.get(g) : null;
+  if (m) pools.push(m);
+  pools.push(nick);
+  for (const pool of pools) {
+    for (const [uid, n] of pool) if (String(n ?? '').trim().toLowerCase() === q) return uid;
+  }
+  for (const pool of pools) {
+    for (const [uid, n] of pool) if (String(n ?? '').trim().toLowerCase().includes(q)) return uid;
+  }
+  return '';
+}
+
 export function status() {
   return { nick: nick.size, groups: card.size, file: FILE };
 }

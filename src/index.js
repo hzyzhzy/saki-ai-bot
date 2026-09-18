@@ -14,6 +14,7 @@ import * as quest from './quest.js';
 import * as affinity from './affinity.js';
 import * as names from './names.js';
 import * as friend from './friend.js';
+import * as remind from './remind.js';
 // ⚠️ 待发箱（2026-09-15 用户要求：没发出去的，通道正常之后自动补发）
 import * as outbox from './outbox.js';
 import { streamChat } from './llm.js';
@@ -714,6 +715,56 @@ if (config.storyline?.enable !== false && config.storyline?.compress?.enable !==
   log.info(
     `故事线压缩：每 ${Math.round(every / 3600000)} 小时检查一次（**每个群各算各的**），` +
       `距上次满 ${Math.round(minGap / 3600000)} 小时、且攒够 ${config.storyline.compress.minEntries} 条才压`,
+  );
+}
+
+// ⏰ **定时提醒**（2026-09-18 用户要求）—— 每分钟看一次有没有到点的。
+// ⚠️ 到点就发，**不判断"晚了多久"**：如果他定的时候机器人正好掉线，
+//    登录后时间已经过了 —— 这时候**照样要发**（他等的是这个提醒，
+//    晚几分钟发出来远比不发有用；`sendChatLike` 那边"补看"逻辑也是这个取向）。
+if (config.remind?.enable !== false) {
+  const every = Math.max(15000, Number(config.remind?.checkIntervalMs) || 60000);
+  // ⚠️⚠️ 发不出去就一直重试，**只给 2 小时**（`giveUpMs`）。
+  //    原来写的是"连续 5 次就放弃" —— 那只有 **5 分钟**：这个号本来就每几小时掉一次线，
+  //    而提醒多半定在他睡觉/不在的时段（凌晨）→ 掉线 5 分钟，这条提醒就**悄悄没了** ✗。
+  //    提醒这件事的价值全在"到点说出来"，所以宁可多试（每分钟一次，最多 120 次）。
+  const giveUpMs = Math.max(60000, Number(config.remind?.giveUpMs) || 2 * 3600 * 1000);
+  const fails = new Map(); // id → {n, since}
+  const tick = async () => {
+    for (const it of remind.due()) {
+      const f = fails.get(it.id) ?? { n: 0, since: Date.now() };
+      try {
+        await bot.sendReminder(it);
+        remind.markSent(it.id);
+        fails.delete(it.id);
+        log.info(`[提醒] 到点已发出：${it.what.slice(0, 40)}（${it.groupId ? `群 ${it.groupId}` : '私聊'}）`);
+      } catch (e) {
+        f.n++;
+        const waited = Date.now() - f.since;
+        if (waited > giveUpMs) {
+          remind.markSent(it.id);
+          fails.delete(it.id);
+          log.warn(
+            `[提醒] 试了 ${f.n} 次（${Math.round(waited / 60000)} 分钟）都发不出去，只能放弃：${it.what.slice(0, 40)}`,
+          );
+        } else {
+          fails.set(it.id, f);
+          // ⚠️ 降噪：只在第 1 次、以后每 10 次打一条（不然每分钟一条会把日志刷满）
+          if (f.n === 1 || f.n % 10 === 0) {
+            log.warn(
+              `[提醒] 暂时发不出去（第 ${f.n} 次，会一直试到 ${Math.round(giveUpMs / 60000)} 分钟）：${e.message}`,
+            );
+          }
+        }
+      }
+    }
+  };
+  setInterval(tick, every).unref();
+  setTimeout(tick, 20 * 1000).unref();
+  const rst = remind.status();
+  log.info(
+    `定时提醒：每 ${Math.round(every / 1000)} 秒查一次` +
+      `${rst.pending ? `，重启前挂着的还有 ${rst.pending} 条（不会丢）` : ''}`,
   );
 }
 
