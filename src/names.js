@@ -256,6 +256,45 @@ export function findByName(name, groupId = '') {
   return '';
 }
 
+/**
+ * 从一句话里认出**名字表里确实有的人**（2026-09-19 加）。
+ *
+ * ⚠️ 为什么需要（用户截图：他问「还记得mei吗」，她答「**mei？没听过这名字，不认识**」）：
+ *    名字表（`state/names.json`）是**程序用的**，从来不进提示词 ——
+ *    所以 MEI 虽然是群成员（群名片就叫 "MEI"），但聊天记录里没人这么叫过，
+ *    她就真的"不认识" ✗。这个函数把"他这句话里提到、而且表里真有"的人挑出来，
+ *    让调用方写进提示词（"群里确实有这个人"）。
+ *
+ * ⚠️ 只认**长度 ≥ 2** 的名字 —— 单字名（"小"、"王"）满屏误命中，宁可漏也别乱认。
+ *
+ * @param {string} text
+ * @param {string} [groupId] 有群号就先认**这个群的名片**
+ * @returns {Array<{uid:string, name:string}>} 最多 3 个
+ */
+export function mentioned(text, groupId = '') {
+  const t = String(text ?? '').toLowerCase();
+  if (t.length < 2) return [];
+  const g = String(groupId ?? '').trim();
+  const out = [];
+  const seen = new Set();
+  const pools = [];
+  const m = g ? card.get(g) : null;
+  if (m) pools.push(m);
+  pools.push(nick);
+  for (const pool of pools) {
+    for (const [uid, name] of pool) {
+      const n = String(name ?? '').trim();
+      if (n.length < 2) continue;
+      if (seen.has(uid)) continue;
+      if (!t.includes(n.toLowerCase())) continue;
+      seen.add(uid);
+      out.push({ uid: String(uid), name: n });
+      if (out.length >= 3) return out;
+    }
+  }
+  return out;
+}
+
 export function status() {
   return { nick: nick.size, groups: card.size, file: FILE };
 }

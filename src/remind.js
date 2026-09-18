@@ -255,6 +255,109 @@ export function resolveWhen(spec = {}, now = Date.now()) {
   return cands.sort((a, b) => a - b)[0] ?? 0;
 }
 
+/**
+ * 他在**这个会话**里最近一条还没发出的提醒（2026-09-18 用户要求"补充式追加/修改"）。
+ *
+ * ⚠️ 为什么需要：他说「顺便改成五点」「也提醒一下老王」时，得先知道**他在说哪一条**。
+ *    答案就是"这个会话里他自己最近定的那条" —— 人说话就是这样接着说的。
+ *    ⚠️ 只认**同一个会话**（群 / 私聊）：他在 A 群定的，不能在 B 群被改掉。
+ *
+ * @param {{by?:string, groupId?:string}} q `groupId` 空串 = 私聊
+ * @returns {object|null}
+ */
+export function latest({ by = '', groupId = '' } = {}) {
+  const u = String(by ?? '').trim();
+  const g = String(groupId ?? '');
+  const live = st.items.filter((x) => !x.sentAt);
+  for (let i = live.length - 1; i >= 0; i--) {
+    if (String(live[i].by) === u && String(live[i].groupId) === g) return live[i];
+  }
+  return null;
+}
+
+/**
+ * 改一条（**只改给了的字段**）。给"补充式的追加/修改"用。
+ * ⚠️ 时间改成已经过去的 → 拒绝（返回 ok:false，上层会如实说）。
+ * ⚠️ 加人时**自动去重**（同一个人说两遍不会 @ 两次）。
+ */
+export function amend(id, patch = {}, now = Date.now()) {
+  const it = st.items.find((x) => x.id === Number(id));
+  if (!it || it.sentAt) return { ok: false, reason: '这条已经不在待发里了' };
+  if (patch.at !== undefined) {
+    const at = Number(patch.at) || 0;
+    if (!at || at <= now) return { ok: false, reason: '新时间已经过了' };
+    if (at - now > maxAheadMs()) return { ok: false, reason: '时间太远了（超过 7 天）' };
+    it.at = at;
+  }
+  if (patch.what !== undefined) {
+    const w = String(patch.what).trim();
+    if (w) it.what = w.slice(0, 200);
+  }
+  if (patch.targets !== undefined) {
+    const seen = new Set(it.targets.map((t) => t.uid || t.name));
+    for (const t of Array.isArray(patch.targets) ? patch.targets : []) {
+      const key = String(t?.uid ?? '') || String(t?.name ?? '');
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      it.targets.push({ uid: String(t?.uid ?? ''), name: String(t?.name ?? '') });
+    }
+    it.targets = it.targets.slice(0, 5);
+  }
+  save();
+  return { ok: true, item: it };
+}
+
+/** 取消一条（「不用提醒了」）。真的删掉，不是标记 —— 他不需要它再出现在任何地方。 */
+export function cancel(id) {
+  const n = st.items.length;
+  st.items = st.items.filter((x) => x.id !== Number(id));
+  if (st.items.length === n) return false;
+  save();
+  return true;
+}
+
+/**
+ * 给聊天提示词用：**这个会话里还没到点的提醒**（2026-09-18 用户反馈：「提醒不会进聊天上下文」）。
+ *
+ * ⚠️ 为什么必须有：原来只在"他说那句话的那一轮"把提醒塞进提示词（`bot.js` 的 `event._remind`），
+ *    **下一轮她就完全不知道有这回事了** —— 用户一问「你等会儿要提醒我什么」她就答不上来，
+ *    甚至可能否认自己答应过 ✗。挂着的提醒是"她此刻的状态"，
+ *    和"她在哪 / 在做什么"（`whereState`）、"她吃了没"（`meal`）是同一类东西 →
+ *    **每次聊天都该带上**。
+ *
+ * ⚠️ **只给这个会话的**（群 / 私聊）—— 和"只在原地提醒"同一个口径：
+ *    A 群定的提醒，不该在 B 群被她说出来。
+ *
+ * ⚠️ 只列**还没到点**的（到点的立刻就会被发出去）。
+ *
+ * @param {string} groupId 空串 = 私聊
+ * @returns {string} 提示词片段；没有就返回空串
+ */
+export function hint(groupId = '', now = Date.now()) {
+  const g = String(groupId ?? '');
+  const live = st.items
+    .filter((x) => !x.sentAt && x.at > now && String(x.groupId) === g)
+    .sort((a, b) => a.at - b.at)
+    .slice(0, 3);
+  if (!live.length) return '';
+  const fmt = (t) => {
+    const d = new Date(t);
+    const sameDay = d.toDateString() === new Date(now).toDateString();
+    const day = sameDay ? '今天' : `${d.getMonth() + 1}月${d.getDate()}日`;
+    return `${day} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  };
+  return [
+    '## ⏰ 你**还记着**这些提醒（就在这个会话里，还没到点）',
+    ...live.map(
+      (x) =>
+        `· ${fmt(x.at)} 提醒他「${x.what}」` +
+        `${x.targets.length ? `（还要一并提醒 ${x.targets.map((t) => t.name || t.uid).join('、')}）` : ''}`,
+    ),
+    '⚠️ 这些是你**答应过、还没到点**的 —— 有人问起你要说得出来（「我四点得喊他」）。',
+    '🚫 别主动催、别提前提醒、别当成已经发生的事，也别编没定过的提醒。',
+  ].join('\n');
+}
+
 /** 到点、还没发过的（按时间正序） */
 export function due(now = Date.now()) {
   return st.items.filter((x) => !x.sentAt && x.at <= now).sort((a, b) => a.at - b.at);
