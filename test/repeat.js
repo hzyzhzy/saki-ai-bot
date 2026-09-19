@@ -90,7 +90,16 @@ repeat.observe(G, 'a');
 repeat.observe(G, 'a');
 check(repeat.observe(G, '') === 2, '空消息不打断链');
 check(repeat.observe(G, '   ') === 2, '纯空白不打断链');
-check(repeat.observe(G, '[图片]') === 1, '换了内容 → 重新起链');
+check(repeat.observe(G, '换了一句完全不一样的话') === 1, '换了内容 → 重新起链');
+// ⚠️⚠️ 2026-09-19 加（用户报：他连发 3 张**不同**的图，却触发了复读、群里出现一行字面 `[图片]`）：
+//    图片消息归一化出来的是**占位符** `[图片]`（不是空串）→ 三张不同的图被当成
+//    "同一句话刷了 3 遍" → 她跟着复读那句占位符 ✗
+//    ⇒ 占位符必须**当没内容**：既不参与复读，也不打断正在进行的链
+//      （所以下面两次都还是 1，不是 2）。
+check(
+  repeat.observe(G, '[图片]') === 1 && repeat.observe(G, '[图片]') === 1,
+  '发图不参与复读（连发几张也不涨链）',
+);
 repeat.reset();
 repeat.observe(G, 'b');
 repeat.observe(G, 'b');
