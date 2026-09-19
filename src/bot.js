@@ -133,7 +133,19 @@ export function sleepNudgeStatus() {
  */
 function srcOf(event) {
   const name = event?.sender?.card || event?.sender?.nickname || String(event?.user_id ?? '');
-  return { userId: String(event?.user_id ?? ''), name };
+  // ⚠️⚠️ 2026-09-19（用户报：「分不清人」——大豆只说了「想不想我」，
+  //    她却把 HZY 之前说的同一句话算到大豆头上）：
+  //    连发合并会把**多个人的话拼进一条**，而提示词那边原来只拿到
+  //    `{userId, name}`（**没有原话**）→ 只好列一份"说话人名单"，
+  //    正文是混在一起的 → 模型只能**自己把句子分配给人**，两个人说同一句话时必串 ✗
+  //    所以这里把**他这条原话**也带上，让调用方能逐条对应"谁说了什么"。
+  let text = '';
+  try {
+    text = msg.tidy(msg.extractText(msg.toSegments(event?.message), { atPlaceholder: '' })).trim();
+  } catch {
+    /* 拿不到就算了（`text` 留空，调用方会退回只列名字） */
+  }
+  return { userId: String(event?.user_id ?? ''), name, text };
 }
 
 /**
@@ -1067,7 +1079,22 @@ export class Bot {
     //      61~85    120s  →  25s
     //      86~100   180s  →  40s
     let factor, minChars, chatCooldownMs, maxChain, idleMs;
-    if (s <= 15) {
+    if (s <= 0) {
+      // ⚠️⚠️ 2026-09-19 用户要求：「**0档直接取消所有闸**」——
+      //    0 = 真的"每句都回"，密度闸一个不留：
+      //      · 冷却 **0**（连着来几条就一条条接）
+      //      · `maxChain = Infinity`（**不限制连续接话条数**，接多少条都不闭嘴）
+      //      · 字数 1、概率不打折（本来就是最低/最高档）
+      //    ⚠️ **没有取消**的是"该不该说话"那类判定（不是密度闸、也不该由这个滑块管）：
+      //      @全体成员不回、@的是别人就不插嘴、不回机器人自己的消息、黑名单/静音。
+      //    ⚠️ 用 `Infinity` 而不是 `null`：下面 `sp.maxChain ?? Math.max(2, …)` 会把 null
+      //      当成"没设"退回默认值 ✗（`chain >= Infinity` 恒为 false = 永不拦 ✓ 正是要的）。
+      factor = 1;
+      minChars = 1;
+      chatCooldownMs = 0;
+      maxChain = Infinity;
+      idleMs = 60000;
+    } else if (s <= 15) {
       // 最活跃：真的能聊起来
       factor = 1;
       minChars = 1;
@@ -1375,11 +1402,16 @@ export class Bot {
       const withinSameUser = snap.inSameUser;
       const withinWindow = snap.inWindow;
 
+      // ⚠️⚠️ 2026-09-19 用户要求：「0档直接取消所有闸」——
+      //    `needJudge: true` 就是"再说一次'该不该说'"那道**抽签感**的来源
+      //    （他 9/13 的原话：「还是有抽签回答的感觉」）。0 档时**跳过它、直接说**。
+      const noJudge = this.strictnessOf(event) <= 0;
       if (snap.phase === 'active' && snap.who === 'him') {
         log.debug(
-          `[${key}] 刚才就在跟他聊（${uid}），接着说（隔了 ${Math.round(snap.silenceMs / 1000)}s）→ 交给判断（不受续话上限限制）`,
+          `[${key}] 刚才就在跟他聊（${uid}），接着说（隔了 ${Math.round(snap.silenceMs / 1000)}s）→ ` +
+            `${noJudge ? '0 档：跳过判断直接说' : '交给判断（不受续话上限限制）'}`,
         );
-        return { mode: 'followUp', needJudge: true, inDialogue: true };
+        return { mode: 'followUp', needJudge: !noJudge, inDialogue: true };
       }
 
       if (withinWindow) {
@@ -1388,9 +1420,10 @@ export class Bot {
           return null;
         }
         log.debug(
-          `[${key}] 可能是对话延续（距上次回复 ${Math.round(snap.silenceMs / 1000)}s，链长 ${chain}）→ 交给判断`,
+          `[${key}] 可能是对话延续（距上次回复 ${Math.round(snap.silenceMs / 1000)}s，链长 ${chain}）→ ` +
+            `${noJudge ? '0 档：跳过判断直接说' : '交给判断'}`,
         );
-        return { mode: 'followUp', needJudge: true };
+        return { mode: 'followUp', needJudge: !noJudge };
       }
 
       // ⚠️ 2026-09-15：**"他接着说、但已经出窗口"要留在日志里**（info 级）。
@@ -5786,7 +5819,11 @@ export class Bot {
             '',
             `⚠️ 他没一次说完，**连着发了 ${srcs.length} 条**（按时间顺序）：`,
             '',
-            ...srcs.map((s, i) => `${i + 1}. ${s.name}（QQ ${s.userId}）`),
+            ...srcs.map(
+              (s, i) =>
+                `${i + 1}. ${s.name}（QQ ${s.userId}）` +
+                `${s.text ? `说：「${String(s.text).slice(0, 120)}」` : ''}`,
+            ),
             '',
             '## 怎么回',
             '',
@@ -5936,7 +5973,21 @@ export class Bot {
     //    ⚠️ 位置放在这里（靠后）：群友追问时，这段离他要回的那句话更近。
     if (event?.message_type === 'group') {
       const brief = quest.briefFor(event.group_id);
-      if (brief) parts.push(brief);
+      if (brief) {
+        // ⚠️⚠️ 2026-09-19（用户报「分不清人」的第二处来源）：
+        //    剧情摘要 / 故事线是**压缩过的"事情经过"**，条目里**没有"谁说的"字段**
+        //    （`state/storyline.json` 只有 `text`，归属全靠摘要里恰好写到），
+        //    也没有时间戳 —— 模型很容易把里面的事**安到在场随便一个人头上** ✗
+        //    （实测：大豆只说了一句「想不想我」，她回的时候把 HZY 之前的
+        //      「我回来了 / 在门口横跳三趟」全算到大豆身上）。
+        //    这一段不是聊天记录，所以这里必须明说"别自己分配"。
+        parts.push(
+          brief +
+            '\n\n⚠️ 上面这段是**事情经过**（不是聊天记录）：里面的名字 / 谁说了什么' +
+            '**只以写明的为准** —— 没写清是谁的，就**别往具体某个人身上安**。' +
+            '这个群里人多，**认错人比不知道更糟**。',
+        );
+      }
     }
     // ⚠️ 2026-09-18：「她人在哪 / 在做什么」（用户要求的状态机）——
     //    有覆盖时**放在日程那段的后面**：它是"她今天亲口说的"，**压过**按小时算的日程。
@@ -6648,6 +6699,19 @@ export class Bot {
 
   async sendChunk(event, raw, reply) {
     const markers = pickMarkers(raw);
+    // ⚠️⚠️ 2026-09-19 加（用户连着报两次"群里出现字面 [表情包] / [图片]"）：
+    //    **这类问题只能靠这条日志定位** —— 因为存进记忆的是 `stripMarkers()` 之后的文本，
+    //    事后去 `recent.json` 里翻**根本看不到她到底写了什么字** ✗
+    //    （我上一次就是这么卡住的：只知道群里出现了 `[图片]`，不知道她原文长什么样）
+    //    所以：**只要这一条里带方括号**，就把"原文 / 解析出几个标记 / 最终发出去的文本"都打出来。
+    //    ⚠️ 只在带方括号时才打，不会刷屏。
+    if (/\[[^\]\s]{1,16}\]/.test(String(raw ?? ''))) {
+      log.info(
+        `[标记] 原文 ${JSON.stringify(String(raw).slice(0, 80))} → 解析出 ${markers.length} 个标记` +
+          `${markers.length ? `（${markers.map((m) => m.tag).join('/')}）` : ''}` +
+          ` → 发的文本 ${JSON.stringify(stripMarkers(raw).trim().slice(0, 60))}`,
+      );
+    }
     // ⚠️ 剥掉 Markdown：手机 QQ 显示不出来，会变成一堆 *** 很难看。
     //    人设里写了禁止，但模型时不时还是用 —— 所以在发送前兜一道，比提示词可靠。
     // ⚠️ 再去掉行尾句号：人设里也写了「别每句都打句号」，但提示词太长模型老忽略。

@@ -57,7 +57,20 @@ export function faceFiles() {
  * 想固定发某一张，就把 tag 写细一点（「疑惑」「疑惑2」）—— 只有同名才随机。
  */
 export function facePath(tag) {
-  const list = faces.filter((x) => x.tag === tag);
+  const t = String(tag ?? '').trim();
+  // ⚠️⚠️ 2026-09-19（用户报：**斗图复读**时群里出现了一行字面 `[表情包]`）：
+  //    他**连发 3 张同样的表情** → 她去复读那个表情，但她**只会照着上下文里的写法写**
+  //    （别人的图在她上下文里就显示成「[表情包]」）→ 而库里没有叫「表情包」的 tag
+  //    → 解析不出来 → 这五个字就字面发到群里了 ✗
+  //    ⚠️ 修法：这些**类别名**直接理解成「**随便来一张**」—— 复读本来就是"跟着发个表情"。
+  //    🚫 **千万别改成"不发"**：那等于把她复读表情包的能力弄没了（我第一版就是这么错的，
+  //       用户当场纠正：「你还直接改成不发了」）。
+  if (/^(表情包|表情|图片|照片|动图|动画表情|贴纸|颜文字|gif|sticker|emoji|img|image)$/i.test(t)) {
+    const all = faces.map((f) => join(DIR, f.file)).filter((p) => existsSync(p));
+    if (!all.length) return null;
+    return all[Math.floor(Math.random() * all.length)];
+  }
+  const list = faces.filter((x) => x.tag === t);
   if (!list.length) return null;
   const ok = list.map((f) => join(DIR, f.file)).filter((p) => existsSync(p));
   if (!ok.length) return null;
@@ -161,7 +174,19 @@ export function stripMarkers(text) {
       // ① 标准写法：只要长得像就剥（哪怕 tag 已从库里删掉，也别把标记漏出去）
       .replace(/\[\s*表情\s*[:：][^\]]*\]/g, '')
       // ② 裸标签：**只剥真的是表情 tag 的**（`[图片]` / `[表情包]` 这种要留着）
-      .replace(/\[\s*([^\]\s]+)\s*\]/g, (raw, tag) => (facePath(tag) ? '' : raw))
+      // ⚠️⚠️ 2026-09-19（用户截图：她"复读表情包"时，群里直接出现了一行 `[表情包]`）：
+      //    `[表情包]` / `[图片]` 是**类别名**，不是表情库里的名字
+      //    （库里是「大笑 / 吃瓜 / 得意…」）→ `facePath()` 认不出来 →
+      //    上面这条"只剥真表情"的规则就把它**原样留下**，于是字面发到群里 ✗
+      //    这些词**只可能是"我想发表情"的意图**（多半还是从别人消息里的
+      //    "[表情包]" 学来的），所以**一律剥掉**：要么她写具体名字（`[得意]` → 真发表情），
+      //    要么就别留痕迹。⚠️ 剥完如果整条成了空的，那这条就不发了（比发五个字强）。
+      .replace(/\[\s*([^\]\s]+)\s*\]/g, (raw, tag) => {
+        if (facePath(tag)) return '';
+        return /^(表情包|表情|图片|照片|动图|动画表情|贴纸|颜文字|gif|sticker|emoji|img|image)$/i.test(tag)
+          ? ''
+          : raw;
+      })
   );
 }
 
