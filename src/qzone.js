@@ -278,7 +278,39 @@ export async function publish(call, post) {
     }
   }
 
-  const r = await call('send_qzone_msg', params);
+  // ⚠️⚠️ 2026-09-20：**按协议端分派** —— 换成 LLBot 之后，原来的
+  //    `send_qzone_msg`（NapCat 的扩展 action）在它那边**不存在**（查过它的实现清单），
+  //    所以发说说必须换条路：
+  //      · `napcat`  → 照旧走那个扩展 action（一直这样，不动）
+  //      · 其它（现在是 `llonebot`）→ 拿 `get_cookies` 给的 h5.qzone.qq.com cookies，
+  //        自己按 QZone 的网页接口发。**原因、风险和"只发文字"的限制都写在
+  //        `src/qzone-http.js` 顶部** —— 动这里之前先看那段。
+  //    ⚠️ 按协议端**直接分派**，而不是"先试 action、失败再回退"：
+  //      后者每次都会先白失败一次 —— 既往日志里灌没用的错，又多送一次可疑信号。
+  //    ⚠️ 哪天 LLBot 补上了 `send_qzone_msg`，把这里改回 action 就行（跟着能删掉那个模块）。
+  const isNapcat = String(config.provider?.name || 'napcat').toLowerCase() === 'napcat';
+  let r;
+  if (isNapcat) {
+    r = await call('send_qzone_msg', params);
+  } else {
+    const { publish: publishHttp } = await import('./qzone-http.js');
+    const ck = await call('get_cookies', { domain: 'h5.qzone.qq.com' });
+    const cookies = String(ck?.cookies ?? '').trim();
+    if (!cookies) throw new Error('拿不到 h5.qzone.qq.com 的 cookies（get_cookies 没给东西）');
+    const hr = await publishHttp({
+      content,
+      cookies,
+      uin: String(config.botQQ ?? '').trim(),
+      // ⚠️ 2026-09-20：**把配图一起带上** —— `params.images` 里是 `imageRef()` 的产物，
+      //    也就是 **`data:image/…;base64,…` 这种 data URL**（⚠️ 不是文件路径！
+      //    `qzone.js` 自己有 `imageRef()`，和 `bot.js` 那个返回 `base64://` 的不一样）。
+      //    模块内部会先上传拿 `richval` 再发布；上传失败自动降级成纯文字。
+      images: (Array.isArray(params.images) ? params.images : []).filter(Boolean),
+    });
+    if (!hr.ok) throw new Error(`空间 HTTP 发送失败：${hr.error}`);
+    // ⚠️ 包成和 action 返回一样的形状，下面那段（`r.status` / `r.data.tid`）就不用改
+    r = { status: 'ok', data: { tid: hr.tid ?? null } };
+  }
   if (r && r.status === 'failed') {
     throw new Error(r.message ?? r.wording ?? '发送失败');
   }

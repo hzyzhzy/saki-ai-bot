@@ -22,6 +22,7 @@ import { WebSocketServer } from 'ws';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { writeFileSync, rmSync, mkdirSync } from 'node:fs';
+import { firstSentenceBreak } from '../src/bot.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 mkdirSync(join(ROOT, 'logs'), { recursive: true });
@@ -324,6 +325,25 @@ async function main() {
   for (const w of ['不大', '一个人住刚好', '你要来']) {
     check(joined.includes(w), `内容没丢：「${w}」`);
   }
+}
+
+// ⚠️⚠️ 2026-09-20 加：**分条切点的判据**（这条判据改错过三次，必须留哨兵）。
+//
+//    最后一次败在"流式 chunk 的边界不由我们控制"：原来要求「**末尾**是句末标点」，
+//    而模型一次吐来整句时，句号落在**中间** → 末尾不是标点 → 不切。
+//    下面第一条就是用户真实报的那条原文（群 200000001，23:05:28）。
+console.log('\n[✓] 分条切点：找最后一个句末标点（不受 chunk 边界影响）');
+{
+  const real = '祥魔是什么鬼，你大半夜就琢磨这个（。我要是魔，头一个收拾的就是你';
+  const n = firstSentenceBreak(real);
+  check(n === 18, `★ 用户真实那句切在「（。」之后（得 ${n}）`);
+  check(real.slice(0, n) === '祥魔是什么鬼，你大半夜就琢磨这个（。', '前半 = 到「（。」为止');
+  check(real.slice(n) === '我要是魔，头一个收拾的就是你', '后半 = 剩下那句');
+  check(firstSentenceBreak('这样吗？那算了') === 4, '★ 问号也切');
+  check(firstSentenceBreak('太好了！我这就去') === 4, '★ 叹号也切');
+  check(firstSentenceBreak('先这样；再说') === 4, '分号也切');
+  check(firstSentenceBreak('没有标点的一句话') === -1, '没有句末标点 → 不切（-1）');
+  check(firstSentenceBreak('') === -1, '空串 → -1');
 }
 
 async function cleanup() {

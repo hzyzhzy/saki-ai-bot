@@ -13,6 +13,7 @@
  *   | --- | --- | --- | --- |
  *   | NapCat | 注入官方 QQ 客户端 | 自定义：**禁商用** | 有自己的 WebUI + HTTP 接口（我们能代点） |
  *   | LLBot | **独立应用**（Desktop/CLI/Docker） | GPL-2.0：可商用，**分发**要带源码 | 有自己的 WebUI/GUI |
+ *   | SnowLuma | 注入官方 QQ 客户端 | 源码可见**非商业**（禁商用 + 禁公开发布修改版） | 有 WebUI，但**要密码**；OneBot 层没有出码/重启 |
  *   | 通用 OneBot 实现 | 看实现 | 看实现 | 通常没有 |
  *
  * ## 怎么换（写给用的人）
@@ -58,16 +59,61 @@ const REGISTRY = {
     defaultLauncher: '',
     defaultManageUrl: () => '',
     caps: {
-      status: false, // 侧信道未知：它没有 NapCat 那套接口；登录状态请看 OneBot 侧（下面那张卡片）
+      // ⚠️⚠️ 2026-09-20 改（用户要求「二维码要和之前一样能在 webui 自动刷新」）：
+      //    这三个原来是 false，理由是"它没有 NapCat 那套接口" ——
+      //    但**看不到码就发现不了掉线**：那天它 QQ 会话失效、开始反复出二维码，
+      //    而 3001 的 OneBot 连接一直没断 → 机器人以为一切正常，
+      //    用户 @ 了半天没人应、日志里连"收到"都没有（真实事故）。
+      //    现在改成**读它自己写的那张 `login-qrcode.png`**（实现见 `src/llbot.js`）：
+      //    图很新 = 正在等扫码 = 没登录。不需要认证、也不用碰它的 API。
+      status: true, // 登录状态（靠二维码文件的新鲜度判断，不是它的接口）
+      qrcode: true, // 出二维码（把它写的那张图发给界面）
+      refreshQr: true, // 「刷新」= 重新拉一次图（它自己每约 2 分钟换一张）
+      restart: false, // ⚠️ 仍旧不支持：重启/重连得去它自己的界面
+      quickLogin: false,
+      autoRecover: false,
+      launch: true,
+    },
+    how: 'LLBot 是**独立应用**：登录状态和二维码在这里能看（读它写的那张码图）；重启/重连还是去它的 WebUI',
+    license: '✅ GPL-2.0：允许商用；但**分发**它（打包进你的安装包、或给客户私有化交付）时必须一并提供源码',
+  },
+  snowluma: {
+    label: 'SnowLuma',
+    defaultDir: () => 'C:\\SnowLuma',
+    // ⚠️ 用我们写的那个 vbs（隐藏启动 + 固定工作目录），**不用它自带的 `launcher.bat`**
+    //    —— 那个 bat 末尾有 `pause`，会留一个黑窗口等着按键（开机自启时很碍事）。
+    //    ⚠️ 这个 vbs 放在 `C:\SnowLuma\_start-hidden.vbs`（和它本体放一起，不进仓库）。
+    defaultLauncher: '_start-hidden.vbs',
+    defaultManageUrl: () => 'http://127.0.0.1:5099',
+    caps: {
+      // ⚠️⚠️ 2026-09-20 加（用户换到它）—— 下面这些是**实测**出来的，不是猜的：
+      //    ① 它的 OneBot 层**没有出码 action**：`packages/onebot/src/actions/` 里
+      //       `info.ts` 只有 `get_login_info`、`extended.ts` 里 `set_restart` 标着
+      //       「重启（不支持）」；整仓库搜 `qrcode` / 二维码 **零命中**（主程序
+      //       `index.mjs` 7.2MB + 全部前端 bundle 都搜过）。
+      //    ② 它的 WebUI **有**「账号状态」，但要**密码登录**（用户已改密码）⇒ 代查不了。
+      //    ⇒ 所以这几项**如实为 false**，界面会明确说"不支持、去它自己的界面"。
+      //    ⚠️ 但**「QQ 在不在线」照样准** —— `/api/qq/status` 走的是 OneBot 自己的
+      //       `get_status()` / `get_login_info()`（标准 action、协议端无关），
+      //       比 LLBot 那套"看码图新旧"还可靠（今天 LLBot 就是因为只能看码图才误判）。
+      status: false,
       qrcode: false,
       refreshQr: false,
       restart: false,
       quickLogin: false,
       autoRecover: false,
+      // ⚠️⚠️ 2026-09-20 改成 **true**（原来是 false）。它是注入式没错，但：
+      //    ① **开机自启必须能把它起起来** —— 自启链是 `SakiBot` → `autostart.ps1`
+      //       → `start-all.ps1`，而那条链按 provider 分派 ⇒ **界面切协议端 = 开机行为自动跟着变**
+      //       （用户问「能不能在 webui 上切换时自动把启动项也切换」——
+      //        自启项只有 `SakiBot` 一个，它每次读 config 决定起谁，所以不用"切换启动项"）；
+      //    ② 它的 `hookAutoLoad` 已设为 true ⇒ 起来之后**自己接入 QQ 进程**，不用人去点。
+      //    launcher 用我们写的 `_start-hidden.vbs`。
       launch: true,
     },
-    how: 'LLBot 是**独立应用**（Desktop / CLI / Docker）：扫码登录、重连、看码都在它自己的 WebUI/GUI 里做',
-    license: '✅ GPL-2.0：允许商用；但**分发**它（打包进你的安装包、或给客户私有化交付）时必须一并提供源码',
+    how: 'SnowLuma 是**注入官方 QQ 客户端**的协议端：扫码在 **QQ 客户端窗口**里；账号状态、连接配置、日志在它自己的 WebUI（默认 http://127.0.0.1:5099，需要密码）。机器人这边只负责收发 —— 在线状态靠 OneBot 的 get_status，照样准',
+    license:
+      '⚠️ 源码可见**非商业**许可（SnowLuma Source-Available Non-Commercial，不是 OSI 开源）：自用、私下改都可以；**商业使用、以及公开发布修改版/衍生版都要事先书面授权** ⇒ 不能打包进安装包，也不能放进公开仓库',
   },
   onebot: {
     label: '通用 OneBot 11 实现',

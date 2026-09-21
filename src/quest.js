@@ -1574,7 +1574,13 @@ export function settle(q, ending, adjust) {
       continue;
     }
     try {
-      const r = adjust(userId, delta, { note });
+      // ⚠️⚠️ 2026-09-20 用户要求：「**二级剧情加的好感度不被每日好感度限制所限制**」——
+      //    所以这里传 `force: true`：绕过 `affinity.js` 里的**每日额度（`DAY_CAP`）**
+      //    和单次幅度上限（`MAX_STEP`）。
+      //    为什么该这样：剧情是**她跟这群人一起经历的大事**，一次好结局的分量
+      //    不该被"今天闲聊的额度用完了"卡住 —— 那个额度是给日常刷分防的。
+      //    ⚠️ **只改剧情这一条路径**：一级事件（`life.js`）和日常聊天照旧受每日限制。
+      const r = adjust(userId, delta, { note, force: true });
       // ⚠️⚠️ 2026-09-17 修：这里原来取的是 `r?.value ?? r?.v`，
       //    而 `affinity.adjust()` 返回的是 `{ ok, from, to, applied, ... }` ——
       //    **根本没有 `value` / `v`**，所以那个字段一直是 null（没人用，就没发现）。

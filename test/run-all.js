@@ -32,6 +32,8 @@ const SUITES = [
   'behavior',
   'attitude',
   'face',
+  // ⚠️ 2026-09-20 加：解题模式判据（「带图 + 短消息」那条踩过两次 —— 见 test/solve.js 头注释）
+  'solve',
   'webui',
   'cs',
   'teach',

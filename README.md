@@ -455,23 +455,47 @@ npm i                       # 依赖只有几个（ws / js-yaml / qrcode …）
 node test/run-all.js        # （可选）先跑一遍测试：全部离线，不碰真 QQ、不花钱
 ```
 
-### 2. 起协议端（NapCatQQ）—— 这一步最容易卡
+### 2. 起协议端（QQ 登录这一步 —— 最容易卡）
 
-1. 从 NapCatQQ 的 Release 下 **`NapCat.Shell`**（Windows 包），解压到任意目录；
-2. **用包里的 `launcher-win10-user.bat` 启动**（它会设好几个环境变量、把 NapCat 注入 QQ）。
-   ⚠️ **别直接调 `NapCatWinBootMain.exe`** —— 那样 QQ 会起来、但 **NapCat 完全没跑**
-   （6099/3001 都不监听、日志里也没有新东西，很容易误判成"启动失败"）；
-3. 首次启动要**扫码登录**（登录态失效时它也会停在二维码界面等你扫）；
-4. 打开 NapCat 的 WebUI（默认 `http://127.0.0.1:6099`），在「网络配置」里加一个
-   **WebSocket 服务端**：端口 `3001`，**设一个 token**（待会儿填进 `config.yml`）；
-5. 确认 `3001` 在监听：
-
-   ```powershell
-   Get-NetTCPConnection -LocalPort 3001 -State Listen
-   ```
-
-> ⚠️ 它的 OneBot 服务端**只允许一个客户端**：机器人占着的时候，别的脚本连 3001 会被拒
-> （排障时先停机器人）。
+> 两条路，**推荐 LLBot**：
+>
+> | | **LLBot**（推荐） | NapCatQQ |
+> | --- | --- | --- |
+> | 是什么 | **独立应用**，不注入 QQ 客户端 | 注入官方 QQ 客户端的插件 |
+> | 许可 | GPL-2.0，**可商用** | ⚠️ **禁止商用** |
+> | 装法 | 下 `LLBot-Desktop-win-x64.zip` 解压、双击 `llbot.exe` | 下 `NapCat.Shell` 解压、跑 `launcher-win10-user.bat` |
+> | 首次 | 界面里点「启动」→ **扫码** | 直接 **扫码** |
+> | 它的 OneBot | **3001，默认就开** | 3001，要在它 WebUI 里手动加一个 |
+>
+> 两条**都要你扫码登录一次**（这是 QQ 侧的事，绕不开）。
+>
+> ⚠️ **两个协议端不能同时跑** —— 都要占 3001，而且连的是同一个号。
+> 换的时候必须：**先停掉前一个 → 再起后一个**。
+>
+> **LLBot 的两个实测坑**：
+> 1. 它的 Desktop 包里**缺 `bin/llbot/node.exe`** → 启动时报「获取Node.js版本失败」。
+>    把机器上任意一个 node 拷成 `<LLBot目录>\bin\llbot\node.exe` 即可（实测 v24 可用）。
+> 2. 它的 WebUI 默认占 **3080**。如果那个端口被别的程序占了（比如你机器上有别的
+>    Web 服务），改 `bin/llbot/data/config_<你的QQ>.json` 里的 `webui.port`。
+>
+> **NapCat 的装法**（如果你选它）：
+>
+> 1. 从 NapCatQQ 的 Release 下 **`NapCat.Shell`**（Windows 包），解压到任意目录；
+> 2. **用包里的 `launcher-win10-user.bat` 启动**（它会设好几个环境变量、把 NapCat 注入 QQ）。
+>    ⚠️ **别直接调 `NapCatWinBootMain.exe`** —— 那样 QQ 会起来、但 **NapCat 完全没跑**
+>    （6099/3001 都不监听、日志里也没有新东西，很容易误判成"启动失败"）；
+> 3. 首次启动要**扫码登录**（登录态失效时它也会停在二维码界面等你扫）；
+> 4. 打开 NapCat 的 WebUI（默认 `http://127.0.0.1:6099`），在「网络配置」里加一个
+>    **WebSocket 服务端**：端口 `3001`，**设一个 token**（待会儿填进 `config.yml`）。
+>
+> 不管走哪条路，最后确认 `3001` 在监听：
+>
+> ```powershell
+> Get-NetTCPConnection -LocalPort 3001 -State Listen
+> ```
+>
+> > ⚠️ OneBot 服务端**只允许一个客户端**：机器人占着的时候，别的脚本连 3001 会被拒
+> > （排障时先停机器人）。
 
 ### 3. 填 `config.yml`（**别提交它**）
 
@@ -491,6 +515,26 @@ copy config.example.yml config.yml      # Linux/macOS: cp
 | `life.enable` / `quest.enable` | 日常事件 / 二级剧情：**建议先关**，测稳了再开 |
 
 改完跑一下 `npm run check`（配置能不能解析 + 模型通不通）。
+
+> 💡 **不想改文件？** 接入点这三项可以**从命令行参数或环境变量传进来**，
+> 优先级是 **命令行参数 > 环境变量 > `config.yml`**（越临时的越优先）。
+> 这适合「被别的管理器一键拉起来」的场景 —— 那种情况下它不该去改你的配置文件：
+>
+> ```bash
+> # 命令行参数
+> node src/index.js --onebot-url ws://127.0.0.1:3001 --onebot-token 你的token --bot-qq 10000002
+>
+> # 环境变量（下面是 Windows PowerShell 写法；Linux/macOS 用 export 同理）
+> $env:QQBOT_ONEBOT_URL='ws://127.0.0.1:3001'
+> $env:QQBOT_ONEBOT_TOKEN='你的token'
+> $env:QQBOT_BOT_QQ='10000002'
+> node src/index.js
+> ```
+>
+> ⚠️ **只支持覆盖这三项**（`onebot.url` / `onebot.accessToken` / `botQQ`），别的配置照旧从
+> `config.yml` 读 —— 故意的，否则"值到底从哪来"会变得没法排查。
+> 启动时日志会打一行 `外部覆盖 : …`，省得你疑惑"我明明改了配置怎么没生效"。
+> （token 只报"覆盖过"，**不打印它的值**。）
 
 ### 4. 知识库起头（三个"活文件"不进仓库）
 

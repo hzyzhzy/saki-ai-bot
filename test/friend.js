@@ -148,10 +148,12 @@ console.log('\n【2】★★ 到线判定：只有**刚越过**才算，不是 >
   const again = aff.adjust('c', 3, { force: true });
   check(again.crossed === false, '★★ 已经在线上再加 → **crossed=false**（不会重复通知）');
 
-  // 顶到 100 之后再加也不该算"越过"
+  // ⚠️ 2026-09-20：好感度**上限改无限**了（用户要求「把好感度上限修改为无限」），
+  //    所以这里不再"封顶在 100"了。
+  //    ⚠️ 但这段的**本意没变**：越过 90 线之后再涨，都不该再算一次"越过"。
   for (let i = 0; i < 5; i++) aff.adjust('c', 3, { force: true });
-  check(aff.get('c') === 100, '封顶在 100');
-  check(aff.adjust('c', 3, { force: true }).crossed === false, '★ 100 封顶后不再算"越过"');
+  check(aff.get('c') === 109, `不封顶了（94 + 5×3 = 109，实际 ${aff.get('c')}）`);
+  check(aff.adjust('c', 3, { force: true }).crossed === false, '★ 越过线之后再涨也不算"越过"');
 }
 
 console.log('\n【3】★★ 到线通知：模板是机器化的、只发一次');

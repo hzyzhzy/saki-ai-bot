@@ -150,7 +150,7 @@ const DEFAULTS = {
    *    真正"官方许可"的只有 QQ 开放平台 / 企业微信。
    */
   provider: {
-    /** napcat | llonebot | onebot（通用：只保证 OneBot 收发） */
+    /** napcat | llonebot | snowluma | onebot（通用：只保证 OneBot 收发） */
     name: 'napcat',
     /** 协议端目录（启动/守护脚本要用）。留空 → napcat 用 ../napcat/NapCat.Shell */
     dir: '',
@@ -262,6 +262,21 @@ const DEFAULTS = {
   },
   /** 主动接话：群里没 @ 它，也可能插一句。分「回答问题」和「被提到」两种场景 */
   chat: {
+    /**
+     * ⚠️ 2026-09-21 加：**正在生成回复时，他（同一个人）又发消息 → 最多"丢掉草稿重来"几次**。
+     *
+     * 用户原话：「这个就是没有把靠近的消息合并的问题」——
+     * 他 @ 她一下、紧接着又补一句，原来会**回两条**（各带一个引用框）。
+     * 现在改成：发现"他还在说"就**把这一版草稿丢掉、带着新消息重新生成**，
+     * 群里只出现一条回复。
+     *
+     * · `0` = 关掉这个行为（退回"生成完再处理那一批"的老样子，也就是回两条）；
+     * · 默认 `2` —— 留个上限，不然他一直刷，她就永远不说话（到顶后照常发出）。
+     *
+     * ⚠️ 只有**同一个人**连发才打断；别人插话不动这一轮（那本来就是另一件事）。
+     * ⚠️ 丢弃的前提是"这一个字都还没发出去"，所以对群里没有可见代价（只多花一次模型调用）。
+     */
+    requeueMax: 2,
     enable: false,
     group: '',
     question: {
@@ -390,6 +405,58 @@ function load() {
   if (!['forward', 'reverse'].includes(cfg.onebot.mode)) {
     throw new Error(`onebot.mode 只能是 forward 或 reverse，当前是 "${cfg.onebot.mode}"`);
   }
+
+  // ── ⚠️ 2026-09-20：允许**从命令行参数 / 环境变量覆盖接入点** ──────────────
+  //
+  // 用户要求（原话）：「给项目加个标准入口，支持从参数或环境变量读
+  //   `onebot.url` / token，不用手改 config.yml」。
+  //
+  // 为什么需要：想让**别的管理器**（LLBot 的「对接框架」、任何部署脚本）
+  //   一键把它拉起来 —— 那种场景它们**不该改我们的配置文件**，
+  //   而是把地址 / token 传进来。这也是"能被别人一键接入"的技术前提。
+  //
+  // 优先级：**命令行参数 > 环境变量 > config.yml**（越临时的越优先）。
+  // 两种写法都行：
+  //   node src/index.js --onebot-url ws://127.0.0.1:3001 --onebot-token abc --bot-qq 123456
+  //   QQBOT_ONEBOT_URL=… QQBOT_ONEBOT_TOKEN=… QQBOT_BOT_QQ=… node src/index.js
+  //
+  // ⚠️ **只覆盖这三项** —— 别把它扩成"通用配置通道"：那样 config.yml 会失去意义，
+  //    而且排错时根本看不出某个值到底从哪来。
+  // ⚠️ 覆盖过什么记在 `cfg.__overridden` 里（启动时打印出来，见 `src/index.js`）——
+  //    "我明明在 config.yml 里改了，怎么不生效"这种问题，全靠它一眼看出。
+  {
+    const argv = process.argv.slice(2);
+    const argOf = (name) => {
+      const i = argv.findIndex((a) => a === `--${name}` || a.startsWith(`--${name}=`));
+      if (i < 0) return null; // ⚠️ null = 没传。**不能拿空串当"没传"** —— token 允许就是空的
+      const hit = argv[i];
+      if (hit.includes('=')) return hit.slice(hit.indexOf('=') + 1);
+      const next = argv[i + 1];
+      return next && !next.startsWith('--') ? next : '';
+    };
+    const envOrNull = (k) => (process.env[k] === undefined ? null : process.env[k]);
+    const pick = (name, envName) => {
+      const a = argOf(name);
+      return a !== null ? a : envOrNull(envName);
+    };
+
+    const urlOverride = pick('onebot-url', 'QQBOT_ONEBOT_URL');
+    if (urlOverride !== null && String(urlOverride).trim()) {
+      cfg.onebot.url = String(urlOverride).trim();
+      cfg.__overridden = [...(cfg.__overridden ?? []), `onebot.url = ${cfg.onebot.url}`];
+    }
+    const tokenOverride = pick('onebot-token', 'QQBOT_ONEBOT_TOKEN');
+    if (tokenOverride !== null) {
+      cfg.onebot.accessToken = String(tokenOverride).trim();
+      // ⚠️ 只说"覆盖过"，**不把 token 的值写进去**（那是要保密的东西）
+      cfg.__overridden = [...(cfg.__overridden ?? []), 'onebot.accessToken'];
+    }
+    const qqOverride = pick('bot-qq', 'QQBOT_BOT_QQ');
+    if (qqOverride !== null && String(qqOverride).trim()) {
+      cfg.botQQ = String(qqOverride).trim();
+      cfg.__overridden = [...(cfg.__overridden ?? []), `botQQ = ${cfg.botQQ}`];
+    }
+  }
   cfg.logLevel = String(cfg.logLevel || 'info').toLowerCase();
   cfg.trigger.keywords = (cfg.trigger.keywords ?? [])
     .filter((k) => typeof k === 'string' && k.trim())
@@ -475,10 +542,22 @@ function load() {
   // ⚠️ 默认**不发**戳一戳的包（2026-09-13，防 QQ 风控）——
   //    发包能力在当前 QQ 版本上必然失败，每次失败都是给风控送证据。
   //    降级 QQ 之后可以改成 true 恢复真戳一戳。
-  cfg.poke.tryPacket = cfg.poke.tryPacket === true;
+  // ⚠️⚠️ 2026-09-21 改（原来是 `=== true`，等于把"没配置"也压成 false）：
+  //    **保留"没配置"这个状态** —— 让 `bot.js` 能按协议端给不同默认值：
+  //      · snowluma：独立协议实现，`send_poke` 是它自己 action 表里的一个 ⇒ 默认**发**
+  //      · napcat  ：走 PacketBackend、QQ 版本越界必然失败 ⇒ 默认**不发**
+  //    只认显式配置：`true` = 一定发，`false` = 一定不发，**不写 = 按协议端**。
+  //    ⚠️ 踩过：写成 `=== true` 之后"没配置"和"显式关掉"就分不开了 ——
+  //      我加了"按协议端默认"，结果 snowluma 下照样不发包（用户戳了一下，日志里什么都没有）。
+  if (cfg.poke.tryPacket !== undefined) cfg.poke.tryPacket = cfg.poke.tryPacket === true;
   cfg.poke.enable = cfg.poke.enable !== false;
   // 同一个人多久内只回拍一次（防刷屏）
   cfg.poke.cooldownMs = Math.max(1000, Number(cfg.poke.cooldownMs) || 30000);
+  // ⚠️⚠️ 2026-09-21（用户要求）：「机器人戳回来的话在我戳了3次再触发一次就行了」
+  //    → 同一个人的戳**攒次数**，每这么多下回拍一次（拍完归零，也就是第 3、6、9… 次）。
+  //    ⚠️ 它只管"拍回去"；**文字回应不受它影响**（那个走上面的 `cooldownMs`，
+  //      用户明确说了"还是直接和之前一样给回复好一点"）。
+  cfg.poke.countPerBack = Math.max(1, Number(cfg.poke.countPerBack) || 3);
   // 发包能力不可用时（QQ 版本越界），退化成用文字回应
   cfg.poke.fallbackText = cfg.poke.fallbackText !== false;
   // ⚠️⚠️ 2026-09-16：**戳一戳交给模型回**（用户要求：
@@ -550,7 +629,11 @@ function load() {
 
   // ── 协议端（provider）────────────────────────────────────
   // ⚠️ 默认 napcat：老配置里没有这一段，行为必须和以前完全一样（向后兼容）。
-  const KNOWN_PROVIDERS = new Set(['napcat', 'llonebot', 'onebot']);
+  // ⚠️⚠️ 2026-09-20：加 `snowluma`。**这行不改的话，config 里写 `name: snowluma`
+  //    会被归一化成 `onebot`**（原值只留在 `provider.nameRaw` 里）——
+  //    实测踩到：`provider.js` 明明加了 snowluma 档，机器人启动日志却打
+  //    `已连接到协议端（onebot）`、caps 也是通用那份，查了半天才定位到这里。
+  const KNOWN_PROVIDERS = new Set(['napcat', 'llonebot', 'snowluma', 'onebot']);
   cfg.provider = cfg.provider ?? {};
   const rawProvider = String(cfg.provider.name ?? 'napcat').trim().toLowerCase();
   // 不认识的名字**退回通用 OneBot** 而不是让机器人挂掉（拼错了也能跑，只是管理面少）

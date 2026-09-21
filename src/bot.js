@@ -38,6 +38,7 @@ import * as meal from './meal.js';
 //    （日程算默认值，她说过的话可以覆盖它，覆盖最多活 2 小时）
 import * as whereState from './where.js';
 import * as remind from './remind.js';
+import * as credBackup from './cred-backup.js';
 import * as affinity from './affinity.js';
 import { detectInsult } from './insult.js';
 import * as repeat from './repeat.js';
@@ -64,12 +65,27 @@ import { checkAttribution } from './attribution-guard.js';
 // 分条参数每次现读（管理界面改了要立即生效，不能在加载时固化）
 // ⚠️ 兜底值跟 config.yml 保持一致（真人打字节奏）；别写回 260/700/90 ——
 //    那样配置一旦读不到就会退回"一大段"的老节奏。
+//
+// ⚠️⚠️ 2026-09-20 用户两条要求（原话）：
+//    ① 「平时聊天时**句号处直接断开**变成两条消息就行了，然后接下来一条**延时 0.2 秒**发出」
+//    ② 「**如果总句数超过 3 句就不分开了**，就不会太吵」
+//       + 「**主动还是不改了，尤其是二级剧情比较长，会分出很多条**」
+//
+//    ⇒ 所以这里**两套阈值**，按"是不是主动那条路"分派：
+//      · 平时聊天（`chatFirst` = 2）：句末标点就断；最多 `maxChunks`（3）条。
+//      · 主动（`volFirst` = 25，老值）：攒够 25 / 36 字才在句末断、**不限条数**
+//        —— 主动接话 / 二级剧情 / 一级事件保持原样，别把剧情切成十几条。
+//      ⚠️ 延时（`delayMs` = 200）**两条路共用** —— 用户只嫌"条数多"，没嫌"太快"；
+//         要让主动也回到 0.65 秒的话，在这儿再分一个键就行。
 const chunkCfg = () => ({
   max: config.chunking?.maxChars || 60,
-  delay: config.chunking?.delayMs ?? 650,
-  first: config.chunking?.firstFlushChars || 25,
+  // ⚠️ 2026-09-20：兜底值**跟着 config.yml 走**（用户觉得 0.2 秒太快 ⇒ 定 1 秒）。
+  //    ⚠️ 别让它和 config.yml 不一致 —— 配置读不到时会悄悄退回一个他没选的节奏。
+  delay: config.chunking?.delayMs ?? 1000,
+  chatFirst: Math.max(2, config.chunking?.firstFlushChars || 2),
+  volFirst: Math.max(4, config.chunking?.voluntaryFirstFlushChars || 25),
+  maxChunks: Math.max(1, Number(config.chunking?.maxSentenceChunks) || 3),
 });
-const softFlush = () => Math.floor(chunkCfg().max * 0.6);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -575,7 +591,10 @@ export class Bot {
     ws.on('message', (data) => this.onRaw(data));
     ws.on('close', () => this.onClose());
     ws.on('error', (err) => log.error('WebSocket 错误:', err.message));
-    log.info('已连接到 NapCat，等待消息…');
+    // ⚠️ 2026-09-20：文案改成**通用**的 —— 协议端已经可以不是 NapCat 了
+    //    （LLBot 的 OneBot 也是 3001）。写死"已连接到 NapCat"会误导看日志的人
+    //    （换 LLBot 那天日志里还在说 NapCat，差点让我以为没切成功）。
+    log.info(`已连接到协议端（${config.provider?.name || 'napcat'}），等待消息…`);
   }
 
   onClose() {
@@ -657,6 +676,26 @@ export class Bot {
       if (payload.meta_event_type === 'lifecycle' && payload.self_id) {
         this.selfId = String(payload.self_id);
         log.info(`已登录 QQ: ${this.selfId}`);
+        // ⚠️⚠️ 2026-09-20 加（用户要求：「**登录成功之后就自动备份**」）：
+        //    这个号每 2~4 小时被腾讯踢一次，而"能不能自动快登回来"全看
+        //    `napcat/.credential` 那份凭据 —— 它被清掉过一次（状态 `nocred`，只能扫码）。
+        //    所以**每次登录成功就存一份**（保留最近 5 份），被踢且凭据没了时
+        //    看门狗会拿它试一次（见 `src/cred-backup.js` + `tools/napcat-cred.mjs`）。
+        //    ⚠️ 不 await、失败只记 debug：备份绝不能拖慢或搞挂登录后的初始化。
+        // ⚠️⚠️ 2026-09-20：**只在协议端是 NapCat 时才备份凭据** ——
+        //    这个文件（`napcat/.credential`）是 **NapCat 专有**的；
+        //    换成 LLBot 之后它一点用都没有（而且那份凭据已经被腾讯作废了），
+        //    再备份只是每次登录白写一个文件。
+        //    （现在协议端是 LLBot，所以这段实际上不跑；
+        //      以后如果退回 NapCat，它会自动恢复工作 —— 判断是实时读配置的。）
+        if (String(config.provider?.name || 'napcat').toLowerCase() === 'napcat') {
+          try {
+            const r = credBackup.backup();
+            if (!r.ok) log.debug(`[凭据备份] 这次没存成：${r.error}`);
+          } catch (e) {
+            log.debug(`[凭据备份] 出错：${e.message}`);
+          }
+        }
         // ⚠️ 2026-09-15：**开机就把群成员名单拉一遍**（只拉一次，异步、失败不影响别的）。
         //
         //    为什么：`/好感度` 榜单要显示名字，而名字原来只能等"这个人说过话"才记得住 ——
@@ -796,6 +835,21 @@ export class Bot {
           .map((s) => String(s.data?.file ?? ''))
           .filter(Boolean),
       });
+      // ⚠️⚠️ 2026-09-20：引用信息**异步补**，绝不能在 `remember` **之前** await ——
+      //    那会把"记上下文"拖慢一次网络往返，而 `handle` 是异步的：
+      //    用户连发两条时，第二条可能因此赶不上这次回复（表现就是"**没读到上文**"）。
+      //    ⇒ 先把消息记住（立刻生效），查到引用再回填（`fetchQuoted` 自带 10 分钟缓存，
+      //      所以绝大多数时候是命中缓存、不花钱）。
+      this.fetchQuoted(payload)
+        .then((q) => {
+          if (!q) return;
+          recent.fillReplyInfo(payload.group_id, payload.message_id, {
+            name: q.name,
+            text: q.text,
+            self: q.fromBot === true,
+          });
+        })
+        .catch(() => {});
       // 同时攒一份素材，将来发 QQ 空间用（只收有一定长度的消息）
       digest.note(payload, { text });
       // 再喂给「暗中观察」：攒够一批就在后台总结群友性格和群里大事
@@ -2227,7 +2281,59 @@ export class Bot {
       //    用户反馈过：「发表情一直走的图片发送，导致每次发的表情都占很大一块空间」。
       //    （这条只对 GIF/动图有意义；静态图带上也不会出错，QQ 会照常渲染成表情样式。）
       const data = { file: imageRef(faceFile) };
-      if (asSticker) data.sub_type = 1;
+      if (asSticker) {
+        // ⚠️⚠️ 2026-09-20 补（用户报：「**发表情变成图片而不是表情格式了**」）：
+        //    `sub_type: 1` 是 **NapCat 特有的**（它内部叫 `picSubType`，见上面那段注释）——
+        //    **换成 LLBot 之后它不认这个字段**（在 `llbot.js` 里查过：`sub_type` 只用在
+        //    好友/群通知上，图片那边没有）→ 于是表情被当**普通图片**发出去：
+        //    占一大块、要点开看 ✗
+        //    `summary` 是 OneBot 11 里更通用的一档（客户端拿它判断"这是什么消息"），
+        //    **两个一起给**：谁认哪个都行，互不冲突。
+        //    ⚠️ 以真机为准 —— 如果还是显示成图片，就得去 LLBot 的仓库看/问它到底认哪个字段。
+        // ⚠️⚠️ 2026-09-20 再修（第一次只加 `summary`，**没用**，还是大图）：
+        //    **这个字段各家协议端的名字不一样**。查了 LLBot 的实现（`llbot.js`）：
+        //      · 它**发图时**读的是 **`p.picSubType`**
+        //        （`uploadGroupImage(..., p.summary, p.picSubType)`）
+        //      · 它**收图时**把 `picElement.picSubType === 1` 映射回
+        //        `sub_type: "sticker" | "normal"`
+        //    也就是说 **LLBot 认的是 `picSubType`**，而 `sub_type` 是 **NapCat 的名字**
+        //    （NapCat 内部叫 `picSubType`，但 OneBot 段里读 `sub_type`）。
+        //    ⇒ **两个都带上** —— 谁认哪个都行。zod 的 object 默认忽略多余字段，
+        //      不会因此报参数错误。
+        // ⚠️⚠️ 2026-09-20 **三修**（前两次都没对）—— 这次是从它自己的 schema 里读出来的：
+        //    LLBot 的图片段定义（`llbot.js` L37923）：
+        //      `sub_type: _enum(["normal", "sticker"]).nullish().default("normal")`
+        //    → 它**只接受字符串 `"normal"` / `"sticker"`**；转换时判的是
+        //      `segment.data.sub_type === "sticker" ? 1 : 0`（L38512），再传给 QQ 的 picSubType。
+        //    而我们一直发**数字 `1`** → 它那边永远算 0 = 普通图片 ✗
+        //    （这就解释了为什么加 `summary`、加 `picSubType` 都没用：字段根本不对。）
+        //    ⚠️ NapCat 认的是**数字**（它自己的口径，原来一直这么用、是好的）→ **按协议端分派**。
+        //    ⚠️ `picSubType` 那个字段它入参 schema 里没有（白加）→ 删掉，别留着误导后面的人。
+        // ⚠️⚠️ 2026-09-20 **四修（这次对了）** —— 前三次全错在「**读错了 API 的源码路径**」。
+        //    ①②③ 的依据分别是「加 `summary`」「加 `picSubType`」、以及 LLBot 的
+        //    `_enum(["normal","sticker"])`。⚠️ **第三条的来源是 LLBot「私有 API」的入参
+        //    schema**（`llbot.js` L37798 `IncomingImageSegmentData` —— 字段是
+        //    `resource_id`/`temp_url` 那套；L38512 旁边在用 `resolveMilkyUri`，是 **Milky 协议**）。
+        //    **机器人根本不走那条路** —— 它是 OneBot11 客户端。
+        //    ✅ 这次顺着**真正走的那条路**读：
+        //      · **收**图（L16181）：`subType: picElement.picSubType`   ← **驼峰**
+        //      · **发**图（L18115）：`Number(segment.data.subType) || 0` ← **驼峰 + 数字**
+        //        再 `SendElement.pic(ctx, path, summary, subType)`（L17787）
+        //        → `picSubType: subType`（L17796）→ `uploadGroupImage(..., picSubType)`
+        //    ⇒ 我发的是**下划线** `sub_type`，它读 `data.subType` 读到 `undefined`
+        //      → `Number(undefined) || 0` = **0 = 普通图片**。**这就是「还是大图」的真因。**
+        //    ⚠️ 教训：**认字段名之前，先确认"这套 schema 是不是我这条链路"** ——
+        //      同一个打包文件里有 ob11 / Milky / LLBot 私有 API **三套**段定义，字段名互不相同。
+        //    ⚠️ `summary` 它认（`segment.data.summary ?? ""`）→ 保留。
+        //    ⚠️ 接收侧的判定同样修了（`message.js` 的 `isStickerSeg()`，4 处在用）。
+        // ⚠️ 两个字段**都给**、都给**数字 `1`** —— 谁认哪个都行，互不冲突：
+        //      · NapCat       认 `sub_type`（下划线数字）
+        //      · LLBot（ob11）认 `subType`（**驼峰**数字）
+        //    判定口径统一收在 `message.js` 的 `isStickerSeg()` 里（那边写了源码依据）。
+        data.sub_type = 1; // NapCat
+        data.subType = 1; // LLBot（ob11 适配器，驼峰）
+        data.summary = '[动画表情]';
+      }
       segments.push({ type: 'image', data });
     }
     if (!segments.length) return Promise.resolve();
@@ -2818,7 +2924,11 @@ export class Bot {
         _sources: [...(entry.event._sources ?? []), srcOf(event)],
         // ⚠️ 这一批里夹着戳一戳 → 合并之后也算「明确召唤」（2026-09-16）
         //    （他先打字、再戳一下，两条会并成一批；不带这个标记就会被档位挡住）
-        ...(event._poke ? { _poke: true } : {}),
+        //    ⚠️ 2026-09-21：戳一戳的**动作文案**（「捏一捏」）也要一起带上 ——
+        //      不然合并之后提示词里又只剩"他戳了你一下"，白读了
+        ...(event._poke
+          ? { _poke: true, ...(event._pokeText ? { _pokeText: event._pokeText } : {}) }
+          : {}),
       };
     } else {
       entry.event._sources = [srcOf(event)];
@@ -3810,6 +3920,18 @@ export class Bot {
      *    所以过渡话自己用一个标记，不去碰分条那条线。
      */
     let anythingSent = false;
+    // ⚠️⚠️ 2026-09-20 加（用户要求）：「**如果总句数超过 3 句就不分开了**，就不会太吵」
+    //
+    //    ⚠️ 难点：**流式生成时没法预知总句数** —— 边生成边发，第 4 句还没出现呢，
+    //       前 3 句可能已经分出去了。所以这里只数**已经分出去的条数**：
+    //       分到第 `MAX_SENTENCE_CHUNKS` 条之后**不再按句号断**，后面只在超过
+    //       `maxChars`（60 字）时才切。
+    //    效果：≤3 句 → 一句一条（用户要的"平时聊天"节奏）；
+    //          更多句 → 前 3 条分开、后面的合并成长条 → **最多 3 条**，不刷屏。
+    //    ⚠️ 如果哪天想要"超过 3 句就整段一条"，那得改成"**等生成完再决定怎么发**"
+    //      （代价：第一条要等模型生成结束才出去，~1-3 秒）—— 用户没要那个，先按这个来。
+    //    可调：`chunking.maxSentenceChunks`（默认 3）。
+    let chunkCount = 0;
     // ⚠️ 引用不引用，**整条回复只算一次**（不是每条 chunk 各算一次，
     //    否则同一条回复可能第一条不引用、第二条引用，很怪）。
     //    用户要求：「非必要不直接回复引用那个人的信息，而是直接发出信息」。
@@ -3835,6 +3957,73 @@ export class Bot {
       for await (const delta of streamChat(messages, controller.signal, { maxTokens: solveMode ? solveMaxTokens() : 0 })) {
         full += delta;
         buffer += delta;
+      }
+
+      // ⚠️⚠️ 2026-09-21 加（用户要求「方案 A」）：
+      //    **生成期间又收到新消息 ⇒ 丢掉这次草稿、并进来重新生成**（只回一条）。
+      //
+      //    用户原话：「**这个就是没有把靠近的消息合并的问题**」。
+      //
+      //    原来的做法（`flushPendingGroup`）是"这一轮生成完 → 把攒下的合成一批 →
+      //    **再处理一次**"，于是群里看到的是**两条回复**。
+      //    真实案例（2026-09-21 16:01，群 200000001）：@她一下 + 紧接着一句 →
+      //    先回「一张一张的，你们这是把相册搬来了（」**带引用**、同一秒又回
+      //    「怎么了这是」**又带引用** ← 用户问的就是这个。
+      //    ⚠️ 那不是"合并"，是"接着再来一遍"。
+      //
+      //    生成已经开始，中途塞不进提示词 ⇒ 只有"**放弃这次、带着新消息重来**"
+      //    才真算合并。好在上面那段"收完再发"让丢弃**几乎零可见代价**：
+      //    此刻群里一个字都还没出去（`anythingSent` 仍是 false），只白花一次模型调用。
+      //
+      //    ⚠️ 为什么必须是"什么都没发过"：将来若给回复加了"过渡话先发一句"，
+      //      那已经出去了的东西就收不回来 —— 那时只能退回原来的行为，不能再重来。
+      //    ⚠️⚠️ **只有"同一个人连发"才许打断生成**（用户 2026-09-21 明确要求）：
+      //      「注意只有同一个人连发的消息可以打断生成」。
+      //      理由：他一句没说完、紧接着补一句，那**本来就是同一件事**，必须并起来看
+      //      （这正是用户报的那个 bug：@她一下 + 下一句 → 被当成两件事、回了两条）。
+      //      而**别人**在她生成期间插话是**另一件事** —— 为它把这次生成丢掉重来，
+      //      等于拿 A 的问题去等 B 的闲话，她答 A 的时机被无谓地推迟，也没道理。
+      //      那种情况保持原样：这一轮照常发，攒下的那条在 `flushPendingGroup` 里处理。
+      //    ⚠️ 判据取 `user_id`（戳一戳的 `user_id` 也是戳的人 ✓）。
+      //    ⚠️ 一旦决定重来，**攒下的消息全部并进来**（含别人的）：上下文更全，
+      //      而且清空了 `items` 就不会再多出一条回复。别人的那句她只是"看到了"，
+      //      不改变"这次是在回他"这件事。
+      //    ⚠️ 上限 `requeueMax`（默认 2，`chat.requeueMax` 可调）—— 不然有人一直刷，
+      //      她就永远不说话。到顶之后照常发出（多一条回复，但总比一句没有强）。
+      //    ⚠️ 已知代价：`maybeRemind()` 会对合进来的消息**再查一遍**（多一次模型调用），
+      //      第一版先这样 —— 卡在提醒的重复判定上不值得把这里写复杂。
+      if (!stopped && !anythingSent) {
+        const st = this.batchState?.get(key);
+        const requeued = Number(meta._requeue) || 0;
+        const requeueMax = Math.max(0, Number(config.chat?.requeueMax ?? 2));
+        const sameSender =
+          event.user_id != null &&
+          !!st?.items?.some((e) => String(e.user_id ?? '') === String(event.user_id));
+        if (st?.items?.length && sameSender && requeued < requeueMax) {
+          const items = st.items.splice(0);
+          const pokeItem = items.find((e) => e._pokeText);
+          const merged = {
+            ...event,
+            message: [...(event.message ?? []), ...items.flatMap((e) => e.message ?? [])],
+            _sources: [...(event._sources ?? [srcOf(event)]), ...items.map((e) => srcOf(e))],
+            // 这一批里夹着戳一戳 → 合并后照样算「明确召唤」（同 `scheduleHandle` 里那条）
+            // ⚠️ 动作文案（「捏一捏」）也要带过来，理由同上
+            ...(items.some((e) => e._poke)
+              ? { _poke: true, ...(pokeItem ? { _pokeText: pokeItem._pokeText } : {}) }
+              : {}),
+          };
+          // ⚠️ 必须**自己**把 running 和 items 清干净：
+          //    外层 `enqueue` 的 finally 里是「items 还剩 → 重置 running 再
+          //    `flushPendingGroup`」—— 不清就会在我这条重来的回复之后**又补一条**，
+          //    等于白改。清掉之后 finally 看到 items 空 → 直接 `batchState.delete` ✓
+          st.running = false;
+          st.pending = false;
+          log.info(
+            `[${key}] 生成期间又收到 ${items.length} 条 —— 丢掉这次草稿、并进来重新生成` +
+              `（第 ${requeued + 1}/${requeueMax} 次）`,
+          );
+          return await this.handle(merged, { ...meta, _requeue: requeued + 1 });
+        }
       }
 
       // ── 发言前强制核对：我这条到底在回谁？有没有认错人？ ──
@@ -3927,8 +4116,17 @@ export class Bot {
       if (buffer) buffer = stripChatUncommonPunct(buffer, { keepMarker: true });
 
       {
-        const { max: CHUNK, delay: CHUNK_DELAY, first: FIRST_FLUSH } = chunkCfg();
-        const SOFT_FLUSH = softFlush();
+        const { max: CHUNK, delay: CHUNK_DELAY, chatFirst, maxChunks } = chunkCfg();
+        // ⚠️⚠️ 2026-09-20 **再修**（用户看到截图说「好像还是没分」）：
+        //    我上一步把「`voluntary` 非空」整个当成"主动那条路"了 —— **分错了**。
+        //    · 用户说的"主动"是**主动发起的长文本**：二级剧情 / 日常事件 / 播报 ——
+        //      那些走 `sendChatLike` → `splitChatText`（那边已经回退，见那个函数的注释）；
+        //    · 而这条流式路上 `voluntary` 装的是**接话**（chat / followUp / question /
+        //      mention / share / sticker）—— **那就是平时聊天**，用户期望它按句末断。
+        //    ⇒ 这条路**一律用聊天规则**：句末标点（。！？；换行）就断、最多 `maxChunks` 条。
+        const sentFloor = chatFirst;
+        const softFloor = Math.max(chatFirst, Math.round(chatFirst * 1.4));
+        const maxSentence = maxChunks;
 
         // ⚠️ 慢响应攒下的过渡话 → **并到正文开头**（2026-09-13）。
         //
@@ -4013,8 +4211,13 @@ export class Bot {
         }
 
         while (buffer.length) {
-          const endsSentence = /[。！？!?；;\n]\s*$/.test(buffer);
-          const earlyFloor = sentFirst ? SOFT_FLUSH : FIRST_FLUSH;
+          // ⚠️ 门槛见上面 `sentFloor` / `softFloor` 那段注释（聊天 = 2 / 主动 = 25→36）。
+          //    ⚠️ `sentFirst` 仍然要维护（别处逻辑用它），只是门槛值不再跟着它跳。
+          const earlyFloor = sentFirst ? softFloor : sentFloor;
+          // ⚠️ **第一个够长的句末标点**在哪儿（找不到 = -1）。
+          //    用"第一个"而不是"最后一个"：一次吐来整段时也要能**逐句**切开
+          //    （用户：「一共三句还是要分」—— 三句要变三条，不能只切一刀变两条）。
+          const cutEnd = firstSentenceBreak(buffer, earlyFloor);
           // ⚠️ 破折号断点（用户：「我觉得完全可以分段，因为都用破折号了」）。
           //    判据是**缓冲区里真的带着 `DASH_BREAK` 标记**，而不是"这次压过破折号"
           //    —— 因为一段话可能在更早的批次里就已经发出去过一部分了。
@@ -4023,9 +4226,20 @@ export class Bot {
           //      按普通规则（首批 25 字）**永远不会分**，用户要的分段就落空。
           const dashSplit = splitAtDashBreak(buffer);
           const dashFlush = !!dashSplit && buffer.length >= 8;
+          // ⚠️ 2026-09-20：分够 `maxSentence` 条之后**不再按句末标点断** ——
+          //    用户：「如果总句数超过 3 句就不分开了，就不会太吵」。
+          //    ⚠️ 主动那条路 `maxSentence` 是 `Infinity`（不限条数，保持原样）。
+          // ⚠️⚠️ 2026-09-20 用户要求：「**如果启用了引用的话就不用分条了，
+          //    因为说明消息已经被淹没了或者很长**」——
+          //    引用的触发条件本身就是"被淹没（间隔 ≥4 条）"或"回复很长"，
+          //    这时候再按句号拆成好几条，只会让引用框重复、观感更乱。
+          //    ⇒ 引用时**不做句末分条**（只保留 `CHUNK` 硬上限 —— 那是平台长度限制）。
+          const sentenceAllowed = chunkCount < maxSentence && !quoteThisReply;
           const shouldFlush =
             !hasOpenMarker(buffer) &&
-            (buffer.length >= CHUNK || (endsSentence && buffer.length >= earlyFloor) || dashFlush);
+            (buffer.length >= CHUNK ||
+              (sentenceAllowed && cutEnd > 0) ||
+              dashFlush);
 
           if (!shouldFlush) break;
 
@@ -4041,31 +4255,74 @@ export class Bot {
               buffer = removeDashMarker(dashSplit.tail);
               continue;
             }
-            const sentText = await this.sendChunk(event, slice, quoteThisReply);
+            // ⚠️⚠️ 2026-09-20 修（用户报：「**回了那个"对"两次**」——
+            //    截图里两条分条**都引用了同一条消息**）：**引用只加在第一条上**。
+            //    `sentFirst` 就是"这次回复已经发过东西了吗" ⇒ 发过就不再带引用。
+            //    （项目里其实一直是这个规矩：「一个字一条」那个彩蛋写的就是
+            //      `i === 0 ? quoteThisReply : false` —— 只有普通分条这几处漏了。）
+            const sentText = await this.sendChunk(event, slice, sentFirst ? false : quoteThisReply);
             if (sentText !== null) sentFirst = true;
+            if (sentText !== null) chunkCount += 1;
             log.info(`破折号处断了一条（前半 ${slice.length} 字）—— 用户要求「该分段就分段」`);
             // 推进到标记之后
             buffer = removeDashMarker(dashSplit.tail);
             if (buffer.length) await sleep(CHUNK_DELAY);
             continue;
           }
-          cut = buffer.length >= CHUNK ? buffer.length : safeCut(buffer);
+          // ⚠️⚠️ 断点优先级：**句末标点处优先**（这才是用户要的"句号处直接断开"）。
+          //    原来写的是 `buffer.length >= CHUNK ? buffer.length : safeCut(buffer)` ——
+          //    把"超长整段"排在句末切**前面**，于是**一句话长过 60 字时永远是整段发**：
+          //    实测 23:16:54 那条（66 字、里面两个句号）就是这么被当成一条发出去的 ✗
+          //    （LLBot 日志 `send_group_msg` 只有那一条，内容是全文。）
+          if (sentenceAllowed && cutEnd > 0) {
+            cut = cutEnd;
+            // ⚠️ 把**紧跟其后的 `[表情:xx]`** 一起纳入这一段 —— 它是给刚那句话配的。
+            //    不这么做，标记会单独成一条（就是之前「一次两个表情包」的邻居问题）。
+            const mk = /^\s*(\[[^\]\s]{1,16}\])/.exec(buffer.slice(cut));
+            if (mk) cut += mk[0].length;
+          } else if (buffer.length >= CHUNK) {
+            // 没有可用的句末切点、又已经超长 → 只能整段发
+            cut = buffer.length;
+          } else {
+            cut = safeCut(buffer);
+          }
           if (cut <= 0) break;
           // ⚠️ 这里用 `dropDashBreak`（换成**逗号**）—— 因为这段里可能还带着
           //    没被切掉的标记（比如标记在很靠后的位置），直接删会少个停顿。
           const slice = dropDashBreak(buffer.slice(0, cut));
-          const sentText = await this.sendChunk(event, slice, quoteThisReply);
+          // ⚠️ 引用**只加在第一条**（同上面破折号那处的注释）——
+          //    原来每条分条都带同一个引用，群里会看到两条一模一样的引用框。
+          const sentText = await this.sendChunk(event, slice, sentFirst ? false : quoteThisReply);
           if (sentText !== null) sentFirst = true;
-          // ⚠️ 按「实际发出去的长度」推进缓冲区，不能用切点长度 ——
-          //    清洗会去掉 Markdown 符号、可能把换行变句号，长度会变。
-          //    按切点推进会**重复发送或吞掉**中间的字符（真实踩过）。
-          buffer = sentText ? buffer.slice(sentText.length) : '';
+          if (sentText !== null) chunkCount += 1;
+          // ⚠️⚠️ 2026-09-20 修（用户截图：**一次发了两个一模一样的表情包**，
+          //    群里还多出一条孤零零的「。」）—— **这里是那个 bug 的真身**：
+          //
+          //    原来写的是 `buffer.slice(sentText.length)`，可是 `sentText` 是
+          //    **清洗之后**的文本：`sendChunk` 会把 `[表情:xx]` 这类标记删掉
+          //    （`stripMarkers`）、末尾句号也会去掉（`dropTrailingPeriods`）→
+          //    **它比原文短**，于是拿它的长度去切**原始 buffer** 等于切在错误位置，
+          //    剩下的尾巴会被当成新的一段**再走一遍分条+发送**。
+          //
+          //    实测现场（群 200000001，22:30:51）：
+          //      原文 `你倒是会安排。…给我备着。[嘟嘴]`
+          //      → 第一次发出去的是**清洗后**的文本（没有标记）
+          //      → buffer 残留 **`。[嘟嘴]`**（就是被删掉的那几个字符的位置）
+          //      → 又发了一次：一个「。」+ **同一张嘟嘴表情**
+          //    日志两边都对得上：bot.log 里两条 `[标记] 原文 …`，
+          //    LLBot 侧 22:30:53 / 22:30:56 两条 `send_group_msg`（同一张 base64）。
+          //
+          //    ⇒ 推进必须按**这次实际消耗掉的原文长度**，也就是切点 `cut` ——
+          //      `buffer.slice(0, cut)` 正是这一次处理掉的范围。
+          //      ⚠️ 别再改回 `sentText.length`：它和原文**不是同一把尺子**。
+          buffer = buffer.slice(cut);
           if (buffer.length) await sleep(CHUNK_DELAY);
         }
 
         // 收尾：剩下的全部处理掉
         if (buffer.trim()) {
-          const sentText = await this.sendChunk(event, buffer, quoteThisReply);
+          // ⚠️ 引用**只加在第一条**（同上面那两处）
+          const sentText = await this.sendChunk(event, buffer, sentFirst ? false : quoteThisReply);
           if (sentText !== null) sentFirst = true;
           buffer = '';
         }
@@ -4213,8 +4470,18 @@ export class Bot {
         //    这个项目里为这条改过三次（余额 402、内容风控、现在这个）。
         //    所以：**网络类瞬时故障 → 说句人话**（像"刚卡了一下，你再说一遍"）；
         //    其它少见故障 → 一句含糊的自己的状况，也不提技术。
+        // ⚠️⚠️ 2026-09-20 修（用户截图：她回「⚠️ ……我这边有点小状况，等下再说」）：
+        //    日志里的真实错误是 **DeepSeek 官方过载** ——
+        //      `503 Service Temporarily Unavailable` +
+        //      `"Service is too busy. We advise users to temporarily switch to alternative LLM API service providers."`
+        //      （16:45~16:54 连着一串），以及 `LLM 请求超时`。
+        //    而**原来这个判据里没有 503、也没有中文"超时"** → 两类都被归到"其它少见故障"
+        //    → 于是说了一句"我这边有点小状况"。可这明明是**等一会儿就好**的瞬时故障 ✗
+        //    ⇒ 把"服务端过载/限流/超时"这一类都算进来（中英文都认）。
+        //    ⚠️ 判据放宽的**方向要选对**：宁可把少见故障误判成"卡了一下"（群友再问一遍就好），
+        //      也别把"过载"说成"我这出了状况"（那是把服务商的问题说成她自己的问题）。
         const isTransient =
-          /fetch failed|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|socket hang up|timeout|aborted/i.test(
+          /fetch failed|ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|socket hang up|timeout|aborted|超时|503|502|504|429|Service is too busy|service_unavailable|Service Temporarily Unavailable|overloaded|rate.?limit|限流|繁忙/i.test(
             `${err.message} ${causeCode}`,
           );
         const hint =
@@ -5331,11 +5598,42 @@ export class Bot {
   }
 
   /**
-   * 拍回去。
+   * 真拍回去（OneBot 的 `send_poke`）。
    *
-   * ⚠️ 防刷屏：同一个人 30 秒内只回拍一次。不然他连点几下，
-   *    这边就跟着拍几下，两边会一直弹提示，很烦。
-   *    另外这里**只回一拍**，不回拍别人的回拍（对方再拍才再回）。
+   * ⚠️ 2026-09-21 抽出来的：以前这段和"文字回应"是**二选一**
+   *    （发包成功就不说话了），用户改成"两个都要"——
+   *    「我觉得在我戳过去之后还是机器人直接和之前一样给回复好一点，
+   *      机器人戳回来的话在我戳了3次再触发一次就行了」。
+   *    所以它独立成一个方法，由 `pokeBack()` 按次数决定要不要调。
+   *
+   * ⚠️ 参数就是 SnowLuma action 表里的定义（`user_id` + 可选 `group_id`，
+   *    它自己路由到"群拍/好友拍"）—— 和 NapCat / LLOneBot 的 `send_poke` 同形。
+   *
+   * @returns {Promise<boolean>} 有没有发成功（失败不抛异常，只记日志）
+   */
+  async sendPokeBack(uid, gid) {
+    try {
+      await this.call('send_poke', gid ? { user_id: uid, group_id: gid } : { user_id: uid });
+      log.info(`[戳一戳] ${uid} 拍了我，拍回去了${gid ? `（群 ${gid}）` : '（私聊）'}`);
+      return true;
+    } catch (e) {
+      // ⚠️ 失败用 `info` 不是 `debug`：用户就是靠日志确认这条链通不通的。
+      //    ⚠️ 也**不抛** —— 拍不回去不该影响"文字回应"那一半。
+      const noPacket = /packetBackend|发包能力|1400|不支持/.test(String(e.message));
+      log.info(`[戳一戳] 拍回去没成${noPacket ? '（协议端不支持这个 action）' : ''}：${e.message}`);
+      return false;
+    }
+  }
+
+  /**
+   * 有人拍了我 → 回话（另外每 `poke.countPerBack` 次拍回去一次）。
+   *
+   * ⚠️ 2026-09-21 用户定的分工：
+   *    · **文字回应照旧** —— 他戳她就跟以前一样，交给她看着上下文回一句
+   *      （防刷屏冷却也照旧：同一个人 30 秒内只回一次话）；
+   *    · **拍回去另外攒次数** —— 每戳 3 次回拍一次（`poke.countPerBack`）。
+   *      这两件事原来是二选一的（拍了就不说话），用户要求改成都要。
+   * ⚠️ 这里**只回一拍**，不回拍别人的回拍（对方再拍才再回）。
    */
   async pokeBack(payload) {
     if (config.poke?.enable === false) return;
@@ -5343,50 +5641,98 @@ export class Bot {
     const uid = String(payload.user_id ?? '');
     if (!uid) return;
 
-    const cooldown = Math.max(1000, Number(config.poke?.cooldownMs ?? 30000));
-    this.lastPokeAt ??= new Map();
-    const last = this.lastPokeAt.get(uid) ?? 0;
-    if (Date.now() - last < cooldown) {
-      log.debug(`[戳一戳] ${uid} 刚拍过（${Math.round((Date.now() - last) / 1000)}s 前），不回拍`);
+    // ⚠️⚠️ 2026-09-21 加（用户问：「戳一戳给的回复可以识别戳一戳的自定义文案吗？
+    //    比如说现在我改成了捏一捏」）：
+    //    **能 —— SnowLuma 会传**。它的 `convertGroupPoke()` / `convertFriendPoke()` 是：
+    //      notice(…, { notice_type:'notify', sub_type:'poke', user_id, target_id,
+    //                  action: event.action, suffix: event.suffix,
+    //                  action_img_url: event.actionImgUrl })
+    //    「捏一捏」就是 `action` + `suffix` 拼出来的（例如 action='捏'、suffix='一捏'）。
+    //    ⚠️ 以前这里**一个字段都没读**（只当"有人拍了我"）→ 提示词里只有
+    //      「他伸手戳了你一下」→ 她当然不知道那是"捏一捏"，回的话对不上。
+    //    ⚠️ 兼容另一种格式：NapCat 那一类把动作放在 `raw_info.action` 里，两边都认。
+    //    ⚠️ 拼法直接相连（QQ 的显示文本就是「{action}{suffix}」）；哪个协议端只给半截，
+    //      大不了文案短一点，不会错。取不到就退回通用的"戳了一下"。
+    const pokeRaw = payload.raw_info ?? payload.rawInfo ?? {};
+    const pokeText = (
+      String(payload.action ?? pokeRaw.action ?? '').trim() +
+      String(payload.suffix ?? pokeRaw.suffix ?? '').trim()
+    ).slice(0, 20);
+
+    // ⚠️⚠️ 2026-09-21（用户要求）：**把"拍回去"和"文字回应"拆开** ——
+    //    「我觉得在我戳过去之后还是机器人直接和之前一样给回复好一点，
+    //      机器人戳回来的话在我戳了3次再触发一次就行了」
+    //    ⇒ ① 文字回应**照旧**：内容、冷却、走模型，全都回到原来的样子；
+    //       ② 拍回去另外按**次数**攒：每戳 `poke.countPerBack`（默认 3）次回拍一次。
+    //
+    //    ⚠️ **计数必须排在冷却前面**：他是为了试这个才连戳三下的 ——
+    //      要是被 30 秒冷却挡掉，计数永远到不了 3，那就等于没改。
+    //      所以顺序是：先计数 → 该拍就拍 → 再判冷却（冷却只管"文字回应"）。
+    //    ⚠️ 拍完**归零**（第 3、6、9… 次各拍一次）：用户说的是"戳 3 次再触发一次"，
+    //      不是"从第 3 次起每次都拍"。
+    //    ⚠️ 计数只在内存里（重启从 0 开始）。丢了最坏的后果只是"下次要重新数到 3"，
+    //      不会漏提醒、也不会重复发东西 ⇒ 不值得为它落盘。
+    //    ⚠️ 只在允许的群里响应（客服模式的边界，和文字回应同一条线）。
+    const gid = payload.group_id ? String(payload.group_id) : '';
+    const allow = config.trigger.allowGroups;
+    if (gid && allow.length > 0 && !allow.includes(gid)) {
+      log.debug(`[戳一戳] 群 ${gid} 不在 allowGroups，不响应`);
       return;
     }
 
-    // 只在允许的群里回拍（客服模式的边界）
-    const gid = payload.group_id ? String(payload.group_id) : '';
-    if (gid) {
-      const allow = config.trigger.allowGroups;
-      if (allow.length > 0 && !allow.includes(gid)) {
-        log.debug(`[戳一戳] 群 ${gid} 不在 allowGroups，不回拍`);
-        return;
+    this.pokeCount ??= new Map();
+    const pokedTimes = (this.pokeCount.get(uid) ?? 0) + 1;
+    const perBack = Math.max(1, Number(config.poke?.countPerBack ?? 3));
+    const wantBack = pokedTimes % perBack === 0;
+    this.pokeCount.set(uid, wantBack ? 0 : pokedTimes);
+
+    const cooldown = Math.max(1000, Number(config.poke?.cooldownMs ?? 30000));
+    this.lastPokeAt ??= new Map();
+    const last = this.lastPokeAt.get(uid) ?? 0;
+    const cooling = Date.now() - last < cooldown;
+
+    // ⚠️⚠️ 拍回去：**能不能发，按协议端分**（2026-09-21 两边都查证过）——
+    //
+    //    · napcat（老规矩，2026-09-13 定）：**不发**。它的 `send_poke` 走
+    //      「发包能力」（PacketBackend），而那只支持特定 QQ 版本区间、用户的 QQ 已越界
+    //      ⇒ 每次必然失败（retcode=1400）。**每次失败都是一次异常请求**，而 QQ 风控
+    //      正是靠"非官方客户端发它不该发的包"判定的（用户收到过
+    //      「设备存在外挂或其他软件影响 QQ 正常使用」的处罚通知）——
+    //      「明知失败还每次试一遍」等于持续给风控送证据。
+    //    · snowluma（现在的协议端）：**能发**。它是独立协议实现、不注入 QQ 客户端，
+    //      支持 OneBot 的 `send_poke`（拍一拍，群聊/私聊自动路由），参数就是
+    //      `user_id` + 可选 `group_id` —— 和我们调用的一字不差，
+    //      也不依赖 QQ 客户端那个"发包能力"。
+    //      ⚠️ 这里**故意不贴它的源码片段**：那个协议端的许可属于 source-available、
+    //        禁止公开发布它的修改版/衍生版，而这个文件会进公开仓库。
+    //    ⚠️ 显式 `poke.tryPacket: true / false` 两边都能覆盖。
+    if (wantBack) {
+      const pokeProvider = String(config.provider?.name ?? '');
+      const canPacket =
+        config.poke?.tryPacket === true ||
+        (config.poke?.tryPacket === undefined && pokeProvider === 'snowluma');
+      if (!canPacket) {
+        log.debug(
+          `[戳一戳] 攒够 ${perBack} 次了，但协议端是 ${pokeProvider || '(没配)'} → 不发包` +
+            `（要发就设 poke.tryPacket: true）`,
+        );
+      } else {
+        await this.sendPokeBack(uid, gid);
       }
     }
 
-    // ⚠️⚠️ **不要发戳一戳的包**（2026-09-13 改，防 QQ 风控）。
-    //
-    //    为什么：`send_poke` 走的是 NapCat 的「发包能力」（PacketBackend），
-    //    而它**只支持特定的 QQ 版本区间**。用户的 QQ 已经越界，
-    //    所以这个调用**每次必然失败**（retcode=1400 packetBackend发包能力不可用）。
-    //
-    //    ⚠️ 关键：**每次失败都是一次异常请求** —— 而 QQ 的风控正是靠
-    //    "非官方客户端在发它不该发的包"来判定外挂的（用户收到了
-    //    「设备存在外挂或其他软件影响 QQ 正常使用」的处罚通知）。
-    //    所以「明知失败还每次试一遍」等于**持续给风控送证据**。
-    //
-    //    改成：直接不发包，**只用文字回应**（用户本来也是这个体验，
-    //    因为发包一直失败、走的一直是文字兜底那条路）。
-    //    要恢复发包（降级 QQ 之后）把 config.poke.tryPacket 设成 true。
-    let pokePacketOk = false;
-    if (config.poke?.tryPacket === true) {
-      try {
-        await this.call('send_poke', gid ? { user_id: uid, group_id: gid } : { user_id: uid });
-        log.info(`[戳一戳] ${uid} 拍了我，拍回去了${gid ? `（群 ${gid}）` : '（私聊）'}`);
-        pokePacketOk = true;
-      } catch (e) {
-        const noPacket = /packetBackend|发包能力|1400/.test(String(e.message));
-        log.debug(`[戳一戳] 发包失败${noPacket ? '（发包能力不可用）' : ''}：${e.message}`);
-      }
+    // ⚠️ 冷却**只管文字回应**（拍回去已经在上面按次数处理过了）。
+    //    被挡掉时把话说清楚 —— 不然他连戳三下只看到一次回复，会以为坏了。
+    if (cooling) {
+      log.debug(
+        `[戳一戳] ${uid} ${Math.round((Date.now() - last) / 1000)}s 前刚回过话` +
+          `（冷却 ${Math.round(cooldown / 1000)}s）→ 这次不回话${wantBack ? '（但拍回去了）' : ''}`,
+      );
+      return;
     }
-    if (!pokePacketOk) {
+
+    // ⚠️ 下面这整段是**文字回应**，和拍回去无关 —— 用户要求"和之前一样"
+    {
       // ⚠️⚠️ 2026-09-16：**戳一戳也交给模型**（用户要求：
       //     「把戳一戳返回的消息也加入 llm 和上下文，要不然戳一下总是回那几句话」）。
       //
@@ -5413,16 +5759,28 @@ export class Bot {
         //    什么意思由提示词里那段【他戳了你一下】解释（见 `buildSystemPrompt`）。
         message: [{ type: 'text', data: { text: '[戳一戳]' } }],
         _poke: true,
+        // ⚠️ 2026-09-21：他用的**哪个动作**（「捏一捏」「拍了拍」…）。
+        //    正文保持 `[戳一戳]` 不变（它必须是一段非空文本，见上面那条注释），
+        //    动作文案单独放这个字段，由提示词那段【他戳了你一下】讲给她听。
+        ...(pokeText ? { _pokeText: pokeText } : {}),
       };
       this.lastPokeAt.set(uid, Date.now());
       if (config.poke?.useLLM !== false) {
+        // ⚠️ 日志把动作文案一起打出来 —— 用户戳一下就能确认协议端到底给没给
+        //    （他 2026-09-21 问的就是这个，日志是最快的验证途径）
         log.info(
-          `[戳一戳] ${uid} 戳了我${gid ? `（群 ${gid}）` : '（私聊）'}→ 交给她看着上下文回`,
+          `[戳一戳] ${uid} 戳了我${gid ? `（群 ${gid}）` : '（私聊）'}` +
+            `${pokeText ? ` —— 动作文案「${pokeText}」` : '（协议端没给动作文案）'}` +
+            `→ 交给她看着上下文回`,
         );
         // ⚠️ 也记进「群里刚才在聊什么」（`recent`）—— 这样**后面**别人说话时，
         //    上下文里能看到「他刚才戳过你」，她就不会又莫名其妙回一句「干嘛」。
         if (gid) {
-          recent.remember(fakeEvent, { text: '[戳一戳]', isAtMe: true, imageFiles: [] });
+          recent.remember(fakeEvent, {
+            text: pokeText ? `[戳一戳:${pokeText}]` : '[戳一戳]',
+            isAtMe: true,
+            imageFiles: [],
+          });
         }
         this.scheduleHandle(fakeEvent, { poke: true }).catch((e) =>
           log.warn(`[戳一戳] 交给模型失败：${e.message}`),
@@ -5435,9 +5793,9 @@ export class Bot {
         try {
           await this.sendText(fakeEvent, line, { reply: false });
         } catch {}
-        log.debug('[戳一戳] 没发包（QQ 版本超出 NapCat 支持范围），改用文字回应');
+        log.debug('[戳一戳] `poke.useLLM=false` → 用写死的那几句文字兜底');
       } else {
-        log.debug('[戳一戳] 没发包也没开文字兜底，忽略');
+        log.debug('[戳一戳] `poke.useLLM=false` 且 `fallbackText=false` → 什么都不回');
       }
     }
     // ⚠️ 冷却时间戳**必须记**（不然他每戳一次都会得到响应）
@@ -5448,8 +5806,9 @@ export class Bot {
   mediaKind(segments) {
     const imgs = segments.filter((s) => s.type === 'image');
     if (!imgs.length) return null;
-    // QQ 里表情包 sub_type=1；只要有一张是普通图，就按普通图处理
-    const allStickers = imgs.every((s) => Number(s.data?.sub_type) === 1);
+    // 表情包 vs 普通图：⚠️ 字段名各协议端不同（NapCat `sub_type`／LLBot ob11 `subType`）
+    // → 统一走 `msg.isStickerSeg()`。只要有一张是普通图，就按普通图处理。
+    const allStickers = imgs.every((s) => msg.isStickerSeg(s));
     return allStickers ? 'sticker' : 'image';
   }
 
@@ -5938,23 +6297,46 @@ export class Bot {
       //      现在它作为一条 `[戳一戳]` 的消息走正常流程，这里负责**告诉她那是什么、
       //      以及怎么回才不像客服**（要短、要看着刚才聊的东西、别每次一样）。
       if (event._poke) {
+        // ⚠️ 2026-09-21：他用的**哪个动作**（用户问的「捏一捏」）——
+        //    SnowLuma 随戳一戳事件一起给（见 `pokeBack` 里那段注释）。
+        //    ⚠️ 取不到时**不许瞎编**，退回原来那句通用的"戳了你一下"。
+        const pt = String(event._pokeText ?? '').trim();
         parts.push(
           [
             '\n# 【他戳了你一下】',
             '',
-            '⚠️ 这次进来的是 **QQ 的「戳一戳」** —— 他不是打了字，是**伸手戳了你一下**。',
+            pt
+              ? `⚠️ 这次进来的是 **QQ 的「戳一戳」**，他用的动作是「**${pt}**」` +
+                '（这就是那几个字的原文，不是我翻译的）。'
+              : '⚠️ 这次进来的是 **QQ 的「戳一戳」** —— 他不是打了字，是**伸手戳了你一下**。',
             '',
             '## 那是什么意思',
-            '- 多半是**打招呼、逗你、催你、或者闲着没事**；也可能是想引起你注意',
+            pt
+              ? `- 「${pt}」是他戳你时选的**动作名**。照它理解语气：` +
+                '「拍了拍」多半是打招呼 / 找你；别的动作（捏、揉、戳脑袋之类）多半是**逗你、跟你闹**。'
+              : '- 多半是**打招呼、逗你、催你、或者闲着没事**；也可能是想引起你注意',
             '- **不是提问**，别当成问题来答，更别问「请问有什么可以帮您」',
             '',
             '## 怎么回（用户原话：以前"戳一下总是回那几句话"）',
-            '- **短**：几个字到一句，最多两句',
+            '- ⚠️⚠️ **短**（用户 2026-09-21 要求"平均长度缩短"）：',
+            '  **上限 15 个字、最多一句**（不是"一句到两句"）。',
+            '  常见长度 **4~12 字**：「又来」「痒」「别捏脸」「干嘛呀」—— 他戳一下，不值得你回一整段。',
+            '  ⚠️ 15 个字是**硬上限**：超了就砍到一句、砍掉多余的修饰，**但语气词留着**（见下条）。',
+            '- ⚠️⚠️ **但语气词一个都不许省**（用户原话：「**不要把语气词也压缩了**」）：',
+            '  哼 / 呀 / 嘛 / 啦 / 诶 / 呗 / 嗷 / 嘞 这些**就是她的活人味**，',
+            '  短 ≠ 干巴巴 ——「别捏了」和「别捏了嘛」，用户要的是**后者**。',
+            '  ⚠️ 别为了凑短把它们删掉，也别改成书面说法（"请不要捏我"这种一律不许）。',
             '- ⚠️⚠️ **别老用同一句** ——「干嘛」「别戳了」「嗯？」「有事说事」这几句',
             '  以前是代码随机挑的，用户已经嫌它总一样了，**尽量别再用这几句**',
-            '- ✅ **看着上文回**：上面【群里刚才在聊什么】那段里如果刚在说某件事，',
-            '  就着那件事回（比如刚聊到工资，可以回「又戳，工资还没发呢」）',
-            '- ✅ 也可以反过来逗他 / 装作被戳烦了 / 问一句「戳我干嘛」—— 但要**换着花样**',
+            ...(pt
+              ? [
+                  `- ✅ **可以就着他这个动作回** —— 他用「${pt}」，答「别捏了，痒」就比「干嘛」贴得多`,
+                  '  ⚠️ 但**别像在念参数**（不许说"你使用了捏一捏这个动作"那种话）—— 就当那是他做的动作',
+                ]
+              : []),
+            '- ✅ **有上文时就着上文回**（优先）：上面【群里刚才在聊什么】里刚在说某件事，',
+            '  就接那件事 —— **但照样要短**（比如刚聊到工资，回「又戳，工资还没发呢」）',
+            '- ✅ 也可以反过来逗他 / 装作被戳烦了 —— 但要**换着花样**',
             '- ⚠️ 别每次被戳就发一张表情图',
             event.message_type === 'group'
               ? '- ⚠️ 群里别 @ 他（会吵）；他就在你跟前，直接说就行'
@@ -6216,6 +6598,18 @@ export class Bot {
           '- **话要短**，一两句，像顺口搭腔。',
           '- 接着上面的话题说，别硬拽回服务器。',
           '- 不一定每次都要接，接不上就随便应一句也行。',
+          '',
+          '⚠️⚠️ **你不在他们的场景里**（2026-09-20 用户报的毛病，这条一定要守住）',
+          '- 别人说自己在游戏里、在现场、在路上、在吃什么东西 —— 那都是**他的**事。',
+          '  你只在 QQ 里，**没有"你那边""我这边"**。',
+          '- 🚫 **不许给自己编"现场"**：编自己在哪里、在干什么、状态怎么样，一律不许。',
+          '  （真实踩过：他发了一张游戏截图说「我这里有点出头了」，你回',
+          '   「**我这边？老样子，坐着呢**」—— 你根本不在那个游戏里，',
+          '   那句"坐着呢"是凭空给自己安了个位置。用户原话：',
+          '   「**又出现没有叫她但是把自己当成主角的情况了**」）',
+          '- ✅ 没点名你的时候：就着**他说的那件事**搭一句，或者干脆别说。',
+          '- ✅ 他要是问「你那边怎么样」，那多半是在**顺着话往下聊他自己的事** ——',
+          '  就说你不知道 / 让他接着说，别替自己编一个处境。',
         ].join('\n'),
       );
     } else if (voluntary === 'share') {
@@ -7555,6 +7949,15 @@ export class Bot {
         '只输出一个 JSON，不要解释、不要围栏：{"change":true,"where":"","doing":""}\n' +
         '· **判定松一点**：只要话里透出位置或正在做的事，就 change=true ——\n' +
         '  「我出后门了」「这就往地铁口去」「我得先回一趟」「还在工位上」都算；\n' +
+        // ⚠️⚠️ 2026-09-20 加宽（用户要求「判断都扩宽一点」+ 真实踩过）：
+        //    她被群友拐去吃面时说的是「走快点，雨又下大了」「挑个靠里的位置坐」，
+        //    模型**全判成"没有位置信息"** → 状态一直卡在 35 分钟前的旧地点 ✗
+        //    ⇒ 把"**在移动 / 在某个场景里 / 天气路况**"这种**隐含位置**的话明确列出来，
+        //      并加一句"拿不准就判 true"（宁可多记一次，也不能让状态卡在几小时前）。
+        '  ⚠️ **隐含位置也算**（原来这类全漏了）：「走快点」「在路上了」「这就过去」\n' +
+        '     「挑个靠里的位置坐」「到楼下了」「我先进去了」「雨又下大了」「外面风好大」\n' +
+        '     「排着队呢」「刚坐下」「在等位」「往回走了」「快到了」—— **都算 change=true**；\n' +
+        '  ⚠️⚠️ **拿不准就判 true**：宁可多记一次，也别让她的状态卡在几小时前。\n' +
         '· 完全没有位置信息的（闲聊、回答问题、吐槽、只是在讲别人的事）→ change=false；\n' +
         '· where / doing 都用**短词**：在校 / 教室 / 客服室 / 家 / 外面 / 地铁口 / 便利店；\n' +
         '  上课 / 打工 / 找人 / 回家路上 / 吃饭。\n' +
@@ -7563,17 +7966,34 @@ export class Bot {
       maxTokens: 120,
     });
     const m = /\{[\s\S]*\}/.exec(String(out ?? ''));
-    if (!m) return;
+    if (!m) {
+      log.info('[位置] 模型没给出可解析的 JSON → 这次状态不变');
+      return;
+    }
     let j;
     try {
       j = JSON.parse(m[0]);
     } catch {
+      log.info(`[位置] 模型输出解析失败 → 这次状态不变：${String(out).slice(0, 80)}`);
       return;
     }
-    if (j?.change !== true) return;
+    // ⚠️⚠️ 2026-09-20：**这一段原来只打 debug** —— 而 `logLevel: info` 时 debug
+    //    **根本不落盘**（项目里反复踩的老坑），于是"状态为什么没更新"完全查不到。
+    //    用户报「被群友拐去吃面了，看看状态机正常吗」时，我就卡在这一点上：
+    //    只知道 `where.json` 停在 35 分钟前的"教学楼门口·等雨停"，**不知道模型判了什么**。
+    //    ⇒ 提到 info。它按群节流（默认 5 分钟最多一条），不会刷屏。
+    if (j?.change !== true) {
+      const cur = whereState.status?.()?.where ?? '';
+      log.info(`[位置] 判定"这句没有位置信息" → 状态不变（当前：${cur || '（空）'}）`);
+      return;
+    }
     const w = String(j.where ?? '').trim().slice(0, 40);
     const doing = String(j.doing ?? '').trim().slice(0, 60);
-    if (!w && !doing) return;
+    if (!w && !doing) {
+      log.info('[位置] 模型说 change=true 但 where/doing 都是空的 → 状态不变');
+      return;
+    }
+    log.info(`[位置] 状态更新：${whereState.status?.()?.where || '（空）'} → ${w || '（空）'}｜${doing}`);
     whereState.apply({ where: w, doing, source: `群${gid}` });
   }
 
@@ -8619,7 +9039,14 @@ export function splitChatText(raw, opts = {}) {
   const CHUNK = Math.max(10, Number(opts.max) || config.chunking?.maxChars || 60);
   // ⚠️ 这两个"句末就断"的门槛必须**和主聊天那条路一样**（25 → 36），
   //    不然剧情分条的节奏会和平时说话不一样，一眼就看出"这条不是她"。
-  const FIRST_FLOOR = Math.max(4, Number(config.chunking?.firstFlushChars) || 25);
+  // ⚠️⚠️ 2026-09-20 **回退**（用户：「**主动还是不改了，尤其是二级剧情比较长，
+  //    会分出很多条**」）：
+  //    这个函数（`splitChatText`）的**调用方全是主动类** —— 日常事件 / 二级剧情 /
+  //    余额抱怨 / 管理面板手动发（见 `sendChatLike` 的调用点：`index.js` 的 life 与
+  //    storyline、`webui.js` 的几处）。所以这里**保持老的"攒够字才断"节奏**：
+  //    不跟着聊天那条改成"句末就断"、也**不设条数上限**。
+  //    ⚠️ 聊天那条路在 `handle` 的流式循环里，那边才用 `chatFirst` / `maxChunks`。
+  const FIRST_FLOOR = Math.max(4, Number(config.chunking?.voluntaryFirstFlushChars) || 25);
   const SOFT_FLOOR = Math.max(FIRST_FLOOR, Math.round(FIRST_FLOOR * 1.4));
 
   // 和 `sendChunk` 同一套清洗，只是**保留**破折号标记（要靠它定位断点）
@@ -8649,7 +9076,7 @@ export function splitChatText(raw, opts = {}) {
         continue;
       }
       const floor = out.length === 0 ? FIRST_FLOOR : SOFT_FLOOR;
-      // ★ 到门槛了、而且后面还有话说 → 就在这个句末断开（和主聊天同一条规则）
+      // ★ 到门槛了、而且后面还有话说 → 就在这个句末断开
       const flushHere = cur && (cur.length + s.length > CHUNK || cur.length >= floor);
       if (flushHere) {
         out.push(cur);
@@ -8662,6 +9089,30 @@ export function splitChatText(raw, opts = {}) {
   }
   // 兜底：任何路径都不许把标记发出去
   return out.map((s) => dropDashBreak(s).trim()).filter(Boolean);
+}
+
+/**
+ * `buffer` 里**第一个够长的句末标点**之后的位置（没有就返回 -1）。
+ *
+ * ⚠️⚠️ 2026-09-20 加（用户：「还是没分成功」+「**一共三句还是要分**」）：
+ *    ① 原来要求"句末标点**正好**在 buffer 末尾"（`/[。！？!?；;\n]\s*$/`），
+ *       可 **chunk 的边界不由我们控制** —— 模型一次吐来整句时，句号落在**中间** → 不切 ✗
+ *    ② 我第一版改成找「**最后**一个」标点，可那样一次到达只会切**一刀**
+ *       （三句变两条）✗ —— 要找「**第一个够长的**」，才能像"逐句发"那样把三句切成三条 ✓
+ *    ⚠️ `minLen`：标点位置必须 >= 它（太短的「嗯。」不单独成条，继续往后攒）。
+ *    ⚠️ 标点后面允许跟空白和收尾括号（「（。」这种倒装写法要一起切进去）。
+ */
+export function firstSentenceBreak(text, minLen = 1) {
+  const t = String(text ?? '');
+  const min = Math.max(1, Number(minLen) || 1);
+  for (let i = 0; i < t.length; i++) {
+    if (!'。！？!?；;\n'.includes(t[i])) continue;
+    let end = i + 1;
+    const tail = /^[\s)）】」』]*/.exec(t.slice(end));
+    if (tail) end += tail[0].length;
+    if (end >= min) return end;
+  }
+  return -1;
 }
 
 function safeCut(text, at) {

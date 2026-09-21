@@ -12,6 +12,7 @@ import { createServer } from 'node:http';
 import { readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync, unlinkSync, statSync } from 'node:fs';
 import { join, extname, basename } from 'node:path';
 import { createHash } from 'node:crypto';
+import { spawn } from 'node:child_process';
 import yaml from 'js-yaml';
 
 import { config, reloadConfig, validate, ROOT, CONFIG_FILE, KNOWLEDGE_DIR, paramsFor } from './config.js';
@@ -21,6 +22,9 @@ import { queryServer, describe, clearCache } from './status.js';
 import * as napcat from './napcat.js';
 // ⚠️ 协议端适配层（2026-09-17 加）：管理面按它分派，换协议端只改 config.yml
 import * as provider from './provider.js';
+// ⚠️ 2026-09-20 加：LLBot 的「登录状态 / 二维码」适配（形状和 `napcat.js` 一致，
+//    所以下面那段二维码路由两边通用 —— 用户要求"二维码要和之前一样能自动刷新"）。
+import * as llbot from './llbot.js';
 // ⚠️ 开机自启（2026-09-17 加）：写注册表 Run 键，界面上开/关
 import * as autostart from './autostart.js';
 import { backupKnowledge } from './backup.js';
@@ -638,35 +642,75 @@ const routes = {
       const url = String(req?.url ?? '');
       const wantFresh = /[?&]fresh=1/.test(url);
 
-      // 已经登录了就没码可扫（免得界面上挂一张废码让人白扫）
-      const st = await napcat.loginStatus().catch(() => null);
-      if (st?.ok && st.isLogin === true) {
+      // ⚠️ 2026-09-20：**按协议端分派** —— LLBot 那边也提供了同形状的三个函数
+      //    （`src/llbot.js`：读它自己写的 `login-qrcode.png`），所以这段逻辑两边通用，
+      //    不用写两份（用户要求「二维码要和之前一样能在 webui 自动刷新」）。
+      const qs = provider.name() === 'llonebot' ? llbot : napcat;
+      const isLlbot = provider.name() === 'llonebot';
+
+      // ⚠️⚠️ 2026-09-20 修（用户截图报的：界面显示「已经登录了」、下面是张破图 +
+      //    「已生成新码，扫吧。」，而实际上**离线、且根本没码**）：
+      //    **不能用"码图旧不旧"推断登录**。LLBot 连着出 10 张码没人扫就会
+      //    **自己停止出码**（日志原话：`已自动刷新 10 张二维码仍未登录, 停止自动刷新`），
+      //    那时码图很旧、而它**根本没登录** → 旧逻辑会说「QQ 已经登录了，不需要扫码」✗
+      //    ⇒ 改成先问 **OneBot 的真实状态**：`get_status().online`
+      //      （标准 action、协议端无关 —— 这才是"能不能收消息"的真话）。
+      let onlineNow = null;
+      if (bot?.call) {
+        onlineNow = await bot
+          .call('get_status')
+          .then((s) => s?.online === true)
+          .catch(() => null);
+      }
+      if (onlineNow === true) {
         return send(res, 409, { ok: false, error: 'QQ 已经登录了，不需要扫码' });
       }
+      // 拿不到 online（连接刚断等）才退回各协议端自己的判断
+      if (onlineNow === null) {
+        const st0 = await qs.loginStatus().catch(() => null);
+        if (st0?.ok && st0.isLogin === true) {
+          return send(res, 409, { ok: false, error: 'QQ 已经登录了，不需要扫码' });
+        }
+      }
+      // LLBot 明确**离线**、而且那张码已经旧了 → 它就是"停止出码"了。
+      // 必须如实说清楚 + 给出下一步（去它自己的界面点刷新），别让界面挂一张破图。
+      if (isLlbot && onlineNow === false) {
+        const f0 = qs.qrcodeFile();
+        if (!f0 || f0.stale) {
+          return send(res, 409, { ok: false, error: llbot.STOPPED_HINT });
+        }
+      }
 
-      // ⚠️ 2026-09-17：**NapCat 没在跑就别发码**。
-      //    以前这里会把 `cache/qrcode.png` 直接发出去 —— 那是**上次留下的旧码**，
+      const st = await qs.loginStatus().catch(() => null);
+
+      // ⚠️ 2026-09-17：**协议端没在跑就别发码**。
+      //    以前这里会把缓存的旧图直接发出去 —— 那是**上次留下的旧码**，
       //    几分钟就死了，用户扫半天扫不动（「这码就没扫成功过」的一部分原因）。
       if (!st?.ok) {
-        return send(res, 503, { ok: false, error: 'NapCat 没在运行 —— 先点「启动 NapCat」' });
+        return send(res, 503, { ok: false, error: `${provider.info().label} 没在运行 —— 先把它启动起来` });
       }
 
       const expired = /过期|刷新/.test(String(st?.loginError ?? ''));
-      const before = napcat.qrcodeFile();
+      const before = qs.qrcodeFile();
       if (wantFresh || expired || !before) {
-        const r = await napcat.refreshQrcode().catch((e) => ({ ok: false, message: e.message }));
+        const r = await qs.refreshQrcode().catch((e) => ({ ok: false, message: e.message }));
         log.debug(`二维码：请求重出 fresh=${wantFresh} expired=${expired} 无文件=${!before} → ${r.ok ? '已发出' : r.message}`);
+        // ⚠️ NapCat 那边是"调接口让它重出"、要等它写完文件；
+        //    LLBot 自己每约 2 分钟轮换一张，等这一下没坏处（也别去催它的节奏）。
         if (r.ok) await new Promise((s) => setTimeout(s, 1200));
       }
 
-      // ① 优先 NapCat 自己写的原图（**太旧的不要**，见 qrcodeFile() 里的 stale）
-      const f = napcat.qrcodeFile();
+      // ① 优先协议端自己写的原图（**太旧的不要**，见 qrcodeFile() 里的 stale）
+      const f = qs.qrcodeFile();
       if (f && !f.stale) return sendBinary(res, 200, readFileSync(f.path), 'image/png');
 
       // ② 退回：按缓存 URL 自己画
       //    ⚠️ 但那 URL 就是上面那张旧图的同一个快照 —— 图都过期了，画出来也是死码，
       //       所以 stale 的时候宁可说"没有"，别给用户一张扫不动的图（2026-09-17）。
-      const q = await napcat.getQrcode();
+      //    ⚠️ LLBot 没有这个备用方式（它只落图、不给链接）→ 如实说没有。
+      const q = qs.getQrcode
+        ? await qs.getQrcode()
+        : { ok: false, message: '这个协议端不提供备用出码方式' };
       if (q.ok && q.qrcodeUrl && !f?.stale) {
         const buf = await QR.toBuffer(q.qrcodeUrl, {
           // ⚠️ 画大一点、留足静区：界面上按 280px 显示时才有足够像素/模块
@@ -686,21 +730,62 @@ const routes = {
     }
   },
 
-  // 轻量「重新出码」：**只是让 NapCat 重出一张**（`RefreshQRcode`）。
+  // 轻量「重新出码」：**只是让协议端重出一张**（NapCat 走 `RefreshQRcode`）。
   //
   // ⚠️ 原来界面上的「重新出码」调的是 `/api/qq/restart` → `RestartNapCat`，
   //    那是**重启整个 NapCat 进程** = 一次 QQ 登录（风控信号）+ 等 20 秒，
   //    而且新实例还没把码生成出来界面就去取了 → 「一直不出」。
   //    重出二维码是个轻活，用轻接口。
+  //
+  // ⚠️⚠️ 2026-09-20 修 —— **这是个真 bug，是 `test/provider.js` 抓出来的**：
+  //    这里原来是**硬编码 `napcat`** 的。换成 LLBot 之后
+  //    `provider.can('refreshQr')` 是 **true**（LLBot 也支持出码，见 `src/llbot.js`），
+  //    于是这条路由直接去调 `napcat.refreshQrcode()` → 请求 NapCat 的 6099 →
+  //    界面上点「重新出码」得到的就是一句 **`fetch failed`**。
+  //    ⇒ 和上面 `qrcode.png` 那条路由一样**按协议端分派**
+  //      （三个函数的形状两边一致，所以分派完这段逻辑通用）。
   'POST /api/qq/refresh-qr': async (_req, res) => {
     if (!provider.can('refreshQr')) {
       return send(res, 200, { ok: false, message: provider.unsupported('refreshQr'), hasImage: false });
     }
-    const r = await napcat.refreshQrcode();
+    const qs = provider.name() === 'llonebot' ? llbot : napcat;
+    const r = await qs.refreshQrcode().catch((e) => ({ ok: false, message: e.message }));
     log.info(`管理界面请求重新出码：${r.ok ? 'ok' : r.message}`);
     if (r.ok) await new Promise((s) => setTimeout(s, 1200));
-    const f = napcat.qrcodeFile();
+    const f = qs.qrcodeFile();
     send(res, 200, { ok: r.ok, message: r.message ?? '', hasImage: !!f && !f.stale });
+  },
+
+  // ⚠️⚠️ 2026-09-20 加（用户要求：「webui 加一个重启机器人的」+「要能成功切换端口」）。
+  //
+  //    这是**重启机器人**（= 按当前 `config.yml` 重新连一次协议端），
+  //    **不是重启协议端** —— 两者完全不同，别混：
+  //      · 重启机器人：SnowLuma / LLBot 都支持（就是重连 3001），**不涉及 QQ 登录**
+  //      · 重启协议端：SnowLuma 压根没有这个接口（见 provider.can('restart')）
+  //
+  //    为什么必须有它：**改完配置必须重启机器人才生效**（provider / onebot / 各种
+  //    config 都是启动时读的）—— 而"切换协议端"就在这个界面上，切完如果不能一键
+  //    重启，就等于**切换没成功**（用户的原话就是「要能成功切换端口」）。
+  //
+  //    ⚠️ 实现必须交给**独立进程**：这个路由所在的进程马上就要被它杀掉。
+  //      `spawn(..., {detached:true}).unref()` + `cmd /c start` 两层保险。
+  //      ⚠️ 别改成 `Start-Process` 或 `execFile` 同步等 —— 那会把自己等死。
+  'POST /api/bot/restart': async (_req, res) => {
+    send(res, 200, {
+      ok: true,
+      message: '正在重启机器人…约 15~30 秒后自己回来（页面刷新一下就能重新连上）',
+    });
+    try {
+      const script = join(ROOT, 'tools', 'restart-bot.ps1');
+      spawn(
+        'cmd.exe',
+        ['/c', 'start', '', '/min', 'powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script],
+        { detached: true, stdio: 'ignore', cwd: ROOT },
+      ).unref();
+      log.info('管理界面请求重启机器人（restart-bot.ps1，独立进程）');
+    } catch (e) {
+      log.error(`重启机器人失败：${e.message}`);
+    }
   },
 
   // 把一条**语音消息**转成文字 —— QQ 官方的 `translatePtt2Text`（NapCat 的 `fetch_ptt_text`）。

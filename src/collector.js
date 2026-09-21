@@ -12,6 +12,7 @@ import { writeFileSync, readFileSync, existsSync, mkdirSync, readdirSync } from 
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { ROOT, config } from './config.js';
+import { isStickerSeg } from './message.js';
 import { log } from './log.js';
 
 const LIB = join(ROOT, 'library');
@@ -317,12 +318,14 @@ export async function collectFromEvent(event, getImage) {
   // QQ 的图片段带一个 `sub_type`：
   //   sub_type: 1 → 动画表情（群友发的表情包）  ★ 我们要的
   //   sub_type: 0 → 普通图片（截图、照片、报错图）✗ 不要
-  // NapCat 是把 QQ 的 `picSubType` 直接映射过来的
-  // （源码：`sub_type: e.picSubType`，且 `picSubType === 0 ? "[图片]" : "[动画表情]"`）。
+  // ⚠️ **哪个字段代表表情包，各协议端不一样** —— NapCat 用 `sub_type: 1`（下划线），
+  //    LLBot 的 ob11 适配器用**驼峰** `subType: 1` → 判定统一走
+  //    `message.js` 的 `isStickerSeg()`，**别在这里自己写字段名**
+  //    （2026-09-20 换协议端时，这里差点漏改：LLBot 下永远判不出表情包）。
   //
   // 真实踩过：以前只靠「有没有配文字」判断，结果**单独发的截图**（没配字）
   // 被当表情包收进来了 —— 调试截图、聊天记录、启动器界面都进过库。
-  const stickers = imgs.filter((s) => Number(s.data?.sub_type ?? 0) === 1);
+  const stickers = imgs.filter(isStickerSeg);
   if (!stickers.length) {
     log.debug('消息里有图片但不是动画表情（sub_type≠1），不收集');
     return result;

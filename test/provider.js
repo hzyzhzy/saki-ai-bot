@@ -120,8 +120,21 @@ async function main() {
     const cfg = makeConfig('llonebot', 'config.provider-llbot-test.yml');
     const p = probe(cfg);
     check(p.name === 'llonebot', 'provider.name 读到了', p.name);
-    check(p.caps.qrcode === false && p.caps.restart === false && p.caps.quickLogin === false, '★ 出码/重启/快速登录 都标成"不支持"', JSON.stringify(p.caps));
-    check(p.canQrcode === false && p.canRestart === false, '★ can() 也返回 false（界面据此禁按钮）');
+    // ⚠️ 2026-09-20 改：LLBot 现在**支持**出码/刷码（`src/llbot.js` 读它自己写的那张
+    //    `login-qrcode.png` —— 用户要求「二维码要和之前一样能在 webui 自动刷新」）。
+    //    所以原来那句「出码/重启/快速登录 都标成不支持」已经不对了。
+    //    **仍然必须如实是 false** 的是：重启、快速登录、假在线自愈。
+    check(
+      p.caps.qrcode === true && p.caps.refreshQr === true && p.caps.status === true,
+      '★ LLBot 支持：看状态 / 出码 / 刷码',
+      JSON.stringify(p.caps),
+    );
+    check(
+      p.caps.restart === false && p.caps.quickLogin === false && p.caps.autoRecover === false,
+      '★ LLBot 不支持：重启 / 快速登录 / 假在线自愈（都如实为 false）',
+      JSON.stringify(p.caps),
+    );
+    check(p.canQrcode === true && p.canRestart === false, '★ can()：出码 true、重启 false（界面据此禁按钮）');
     check(/LLBot/.test(p.unsupportedQrcode) && /管理界面/.test(p.unsupportedQrcode), '★ 拒绝文案里指明了"去哪儿做"', p.unsupportedQrcode);
     check(p.recover.requested === false && /不是 NapCat/.test(p.recover.reason), '★ 非 NapCat 时不写"重启请求"条子（别误导看门狗）', p.recover.reason);
     check(p.canLaunch === false, '没配 launcher → 不能说"能从这边启动"');
@@ -191,20 +204,43 @@ async function main() {
     if (up) {
       const st = await (await fetch(`${BASE}/api/qq/status`)).json();
       check(st.provider?.name === 'llonebot', '★ 状态接口报出了协议端', st.provider?.name);
-      check(st.provider?.caps?.qrcode === false, '★ 状态接口里能力如实为 false');
+      // ⚠️ 2026-09-20 改：LLBot 现在支持出码 → qrcode 该是 true；**重启**仍如实 false。
+      //    （这条断言的本意是"能力不许吹牛"，所以两半都要查。）
+      check(
+        st.provider?.caps?.qrcode === true && st.provider?.caps?.restart === false,
+        '★ 状态接口里能力如实（出码 true / 重启 false）',
+        JSON.stringify(st.provider?.caps),
+      );
       check(/LLBot/.test(JSON.stringify(st)), '状态里带上了协议端说明（界面显示用）');
 
       const qr = await fetch(`${BASE}/api/qq/qrcode.png?fresh=1`);
-      check(qr.status === 409, '★ 出码接口：409（不是 500，也不是假装成功）', String(qr.status));
-      const qrj = await qr.json();
-      check(/LLBot/.test(qrj.error || ''), '拒绝理由说得清楚', qrj.error);
+      const qrj = await qr.json().catch(() => ({}));
+      // ⚠️ 2026-09-20 改：原来断言"409（不支持出码）"。LLBot 现在支持出码，它会去读那张
+      //    `login-qrcode.png`：码旧了（多半说明登录着）→ 409「QQ 已经登录了，不需要扫码」；
+      //    码很新（它正在等扫码）→ 200 + 那张原图。
+      //    所以这里只断言**不打 500、而且给的理由清楚** —— 两种环境都成立。
+      check(qr.status !== 500, '★ 出码接口：不打 500（不假装成功、也不炸）', String(qr.status));
+      check(
+        qr.status !== 409 || /已经登录/.test(qrj.error || ''),
+        '★ 409 时理由是「已经登录了，不需要扫码」',
+        qrj.error ?? `（HTTP ${qr.status}，返回的是图）`,
+      );
 
       const rs = await (await fetch(`${BASE}/api/qq/restart`, { method: 'POST' })).json();
       check(rs.ok === false, '★ 重启接口：ok=false（没配 launcher 就不吹牛）', JSON.stringify(rs));
       const rc = await (await fetch(`${BASE}/api/qq/recover`, { method: 'POST' })).json();
       check(rc.recovered === false && /LLBot/.test(rc.message || ''), '★ 一键恢复：明确说这个协议端不适用', rc.message);
       const rq = await (await fetch(`${BASE}/api/qq/refresh-qr`, { method: 'POST' })).json();
-      check(rq.ok === false && /LLBot/.test(rq.message || ''), '★ 重新出码：明确拒绝', rq.message);
+      // ⚠️ 2026-09-20 改（**这条断言抓出过一个真 bug**）：LLBot 现在支持"重新出码"
+      //    （它每约 2 分钟自己轮换一张，我们只如实报告）→ 不再是"明确拒绝"。
+      //    但它**必须走 LLBot 那条路** —— 修之前这条路由硬编码 `napcat`，
+      //    返回的是 `fetch failed`（跑去调 NapCat 的 6099 了）。
+      //    ⚠️ 所以断言里**必须带 `!/fetch failed/`**，别再让这个 bug 溜过去。
+      check(
+        rq.ok === true && /LLBot/.test(rq.message || '') && !/fetch failed/.test(rq.message || ''),
+        '★ 重新出码：走 LLBot 那条路（不许跑去调 NapCat 报 fetch failed）',
+        rq.message,
+      );
     }
     proc.kill();
     await sleep(400);

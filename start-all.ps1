@@ -52,6 +52,27 @@ Write-Host '  一键启动：先 QQ 协议端，再客服小祥'
 Write-Host '============================================'
 Write-Host ''
 
+# ⚠️⚠️ 2026-09-20 加：**协议端换成 LLBot 了**（见 AGENTS「协议端已换成 LLBot」）。
+#    LLBot 的 OneBot **也用 3001** —— 所以这个脚本**绝不能再"3001 没在跑就去启 NapCat"**：
+#    那会把 NapCat 拉起来占住 3001，LLBot 反而抢不到，而且 NapCat 那边还要扫码 ✗
+#    ⚠️ 这条链是会**开机自动跑**的（`autostart.ps1` 第 62 行调本脚本）→
+#      不修的话**每次开机会把 NapCat 拉起来**，机器人开机后就是死的。
+#    做法：读 `config.yml` 的 `provider.name`；是 `llonebot` 就改去拉 LLBot。
+function Get-ProviderName {
+  $f = Join-Path $BotDir 'config.yml'
+  $lines = @(Get-Content $f -ErrorAction SilentlyContinue)
+  for ($i = 0; $i -lt $lines.Count; $i++) {
+    if ($lines[$i] -match '^provider:\s*$') {
+      for ($j = $i + 1; $j -lt [Math]::Min($i + 6, $lines.Count); $j++) {
+        if ($lines[$j] -match '^\s+name\s*:\s*[''""]?([A-Za-z]+)') { return $Matches[1].ToLower() }
+      }
+      return ''
+    }
+  }
+  return ''
+}
+$ProviderName = Get-ProviderName
+
 # ── 1. NapCat ──────────────────────────────────────
 Write-Step '[1/3] 检查 NapCat...'
 
@@ -73,6 +94,96 @@ if (Test-Port 3001) {
   Write-Step '      NapCat 进程在跑，但 3001 没监听 —— 它在等扫码。'
   Write-Host '       [注意] 不重启它：重启会把这次登录也毁掉，白白多烧一次。' -ForegroundColor Yellow
   Write-Host '              点开任务栏那个 NapCat 窗口扫码；扫完机器人会自己连上。' -ForegroundColor Yellow
+} elseif ($ProviderName -ne 'napcat') {
+  # ⚠️⚠️ 2026-09-20 改：**不是 NapCat 的协议端，一律不碰 NapCat**
+  #    （都抢 3001，而且用户根本没在用它）。
+  #    原来这里写的是 `-eq 'llonebot'` —— 换成 **SnowLuma** 之后不匹配，
+  #    就会掉到最后的 `else`（**去拉 NapCat**）✗ 真实隐患。
+  if ($ProviderName -eq 'llonebot') {
+    # LLBot：独立应用（不注入 QQ），双击即用；它自己会开 3001 上的 OneBot。
+    Write-Step '      协议端是 LLBot —— 跳过 NapCat（两个协议端都抢 3001，不能同时跑）'
+    $llbotExe = 'C:\LLBot\llbot.exe'
+    if (Test-Path $llbotExe) {
+      Write-Step '      拉起 LLBot…（它起来后如果没自动登录，要去它的窗口点「启动」）'
+      Start-Process -FilePath $llbotExe -ErrorAction SilentlyContinue | Out-Null
+      # 它开核心 + 登录要十几秒，等一会儿再往下（最多 40 秒）
+      for ($i = 0; $i -lt 20; $i++) {
+        if (Test-Port 3001) { break }
+        Start-Sleep -Seconds 2
+      }
+      if (Test-Port 3001) {
+        Write-Step '      ✅ LLBot 的 OneBot（3001）已就绪'
+      } else {
+        Write-Host '       [注意] 3001 还没起来 —— 去 LLBot 窗口点「启动」；' -ForegroundColor Yellow
+        Write-Host '              它登录好之后机器人会自己连上（3 秒一轮重连）。' -ForegroundColor Yellow
+      }
+    } else {
+      Write-Host "      [警告] 找不到 $llbotExe —— 请手动启动 LLBot" -ForegroundColor Yellow
+    }
+  } else {
+    # ⚠️⚠️ 2026-09-20 改：**不只是提示了 —— 真的去把它起起来**。
+    #
+    #    为什么：开机自启链是 `SakiBot`（注册表）→ `_autostart-hidden.vbs`
+    #    → `autostart.ps1` → **这里**。而界面切换协议端**只改 `config.yml`**，
+    #    所以只要这里**按 provider 分派**，"开机起谁"就会**自动跟着界面切换走** ——
+    #    用户问「能不能在 webui 上切换时自动把启动项也切换」，这就是答案：
+    #    **自启项永远只有 `SakiBot` 一个**，它每次启动都读 config 决定起哪个协议端，
+    #    所以不存在"要不要切换启动项"的问题。
+    #    （反过来：协议端**自己注册的开机自启**必须清掉 —— LLBot 的
+    #      `LuckyLilliaDesktop` 就是这么干的，留着就会和当前协议端抢 3001。）
+    Write-Step "      协议端是 $ProviderName —— 跳过 NapCat（都抢 3001，不能同时跑）"
+    if ($ProviderName -eq 'snowluma') {
+      $snowDir = 'C:\SnowLuma'
+      $snowVbs = Join-Path $snowDir '_start-hidden.vbs'
+      # ⚠️⚠️ 2026-09-21 加（**开机实测踩到的第一个坑**）：SnowLuma 是**注入式**，
+      #    而且它只注入"**已经发现的** QQ 进程"（它日志原话：`hook auto-load enabled:
+      #    every discovered QQ process will be injected`）—— **它自己不会拉 QQ**。
+      #    ⇒ 开机时 QQ 客户端没起来 ⇒ 它注不进去 ⇒ **OneBot（3001）根本不会起**
+      #      ⇒ 机器人一直 ECONNREFUSED（01:24 那次重启就是这样：5099 在听、3001 空着、
+      #        机器人起来了但连不上，`autostart.ps1` 报"等待机器人连上 NapCat..."）。
+      #    ⇒ **必须先确保 QQ 客户端在跑**（用机器人号登着那个）。
+      $qqExe = 'C:\Program Files\Tencent\QQNT\QQ.exe'
+      if (-not @(Get-Process -Name QQ -ErrorAction SilentlyContinue).Count) {
+        if (Test-Path $qqExe) {
+          Write-Step '      拉起 QQ 客户端…（SnowLuma 注不进去就不会有 OneBot）'
+          Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', 'start', '', $qqExe -ErrorAction SilentlyContinue | Out-Null
+        } else {
+          Write-Host "      [警告] 找不到 QQ 客户端：$qqExe" -ForegroundColor Yellow
+        }
+      } else {
+        Write-Step '      QQ 客户端已在跑'
+      }
+      # ⚠️⚠️ 2026-09-21 加（**开机实测踩到的第二个坑**）：**幂等**。
+      #    01:24 那次起了**两个** SnowLuma —— 第二个发现 5099 被占，**退到了 5100**
+      #    （它日志：`port 5099 is in use, using 5100 instead`）。两个实例以后会抢 3001。
+      if (@(Get-NetTCPConnection -LocalPort 5099 -State Listen -ErrorAction SilentlyContinue).Count -gt 0) {
+        Write-Step '      SnowLuma 已经在跑（5099 在听）—— 跳过启动'
+      } elseif (Test-Path $snowVbs) {
+        Write-Step '      拉起 SnowLuma…'
+        Start-Process -FilePath 'wscript.exe' -ArgumentList '//nologo', $snowVbs -ErrorAction SilentlyContinue | Out-Null
+      } else {
+        Write-Host "      [警告] 找不到 $snowVbs —— 请手动启动 SnowLuma" -ForegroundColor Yellow
+      }
+      # 等 3001：要等 QQ 登录 + 注入 + 它自己起 OneBot，给足时间（最多 90 秒）
+      for ($i = 0; $i -lt 45; $i++) {
+        if (Test-Port 3001) { break }
+        Start-Sleep -Seconds 2
+      }
+      if (Test-Port 3001) {
+        Write-Step '      ✅ SnowLuma 的 OneBot（3001）已就绪'
+      } else {
+        Write-Host '       [注意] 3001 还没起来 —— 去它自己的界面（5099）看接入状态；' -ForegroundColor Yellow
+        Write-Host '              ⚠️ 最可能是 QQ 客户端没登录（要扫码）—— 登好机器人号它会自动注入。' -ForegroundColor Yellow
+      }
+    } else {
+      Write-Step "      $ProviderName 没有配启动方式 —— 去它自己的界面启动"
+      if (Test-Port 3001) {
+        Write-Step '      ✅ 3001 已就绪'
+      } else {
+        Write-Host '       [注意] 3001 还没起来；起好之后机器人会自己连上。' -ForegroundColor Yellow
+      }
+    }
+  }
 } else {
   Write-Step '      NapCat 没在跑。'
 

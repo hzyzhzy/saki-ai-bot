@@ -656,6 +656,31 @@ $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
 ⚠️ 反过来：**别指望 `Start-Process` 起的东西能活久** —— 短命令里查一下状态没事，
 但要交付给用户长期跑的服务，就得走上面这条路（或者让用户双击 bat）。
 
+### ⚠️⚠️ 但 WMI **起不了 PowerShell 脚本**（2026-09-20 实测，别再拿这招补看门狗）
+
+上面那条对 `cmd /c start …` 这类**辅助进程**成立，但**对 PowerShell 不成立**：
+WMI 创建的进程跑在**非交互式窗口站**里，PowerShell 在里面起不来 / 一起来就没。
+三种起法实测（都是 WMI `Win32_Process Create`）：
+
+| 起的命令 | 结果 |
+| --- | --- |
+| `powershell -File watchdog.ps1` | ❌ 5 秒就没，`watchdog.log` **一行都不写** |
+| `wscript //nologo _watchdog-hidden.vbs`（vbs 里 `Run(…,0,False)`） | ❌ 35 秒后没有看门狗进程、日志无新行 |
+| `cmd /c start "" /min powershell -File watchdog.ps1` | ⚠️ 活到 ~22 秒（**可能是我那条命令结束时 job 连坐**带走的，不能算它自己死） |
+
+⇒ **结论**：
+
+- ✅ 看门狗**该由开机自启负责**（`SakiBot` → `_autostart-hidden.vbs` → `autostart.ps1`
+  最后一行起它，是 explorer 在**用户会话**里启动的）。
+  证据：`autostart.log` 09-20 12:03 那轮到「启动看门狗…」，`watchdog.log` 里 12:05~15:18
+  是它干的活 → **能连续工作几小时** ✓
+- ❌ **AI 会话里没法"补一个活着的看门狗"** —— WMI 那几条路都不通。
+  要补只有两条：**用户双击 `看门狗.bat`**，或者走计划任务（`schtasks /it`，
+  属于改系统设置 —— **先问再动**）。
+- ⚠️ 顺带：查它的时候**别用 `-match 'watchdog'`** —— 我自己的命令行里就写着那个词，
+  会**打中我自己**，于是"看见"一个根本不存在的看门狗 PID（2026-09-20 就这么误判了一次）。
+  拼字符串：`'watch' + 'dog\.ps1'`。
+
 ### ⚠️⚠️ 起 NapCat 必须走 launcher（或补齐那五个环境变量）
 
 `launcher-win10-user.bat` 看着只是"调一下 NapCatWinBootMain.exe"，其实它真正干的事是
@@ -847,3 +872,47 @@ node test/ask-attitude.js
 | 测试脚本 `ECONNREFUSED 3001` | 机器人占着连接，先停它 |
 | 看门狗窗口反复刷 `Cannot validate argument on parameter 'ArgumentList'` + 「等了 90 秒 NapCat 仍未监听 3001」 | **空数组传给了 `Start-Process -ArgumentList`**：`@()` 会抛异常，命令直接中断 → NapCat **压根没被启动**（2026-09-17 修的 `watchdog.ps1`；同一次还修了它读 `config.yml` **不认单引号** `botQQ: '10000002'` 的 bug）。⚠️ 这个坑 `start-all.ps1` 09-15 就修过，watchdog 那份漏了 —— **两个脚本都要看** |
 | 在管理界面点了「重启 NapCat」，它到底会不会自己回来 | ✅ **会，而且很快**（2026-09-17 03:12 实测：03:12:05 点 → WS 断开 → 03:12:08 QQ 进程换新 → **03:12:11 已登录，6 秒**）。`RestartNapCat` 自己就会把 QQ 重新拉起来，**看门狗都来不及出手**（它 20 秒才查一次）。<br>⚠️ 那 03:04 用户点完为什么就没回来？**因为当时坏掉的看门狗把恢复过程打断了**：`Start-NapCat` 每轮先 `Stop-Process QQ` 再 `Start-Process`，而后者又因为空数组抛异常 → **QQ 被强杀、NapCat 又没起来**，于是死循环。两处都修好（`e4ad20b`）后这条链才是通的。<br>→ 所以**点重启是安全的**（约 6 秒不可用），出问题才需要看门狗兜底；点完 1 分钟还不通，去看 `logs/watchdog.log` |
+
+---
+
+## 🔄 协议端已换成 LLBot（2026-09-20）—— 重要
+
+**为什么换**：NapCat 依赖 `napcat/.credential` 那份**快速登录凭据**，而腾讯在 09-20
+把它**从快登名单里删掉了**（探针报 `online:nocred`）→ 之后**每次被踢都得扫码**。
+LLBot 是**独立实现、不注入 QQ 客户端**，客户端特征和 NapCat 不一样。
+
+**现状**：
+
+| | |
+| --- | --- |
+| `config.yml` | `provider.name: llonebot` |
+| LLBot 位置 | `C:\LLBot\llbot.exe`（**故意不放 OneDrive 里**，免得同步拖累） |
+| 它的 OneBot | **也是 3001**（`ob11.connect[0]`；token 已和 `config.yml` 的 accessToken 对齐） |
+| 它的 WebUI | **3081**（⚠️ 它默认 3080，和 DSH 自己的 Web GUI **撞车**，已改） |
+| 启动方式 | 双击 `llbot.exe` → 界面里点「启动」；**它也在开机自启里**（2026-09-20 核实：注册表 `HKCU\...\Run` 值名 `LuckyLilliaDesktop` = `"C:\LLBot\llbot.exe" --startup-delay=5`）<br>⚠️ **原来这里写的是「它不随开机自启」，是错的** —— 我照着印象写的，没查注册表 |
+| 签名 | 它自己向官方签名服务取 token（`ttl=86400s`，24 小时自动续） |
+| 看门狗 | **已改**：读到 `provider.name=llonebot` 时**只保机器人，绝不碰 NapCat** |
+
+**⚠️ 换协议端时踩到的坑（别再踩）**：
+
+1. **两个协议端不能同时跑** —— 都抢 3001，而且连的是同一个号。切换顺序必须是：
+   **停 NapCat（连 QQ 一起）→ 再起 LLBot**。
+2. **NapCat 的 launcher 会守护着把 QQ 拉回来**（`launcher-win10-user.bat` 那个 cmd 窗口），
+   光杀 QQ 没用，得连它一起停。
+3. **LLBot Desktop 包里缺 `bin\llbot\node.exe`** → 启动时报 `获取Node.js版本失败`。
+   拿系统任意 node 拷过去即可（实测 v24.20.0 可用）。
+4. **首次登录必须扫码**；扫完它会**自动把号登记进签名白名单**
+   （报错里那句 `login that QQ once via wtlogin.login to auto-enroll`）。
+   在那之前它会 `[Sign] FATAL auth failure ... uin not in your allowed list` 并退出。
+5. LLBot 的管理能力**只有 `launch`**（不支持出码/重启）→ 界面上那些按钮显示"不支持"，
+   这是**对的**，不是 bug。
+
+**怎么退回去用 NapCat**：
+1. `config.yml` 里删掉 `provider:` 段（或把 name 改回 `napcat`）；
+2. 停掉 LLBot；
+3. 拉起 NapCat（`napcat\NapCat.Shell\launcher-win10-user.bat`，**窗口要可见**）；
+4. ⚠️ **要扫码** —— 那份快登凭据已被腾讯作废，退回去也回不到"自动登录"了。
+
+**⚠️ 凭据备份模块的现状**：`src/cred-backup.js` + `tools/napcat-cred.mjs` 是**NapCat 专用**的。
+现在协议端是 LLBot → `bot.js` 里那段备份**不会执行**（加了 provider 判断）。
+留着是为了"哪天退回 NapCat 还能用"，**不是死代码，别删**。

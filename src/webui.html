@@ -373,6 +373,19 @@
   body.dark .gr-row{background:rgba(255,255,255,.06)}
   body.dark .blob{opacity:.40;filter:blur(30px)}
   body.dark .blob.m{opacity:.34;filter:blur(24px)}
+  /* ⚠️ 2026-09-20 用户要求：「把 webUI 需要粗体的地方改为粗体，比如标题、左侧栏」——
+     原来标题是 600、左侧栏压根没设字重（等于 400，看着很细），统一提上来：
+       标题 700 / 次级标题 600 / 左侧栏 600（选中的那个 700，配合背景色区分）
+     ⚠️ 放在样式表最后是**故意的**：同权重下后者生效，这样不用去改上面那些原规则，
+      以后想回退也只删这几行就行。 */
+  header h1{font-weight:700}
+  .card h2{font-weight:700}
+  .card h3{font-weight:600}
+  /* ⚠️ 2026-09-20 用户要求：「把 webui 左边侧栏的字体调大一点」——
+     侧栏原来没设字号、继承 body 的 14px，而按钮又高又宽，字看着偏小 → 提到 15.5px。
+     （和上面那组字重规则放一起，都属于"末尾覆盖"，想回退只删这几行。） */
+  nav button{font-weight:600;font-size:15.5px}
+  nav button.on{font-weight:700}
 </style>
 </head>
 <body>
@@ -1010,7 +1023,8 @@
     <div class="card">
       <h2>参数</h2>
       <div class="row">
-        <div><label>加好友的门槛（好感度）</label><input type="number" id="a-threshold" min="50" max="100"></div>
+        <!-- ⚠️ 2026-09-20：好感度**上限已改为无限**（用户要求）→ 门槛的 max 不能还是 100 -->
+        <div><label>加好友的门槛（好感度）</label><input type="number" id="a-threshold" min="50" max="999999"></div>
         <div><label>排行榜显示几个</label><input type="number" id="a-boardSize" min="1" max="30"></div>
         <div><label>回应判定窗口（分钟）</label><input type="number" id="a-window" min="1" step="5"></div>
       </div>
@@ -1699,8 +1713,10 @@ async function reloadAll() {
   // 收紧度滑块（只对灵敏度 ① 生效）
   $('strictness').value = Number.isFinite(Number(c.chat?.strictness)) ? Number(c.chat.strictness) : 50;
   onStrictInput();
-  $('chunking-maxChars').value = c.chunking?.maxChars ?? 260;
-  $('chunking-delayMs').value = c.chunking?.delayMs ?? 700;
+  // ⚠️ 这两个兜底值必须和 config.yml 一致 —— 原来写的是 260 / 700（那套"一大段"的老节奏），
+  //    早就过时了；配置读不到时界面会显示错的数字。
+  $('chunking-maxChars').value = c.chunking?.maxChars ?? 60;
+  $('chunking-delayMs').value = c.chunking?.delayMs ?? 1000;
 
   // 教学
   $('teach-teachers').value = (c.teach.teachers || []).join('\n');
@@ -3025,7 +3041,29 @@ async function qqRefresh() {
 
     let html =
       kv('协议端', esc(pv.label || '—') +
-        (pv.manageUrl ? ' · <a href="' + esc(pv.manageUrl) + '" target="_blank">它自己的管理界面</a>' : '')) +
+        (pv.manageUrl ? ' · <a href="' + esc(pv.manageUrl) + '" target="_blank">它自己的管理界面</a>' : '') +
+        // ⚠️⚠️ 2026-09-19 加（用户要求：「在 webui 加个切换控制」）：
+        //    界面上直接换协议端 = 改 `config.yml` 的 `provider.name`。
+        //    ⚠️ **收发本身跟协议端无关**（都走 onebot.url + token），换的是
+        //      "出码 / 重启 / 启停 / 假在线自愈"这些**管理能力**；
+        //    ⚠️ 而 provider 是**启动时读**的 → **改完必须重启机器人才生效**，
+        //      所以这里把这句话写在旁边，别让人以为一选就换过去了。
+        //    ⚠️ 选项写死这几个是故意的（= `provider.js` 里 REGISTRY 的键）。
+        //    ⚠️⚠️ 2026-09-20：**这三处必须同时有这个协议端，否则会被"归一化成 onebot"**：
+        //       ① `provider.js` 的 REGISTRY  ② `config.js` 的 KNOWN_PROVIDERS
+        //       ③ 就是这行选项。
+        //       今天就踩了：换到 SnowLuma 之后只改了 ①，结果启动日志打
+        //       「已连接到协议端（onebot）」、界面显示「通用 OneBot 11 实现」——
+        //       因为 config.js 的白名单里没有它，`name` 被改成了 onebot
+        //       （原值只留在 `provider.nameRaw` 里，害我查了半天）。
+        //      将来加协议端，这里要跟着加（或者让 `/api/status` 把 NAMES 带过来）。
+        ' <select id="pv-name" style="margin-left:6px;vertical-align:middle">' +
+        ['napcat', 'llonebot', 'snowluma', 'onebot']
+          .map((x) => '<option value="' + x + '"' + (x === pv.name ? ' selected' : '') + '>' + x + '</option>')
+          .join('') +
+        '</select>' +
+        ' <button onclick="qqSwitchProvider()">切换</button>' +
+        ' <span class="hint">换完**重启机器人**才生效；收发不受影响，出码/重启那些按钮会跟着变</span>') +
       kv('QQ 是否在线', badge) +
       kv('账号', esc(o.qq || '—') + (o.nickname ? ' (' + esc(o.nickname) + ')' : '') +
         ' <span class="hint">（这条来自 OneBot 侧，换任何协议端都准）</span>');
@@ -3038,6 +3076,17 @@ async function qqRefresh() {
         running ? '<b style="color:#16a34a">在跑</b>' : '<b style="color:#dc2626">没在跑</b>',
       );
     }
+
+    // ⚠️⚠️ 2026-09-20 加（用户：「webui 加一个重启机器人的」+「要能成功切换端口」）：
+    //    **重启机器人**和"重启协议端"是两件事 —— 前者只是按当前 config 重连一次
+    //    协议端（SnowLuma / LLBot 都支持，不涉及 QQ 登录），而后者 SnowLuma 压根没有。
+    //    改完配置（尤其切协议端）**必须重启机器人才生效**，所以这个按钮放在状态页最显眼处。
+    html += kv(
+      '机器人进程',
+      '<button class="ghost" id="btn-bot-restart" onclick="qqRestartBot()">重启机器人</button>' +
+        ' <span class="hint">= 按当前配置重新连一次协议端（改完配置 / 切完协议端点它生效）；' +
+        '**不是**重启协议端，也不涉及 QQ 登录</span>',
+    );
 
     // 按钮跟着"状态 + 协议端能力"变
     const btn = $('btn-qq-restart');
@@ -3056,12 +3105,18 @@ async function qqRefresh() {
       if (pv.how) h.textContent = pv.how + (pv.license ? '　｜　' + pv.license : '');
     }
 
-    // NapCat 专属那几块：只在这个协议端支持时才显示（别的协议端显示"不支持 + 去哪儿做"）
-    if (!caps.status) {
+    // ⚠️⚠️ 2026-09-20 修（用户截图：LLBot 下这里显示「NapCat 管理接口 连不上 — fetch failed」）：
+    //    我为 LLBot 也打开了 `caps.status`（为了能看登录状态），可**这一段的字段全是
+    //    NapCat 专属的**（`r.napcat` = 它 6099 那套 HTTP 接口）→ LLBot 也走进来、显示"连不上" ✗
+    //    ⇒ 按协议端分开：**只有 napcat 才显示这几张卡**。
+    //      LLBot 的登录状态在**二维码那张卡**上看（它会直接把正在出的码显示出来，
+    //      "在出码"就等于"没登录"，见 `src/llbot.js`）。
+    const isNapcat = String(pv.name || '').toLowerCase() === 'napcat';
+    if (isNapcat && !caps.status) {
       html += kv('协议端管理接口', '<span class="hint">' + esc(n.error || '当前协议端没有这套接口') + '</span>');
-    } else if (!n.reachable) {
+    } else if (isNapcat && !n.reachable) {
       html += kv('NapCat 管理接口', '<b style="color:#dc2626">连不上</b> — ' + esc(n.error || ''));
-    } else {
+    } else if (isNapcat) {
       html += kv('NapCat 侧登录状态', n.isLogin ? '已登录' : '未登录');
       if (n.isOffline) html += kv('NapCat 侧', '<b style="color:#dc2626">标记为离线</b>');
       if (n.loginError) html += kv('登录错误', esc(n.loginError));
@@ -3089,17 +3144,31 @@ async function qqReloadQr() {
   const img = $('qq-qr-img');
   if (!card || !img) return;
   card.style.display = '';
-  // ⚠️ NapCat 没在跑的时候出不了码（后端直接 503），别让浏览器去请求一个空白图
+  // ⚠️ 协议端没在跑的时候出不了码（后端直接 503），别让浏览器去请求一个空白图
   const st = await api('/api/qq/status').catch(() => null);
   if (st && st.running === false) {
     img.removeAttribute('src');
     if ($('qq-qr-hint')) {
-      $('qq-qr-hint').innerHTML = 'NapCat 没在运行，出不了码 —— 先点下面的「启动 NapCat」把窗口开起来。';
+      $('qq-qr-hint').textContent =
+        (st.provider?.label || '协议端') + ' 没在运行，出不了码 —— 先把它启动起来。';
     }
     return;
   }
+  // ⚠️⚠️ 2026-09-20 加：**拿不到图的时候不许留一张破图**（用户截图里就是那个样子：
+  //    一个破图图标 + alt 文字）。后端在 409/404/503 时回的是 **JSON（原因）**，
+  //    浏览器把它当图片加载就会显示破图。⇒ 在 onerror 里再问一次拿原因，
+  //    然后**把破图撤掉、只留文字**。
+  img.onerror = async () => {
+    img.removeAttribute('src');
+    let reason = '';
+    try {
+      const r = await fetch('/api/qq/qrcode.png?fresh=1&t=' + Date.now());
+      reason = (await r.json()).error || '';
+    } catch {}
+    if ($('qq-qr-hint')) $('qq-qr-hint').textContent = reason || '这次拿不到二维码。';
+  };
   img.src = '/api/qq/qrcode.png?fresh=1&t=' + Date.now();
-  $('qq-qr-hint').textContent = '这是刚生成的新码。扫不出来就再点一次「重新出码」。';
+  if ($('qq-qr-hint')) $('qq-qr-hint').textContent = '正在取码…扫不出来就点「重新出码」。';
 }
 
 /**
@@ -3117,15 +3186,84 @@ async function qqNewQr() {
     const card = $('qq-qr-card');
     if (card) card.style.display = '';
     if (img) img.src = '/api/qq/qrcode.png?t=' + Date.now();
+    // ⚠️⚠️ 2026-09-20 修（用户截图：界面写着「已生成新码，扫吧。」，下面是张**破图**）：
+    //    旧代码**只看 `r.ok`** 就宣布成功。而 LLBot 想出码也出不来的时候
+    //    （它连出 10 张没人扫就**停止出码**了），后端会回
+    //    `{ok:true, hasImage:false, message:'…'}` → 界面于是在**撒谎**。
+    //    ⇒ **以 `hasImage` 为准**；没拿到图就如实转述后端给的原因。
     if ($('qq-qr-hint')) {
-      $('qq-qr-hint').textContent = r.ok
+      $('qq-qr-hint').textContent = r.ok && r.hasImage
         ? '已生成新码，扫吧。'
-        : '出码失败：' + (r.message || '未知原因') + '（可以先点「重启 NapCat」）';
+        : r.message || '这次没拿到新码 —— LLBot 那边可能停止出码了，去它的界面点「刷新」。';
     }
   } catch (e) {
     if ($('qq-qr-hint')) $('qq-qr-hint').textContent = '出码出错：' + e.message;
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = '重新出码'; }
+  }
+}
+
+/**
+ * 切换协议端（改 `config.yml` 的 `provider.name`）→ 保存后**问一句要不要立刻重启机器人**。
+ *
+ * ⚠️⚠️ 2026-09-20 加（用户原话：「**要能成功切换端口**」）：
+ *    原来切完只弹一句「已保存。重启机器人后生效」—— 而"重启机器人"的入口在别的卡片里，
+ *    用户切完很容易**以为已经切好了**，实际收发还在走老协议端 ✗
+ *    ⇒ 切完直接问「现在重启吗」，点一下就走 `/api/bot/restart`，这才叫"切换成功"。
+ *    ⚠️ 用 `confirm` 而不是自动重启：万一用户只是在看选项、并不想现在断线。
+ */
+async function qqSwitchProvider() {
+  const sel = $('pv-name');
+  const name = sel ? sel.value : '';
+  if (!name) return;
+  let j;
+  try {
+    j = await api('/api/config', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ provider: { name } }),
+    });
+  } catch (e) {
+    alert('保存失败：' + e.message);
+    return;
+  }
+  if (!j || !j.ok) {
+    alert('保存失败：' + ((j && j.error) || '未知'));
+    return;
+  }
+  if (
+    confirm(
+      '已切到「' +
+        name +
+        '」。\n\n要现在重启机器人让它生效吗？\n（约 15~30 秒，期间收不到消息；不重启的话它仍按老协议端跑）',
+    )
+  ) {
+    qqRestartBot();
+  } else {
+    alert('已保存。记得自己重启机器人才生效 —— 状态页有「重启机器人」按钮。');
+  }
+}
+
+/**
+ * 重启机器人 —— 按当前配置重新连一次协议端。
+ * ⚠️ **不是**重启协议端，也**不涉及 QQ 登录**（协议端是独立进程，这条 2026-09-20 实测过）。
+ */
+async function qqRestartBot() {
+  const btn = $('btn-bot-restart');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = '正在重启…';
+  }
+  try {
+    const r = await api('/api/bot/restart', { method: 'POST' });
+    alert((r && r.message) || '正在重启机器人…十几秒后自己回来，刷新页面即可。');
+  } catch (e) {
+    alert('重启请求失败：' + e.message);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = '重启机器人';
+    }
   }
 }
 

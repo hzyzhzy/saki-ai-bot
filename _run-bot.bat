@@ -58,4 +58,29 @@ rem ⚠️ 这两行**留着**：走代理时必须用它排除本机（不然�
 set "NO_PROXY=127.0.0.1,localhost,::1"
 set "no_proxy=127.0.0.1,localhost,::1"
 
+rem ── ⚠️⚠️ 2026-09-20 加：**保留历史日志** ──────────────────────────
+rem    为什么：用户报「这句 @ 没回复」时，那段对话发生在**上一次重启之前**，
+rem    而原来第 61 行是 `> logs\bot.log` = **直接覆盖** → 证据被清掉，只能靠猜 ✗
+rem    （真实踩到，所以这条必须补上。）
+rem    做法：启动前把旧的 bot.log 改名成 `bot-<时分秒>.log`，**只留最近 10 份**。
+rem    ⚠️ 时间戳只取 %TIME% 并去掉冒号和点（纯数字，免得不合法的文件名/编码问题）；
+rem       `%DATE%` 带中文（"周日"），在 bat 里容易踩编码坑，所以不用它。
+rem    ⚠️ 同一秒内重启才会撞名，而重启间隔至少几分钟 → 实际不会撞。
+set "STAMP=%TIME::=%"
+set "STAMP=%STAMP:.=%"
+if exist "logs\bot.log" move /y "logs\bot.log" "logs\bot-%STAMP%.log" >nul 2>&1
+rem 只留最近 10 份：`dir /o-d` 按修改时间倒序，skip=10 跳过最新的十个，剩下的删掉
+rem ⚠️⚠️ 2026-09-20 修：原来这里写的是
+rem      `for /f "skip=10 delims=" %%f in ('dir /b /o-d "logs\bot-*.log" 2^>nul') do …`
+rem    实测**每次启动都在窗口里报错**（用户截图）：
+rem      `'dir /b /o-d "logs\bot-*.log" 2>nul' is not recognized as an internal or external command`
+rem    —— `for /f` 的单引号子命令里 `2^>nul` 的脱字符会被吃掉一层，
+rem       cmd 于是把整串当成了「一条命令的名字」。
+rem    改成 AGENTS 里那个老办法：**先写临时文件再读**
+rem    （⚠️ 不准再改回 `for /f` 包重定向 —— 这个坑在 .bat 里踩过不止一次）。
+set "OLDLOG=%TEMP%\_qqbot_oldlogs.txt"
+dir /b /o-d "logs\bot-*.log" > "%OLDLOG%" 2>nul
+for /f "skip=10 delims=" %%f in (%OLDLOG%) do del "logs\%%f" >nul 2>&1
+del "%OLDLOG%" >nul 2>&1
+
 node src\index.js > "logs\bot.log" 2>&1

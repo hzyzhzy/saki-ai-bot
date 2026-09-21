@@ -3,6 +3,31 @@
  * 消息既可能是 CQ 码字符串，也可能是消息段数组，两种都要能处理。
  */
 
+/**
+ * 这个图片段是「动画表情 / 表情包」，还是普通图片（截图、照片、报错图）。
+ *
+ * ⚠️⚠️ **字段名按协议端不同 —— 别再猜，两边源码都读过了**（2026-09-20）：
+ *
+ * | 协议端 | 字段 | 形态 | 源码 |
+ * | --- | --- | --- | --- |
+ * | NapCat | `sub_type` | **数字** `1` | 内部 `picSubType` 直接映射 |
+ * | LLBot（ob11） | `subType` | **驼峰**、数字 `1` | 收图 L16181 `subType: picElement.picSubType` |
+ *
+ * 另：LLBot 的**私有** API / Milky 那套用字符串 `sub_type: 'sticker'`
+ * （`llbot.js` L37923 的 `_enum(["normal","sticker"])`、L38512），
+ * **那条路机器人不走**，但留作保险 —— 各家实现都在往这个口径上靠。
+ *
+ * 判定**只在这一个函数里**：以后换协议端、或者哪家又改名，只改这里。
+ */
+export function isStickerSeg(seg) {
+  const d = seg?.data;
+  if (!d) return false;
+  if (Number(d.sub_type) === 1) return true; // NapCat
+  if (Number(d.subType) === 1) return true; // LLBot（ob11）
+  const s = String(d.sub_type ?? d.subType ?? '').toLowerCase();
+  return s === 'sticker'; // LLBot 私有 API / Milky
+}
+
 /** 把任意形态的消息统一成消息段数组 */
 export function toSegments(message) {
   if (Array.isArray(message)) return message;
@@ -71,9 +96,9 @@ export function extractText(segments, { atPlaceholder = '' } = {}) {
         parts.push(atPlaceholder);
         break;
       case 'image':
-        // 区分表情包和截图：QQ 里表情包 sub_type=1。
+        // 区分表情包和截图（字段名各协议端不同 → 统一走 isStickerSeg）。
         // 这个区别对回答方式影响很大 —— 表情包是「在玩笑」，截图是「有问题要问」。
-        parts.push(seg.data?.sub_type === 1 ? '[表情包]' : '[图片]');
+        parts.push(isStickerSeg(seg) ? '[表情包]' : '[图片]');
         break;
       case 'face':
         parts.push('[QQ表情]');
@@ -199,7 +224,7 @@ export function forwardNodeText(data) {
       .map((s) => {
         if (s.type === 'text') return s.data?.text ?? '';
         if (s.type === 'at') return `@${s.data?.qq ?? ''}`;
-        if (s.type === 'image') return s.data?.sub_type === 1 ? '[表情包]' : '[图片]';
+        if (s.type === 'image') return isStickerSeg(s) ? '[表情包]' : '[图片]';
         if (s.type === 'face') return '[QQ表情]';
         if (s.type === 'forward') return '[里面还有一个转发]';
         if (s.type === 'record') return '[语音]';

@@ -10,6 +10,7 @@ import { readFileSync } from 'node:fs';
 import { config } from './config.js';
 import { log } from './log.js';
 import { describeImage } from './vision.js';
+import { isStickerSeg } from './message.js';
 
 /** 图片描述缓存：key = 图片 file id，value = { text, at } */
 const cache = new Map();
@@ -99,11 +100,12 @@ export async function describeImagesIn(event, call) {
     const file = String(seg.data?.file ?? '');
     if (!file) continue;
 
-    // QQ 的图片段带 sub_type：1 = 动画表情（表情包），0 = 普通图片（截图/照片）。
+    // 图片段带 `sub_type`/`subType`：1 = 动画表情（表情包），0 = 普通图片（截图/照片）。
+    // ⚠️ **字段名各协议端不同**（NapCat 下划线、LLBot 驼峰）→ 统一走 `isStickerSeg()`。
     // ⚠️ 这个区别要**一路带到提示词里** —— 表情包是「在玩梗」，只要理解情绪；
     //    截图是「有东西给你看」，要理解内容。用同一套口径会让它对着表情包
     //    一本正经地描述画面（真实踩过：「强强？这图变形得够狠的……」）。
-    const kind = Number(seg.data?.sub_type ?? 0) === 1 ? 'sticker' : 'image';
+    const kind = isStickerSeg(seg) ? 'sticker' : 'image';
 
     // 表情包不识别（那是玩梗，不需要描述，而且省 token）
     if (kind === 'sticker' && config.vision?.describeStickers !== true) {

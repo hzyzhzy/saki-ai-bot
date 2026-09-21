@@ -49,7 +49,12 @@ const FILE = process.env.QQBOT_AFFINITY_FILE
 /** 默认好感度（用户指定 50） */
 export const DEFAULT_AFFINITY = 50;
 export const MIN_AFFINITY = 0;
-export const MAX_AFFINITY = 100;
+// ⚠️⚠️ 2026-09-20 用户要求：「**把好感度上限修改为无限**」——
+//    原来封顶 100（到顶就是"满分"），现在**不设上限**：处得越久、参与剧情越多，可以一直涨。
+//    ⚠️ 保留这个常量名是为了不动调用方；值用 `Infinity`。
+//    ⚠️ 对外（`status().range` / 界面）**报 `null` 表示"无上限"** ——
+//      `Infinity` 一旦被 JSON.stringify 会变成 `null`，与其让它"意外"变 null，不如我们自己说清楚。
+export const MAX_AFFINITY = Infinity;
 
 /**
  * 两条硬边界：
@@ -218,7 +223,9 @@ function save() {
 }
 
 function clamp(n) {
-  return Math.max(MIN_AFFINITY, Math.min(MAX_AFFINITY, Math.round(Number(n) || 0)));
+  // ⚠️ 2026-09-20：**只保底、不封顶**（用户要求「上限修改为无限」）。
+  //    🚫 别在这里加回 `Math.min(MAX_AFFINITY, …)` —— 那会把上限又夹回 100。
+  return Math.max(MIN_AFFINITY, Math.round(Number(n) || 0));
 }
 
 function rollDay(gid) {
@@ -438,7 +445,7 @@ export function promptLine(userId, opts = {}) {
   return [
     '## 你对这个人的好感度（私人印象，**别说出来**）',
     '',
-    `你对 **${name}** 的好感度：**${v}/100**（${band}）`,
+    `你对 **${name}** 的好感度：**${v}**（${band}）`,
     '',
     '- ⚠️⚠️ **绝对不许说出数字、也不许提"好感度"这个词** ——',
     '  那是游戏面板，说出来一秒出戏。它只影响你的**语气松紧**：',
@@ -475,7 +482,7 @@ export function status(groupId = '') {
     return {
       enable: enabled(),
       default: DEFAULT_AFFINITY,
-      range: [MIN_AFFINITY, MAX_AFFINITY],
+      range: [MIN_AFFINITY, null], // ⚠️ 2026-09-20：上限改无限 → 对外用 null 表示"不封顶"
       groupId: gid,
       tracked: b?.users.size ?? 0,
       users: list,

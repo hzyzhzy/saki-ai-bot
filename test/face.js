@@ -14,6 +14,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { facePath } from '../src/faces.js';
+import { isStickerSeg, extractText } from '../src/message.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const LLM_PORT = 39602;
@@ -101,8 +102,11 @@ wss.on('connection', (ws, req) => {
     if (m.action === 'send_group_msg' || m.action === 'send_private_msg') {
       const segs = m.params?.message ?? [];
       const text = segs.filter((s) => s.type === 'text').map((s) => s.data.text).join('');
-      const images = segs.filter((s) => s.type === 'image').map((s) => s.data.file);
-      if (text.trim() || images.length) sent.push({ text, images });
+      const imageSegs = segs.filter((s) => s.type === 'image');
+      const images = imageSegs.map((s) => s.data.file);
+      if (text.trim() || images.length) {
+        sent.push({ text, images, imageData: imageSegs.map((s) => s.data) });
+      }
     }
     if (m.echo !== undefined) {
       ws.send(JSON.stringify({ status: 'ok', retcode: 0, data: { message_id: 1 }, echo: m.echo }));
@@ -194,6 +198,14 @@ async function main() {
   // 解码回来的内容必须和 face_wuyu 那张文件**逐字节相同**。
   const sentImg = imgOnly[0]?.images[0] ?? '';
   check(sentImg.startsWith('base64://'), '图片用 base64:// 发送（不用 file://）');
+
+  // ⚠️ 2026-09-20 加：**发出去的表情必须是"表情"而不是"大图"** —— 靠图片段上的字段告诉协议端，
+  //    而字段名各家不同（NapCat `sub_type` / LLBot 的 ob11 适配器 `subType`）→ **两个都要发**。
+  //    真实踩过：换成 LLBot 后只发了 `sub_type`（以为它认），结果它读 `data.subType` 读到 undefined
+  //    → `Number(undefined)||0` = 0 = 普通图片 → 用户连着两次反馈「表情包还是大图」。
+  const d0 = imgOnly[0]?.imageData?.[0] ?? {};
+  check(Number(d0.sub_type) === 1, '图片段带 sub_type: 1（NapCat 的口径）');
+  check(Number(d0.subType) === 1, '图片段带 subType: 1（LLBot ob11 的口径，驼峰）');
   let imgOk = false;
   let imgNote = '';
   try {
@@ -247,8 +259,28 @@ async function main() {
   // 关键：不能出现 "[表情" 这种半截东西
   check(!/\[表情/.test(t), '没有半个标记泄漏到文字里');
   check(!/\[表$|\[$/.test(t.trim()), '没有以半个标记结尾');
-  check(allImages().length >= 1, `分条后仍然发出了图片（${allImages().length} 张）`);
+  // ⚠️⚠️ 2026-09-20 改：原来是 `>= 1`（**太松，放过了重复**）。
+  //    用户截图报「**一次发了两个一模一样的表情包**」，真身是流式分条那里
+  //    拿 `sentText.length`（**清洗后**的长度）去切原文 buffer → 尾巴被当成新一段又发一遍。
+  //    这段原文里**只有 1 个** `[表情:欢呼]` 标记，所以**发出的图必须正好 1 张**；
+  //    多一张就是那个 bug 回来了。
+  check(allImages().length === 1, `分条后发出了 1 张图（实际 ${allImages().length} 张）`);
   console.log(`     （分了 ${sent.length} 条发送）`);
+
+  // ⚠️ 2026-09-20 加 [5]：**接收侧**认不认得出表情包 —— 字段名各协议端不一样。
+  //    真实踩过（换 LLBot 之后）：只认下划线 `sub_type` → 群友发的表情包被判成"普通图片"，
+  //    于是 ① 提示词里 `[表情包]` 变成 `[图片]`（她以为对方在晒截图，一本正经地捧场）
+  //        ② 表情收集器一张都收不到 ③ 识图缓存会去描述表情包，白花 token。
+  console.log('\n[5] 表情包判定：各协议端的字段名都要认');
+  const seg = (data) => ({ type: 'image', data });
+  check(isStickerSeg(seg({ sub_type: 1 })), 'NapCat 口径 sub_type:1 → 是表情');
+  check(isStickerSeg(seg({ subType: 1 })), 'LLBot ob11 口径 subType:1（驼峰）→ 是表情');
+  check(isStickerSeg(seg({ sub_type: 'sticker' })), "字符串 'sticker'（LLBot 私有 API 口径）→ 是表情");
+  check(!isStickerSeg(seg({ sub_type: 0 })), 'sub_type:0 → 不是表情');
+  check(!isStickerSeg(seg({ subType: 0 })), 'subType:0 → 不是表情');
+  check(!isStickerSeg(seg({})), '没有类型字段 → 不是表情');
+  check(extractText([seg({ subType: 1 })]) === '[表情包]', 'LLBot 口径的表情包在提示词里显示成 [表情包]');
+  check(extractText([seg({ sub_type: 0 })]) === '[图片]', '普通图片在提示词里显示成 [图片]');
 }
 
 async function cleanup() {

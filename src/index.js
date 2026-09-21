@@ -152,6 +152,14 @@ log.info(' QQ AI 机器人启动中');
 log.info(` 连接模式 : ${config.onebot.mode}`);
 // ⚠️ 协议端（2026-09-17 加）：**收发跟它无关**，但它决定"出码/重启"这些管理能力有没有
 log.info(` 协议端   : ${provider.info().label}（管理能力：${Object.entries(provider.info().caps).filter(([, v]) => v).map(([k]) => k).join('/') || '仅收发'}）`);
+// ⚠️ 2026-09-20 加：**接入点被外部覆盖**时明确打出来。
+//    支持命令行参数（`--onebot-url` / `--onebot-token` / `--bot-qq`）和环境变量
+//    （`QQBOT_ONEBOT_URL` / `QQBOT_ONEBOT_TOKEN` / `QQBOT_BOT_QQ`），
+//    优先级：**参数 > 环境变量 > config.yml**。
+//    ⚠️ 没有这一行，"我在 config.yml 里明明改了、怎么不生效"这种问题得查半天。
+if (Array.isArray(config.__overridden) && config.__overridden.length) {
+  log.info(` 外部覆盖 : ${config.__overridden.join('，')}（来自命令行参数 / 环境变量，**优先于 config.yml**）`);
+}
 log.info(` 模型     : ${config.llm.model}`);
 log.info(` 群聊回复 : ${config.trigger.groupChat ? (config.trigger.requireAtInGroup ? '开启（需 @）' : '开启（所有消息）') : '关闭'}`);
 log.info(` 私聊回复 : ${config.trigger.privateChat ? '开启' : '关闭'}`);

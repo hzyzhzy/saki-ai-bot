@@ -10,11 +10,18 @@
   而且**重启之后才发现**。人肉把关不可靠，所以把这道闸写成脚本：
   **不够就 exit 1，根本不动手**。
 
-  ## 为什么必须是 5 分钟
+  ## 时间间隔门槛（⚠️ 2026-09-20 改：300 秒 → 30 秒）
 
-  一次"重启机器人" = **一次新的 QQ 登录**。这个号已经被 QQ 安全中心标成
-  "风险设备"（收到过「设备存在外挂或其他软件影响 QQ 正常使用」的处罚通知），
-  短时间内的会话更迭是风控**最敏感**的特征。
+  原来要求隔 **5 分钟**，理由是「一次重启机器人 = 一次新的 QQ 登录」。
+  **换成 LLBot / SnowLuma 之后这条不成立了**：协议端是**独立进程**，
+  重启机器人 = 机器人**重新连一次它的 OneBot（3001）** —— QQ 那边的登录会话
+  **完全没动**（2026-09-20 实测：一晚重启了十几次，协议端日志里一次 login 都没有）。
+
+  ⚠️ 现在保留的 30 秒只为防「手抖连点」和「新实例还没站稳又被杀」，**不再是风控考虑**。
+  NapCat 时代（注入式）的历史理由留在这里备查：
+  > 一次"重启机器人" = **一次新的 QQ 登录**。这个号已经被 QQ 安全中心标成
+  > "风险设备"（收到过「设备存在外挂或其他软件影响 QQ 正常使用」的处罚通知），
+  > 短时间内的会话更迭是风控**最敏感**的特征。
 
   ## 用法
 
@@ -29,7 +36,7 @@
   这条判据不需要额外落盘，也不怕机器人自己掉线重连（那种情况取最后一条仍然对）。
 #>
 param(
-  [int]$MinGapSec = 300,
+  [int]$MinGapSec = 30,   # ⚠️ 见文件头：LLBot/SnowLuma 时代重启机器人不是 QQ 登录，30 秒只为防连点
   [switch]$CheckOnly,
   [switch]$Force
 )
@@ -105,6 +112,23 @@ if ($list.Count -eq 0) {
   Start-Sleep -Seconds 15
   $list = @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
     Where-Object { $_.CommandLine -match $pat -and $_.ProcessId -ne $PID -and $_.CommandLine -notmatch 'runner\.js' })
+}
+# ⚠️⚠️ 2026-09-20 加：**看门狗没在跑时，自己把它拉起来**。
+#    为什么要加：管理界面上的「重启机器人」按钮就是调这个脚本 ——
+#    而看门狗经常没在跑（2026-09-20 白天它就不在）⇒ 少了这段，
+#    点一次按钮的结果是**机器人被停掉、然后没人补**，比不点还糟 ✗
+if ($list.Count -eq 0) {
+  Write-Host '看门狗没在跑（没人补）—— 自己用 WMI 拉起一个…' -ForegroundColor Yellow
+  $r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
+    CommandLine = 'cmd.exe /c _run-bot.bat'; CurrentDirectory = $root
+  }
+  Write-Host ("  已用 WMI 启动（返回 {0}）" -f $r.ReturnValue)
+  for ($i = 0; $i -lt 20; $i++) {
+    Start-Sleep -Seconds 2
+    $list = @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
+      Where-Object { $_.CommandLine -match $pat -and $_.ProcessId -ne $PID -and $_.CommandLine -notmatch 'runner\.js' })
+    if ($list.Count -ge 1) { break }
+  }
 }
 $color = if ($list.Count -eq 1) { 'Green' } else { 'Red' }
 Write-Host ("实例数：{0}（必须是 1）" -f $list.Count) -ForegroundColor $color

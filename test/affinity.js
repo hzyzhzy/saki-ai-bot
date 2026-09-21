@@ -70,23 +70,36 @@ console.log('\n【1】默认值与范围（用户指定：默认 50，0~100）')
 {
   aff.__clear();
   check(aff.DEFAULT_AFFINITY === 50, '默认值 = 50');
-  check(aff.MIN_AFFINITY === 0 && aff.MAX_AFFINITY === 100, '范围 = 0~100');
+  // ⚠️ 2026-09-20：上限改成**无限**了（用户要求「把好感度上限修改为无限」）
+  check(aff.MIN_AFFINITY === 0 && aff.MAX_AFFINITY === Infinity, '下限 0、**上限无限**');
   check(aff.get(A) === 50, '没记录过的人 → 返回默认 50');
   check(aff.status().tracked === 0, '只是**读**一下不该产生记录（不写盘）');
 }
 
-console.log('\n【2】能调，而且有上下限');
+console.log('\n【2】能调：**有下限、但不封顶**');
 {
   aff.__clear();
   // 用 force 绕过单次/每日的夹取，专门验"范围"
   aff.adjust(A, 100, { force: true });
-  check(aff.get(A) === 100, `加满 → 100（实际 ${aff.get(A)}）`);
+  check(aff.get(A) === 150, `不封顶：50 + 100 = 150（实际 ${aff.get(A)}）`);
   aff.adjust(A, 100, { force: true });
-  check(aff.get(A) === 100, '再加也不会超过 100');
+  check(aff.get(A) === 250, `还能继续往上（实际 ${aff.get(A)}）`);
   aff.adjust(A, -500, { force: true });
   check(aff.get(A) === 0, `减到底 → 0（实际 ${aff.get(A)}）`);
   aff.adjust(A, -10, { force: true });
   check(aff.get(A) === 0, '再减也不会低于 0');
+
+  // ⚠️⚠️ 2026-09-20 加（用户要求：「**二级剧情加的好感度不被每日好感度限制所限制**」）：
+  //    `force: true` 必须**不消耗每日额度** —— 剧情加分走的就是这条路。
+  //    （回归价值：以后谁要是把 `force` 的实现改坏了，"剧情加不了分"就会在这里先炸。）
+  aff.__clear();
+  const before = aff.dailyLeft(A);
+  aff.adjust(A, 3, { force: true });
+  aff.adjust(A, 3, { force: true });
+  check(aff.dailyLeft(A) === before, `force 不吃每日额度（前后都是 ${before}）`);
+  aff.__clear();
+  aff.adjust(A, 3);
+  check(aff.dailyLeft(A) === before - 3, `不加 force 才吃额度（${before} → ${aff.dailyLeft(A)}）`);
 }
 
 console.log('\n【3】★ 单次幅度和每日总量有上限（防"聊一句就暴涨"）');
@@ -185,7 +198,9 @@ console.log('\n【6】注入的内容要合格（别让她把数字说出来）'
   aff.adjust(A, 3, { force: true });
   const line = aff.promptLine(A, { isOwner: false, name: '小夏' });
   check(line.includes('小夏'), '点名了是谁');
-  check(/\d+\/100/.test(line), '给了数值（她自己心里要有数）');
+  // ⚠️ 2026-09-20：上限改无限之后，提示词里**不再写 `/100`**（那会让她以为满分就是 100）。
+  //    只要给得出具体数值就行。
+  check(/\d+/.test(line) && !/\/100/.test(line), '给了数值，而且不写 /100（上限无限）');
   check(/不许说出数字|别说出来/.test(line), '★ 明确要求**不许说出数字**');
   check(/好感度/.test(line) && /别说|出戏/.test(line), '也要求不许提「好感度」这个词');
   check(/HZY/.test(line), '★ 写明"管不到 HZY"（优先级约束传达到了）');

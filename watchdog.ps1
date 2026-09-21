@@ -32,7 +32,16 @@ try {
 
 function Say($msg) {
   $line = "[{0}] {1}" -f (Get-Date -Format 'HH:mm:ss'), $msg
-  Write-Host $line
+  # ⚠️⚠️ 2026-09-20 修：**没有控制台时 `Write-Host` 会抛异常**，
+  #    而 Say 是在 while 循环里调的 → 异常**直接终止整个看门狗**。
+  #    实测（用户报「被踢了没人自动补」→ 查到的）：
+  #      · `Invoke-CimMethod Win32_Process Create` 起 `powershell -File watchdog.ps1`
+  #        （**无窗口**）→ 进程存在过、5 秒后就没了，`watchdog.log` **一行都没写**；
+  #      · 同一条命令**在前台跑**（有控制台）→ 横幅、协议端行都正常，活得好好。
+  #    16:56 那次日志停在「协议端：llonebot」也是这个 —— 它写完那句就死在循环里了。
+  #    ⇒ 两句都包 try/catch：**日志文件才是记录主体**，控制台只是顺带。
+  #    （原来只有 `Add-Content` 在 try 里，`Write-Host` 裸着 —— 这就是根因。）
+  try { Write-Host $line } catch {}
   try { Add-Content -Path $LogFile -Value $line -Encoding UTF8 } catch {}
 }
 
@@ -320,8 +329,49 @@ $lastQuickLogin = [datetime]::MinValue
 #    10 分钟内不重复（重启 = 一次登录，这台机器的号已被标风险设备）
 $lastFakeOnlineRestart = [datetime]::MinValue
 
+# ⚠️⚠️ 2026-09-20 加：**协议端换成 LLBot 了**（NapCat 的快速登录凭据被腾讯作废、
+#    每次被踢都得扫码，所以改用不注入 QQ 客户端的 LLBot）。
+#    ⚠️ LLBot 的 OneBot 也用 **3001** —— 所以这一版看门狗**绝不能再"发现 3001 不在就去拉 NapCat"**：
+#      那会把 NapCat 拉回来抢 3001，两个协议端互相打架
+#      （2026-09-20 实测踩到：QQ 被反复拉起、清都清不干净）。
+#    做法：读 config.yml 的 `provider.name`；是 `llonebot` 就只走下面那个**只保机器人**的简单模式，
+#    其余（`napcat` / 没写 / 任何别的）**完全按老逻辑跑** —— 退路保留。
+#    ⚠️ 用"先找 `provider:` 行、再看它下面几行的 `name:`"，而不是全文件搜 `name:`
+#      （配置文件里别处也可能有 `name:`，那样会读错）。
+function Get-ProviderName {
+  $f = Join-Path $BotDir 'config.yml'
+  $lines = @(Get-Content $f -ErrorAction SilentlyContinue)
+  for ($i = 0; $i -lt $lines.Count; $i++) {
+    if ($lines[$i] -match '^provider:\s*$') {
+      for ($j = $i + 1; $j -lt [Math]::Min($i + 6, $lines.Count); $j++) {
+        if ($lines[$j] -match '^\s+name\s*:\s*[''""]?([A-Za-z]+)') { return $Matches[1].ToLower() }
+      }
+      return ''
+    }
+  }
+  return ''
+}
+$ProviderName = Get-ProviderName
+Say "协议端：$ProviderName（只有 napcat 才由看门狗代管；其它一律只保机器人、不碰协议端）"
+
 while ($true) {
   Start-Sleep -Seconds $CheckSeconds
+
+  # ⚠️⚠️ 2026-09-20 改：**只有 napcat 才走下面那套 NapCat 自愈**。
+  #    原来写的是「`-eq 'llonebot'` 才走这个"只保机器人"的分支」——
+  #    换成 **SnowLuma** 之后它不匹配，就**落到下面的 NapCat 分支**里去了
+  #    ⇒ **看门狗会跑去启动/重启 NapCat**（用户根本没在用它）✗
+  #    ⇒ 反过来写：**不是 napcat，就只保机器人、绝不碰协议端**。
+  #    协议端自己在跑，掉线要在**它自己的界面**里弄回来 —— 我们只如实提醒，不假装能自愈。
+  if ($ProviderName -ne 'napcat') {
+    if (-not (Test-NapCat)) {
+      Say "⚠️ 3001 没有监听 —— 协议端（$ProviderName）没在跑，去它自己的界面启动"
+    } elseif (-not (Test-Bot)) {
+      Say '❌ 机器人进程不在了，重新拉起'
+      Start-Bot | Out-Null
+    }
+    continue
+  }
 
   if (-not (Test-NapCat)) {
     # ⚠️⚠️ 2026-09-13 修：**「在等扫码」和「挂了」是两种状态，别混**。
@@ -434,6 +484,45 @@ while ($true) {
     # ⚠️ 返回的是对象：state = online/offline/stale/unknown，hasCred = 快登凭据还在不在
     $qq = Test-QQOnline
     $qqDead = ($qq.state -eq 'offline') -or ($qq.state -eq 'stale')
+
+    # ⚠️⚠️ 2026-09-20 加（用户要求：「**被踢之后就自动使用备份登录一次**，
+    #    **登录失败就自动删掉备份然后显示二维码**」）：
+    #    `hasCred = $false`（探针报 `nocred`）= **本地快登凭据已被腾讯清掉**。
+    #    这时先把**备份放回去试一次** —— 放回去之后，下面那套「快登 / 重启 NapCat」
+    #    就又有凭据可用了（凭据没了的话它们怎么试都没用）。
+    #    ⚠️ **只在这一次进程里试一遍**（`$script:CredTried`）：恢复完仍然没凭据，
+    #      说明备份也废了 → 删掉它 + 叫人扫码。留着只会让我们每 20 秒拿废凭据去撞风控。
+    #    ⚠️ 正常情况（`hasCred = $true`）整段**完全不执行**，不影响现有自愈逻辑。
+    # ⚠️⚠️ 2026-09-20 **实测修**：判断条件**不能只看 `$qqDead`** ——
+    #    凭据真的失效时，NapCat 的状态往往是 **`unknown`**
+    #    （`isLogin` 不是 true、`loginError` 又是空的 → `classify()` 归到 unknown），
+    #    于是 `offline` / `stale` 两个词都套不上 → 恢复逻辑**压根不执行** ✗
+    #    （01:44 那次实测：`unknown:nocred`，看门狗什么也没做，机器人干等到现在）
+    #    ⇒ 改成：**只要"不是 online"且"没有快登凭据"**，就值得拿备份试一次。
+    $qqNoCred = (-not $qq.hasCred) -and ($qq.state -ne 'online')
+    if ($qqNoCred) {
+      if (-not $script:CredTried) {
+        $script:CredTried = $true
+        # ⚠️ 取**最后一行**匹配：`src/config.js`/`log.js` 的日志可能混进 stdout
+        $credOut = & node (Join-Path $BotDir 'tools\napcat-cred.mjs') restore 2>$null | Select-Object -Last 5
+        if (($credOut -join ' ') -match '(^|\s)ok(\s|$)') {
+          Say '🔑 快登凭据没了 → 已用备份恢复一次，重新判一次在线状态'
+          Start-Sleep -Seconds 2
+          $qq = Test-QQOnline
+          $qqDead = ($qq.state -eq 'offline') -or ($qq.state -eq 'stale')
+          # ⚠️ 恢复完必须**重算**这个，否则下面那个"删备份"分支会拿旧值把好备份也删掉
+          $qqNoCred = (-not $qq.hasCred) -and ($qq.state -ne 'online')
+          if (-not $qqDead) { $qqOfflineCount = 0 }
+        } else {
+          Say "⚠️ 备份恢复没成功：$($credOut -join ' ')"
+        }
+      }
+      if ($qqNoCred -and -not $script:CredCleared) {
+        $script:CredCleared = $true
+        & node (Join-Path $BotDir 'tools\napcat-cred.mjs') clear 2>$null | Out-Null
+        Say '🗑️ 备份也失效了 → 已删除备份。现在只能扫码登录（NapCat 窗口 / 管理界面出码）'
+      }
+    }
     if ($qqDead) {
       $qqOfflineCount++
       $why = if ($qq.state -eq 'stale') { 'QQ 卡死了（登录态已作废，NapCat 报"已登录,无法重复登录"）' } else { 'QQ 离线了' }

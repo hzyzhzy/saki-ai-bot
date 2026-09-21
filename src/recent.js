@@ -109,13 +109,26 @@ export function reload() {
     const n = [...next.values()].reduce((a, l) => a + l.length, 0);
     if (n) log.info(`[上下文] 重启恢复：${next.size} 个群 / ${n} 条（只恢复 12 小时内的）`);
   } catch (e) {
-    log.debug(`上下文读取失败（当作空的）：${e.message}`);
+    // ⚠️⚠️ 2026-09-20 改 `debug` → **`warn`**：这条原来是 debug，而 `logLevel: info`
+    //    ⇒ **它永远不会落盘** —— 于是"重启恢复没生效"这种事故**完全查不到原因**
+    //    （实测：`state/recent.json` 里明明有 5 条、过滤条件也全满足，
+    //      `reload()` 却恢复 0 条，而日志里一个字都没有。）
+    log.warn(`[上下文] 读取失败（当作空的）：${e.message}`);
   }
 }
 
-// ⚠️ 模块加载时就恢复（和 `tic.js` / `meal.js` 同一个做法）——
-//    不在这里调的话，重启后 `store` 仍是空的，上面那段落盘就白做了。
-reload();
+// ⚠️⚠️ 2026-09-20 修（用户问「重启能不能不忘记上下文？」—— 一查发现**从来没生效过**）：
+//
+//    原来 `reload()` 就调在这一行（模块顶层靠前的位置），可是它内部用到了
+//    `const BUFFER_MAX`（`slice(-BUFFER_MAX)`），而那个常量定义在**文件后半段**。
+//    `const` **不提升**（TDZ）→ 每次都抛
+//      `Cannot access 'BUFFER_MAX' before initialization`
+//    → 被 catch 里的 `log.debug` 吞掉（而 `logLevel: info` ⇒ **永远不落盘**）
+//    → 表现就是：`state/recent.json` 里明明有 5 条、过滤条件也全满足，
+//      重启后她却说「没上下文，不明指向」，而日志里一个字都没有。
+//
+//    ⇒ 调用**挪到文件末尾**（那时所有常量都已初始化）。
+//    ⚠️ 别再挪回上面 —— 这个坑没有报错、没有日志，只能靠"她怎么又失忆了"发现。
 
 /**
  * 语气记录：`group_id -> { challenges, at }`
@@ -284,12 +297,53 @@ export function remember(event, parsed = {}) {
   // 纯图片消息也记一笔，让模型知道刚才有人发过图
   if (!text) text = '（发了一张图）';
 
+  // ⚠️⚠️ 2026-09-20 加（用户抓到的真实案例：**她把「白天」记到错的人头上**）：
+  //
+  //    上下文里引用只显示成 `[引用#-795241984]` —— 模型**看不到被引的是谁、说了什么**，
+  //    于是几轮之后就把话归错人。真实链条（群 200000006）：
+  //      羽衫: 可是我这边是白天诶          ← 「白天」是**羽衫**说的
+  //      …（她正确接了两轮）…
+  //      26无线电讯号: 睡觉了 / 她说「白天还睡觉啊」
+  //      26无线电讯号: [引用#-795241984] 你跑美国了是吧   ← 引用的其实是**她自己**那句话
+  //      她: 谁跑美国了（**是你说白天**，我才问的 ✗      ← 归错人了
+  //
+  //    ⚠️ 用户还提了「为什么不能把编号换成群昵称加编号」——
+  //       我们的做法**比那个更好**：能查到就显示「**引用谁说的 + 原文**」。
+  //    ⚠️⚠️ 2026-09-20 再改：**优先用调用方查好的**（`bot.fetchQuoted()` 走 OneBot 的
+  //       `get_msg`，连**不在本地缓冲里**的消息也能拿到"谁说的 + 原文"）；
+  //       查不到才退回本地缓冲查找。显示见 `contextText()`。
+  let replyTo = null;
+  {
+    const segs0 = Array.isArray(event.message) ? event.message : [];
+    const rid = String(segs0.find((s) => s && s.type === 'reply')?.data?.id ?? '').trim();
+    const given = parsed.replyTo;
+    if (given && (given.name || given.text)) {
+      replyTo = {
+        id: rid || String(given.id ?? ''),
+        self: given.self === true || given.fromBot === true,
+        name: String(given.name ?? ''),
+        text: String(given.text ?? '').slice(0, 60),
+      };
+    } else if (rid) {
+      const hit = list.find((m) => m.messageId && String(m.messageId) === rid);
+      replyTo = hit
+        ? {
+            id: rid,
+            self: hit.self === true,
+            name: String(hit.name ?? ''),
+            text: String(hit.text ?? '').slice(0, 60),
+          }
+        : { id: rid }; // 不在缓冲里 → 只留 id（显示成编号，聊胜于无）
+    }
+  }
+
   list.push({
     name: event.sender?.card || event.sender?.nickname || String(event.user_id),
     userId: String(event.user_id),
     // ⚠️ 记 message_id：剔除「当前这条」时靠它，别靠文本比对（见 contextText 的注释）
     messageId: event.message_id !== undefined ? String(event.message_id) : '',
     text,
+    replyTo,
     atMe: parsed.isAtMe === true,
     time: Date.now(),
     // ⚠️⚠️ 把图片的 `file` 也存下来（2026-09-13 加）。
@@ -366,6 +420,38 @@ export function recentImages(groupId, opts = {}) {
  *      （见 `isOwnMessage` / `bot.isQuoteOfMe`）。能拿到就传 —— 拿不到也只是
  *      少一条兜底（主力判据是 `bot.myMsgIds`）。
  */
+/**
+ * 回填「这条消息引用的是谁、说了什么」—— 由 `bot.js` 查完 `get_msg` 之后调用。
+ *
+ * ⚠️⚠️ 2026-09-20 加这个函数的原因（**是我自己引入的回归**）：
+ *    我一开始是在 `onRaw` 里先 `await fetchQuoted(payload)` **再** `remember` ——
+ *    结果**"记上下文"被一次网络调用拖慢**，而 `handle` 是异步的：
+ *    用户连发两条时，第二条刚发出、`remember` 还没跑完，**她就已经在读上下文生成回复了**
+ *    ⇒ 表现就是「**没读到上文**」。真实案例（群 200000001，01:06）：
+ *      HZY 发「对」→ 紧接着「f3加f4也可以调」；她只看到前者，
+ *      回成「对什么对，都困得只会说单字了（」—— 完全没接 MC 那个话题。
+ *    ⇒ 所以改成：**先立刻 `remember`（不等查询）**，查到了再用这个函数**回填**。
+ *    ⚠️ 代价：本条消息**自己**的引用信息会晚几十毫秒；但"**别人引用她**"的那些
+ *      早在别人发消息时就存好了，回答时用不到本条自己的引用 —— 不影响。
+ */
+export function fillReplyInfo(groupId, messageId, info) {
+  if (!info) return false;
+  const list = store.get(String(groupId));
+  if (!list?.length) return false;
+  const id = String(messageId ?? '');
+  if (!id) return false;
+  const hit = list.find((m) => m.messageId && String(m.messageId) === id);
+  if (!hit) return false;
+  hit.replyTo = {
+    id: hit.replyTo?.id || '',
+    self: info.self === true,
+    name: String(info.name ?? ''),
+    text: String(info.text ?? '').slice(0, 60),
+  };
+  scheduleSave();
+  return true;
+}
+
 export function rememberBot(event, text, messageId = '') {
   if (!config.context?.enable) return;
   if (event.message_type !== 'group') return;
@@ -464,7 +550,21 @@ export function contextText(groupId, excludeText = '', excludeIds = [], opts = {
     //      所以这纯粹是"她模仿了占位符"，不是复读功能的问题。）
     //    ⇒ 给模型看的文本里**别用方括号**，直接说人话：`（发了张图）`。
     //      这样她学不到"方括号=标记"这个错概念；真要发表情，写法由表情清单单独教。
-    const body = String(m.text ?? '').replace(
+    // ⚠️⚠️ 2026-09-20 加：把 `[引用#id]` 换成**看得懂**的（被引内容在 remember() 里就存好了）。
+    //    案例见 `remember()` 里那段注释：别人引用**她自己**说的话，而她的上下文里只有
+    //    一个编号 ⇒ 看不到引的是谁 ⇒ 把「白天」归错了人。
+    let body = String(m.text ?? '');
+    if (m.replyTo?.id) {
+      const who = m.replyTo.self
+        ? '【引用你自己说的】'
+        : m.replyTo.name
+          ? `【引用${m.replyTo.name}说的】`
+          : '【引用】';
+      const quote = m.replyTo.text ? `：${m.replyTo.text}` : `（#${m.replyTo.id}）`;
+      body = `${who}${quote} ${body.replace(/\[引用#[^\]]*\]/g, '').trim()}`.trim();
+    }
+    // ⚠️ 方括号占位符一律换成人话（她照着上下文学方括号那个坑，见下面的长注释）
+    body = body.replace(
       /\[(图片|照片|表情包|动画表情|动图|贴纸|gif|sticker|img|image)\]/gi,
       '（发了张图）',
     );
@@ -643,3 +743,9 @@ export function stats() {
   for (const list of store.values()) total += list.length;
   return { groups: store.size, messages: total };
 }
+
+// ⚠️⚠️ **恢复必须放在文件最后** —— 见上面那段「2026-09-20 修」的注释：
+//    `reload()` 内部用 `const BUFFER_MAX`，而它定义在上面（253 行附近）。
+//    放在它前面会抛 TDZ（`Cannot access 'BUFFER_MAX' before initialization`），
+//    而且**没有任何日志**，只会表现为"重启又失忆了"。
+reload();

@@ -165,7 +165,15 @@ console.log('\n【4】★ 接线：界面和后端都必须带 `fresh=1` / 走�
     /过期\|刷新/.test(qrRoute),
     '★ NapCat 说「二维码已过期」时也会自动重出',
   );
-  check(/napcat\.qrcodeFile\(\)/.test(qrRoute), '优先用 NapCat 那张原图');
+  // ⚠️ 2026-09-20 改：这条原来匹配字面量 `napcat.qrcodeFile()`。换 LLBot 之后路由改成
+  //    **按协议端分派**（`const qs = provider.name() === 'llonebot' ? llbot : napcat`），
+  //    字面量就没了 → 套件误报失败（代码其实是对的）。
+  //    断言的本意是「**优先用协议端自己写的那张原图**，而不是自己按 URL 画」——
+  //    所以认 `qs.` / `napcat.` / `llbot.` 三种前缀。
+  check(
+    /(qs|napcat|llbot)\.qrcodeFile\(\)/.test(qrRoute),
+    '优先用协议端写的那张原图（NapCat 的 qrcode.png / LLBot 的 login-qrcode.png）',
+  );
   check(/width:\s*640/.test(qrRoute), '自己画时画大一点（640，不是 420）');
   check(/margin:\s*2/.test(qrRoute), '静区留 2 个模块（原来 1 太窄）');
   check(/'POST \/api\/qq\/refresh-qr'/.test(js), '新增了轻量出码接口 /api/qq/refresh-qr');
