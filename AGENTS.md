@@ -169,23 +169,23 @@ git revert <sha>              # 整次提交退回去（留记录，比 reset �
 ## 🌐 这机器上 **GitHub 必须走代理**（2026-09-17 实测）
 
 - `hosts` 里 `github.com` / `api.github.com` / `raw.githubusercontent.com` / `github.io`
-  等一大串指向了 `127.0.0.1` —— **用户说这大概率是代理软件（Clash）自己写进去的**，
+  等一大串指向了 `203.0.113.10` —— **用户说这大概率是代理软件（Clash）自己写进去的**，
   所以**代理非正常退出时，那些条目和系统代理会留下** →
   表现就是「代理明明关了/挂了，GitHub 反而还是连不上」。
   遇到这种情况：**先看系统代理和 hosts，而不是怀疑 GitHub 或 git**。
-- Clash 在跑时（`127.0.0.1:7890` 在听）这样推：
+- Clash 在跑时（`203.0.113.10` 在听）这样推：
 
 ```powershell
 cd '<项目目录>\qq-ai-bot-public'
-git -c http.proxy=http://127.0.0.1:7890 -c https.proxy=http://127.0.0.1:7890 push -u origin main
+git -c http.proxy=http://203.0.113.10 -c https.proxy=http://203.0.113.10 push -u origin main
 ```
 
 - ⚠️ **不要写进 `git config --global`** —— 代理一关，之后所有 git 操作都会卡死。
   用 `-c` 一次性传（或者只写进这一个仓库的 local config）。
-- 查 GitHub API 也一样：`Invoke-RestMethod ... -Proxy http://127.0.0.1:7890`。
+- 查 GitHub API 也一样：`Invoke-RestMethod ... -Proxy http://203.0.113.10`。
 - ⚠️ 我这边 `git push` 报 **exit code 1 但其实是成功** —— PowerShell 会把 git 写到
   stderr 的进度行当成错误记录。**看 `main -> main` 那行**，别只看退出码。
-- 公开副本远端：`https://github.com/hzyzhzy/saki-ai-bot`（**只有公开副本能推**；
+- 公开副本远端：`https://github.com/<主人>/saki-ai-bot`（**只有公开副本能推**；
   live 那份（`qq-ai-bot/`）**永远不加 remote**）。
 
 ### 🚦 推之前先给用户过一眼「推哪些 / 排除哪些」（2026-09-17 用户定）
@@ -363,7 +363,7 @@ Start-Sleep -Seconds 8
 Get-Content logs\bot.log | Select-String -Pattern '知识库|已连接|已登录'
 ```
 
-看到「已连接到 NapCat」+「已登录 QQ」就是好了，**这时就告诉用户可以测**。
+看到「已连接到协议端」+「已登录 QQ」就是好了，**这时就告诉用户可以测**。
 
 #### ✅ 正确顺序（2026-09-15 晚起用这个）
 
@@ -377,7 +377,7 @@ Get-Content logs\bot.log | Select-String -Pattern '知识库|已连接|已登录
 
 1. **按 PID** 杀掉机器人（绝不按名字杀，见下）；
 2. **等 10~15 秒，先看门狗**：它多半会自己补一个。
-   - 补上了 → **就用它的，我不要自己再起**（它还会等"已连接到 NapCat"）；
+   - 补上了 → **就用它的，我不要自己再起**（它还会等"已连接到协议端"）；
    - 没补 → 这才自己 `_run-bot.bat`。
 3. **最后必须数实例数，必须是 1**：
    ```powershell
@@ -429,7 +429,7 @@ Get-Content logs\bot.log | Select-String -Pattern '知识库|已连接|已登录
 - 🚫 **不许**说「不用扫码就登上了」「直接用缓存登录态登的」这种话
 - 🚫 也不许反过来断言「这次肯定要扫码」
 - ✅ 能说的只有**我能验证的**：进程在不在、3001/6099 在不在听、
-  机器人日志有没有「已连接到 NapCat」、`node tools/napcat-state.mjs` 报什么
+  机器人日志有没有「已连接到协议端」、`node tools/napcat-state.mjs` 报什么
   （`online:nocred` 只说明"在线 + 本地凭据是空的"，**推不出登录方式**）
 - 想确认登录方式，**问用户**（他看得见那个窗口）
 
@@ -449,7 +449,7 @@ Get-Content logs\bot.log | Select-String -Pattern '知识库|已连接|已登录
    ├─ 在跑   → 直接进第 ②
    └─ 没在跑 → 启动 NapCat，等它就绪（最多 90 秒），再进第 ②
 ② 启动机器人
-③ 确认日志里出现「已连接到 NapCat」+「已登录 QQ」
+③ 确认日志里出现「已连接到协议端」+「已登录 QQ」
 ④ 告诉用户可以测了（顺带说明管理界面地址）
 ```
 
@@ -464,7 +464,7 @@ qq-ai-bot\一键启动（QQ+机器人）.bat /n      不打开（脚本化调用
 底层是 `start-all.ps1`，它会：
 1. 检查 3001 端口 → 没在跑就**先关掉残留 QQ** 再启动 NapCat，等它就绪（最多 90 秒）
 2. 按 PID 停掉旧的机器人进程（不会误伤别的 node）
-3. 启动机器人并轮询日志，确认出现「已连接到 NapCat」
+3. 启动机器人并轮询日志，确认出现「已连接到协议端」
 4. 打印管理界面地址和日志路径
 
 **从零启动实测 5.4 秒**（NapCat 已在跑的情况）。
@@ -504,7 +504,7 @@ $c = [System.IO.File]::ReadAllText($p) -replace "`r`n","`n" -replace "`n","`r`n"
 ```
 
 **5. `timeout /t N` 在标准输入被重定向的环境下会报错**（「Input redirection is not supported」）。
-用 `ping -n N -w 1000 127.0.0.1 >nul` 代替。
+用 `ping -n N -w 1000 203.0.113.10 >nul` 代替。
 
 **6. `chcp 65001` 之后，命令行里的 `>` 重定向和硬编码的中文路径可能出问题。**
 `_run-bot.bat` 里用的是相对路径 `logs\bot.log`，够用。
@@ -555,9 +555,9 @@ node src/index.js
 ```
 [..] INF 已加载表情库 N 张：...
 [..] INF 连接成功
-[..] INF 已连接到 NapCat，等待消息…
+[..] INF 已连接到协议端，等待消息…
 [..] INF 已登录 QQ: 10000002
-[..] INF  管理界面: http://127.0.0.1:3099
+[..] INF  管理界面: http://203.0.113.10
 ```
 
 ---
@@ -830,7 +830,7 @@ node test/tic.js          # 口癖节流（同一个开场白反复出现时抑�
 node test/punctuation.js  # 聊天里不用的标点（破折号→逗号）+ 破折号处要分条
 node test/cooldown.js     # 主动接话冷却按群隔离 + 「收紧度≤2 跳过 judge」没被误删
 node test/join-scope.js   # 「能在哪些群主动搭话」读 allowGroups（不再看废弃的 chat.group）
-node test/at-other.js     # 「@ 的是别人别插嘴」—— at 段 + **文本形态**（`@HZY 给个服世界地图。`）两种都要拦
+node test/at-other.js     # 「@ 的是别人别插嘴」—— at 段 + **文本形态**（`@<主人> 给个服世界地图。`）两种都要拦
 node test/quote.js        # ★「引用」两条规矩：引用她=直接对她说话；间隔≥4条就该引用；引用够了**不许再补 @**（余额见底那条 @ 不许动）
 node test/tone.js         # 「别一直质疑对方」—— 连着抬杠的计数 + ≥2 才注入"这句接住"
 node test/watchdog-state.js # 看门狗判「QQ 在不在线」：★「已登录,无法重复登录」是**卡死**不是在线
@@ -867,7 +867,7 @@ node test/ask-attitude.js
 | 日志说「已登录,无法重复登录」但其实收不到消息 | ⚠️ **卡死态**（登录态被作废，QQ 核心还攥着旧会话）。跑 `node tools/napcat-state.mjs` 看是不是 `stale` —— 是就重启 NapCat；`stale:nocred` 则只能扫码 |
 | 扫码页显示「二维码已过期，请刷新」 | 正常（刚重启完就是这样）。3099 点「显示二维码」会刷一张新的 |
 | 用户说「QQ 又连不上」 | 用户自己开了 QQ，那个实例没有 NapCat（NapCat 只在启动时注入） |
-| 浏览器打不开 3099 | 换 `127.0.0.1` / `localhost` / `[::1]` 试（已做双栈）；还不行看有没有代理软件劫持回环 |
+| 浏览器打不开 3099 | 换 `203.0.113.10` / `localhost` / `[::1]` 试（已做双栈）；还不行看有没有代理软件劫持回环 |
 | 表情图纸空白 | 图片文件丢了，看启动警告 |
 | 测试脚本 `ECONNREFUSED 3001` | 机器人占着连接，先停它 |
 | 看门狗窗口反复刷 `Cannot validate argument on parameter 'ArgumentList'` + 「等了 90 秒 NapCat 仍未监听 3001」 | **空数组传给了 `Start-Process -ArgumentList`**：`@()` 会抛异常，命令直接中断 → NapCat **压根没被启动**（2026-09-17 修的 `watchdog.ps1`；同一次还修了它读 `config.yml` **不认单引号** `botQQ: '10000002'` 的 bug）。⚠️ 这个坑 `start-all.ps1` 09-15 就修过，watchdog 那份漏了 —— **两个脚本都要看** |

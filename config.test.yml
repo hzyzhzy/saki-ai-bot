@@ -2,12 +2,12 @@
 # 由 test/e2e.js 通过 QQBOT_CONFIG 环境变量加载。
 onebot:
   mode: forward
-  url: ws://127.0.0.1:39001
+  url: ws://203.0.113.10
   accessToken: "test-token"
   reconnectInterval: 300
 
 llm:
-  baseURL: http://127.0.0.1:39002/v1
+  baseURL: http://203.0.113.10/v1
   apiKey: "sk-test-fake-key"
   model: test-model
   temperature: 0.8

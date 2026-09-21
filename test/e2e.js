@@ -149,7 +149,7 @@ const received = []; // 机器人发回来的 API 调用
 let botSocket = null;
 let connected = false;
 
-const wss = new WebSocketServer({ port: WS_PORT, host: '127.0.0.1' });
+const wss = new WebSocketServer({ port: WS_PORT, host: '203.0.113.10' });
 
 wss.on('connection', (ws, req) => {
   const auth = req.headers.authorization ?? '';
@@ -257,10 +257,10 @@ const sentTexts = () =>
 let bot = null;
 
 async function main() {
-  await new Promise((r) => llmServer.listen(LLM_PORT, '127.0.0.1', r));
+  await new Promise((r) => llmServer.listen(LLM_PORT, '203.0.113.10', r));
   await new Promise((r) => (wss._server.listening ? r() : wss.once('listening', r)));
-  console.log(`\n假模型服务: http://127.0.0.1:${LLM_PORT}/v1`);
-  console.log(`假 NapCat : ws://127.0.0.1:${WS_PORT}\n`);
+  console.log(`\n假模型服务: http://203.0.113.10:${LLM_PORT}/v1`);
+  console.log(`假 NapCat : ws://203.0.113.10:${WS_PORT}\n`);
 
   console.log('[1] 启动机器人子进程');
   // stdio 交给父进程用的管道，这里设为 ignore 以免和测试输出互相干扰
@@ -269,9 +269,9 @@ async function main() {
     env: {
       ...process.env,
       QQBOT_CONFIG: 'config.test.yml',
-      // ⚠️ 排除本机代理：假模型/假 NapCat 都跑在 127.0.0.1，
+      // ⚠️ 排除本机代理：假模型/假 NapCat 都跑在 203.0.113.10，
       //    如果 shell 里设了 NODE_USE_ENV_PROXY，不加这个假模型请求会走代理而失败
-      NO_PROXY: '127.0.0.1,localhost,::1',
+      NO_PROXY: '203.0.113.10,localhost,::1',
     },
     stdio: ['ignore', 'ignore', 'ignore'],
   });
@@ -409,13 +409,13 @@ async function main() {
   check(llmCalls.length === callsBefore, '「清空对话」没有浪费一次模型调用');
 
   // ─────────────────────────────────────────────────────────────────
-  console.log('\n[7] `/好感度` 群命令（HZY 报「发了没回复」，2026-09-15 修）');
+  console.log('\n[7] `/好感度` 群命令（<主人> 报「发了没回复」，2026-09-15 修）');
   //
   // ⚠️⚠️ 这套断言能成立，靠的是 `config.test.yml` 的**默认档位**：
   //    它只写了 `requireAtInGroup: true`，没有 `respondTo` / `groupRespondTo`，
   //    也没有 `chat:` 段 → `resolveRespondTo()` = **3（只认 @）**，
   //    `chat.enable` 是关的。
-  //    也就是说：这正是 HZY 那个"发了石沉大海"的场景 ——
+  //    也就是说：这正是 <主人> 那个"发了石沉大海"的场景 ——
   //    命令原来挂在 `shouldJoinChat()` 里，被"档位 3"和"chat.enable=false"
   //    两道与它无关的闸门挡掉了，而且**一道日志都不留**。
   {

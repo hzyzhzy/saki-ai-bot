@@ -22,7 +22,7 @@
  *     name: llonebot                 # napcat | llonebot | onebot
  *     dir: D:\LLBot                  # 启动/守护脚本要用（可选）
  *     launcher: LLBot.exe            # 相对 dir 或绝对路径（可选）
- *     manageUrl: http://127.0.0.1:3080   # 它自己的管理界面（只用于在界面上给你个链接）
+ *     manageUrl: http://203.0.113.10   # 它自己的管理界面（只用于在界面上给你个链接）
  *   ```
  *   ⚠️ **收发那部分不用改**：`onebot.url` + `onebot.accessToken` 保持指向新协议端的 WS 服务端即可。
  */
@@ -40,7 +40,7 @@ const REGISTRY = {
     label: 'NapCat',
     defaultDir: () => join(ROOT, '..', 'napcat', 'NapCat.Shell'),
     defaultLauncher: 'launcher-win10-user.bat',
-    defaultManageUrl: () => `http://${config.napcat?.webuiHost ?? '127.0.0.1'}:${config.napcat?.webuiPort ?? 6099}`,
+    defaultManageUrl: () => `http://${config.napcat?.webuiHost ?? '203.0.113.10'}:${config.napcat?.webuiPort ?? 6099}`,
     caps: {
       status: true, // 看登录状态（走 NapCat 的 HTTP 接口）
       qrcode: true, // 出二维码
@@ -84,7 +84,7 @@ const REGISTRY = {
     //    —— 那个 bat 末尾有 `pause`，会留一个黑窗口等着按键（开机自启时很碍事）。
     //    ⚠️ 这个 vbs 放在 `C:\SnowLuma\_start-hidden.vbs`（和它本体放一起，不进仓库）。
     defaultLauncher: '_start-hidden.vbs',
-    defaultManageUrl: () => 'http://127.0.0.1:5099',
+    defaultManageUrl: () => 'http://203.0.113.10',
     caps: {
       // ⚠️⚠️ 2026-09-20 加（用户换到它）—— 下面这些是**实测**出来的，不是猜的：
       //    ① 它的 OneBot 层**没有出码 action**：`packages/onebot/src/actions/` 里
@@ -111,7 +111,7 @@ const REGISTRY = {
       //    launcher 用我们写的 `_start-hidden.vbs`。
       launch: true,
     },
-    how: 'SnowLuma 是**注入官方 QQ 客户端**的协议端：扫码在 **QQ 客户端窗口**里；账号状态、连接配置、日志在它自己的 WebUI（默认 http://127.0.0.1:5099，需要密码）。机器人这边只负责收发 —— 在线状态靠 OneBot 的 get_status，照样准',
+    how: 'SnowLuma 是**注入官方 QQ 客户端**的协议端：扫码在 **QQ 客户端窗口**里；账号状态、连接配置、日志在它自己的 WebUI（默认 http://203.0.113.10，需要密码）。机器人这边只负责收发 —— 在线状态靠 OneBot 的 get_status，照样准',
     license:
       '⚠️ 源码可见**非商业**许可（SnowLuma Source-Available Non-Commercial，不是 OSI 开源）：自用、私下改都可以；**商业使用、以及公开发布修改版/衍生版都要事先书面授权** ⇒ 不能打包进安装包，也不能放进公开仓库',
   },

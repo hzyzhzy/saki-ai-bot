@@ -33,6 +33,7 @@
  */
 import { config } from './config.js';
 import { log } from './log.js';
+import * as persona from './persona.js';
 
 // ⚠️ 配置键是 **`selfFollowUp`**（不是 `followUp`）——
 //    `chat.followUp` 是另一件事（**对话延续**：别人又说话了要不要接着聊）。
@@ -134,7 +135,7 @@ export async function askFollowUp(p = {}) {
   //    套在"要不要补一句"上完全不搭（而且它第一句就要求"把数字说出来"）。
   //    所以直接自己拼提示词、走通用的 `phrase()`。
   const sys = [
-    '你是丰川祥子（自称 **Saki**），在一个 QQ 群里当客服，说话短、自然、有点傲娇。',
+    persona.promptText('followUpLine'),
     '',
     '## 你现在的任务',
     '你刚在群里说完一段话。真人聊天有个习惯：**说完一句，有时会又想起一件事，再补一句**',

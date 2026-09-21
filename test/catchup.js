@@ -34,7 +34,7 @@ writeFileSync(
   join(ROOT, CFG_REL),
   [
     'llm:',
-    '  baseURL: http://127.0.0.1:1/v1',
+    '  baseURL: http://203.0.113.10:1/v1',
     '  apiKey: "sk-test"',
     '  model: test-model',
     'trigger:',
@@ -71,7 +71,7 @@ const { Bot } = await import('../src/bot.js');
 const G1 = '200000001';
 const G2 = '200000002';
 const BOT = '10000002';
-const HZY = '10000001';
+const <主人> = '10000001';
 const NOW = Date.now();
 const sec = (msAgo) => Math.floor((NOW - msAgo) / 1000); // OneBot 的 time 是**秒**
 
@@ -102,8 +102,8 @@ function makeBot(history) {
 console.log('\n【1】★ 该补的：上线前 10 分钟内 @ 她的');
 {
   const b = makeBot([
-    { message_id: 1, time: sec(2 * 60 * 1000), user_id: HZY, sender: { user_id: HZY }, message: at('我可以蹭一下你吗') },
-    { message_id: 2, time: sec(5 * 60 * 1000), user_id: HZY, sender: { user_id: HZY }, message: at('求互相包容') },
+    { message_id: 1, time: sec(2 * 60 * 1000), user_id: <主人>, sender: { user_id: <主人> }, message: at('我可以蹭一下你吗') },
+    { message_id: 2, time: sec(5 * 60 * 1000), user_id: <主人>, sender: { user_id: <主人> }, message: at('求互相包容') },
   ]);
   const n = await b.catchUpMissed();
   check(n === 2, `补回 2 条（实际 ${n}）`);
@@ -116,11 +116,11 @@ console.log('\n【2】★★ 不该补的四种（这是防重复/防刷屏的�
 {
   const b = makeBot([
     // ① 上线**之后**的（实时那条路已经处理过 → 再补就是答两遍）
-    { message_id: 11, time: sec(-5000), user_id: HZY, sender: {}, message: at('上线之后的') },
+    { message_id: 11, time: sec(-5000), user_id: <主人>, sender: {}, message: at('上线之后的') },
     // ② 超过 10 分钟的（用户指定）
-    { message_id: 12, time: sec(15 * 60 * 1000), user_id: HZY, sender: {}, message: at('十五分钟前的') },
+    { message_id: 12, time: sec(15 * 60 * 1000), user_id: <主人>, sender: {}, message: at('十五分钟前的') },
     // ③ 纯闲聊（没 @、没关键词、不是服务器问题）
-    { message_id: 13, time: sec(3 * 60 * 1000), user_id: HZY, sender: {}, message: txt('今天天气不错') },
+    { message_id: 13, time: sec(3 * 60 * 1000), user_id: <主人>, sender: {}, message: txt('今天天气不错') },
     // ④ 她自己发的
     { message_id: 14, time: sec(3 * 60 * 1000), user_id: BOT, sender: {}, message: txt('@我自己说的') },
   ]);
@@ -132,8 +132,8 @@ console.log('\n【2】★★ 不该补的四种（这是防重复/防刷屏的�
 console.log('\n【3】关键词 / 服务器问题也要补（那两类同样"必须回"）');
 {
   const b = makeBot([
-    { message_id: 21, time: sec(60 * 1000), user_id: HZY, sender: {}, message: txt('那个整合包在哪下') },
-    { message_id: 22, time: sec(90 * 1000), user_id: HZY, sender: {}, message: txt('服务器现在在线人数多少') },
+    { message_id: 21, time: sec(60 * 1000), user_id: <主人>, sender: {}, message: txt('那个整合包在哪下') },
+    { message_id: 22, time: sec(90 * 1000), user_id: <主人>, sender: {}, message: txt('服务器现在在线人数多少') },
   ]);
   const n = await b.catchUpMissed();
   check(n === 2, `关键词 + 服务器问题 → 都补（实际 ${n}）`);
@@ -142,11 +142,11 @@ console.log('\n【3】关键词 / 服务器问题也要补（那两类同样"必
 console.log('\n【4】★ 去重：已经见过的 message_id 不再补');
 {
   const b = makeBot([
-    { message_id: 31, time: sec(60 * 1000), user_id: HZY, sender: {}, message: at('同一条') },
+    { message_id: 31, time: sec(60 * 1000), user_id: <主人>, sender: {}, message: at('同一条') },
   ]);
   const recent = await import('../src/recent.js');
   recent.clear(G1);
-  recent.remember({ message_type: 'group', group_id: G1, user_id: HZY, message_id: 31, message: at('同一条') }, { text: '同一条' });
+  recent.remember({ message_type: 'group', group_id: G1, user_id: <主人>, message_id: 31, message: at('同一条') }, { text: '同一条' });
   const n = await b.catchUpMissed();
   check(n === 0, `recent 里已经有 31 号 → 不补（实际 ${n}）`);
 }
@@ -156,7 +156,7 @@ console.log('\n【5】一次最多补 3 条、且一个进程只补一次');
   const many = Array.from({ length: 6 }, (_, i) => ({
     message_id: 100 + i,
     time: sec((i + 1) * 30 * 1000),
-    user_id: HZY,
+    user_id: <主人>,
     sender: {},
     message: at(`第 ${i + 1} 条`),
   }));
@@ -170,8 +170,8 @@ console.log('\n【5】一次最多补 3 条、且一个进程只补一次');
 console.log('\n【6】多个群都补（每个群各拉一次历史）');
 {
   const b = makeBot([
-    { message_id: 41, time: sec(60 * 1000), user_id: HZY, sender: {}, group_id: G1, message: at('群里问的') },
-    { message_id: 42, time: sec(70 * 1000), user_id: HZY, sender: {}, group_id: G2, message: at('另一个群问的') },
+    { message_id: 41, time: sec(60 * 1000), user_id: <主人>, sender: {}, group_id: G1, message: at('群里问的') },
+    { message_id: 42, time: sec(70 * 1000), user_id: <主人>, sender: {}, group_id: G2, message: at('另一个群问的') },
   ]);
   const n = await b.catchUpMissed();
   check(n >= 1, `至少补回 1 条（实际 ${n}）`);

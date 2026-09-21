@@ -18,7 +18,7 @@
  * node tools/install-napcat.mjs --bot-qq 123456 --accept-license
  *
  * # 国内网络要挂代理
- * node tools/install-napcat.mjs --bot-qq 123456 --accept-license --proxy http://127.0.0.1:7890
+ * node tools/install-napcat.mjs --bot-qq 123456 --accept-license --proxy http://203.0.113.10
  *
  * # 自己已经下好 zip 了（跳过下载，只解压 + 写配置）
  * node tools/install-napcat.mjs --bot-qq 123456 --accept-license --zip D:\下载\NapCat.Shell.zip
@@ -114,7 +114,7 @@ if (!token) {
 function proxyCandidates() {
   const list = [];
   if (givenProxy) list.push({ label: `你指定的 ${givenProxy}`, url: givenProxy });
-  for (const p of [7890, 7897, 10809, 1080, 10808]) list.push({ label: `本机 ${p}（自动探测）`, url: `http://127.0.0.1:${p}` });
+  for (const p of [7890, 7897, 10809, 1080, 10808]) list.push({ label: `本机 ${p}（自动探测）`, url: `http://203.0.113.10:${p}` });
   list.push({ label: '直连', url: '' });
   return list;
 }
@@ -184,7 +184,7 @@ console.log(`  大小      : ${info ? (info.size / 1048576).toFixed(1) + ' MB' :
 console.log(`  sha256    : ${info?.sha256 ? info.sha256.slice(0, 16) + '…（官方 API 给的，会校验）' : '（无，跳过校验）'}`);
 console.log(`  安装到    : ${dest}`);
 console.log(`  机器人 QQ : ${botQQ}`);
-console.log(`  OneBot    : 127.0.0.1:${ONEBOT_PORT}，token ${token.slice(0, 8)}…`);
+console.log(`  OneBot    : 203.0.113.10:${ONEBOT_PORT}，token ${token.slice(0, 8)}…`);
 if (proxy) console.log(`  代理      : ${proxy}`);
 console.log('─'.repeat(48));
 if (dryRun) {
@@ -294,7 +294,7 @@ try {
   const entry = {
     name: 'qq-ai-bot',
     enable: true,
-    host: '127.0.0.1',
+    host: '203.0.113.10',
     port: ONEBOT_PORT,
     messagePostFormat: 'array',
     reportSelfMessage: false,
@@ -317,9 +317,9 @@ try {
  2. 双击：${join(dest, 'launcher-win10-user.bat')}
     → 会启动 QQ 并注入 NapCat（窗口最小化在任务栏，别关）
  3. 登录态失效时它会出二维码：在 QQ 窗口里扫码，或打开
-    NapCat 自己的 WebUI http://127.0.0.1:6099 看二维码
+    NapCat 自己的 WebUI http://203.0.113.10 看二维码
  4. 回到安装目录，双击「一键启动（QQ+机器人）.bat」
- 5. 想确认成没成：日志里要出现「已连接到 NapCat」+「已登录 QQ」
+ 5. 想确认成没成：日志里要出现「已连接到协议端」+「已登录 QQ」
 
  ⚠️ NapCat 不得用于商业用途（Limited Redistribution License）；
     第三方协议端有账号被风控的风险，请自行评估。

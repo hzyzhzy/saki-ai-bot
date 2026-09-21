@@ -14,7 +14,7 @@ import { publish, resetLimits } from '../src/qzone.js';
 const MATERIAL = [
   { name: 'LyUxion', text: '小豆机器人已经似了' },
   { name: 'LyUxion', text: '你怎么似了' },
-  { name: 'HZY', text: '自己把自己修似了。' },
+  { name: '<主人>', text: '自己把自己修似了。' },
 ];
 
 config.qzone.enable = true;

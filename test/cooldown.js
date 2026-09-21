@@ -42,7 +42,7 @@ mkdirSync(join(ROOT, 'logs'), { recursive: true });
 const CFG_REL = 'logs/__test-cooldown.yml';
 writeFileSync(
   join(ROOT, CFG_REL),
-  ['llm:', '  baseURL: http://127.0.0.1:1/v1', '  apiKey: "sk-test"', '  model: test-model', ''].join('\n'),
+  ['llm:', '  baseURL: http://203.0.113.10:1/v1', '  apiKey: "sk-test"', '  model: test-model', ''].join('\n'),
   'utf8',
 );
 process.env.QQBOT_CONFIG = CFG_REL;

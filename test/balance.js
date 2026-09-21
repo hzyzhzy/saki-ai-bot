@@ -4,7 +4,7 @@
  * 覆盖 2026-09-13 用户的两轮要求：
  *   ① 话术别出常识错（原来写「电子琴键盘换琴弦」—— 键盘没有弦）
  *   ② 「见底」档要**直接 @ 服主**、要软催（不能像欠了一百万）
- *   ③ 称呼：平时叫 HZY，「服主」只在服务器事务里用
+ *   ③ 称呼：平时叫 <主人>，「服主」只在服务器事务里用
  *
  * ⚠️ 这里**不用**等那个 90 秒的首检（`startBalanceWatch` 里硬编码的），
  *    而是把风险最大的那一段 —— **@ 的消息段真的拼进去了吗** —— 单独拎出来测。
@@ -25,7 +25,7 @@ const T_FILE = 'state/_test-balance.json';
 const WS_PORT = 39831;
 const TOKEN = 'test-token-balance';
 process.env.QQBOT_BALANCE_FILE = T_FILE;
-process.env.NO_PROXY = '127.0.0.1,localhost,::1';
+process.env.NO_PROXY = '203.0.113.10,localhost,::1';
 process.env.no_proxy = process.env.NO_PROXY;
 
 let failures = 0;
@@ -81,7 +81,7 @@ console.log('\n【2】★ 提醒的是"他去充值"，不是"她自己花超了
     all.find((l) => !/充|余额|账|钱|清零/.test(l)) ?? '',
   );
   // ✅ 要指着他（名字或"你"）
-  check(all.some((l) => /HZY|你/.test(l)), '有指向他的说法（HZY / 你）');
+  check(all.some((l) => /<主人>|你/.test(l)), '有指向他的说法（<主人> / 你）');
   // ❌ 不能再出现"是我花超了"这一套
   check(
     !all.some((l) => /我自己的问题|是我花得快|花得有点凶|我花超/.test(l)),
@@ -97,19 +97,19 @@ console.log('\n【2】★ 提醒的是"他去充值"，不是"她自己花超了
     '不提「这个月/本月/月底」（余额是随用随充，没有月度周期）',
     all.find((l) => /这个月|本月|这月|月底|下个月|每月/.test(l)) ?? '',
   );
-  // ⚠️ 用户第三次纠正：「**不能说"你"，因为是在群里发的，应该说 HZY**」
-  //    —— 群里发的话必须有指向，所以**每条都要点名 HZY**。
+  // ⚠️ 用户第三次纠正：「**不能说"你"，因为是在群里发的，应该说 <主人>**」
+  //    —— 群里发的话必须有指向，所以**每条都要点名 <主人>**。
   check(
-    all.every((l) => /HZY/.test(l)),
-    '每条都点名 HZY（群里发的，说"你"没指向）',
-    all.find((l) => !/HZY/.test(l)) ?? '',
+    all.every((l) => /<主人>/.test(l)),
+    '每条都点名 <主人>（群里发的，说"你"没指向）',
+    all.find((l) => !/<主人>/.test(l)) ?? '',
   );
-  // ⚠️ 用户追加：「**如果出现"你"的话要改成 hzy**」——
-  //    带"你"不是绝对不行，但**不能只有"你"没有 HZY**（那才是没指向）。
-  //    逐条断言：每条都必须有 HZY（上面那条已经保证），
-  //    而且**不能出现"你"单独成指代而全句无 HZY**的情况 —— 由上面那条覆盖。
-  const onlyYou = all.filter((l) => /你/.test(l) && !/HZY/.test(l));
-  check(onlyYou.length === 0, '没有"只有你、没有 HZY"的句子', onlyYou[0] ?? '');
+  // ⚠️ 用户追加：「**如果出现"你"的话要改成 <主人>**」——
+  //    带"你"不是绝对不行，但**不能只有"你"没有 <主人>**（那才是没指向）。
+  //    逐条断言：每条都必须有 <主人>（上面那条已经保证），
+  //    而且**不能出现"你"单独成指代而全句无 <主人>**的情况 —— 由上面那条覆盖。
+  const onlyYou = all.filter((l) => /你/.test(l) && !/<主人>/.test(l));
+  check(onlyYou.length === 0, '没有"只有你、没有 <主人>"的句子', onlyYou[0] ?? '');
   // 「见底」档要直接催
   check(critLines.some((l) => /充(一)?下|该充|充点|充值/.test(l)), '「见底」档直接催他充钱');
 }
@@ -118,13 +118,13 @@ console.log('\n【3】见底档 @ 他 + 正文里也点名（不是二选一）'
 {
   // ⚠️ 这一节原来测的是 `stripNameForAt()`（"见底档 @ 了就不写名字"）。
   //    **2026-09-13 用户纠正后那个函数已删除**：
-  //    「不能说"你"，因为是在群里发的，应该说 HZY」
+  //    「不能说"你"，因为是在群里发的，应该说 <主人>」
   //    —— @ 只是给手机通知用的，**不能拿它替代正文里的点名**。
   //    所以现在测的是**反过来**：两档话术都必须带名字。
   check(typeof balance.stripNameForAt === 'undefined', 'stripNameForAt 已删除（不再去掉名字）');
   for (const tier of ['low', 'critical']) {
     const lines = balance.allLines(tier);
-    check(lines.every((l) => /HZY/.test(l)), `${tier} 档每条都带 HZY`, lines.find((l) => !/HZY/.test(l)) ?? '');
+    check(lines.every((l) => /<主人>/.test(l)), `${tier} 档每条都带 <主人>`, lines.find((l) => !/<主人>/.test(l)) ?? '');
   }
 }
 
@@ -140,7 +140,7 @@ console.log('\n【4】dry 预览不能把档位标记成"已抱怨"');
 
 console.log('\n【5】★ 「见底」档发出的消息里要有 @ 段');
 {
-  const wss = new WebSocketServer({ port: WS_PORT, host: '127.0.0.1' });
+  const wss = new WebSocketServer({ port: WS_PORT, host: '203.0.113.10' });
   await new Promise((r) => wss.once('listening', r));
 
   const got = [];
@@ -176,7 +176,7 @@ console.log('\n【5】★ 「见底」档发出的消息里要有 @ 段');
   });
 
   const bot = new Bot();
-  const sock = new WebSocket(`ws://127.0.0.1:${WS_PORT}`, {
+  const sock = new WebSocket(`ws://203.0.113.10:${WS_PORT}`, {
     headers: { Authorization: `Bearer ${TOKEN}` },
   });
   // 用真的 `attach()`，别自己塞 `bot.ws` —— 回执要有人处理（`pending` 表）
@@ -185,10 +185,10 @@ console.log('\n【5】★ 「见底」档发出的消息里要有 @ 段');
   await sleep(600);
 
   // ① 带 @（见底档）
-  await bot.sendToGroup('200000001', '账上真见底了，充一下吧', { at: owner, atName: 'HZY' });
+  await bot.sendToGroup('200000001', '账上真见底了，充一下吧', { at: owner, atName: '<主人>' });
   await sleep(300);
   // ② 不带 @（偏低档）
-  await bot.sendToGroup('200000001', 'HZY，账上快见底了，记得给我充点');
+  await bot.sendToGroup('200000001', '<主人>，账上快见底了，记得给我充点');
   await sleep(300);
 
   const sends = got.filter((m) => m.action === 'send_group_msg');
@@ -236,7 +236,7 @@ console.log('\n【6】★★ 5 元档"藏在代码里"（用户 2026-09-15 晚�
   cfg.balance.low = oldLow;
 }
 
-console.log('\n【7】★★ 余额提醒**按群各记一次**（修 HZY 报的「699 收不到余额报警」）');
+console.log('\n【7】★★ 余额提醒**按群各记一次**（修 <主人> 报的「699 收不到余额报警」）');
 {
   const cfg = (await import('../src/config.js')).config;
   const oldLow = cfg.balance.low;
@@ -267,9 +267,9 @@ console.log('\n【7】★★ 余额提醒**按群各记一次**（修 HZY 报的
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ balance_infos: [{ currency: 'CNY', total_balance: '10.00' }] }));
   });
-  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  await new Promise((r) => srv.listen(0, '203.0.113.10', r));
   const oldBase = cfg.llm.baseURL;
-  cfg.llm.baseURL = `http://127.0.0.1:${srv.address().port}/v1`;
+  cfg.llm.baseURL = `http://203.0.113.10:${srv.address().port}/v1`;
   const fetched = await balance.fetchBalance();
   check(fetched.ok === true && fetched.total === 10, '★ 假余额接口通了（模拟"充值到 10 元"）', fetched.error ?? '');
   const a3 = balance.balanceComplaint({ total: 1, groupId: A });

@@ -109,7 +109,7 @@ loadState();
  *      本来就是给"自动发"用的密度闸门。
  *      bot.js 里那句注释写的就是「手动也要守**每天上限**」——实现漏了排除冷却，
  *      于是"她 12 分钟前刚发过一条"会把手动也挡住 ✗（真实踩过：
- *      HZY 点了立刻发送，界面上只看到「失败： undefined」）。
+ *      <主人> 点了立刻发送，界面上只看到「失败： undefined」）。
  */
 export function whyNot(isAuto = true, opts = {}) {
   const q = config.qzone ?? {};

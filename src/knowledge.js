@@ -4,9 +4,10 @@
  */
 import { readFileSync, readdirSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { ROOT, KNOWLEDGE_DIR } from './config.js';
+import { ROOT, KNOWLEDGE_DIR, config, personaId, personaDir } from './config.js';
 import { log } from './log.js';
 import { learnedText, listEntries } from './learned.js';
+import { animeWorks } from './persona.js';
 // ⚠️ 2026-09-17 加：群友常**@着某人**问「介绍一下他」，而文本里**没有名字** ——
 //    得靠 at 段的 QQ 号反查出群名片，才能判断"这是在说资料里的某个人"。
 import * as names from './names.js';
@@ -16,7 +17,7 @@ const DIR = KNOWLEDGE_DIR;
 /** 学习档案单独处理（优先级更高），不参与下面的通用拼接 */
 const LEARNED = 'learned.md';
 /**
- * ⚠️ **群资料库**目录（2026-09-15 晚加，HZY 要求）：
+ * ⚠️ **群资料库**目录（2026-09-15 晚加，<主人> 要求）：
  *    `knowledge/groups/<群号>.md` —— **只在该群里注入**。
  *
  *    为什么要分群（用户原话）：「最开始的群只玩 mc，但是这个 699 开头的群，
@@ -25,6 +26,21 @@ const LEARNED = 'learned.md';
  *       "全局知识"列表**天然看不见它**（不递归），不会混进去。
  */
 const GROUP_DIR = join(DIR, 'groups');
+
+/**
+ * 动画库（`knowledge/anime/<库名>.md`）—— 2026-09-21 从"一个共用 `anime.md`"改过来。
+ *
+ * ⚠️ **不再自动全读**：一个库进不进她的提示词，由**人设声明的库名**决定
+ *    （`identity.anime.works`，见 `persona.animeWorks()`）。
+ *    为什么：换角色之后她不该还认识上一个角色的作品 ——
+ *    「anime 库只有 bangdream 的内容」时，这份库就是**邦邦的库**，
+ *    下一份库（别的作品）该是另一个文件、另一套世界观。
+ * ⚠️ 所以这个目录**不能被当成 knowledge/ 根目录下的普通 md 扫进来** ——
+ *    它是"库池"，扫进来就会全量注入，等于没改。（`readdirSync` 只取 `.md`，
+ *    子目录天然不会被扫到 ✓ 但新增库时也别往根目录丢。）
+ * ⚠️ 人设**没声明任何一个** = 一个都不读（不是"读全部"）。
+ */
+const ANIME_DIR = join(DIR, 'anime');
 /**
  * 私聊记忆目录（2026-09-17 加）。
  *
@@ -120,27 +136,63 @@ let skippedData = [];
 
 function load() {
   try {
-    const names = readdirSync(DIR).filter(
-      (n) => n.toLowerCase().endsWith('.md') && n.toLowerCase() !== LEARNED,
-    );
+    // ── 收集 md 文件：**人设包优先**，然后是共用的 knowledge/ ────────────
+    // ⚠️ 2026-09-21：人设的 md 现在住在 `personas/<id>/`（以前全在 knowledge/）。
+    // ⚠️ 同名文件**以人设包为准**（不把两边的内容混起来看）——
+    //    否则库里留着一份旧 persona.md，换人设会"换了但没完全换"，最难查。
+    const pdir = personaDir();
+    const collected = [];
+    if (existsSync(pdir)) {
+      for (const n of readdirSync(pdir)) {
+        if (!n.toLowerCase().endsWith('.md')) continue;
+        collected.push({ name: n, file: join(pdir, n), from: 'persona' });
+      }
+    } else {
+      log.warn(`人设包目录不存在（${pdir}）—— 她将没有任何性格设定，去 personas/ 下建一个`);
+    }
+    for (const n of readdirSync(DIR)) {
+      if (!n.toLowerCase().endsWith('.md')) continue;
+      if (n.toLowerCase() === LEARNED) continue; // 学习档案单独处理
+      if (collected.some((c) => c.name.toLowerCase() === n.toLowerCase())) continue;
+      collected.push({ name: n, file: join(DIR, n), from: 'knowledge' });
+    }
     // persona 放最前面，其余按文件名排序
-    names.sort((a, b) => {
-      const pa = a.toLowerCase().startsWith('persona') ? 0 : 1;
-      const pb = b.toLowerCase().startsWith('persona') ? 0 : 1;
-      return pa - pb || a.localeCompare(b);
+    collected.sort((a, b) => {
+      const pa = a.name.toLowerCase().startsWith('persona') ? 0 : 1;
+      const pb = b.name.toLowerCase().startsWith('persona') ? 0 : 1;
+      return pa - pb || a.name.localeCompare(b.name);
     });
 
     const keep = [];
     skippedData = [];
-    for (const name of names) {
-      const content = readFileSync(join(DIR, name), 'utf8').trim();
+    for (const it of collected) {
+      const content = readFileSync(it.file, 'utf8').trim();
       if (content.includes(DATA_MARK)) {
-        skippedData.push(name);
+        skippedData.push(it.name);
         continue;
       }
-      keep.push({ name, content });
+      keep.push({ name: it.name, content, from: it.from });
     }
-    files = keep;
+    // ── 动画库（`knowledge/anime/<库名>.md`）：**只加载人设声明的那几个** ──
+    // ⚠️ 2026-09-21 改：原来是根目录一个共用的 `anime.md`，谁都能读。
+    //    现在按 `identity.anime.works` 走 —— 没声明就一份都不读（换角色不串味）。
+    //    名字用 `anime/<库名>.md`，和 `groups/<群号>.md` 一个风格。
+    const animeKept = [];
+    for (const w of animeWorks()) {
+      const f = join(ANIME_DIR, `${w}.md`);
+      try {
+        if (!existsSync(f)) {
+          log.warn(`人设声明的动画库「${w}」没有对应文件：${f} —— 这个作品的事她不会懂`);
+          continue;
+        }
+        const content = readFileSync(f, 'utf8').trim();
+        if (!content) continue;
+        animeKept.push({ name: `anime/${w}.md`, content, from: 'knowledge' });
+      } catch (e) {
+        log.warn(`读动画库「${w}」失败（当作没有）：${e.message}`);
+      }
+    }
+    files = [...keep, ...animeKept];
     loadedAt = Date.now();
 
     // ── 群资料库（`knowledge/groups/<群号>.md`）────────────────
@@ -169,10 +221,20 @@ function load() {
     const dmCount = scanDir(DM_DIR, (id) => `dm:${id}`, (n) => `dm/${n}`);
     groupFiles = gmap;
 
+    // ⚠️ 人设包和共用库**分开报** —— 换人设那一下能不能生效，看这行最直观
+    const pFiles = files.filter((f) => f.from === 'persona');
     log.info(
-      `已加载知识库 ${files.length} 个文件：${files.map((f) => f.name).join(', ')}` +
+      `人设包「${personaId()}」${pFiles.length} 个文件：` +
+        (pFiles.map((f) => f.name).join(', ') || '（空 —— 她不会有任何性格，去 personas/ 下建一个）'),
+    );
+    log.info(
+      `已加载知识库 ${files.length - pFiles.length} 个文件：` +
+        `${files.filter((f) => f.from !== 'persona').map((f) => f.name).join(', ')}` +
         (skippedData.length ? `（另有 ${skippedData.length} 个数据文件不进聊天：${skippedData.join(', ')}）` : ''),
     );
+    if (animeKept.length) {
+      log.info(`动画库 ${animeKept.length} 份（**由人设声明**）：${animeKept.map((f) => f.name).join(', ')}`);
+    }
     if (groupFiles.size) {
       log.info(
         `群资料库 ${groupFiles.size - dmCount} 份（**只给对应的群用**）：${[...groupFiles.keys()].filter((k) => !k.startsWith('dm:')).join(', ') || '（无）'}`,
@@ -247,6 +309,26 @@ export function personaText() {
 
 const CAST_FILE = 'cast.md';
 
+/**
+ * **角色专属的数据文件**（人物名册、日常事件库、剧情点子）在哪儿。
+ *
+ * ⚠️ 2026-09-21：这三份以前跟服务器库一起躺在共用的 `knowledge/` 里，
+ *    但「换一个角色」它们就完全不成立了 —— 名册是别人的队友、
+ *    事件是别人的日常、剧情点子是别人的世界线。所以它们搬进了人设包
+ *    （`personas/<id>/cast.md`、`life-events.md`、`quest-ideas.md`）。
+ *
+ * 这里**人设包优先、共用目录回落**：搬过去之后回落自然不会生效，
+ * 但哪天换了人设忘了写这几份，至少不会整个功能失效。
+ * ⚠️ 文件名做白名单（只留字母数字点横线），别让它拼出 `../` 去读别处。
+ */
+export function personaDataFile(name) {
+  const safe = String(name ?? '').replace(/[^\w.-]/g, '');
+  if (!safe) return '';
+  const p = join(personaDir(), safe);
+  if (existsSync(p)) return p;
+  return join(DIR, safe);
+}
+
 /** 比名字时用的宽松形式：去掉标点/空白、转小写（`MyGO!!!!!` → `mygo`） */
 function loose(s) {
   return String(s ?? '')
@@ -267,7 +349,7 @@ function loose(s) {
 export function castBands() {
   let raw = '';
   try {
-    raw = readFileSync(join(DIR, CAST_FILE), 'utf8');
+    raw = readFileSync(personaDataFile(CAST_FILE), 'utf8');
   } catch {
     return [];
   }
@@ -576,7 +658,7 @@ export function selectFor(text, opts = {}) {
   if (needServer) picked.push('hzymtr-server.md');
   else skipped.push('hzymtr-server.md');
 
-  // ⚠️⚠️ 2026-09-17 修（HZY 报的：「699 群有群友让机器人介绍另一个群友，但是机器人说不知道。
+  // ⚠️⚠️ 2026-09-17 修（<主人> 报的：「699 群有群友让机器人介绍另一个群友，但是机器人说不知道。
   //    **应该先对应上名字**，直接调用群知识库来回答」）。
   //    日志里的原样是 `at <- 能介绍一下 嘛` —— **名字是空的**：
   //    群友是 @着那个人问的，而 @ 走的是 **at 段**，`extractText` 出来的文本里没有名字，
@@ -630,12 +712,18 @@ export function selectFor(text, opts = {}) {
   //    所以加第二条判据：**把 anime.md 里出现过的关键词抠出来，看消息里有没有**。
   //    这样以后往 anime.md 加新词条（比如「邦邦」「邦高祖」）**自动生效**，
   //    不用同时改这个正则 —— 两个地方要同步维护的东西，迟早会漏。
-  const needAnime =
+  // ⚠️ 2026-09-21 改：原来是**一个**写死名字的 `anime.md`，现在是**人设声明的那几个**
+  //    动画库（`anime/<库名>.md`）**逐个判**：
+  //    通用词命中、或者消息里出现了那份库里写过的词 → 带它。
+  //    人设一个都没声明时这一节就是空的（不是漏了，是设计如此 —— 换角色不串味）。
+  const needAnimeWord =
     /动漫|番剧|新番|动画|漫画|轻小说|乐队|企划|偶像|二次元|看过|追番|角色|声优|梦限大|mygo|mujica|わたなれ|考拉/i.test(
       t,
-    ) || mentionsAnyTerm(t, 'anime.md');
-  if (needAnime) picked.push('anime.md');
-  else skipped.push('anime.md');
+    );
+  for (const lib of files.filter((f) => f.name.startsWith('anime/'))) {
+    if (needAnimeWord || mentionsAnyTerm(t, lib.name)) picked.push(lib.name);
+    else skipped.push(lib.name);
+  }
 
   // ── `owner.md`：**只有跟主人说话时**才读（2026-09-17 用户定）──────────
   //
@@ -679,6 +767,17 @@ export function selectFor(text, opts = {}) {
   else skipped.push('persona-media.md');
 
   return { names: picked, skipped };
+}
+
+/**
+ * 当前加载了哪几个动画库（`anime/<库名>.md`）。
+ *
+ * 给 `bot.js` 那句"**本地库里已经有这个词条就别去搜了**"用 ——
+ * 原来那里写死的是 `['anime.md', 'group-memory.md']`，改成人设驱动的库名之后，
+ * 它得跟着走，否则换了人设就判断不出来了。
+ */
+export function animeLibNames() {
+  return files.filter((f) => f.name.startsWith('anime/')).map((f) => f.name);
 }
 
 /**

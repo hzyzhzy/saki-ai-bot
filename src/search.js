@@ -11,12 +11,13 @@
  *   真不能用了就换 Tavily（1000 次/月免费），换的时候只要改这个文件。
  */
 import { config } from './config.js';
+import * as persona from './persona.js';
 // 重新导出，方便 bot.js 只 import 一个模块
 export { planSearch } from './search-plan.js';
 import { log } from './log.js';
 
 const UA =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/203.0.113.10 Safari/537.36';
 
 /** 上一次请求的时间，用来限速 */
 let lastAt = 0;
@@ -138,7 +139,7 @@ export function toQuery(text) {
 
   // ① 去掉呼语、人称、客套
   q = q
-    .replace(/^(你|您|小祥|客服小祥)[，,、\s]*/g, '')
+    .replace(new RegExp(`^(?:你|您|${persona.matchNamesAlt()})[，,、\\s]*`, 'g'), '')
     .replace(/^(请问|麻烦|帮我|能不能|可不可以|想问下|问一下)/g, '')
     .replace(/你?(看过|看过没|看过吗|有没有看过|在追吗?|知道吗|听说过吗|懂吗|会吗)/g, '')
     .replace(/(谢谢你?|多谢|辛苦了?)/g, '')

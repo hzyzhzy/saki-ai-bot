@@ -20,7 +20,7 @@
  * 输出：每个套件一行（耗时 + 结果），最后给总耗时和失败清单。
  */
 import { spawn } from 'node:child_process';
-import { readdirSync, copyFileSync, mkdirSync, rmSync } from 'node:fs';
+import { readdirSync, copyFileSync, mkdirSync, rmSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -58,6 +58,14 @@ const SUITES = [
   // ⚠️ 2026-09-15 晚加：知识库**分群**（群资料库只给那个群；共享文件的「群标签块」按群生效；
   //    二次元库仍然全局可用）
   'knowledge-groups',
+  // ⚠️ 2026-09-21 加：人设管理（WebUI「人设」页的文件层）——
+  //    id 对齐 / 必填校验 / 路径白名单 / 保存前备份 / 新建改名 / 删除留底。
+  //    ⚠️ 它会**写和删**人设包，所以必须靠 `QQBOT_PERSONAS_DIR` 指到临时池
+  //    （套件自己设，绝不能碰真实的 personas/）。
+  'persona-admin',
+  // ⚠️ 2026-09-21 加：人设**自动起草** —— 只测不联网那层（动画库清单 / 联网前校验 / 字数上限）。
+  //    ⚠️ 起草本身要联网 + 调模型，**不进回归**：每跑一次就烧一次钱，网一断还红。
+  'persona-draft',
   // ⚠️ 2026-09-15 晚加：好友/好感度接线（到线通知只发一次 + 被回应加分 + `/好感度` 出榜）。
   //    它一直在仓库里但**没进过回归名单**（用户要求加进来）。
   'friend',
@@ -114,6 +122,12 @@ const SUITES = [
   'holiday',
   'quest',
   'outbox',
+  // ⚠️ 2026-09-21 加：提示词快照 —— 做人设模块化时靠它证明"一个字都没改味"。
+  //    ⚠️ 它**故意不隔离快照文件本身**（要用持久的那份 `state/__prompt-snapshot.json`），
+  //       但脚本自己会设好别的隔离 env。
+  'prompt-snapshot',
+  // ⚠️ 2026-09-21 加：单例锁（重复实例会让说说/接话重复发、甚至"一条消息回两次"）
+  'singleton',
   'napcat-recover',
   'punctuation',
   'e2e',
@@ -195,6 +209,15 @@ function isolatedStateEnv(name) {
     // ⚠️ 这条**一定不能漏**：漏了的话测试跑起来会往真实的
     //    `state/napcat-restart.request` 写条子 → 看门狗真去重启协议端。
     QQBOT_NAPCAT_REQ_FILE: p('napcatreq'),
+    // ⚠️ 2026-09-21 加：单例锁（`state/bot.lock`）。**必须隔离** ——
+    //    不隔离的话，`test/behavior.js` / `test/e2e.js` 里
+    //    `spawn(node, [src/index.js])` 起的探针机器人会被"已经有真机器人在跑"挡在门外，
+    //    那几个套件会整片失败（而且看着像代码坏了）。
+    // ⚠️ 2026-09-21 加：文件名里带 **run-all 自己的 PID**。
+    //    锁文件是"会跨运行残留"的东西（子进程被强杀时不走清理），
+    //    用固定名字就会和上一轮留下的撞 —— 实测 `test/punctuation.js`
+    //    因此**连续两轮回归都失败**（残留锁里的 PID 被复用，探活误判成"有实例在跑"）。
+    QQBOT_LOCK_FILE: `logs/__run-${safe}-${process.pid}-lock.json`,
   };
 }
 
@@ -227,6 +250,16 @@ function isolatedKnowledgeDir(name) {
       if (!f.toLowerCase().endsWith('.md')) continue;
       copyFileSync(join(ROOT, 'knowledge', f), join(abs, f));
     }
+    // ⚠️ 2026-09-21：动画库在**子目录**里（`knowledge/anime/<库名>.md`）—— 也要复制。
+    //    不复制的话套件里一份动画库都读不到，跟真实环境不一致（会掩盖或制造假红）。
+    const adir = join(ROOT, 'knowledge', 'anime');
+    if (existsSync(adir)) {
+      mkdirSync(join(abs, 'anime'), { recursive: true });
+      for (const f of readdirSync(adir)) {
+        if (!f.toLowerCase().endsWith('.md')) continue;
+        copyFileSync(join(adir, f), join(abs, 'anime', f));
+      }
+    }
     mkdirSync(join(abs, '_backup'), { recursive: true });
     return rel;
   } catch (e) {
@@ -254,11 +287,11 @@ function runSuite(name) {
         // ⚠️ 隔离路径放在**后面**，保证它一定生效（别被外面同名变量盖掉）
         ...isolatedStateEnv(name),
         ...(know ? { QQBOT_KNOWLEDGE_DIR: know } : {}),
-        HTTP_PROXY: process.env.HTTP_PROXY ?? 'http://127.0.0.1:7890',
-        HTTPS_PROXY: process.env.HTTPS_PROXY ?? 'http://127.0.0.1:7890',
+        HTTP_PROXY: process.env.HTTP_PROXY ?? 'http://203.0.113.10',
+        HTTPS_PROXY: process.env.HTTPS_PROXY ?? 'http://203.0.113.10',
         NODE_USE_ENV_PROXY: '1',
-        NO_PROXY: '127.0.0.1,localhost,::1',
-        no_proxy: '127.0.0.1,localhost,::1',
+        NO_PROXY: '203.0.113.10,localhost,::1',
+        no_proxy: '203.0.113.10,localhost,::1',
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });

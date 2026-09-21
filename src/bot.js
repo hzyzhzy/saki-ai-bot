@@ -1,7 +1,11 @@
 import { config, ROOT, KNOWLEDGE_DIR, paramsFor } from './config.js';
+// ⚠️ 2026-09-21：她的名字 / 外号 / 怎么称呼主人，都从 `personas/<id>/identity.json` 来
+//    （见 src/persona.js）。这些东西以前散在这个文件里写死（`['saki','小祥','祥子',…]` 那种），
+//    换个角色就换不动 —— 表现出来就是"人换了、名字还是旧的"。
+import * as persona from './persona.js';
 
 /**
- * 收紧度的**默认值**（2026-09-15 晚 HZY：「首先默认 50，只保留分群的数据」）。
+ * 收紧度的**默认值**（2026-09-15 晚 <主人>：「首先默认 50，只保留分群的数据」）。
  * ⚠️ 现在**没有"全局收紧度"**了：每个群各存各的，没设过的群就是这个值。
  */
 const DEFAULT_STRICTNESS = 50;
@@ -11,7 +15,7 @@ import { log } from './log.js';
 import { streamChat, quickAck, phrase } from './llm.js';
 import * as msg from './message.js';
 import * as history from './history.js';
-import { knowledgeText, hasKnowledge, selectFor as knowledgeSelect, mentionsAnyTerm, whoIsBrief } from './knowledge.js';
+import { knowledgeText, hasKnowledge, selectFor as knowledgeSelect, mentionsAnyTerm, whoIsBrief, animeLibNames } from './knowledge.js';
 import * as mclog from './mc-log.js';
 import * as observe from './observe.js';
 import { queryServer, describe } from './status.js';
@@ -75,17 +79,36 @@ import { checkAttribution } from './attribution-guard.js';
 //      · 平时聊天（`chatFirst` = 2）：句末标点就断；最多 `maxChunks`（3）条。
 //      · 主动（`volFirst` = 25，老值）：攒够 25 / 36 字才在句末断、**不限条数**
 //        —— 主动接话 / 二级剧情 / 一级事件保持原样，别把剧情切成十几条。
-//      ⚠️ 延时（`delayMs` = 200）**两条路共用** —— 用户只嫌"条数多"，没嫌"太快"；
-//         要让主动也回到 0.65 秒的话，在这儿再分一个键就行。
+//      ⚠️ 延时**两条路共用**（见下面 `chunkDelay()`）—— 用户只嫌"条数多"，没嫌"太快"。
 const chunkCfg = () => ({
   max: config.chunking?.maxChars || 60,
-  // ⚠️ 2026-09-20：兜底值**跟着 config.yml 走**（用户觉得 0.2 秒太快 ⇒ 定 1 秒）。
-  //    ⚠️ 别让它和 config.yml 不一致 —— 配置读不到时会悄悄退回一个他没选的节奏。
-  delay: config.chunking?.delayMs ?? 1000,
   chatFirst: Math.max(2, config.chunking?.firstFlushChars || 2),
   volFirst: Math.max(4, config.chunking?.voluntaryFirstFlushChars || 25),
   maxChunks: Math.max(1, Number(config.chunking?.maxSentenceChunks) || 3),
 });
+
+/**
+ * 分条之间等多久（毫秒）—— **每个分条点都重新摇一次**。
+ *
+ * ⚠️⚠️ 2026-09-21 用户要求：
+ *    「分条消息的时间间隔可以用随机数，范围 1 秒到 2 秒吧，这样更像真人在发消息」。
+ *    原来是固定 `chunking.delayMs`，每一段间隔都一模一样 ⇒ 节奏一看就是机器。
+ *    现在：`delayMs` 是**下限**、`delayMaxMs` 是**上限**，每次独立在区间里摇一个值。
+ *
+ * ⚠️ 为什么必须是**函数**而不是一个常量：固定才是要解决的问题。
+ *    以前是"进函数时算一次、循环里都用这个值"—— 即便那个值本身随机，
+ *    整条回复也还是**同一个节奏**；现在每个分条点各调一次 ⇒
+ *    1.2 秒、1.8 秒、1.05 秒…… 这才像人在打字。
+ * ⚠️ 没配 `delayMaxMs` 时**不随机**（等价于原来的固定间隔）—— 不动别人已有的手感。
+ * ⚠️ 上限写得比下限还小 → 按**下限**走（配置写反了也不倒着算）。
+ */
+export function chunkDelay() {
+  const lo = Math.max(0, Number(config.chunking?.delayMs ?? 1000) || 0);
+  const rawHi = config.chunking?.delayMaxMs;
+  const hi = rawHi === undefined || rawHi === null ? lo : Math.max(lo, Number(rawHi) || lo);
+  // ⚠️ `+1` 是为了让**上限取得到**（Math.random() 永远小于 1）
+  return hi > lo ? lo + Math.floor(Math.random() * (hi - lo + 1)) : lo;
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -150,7 +173,7 @@ export function sleepNudgeStatus() {
 function srcOf(event) {
   const name = event?.sender?.card || event?.sender?.nickname || String(event?.user_id ?? '');
   // ⚠️⚠️ 2026-09-19（用户报：「分不清人」——大豆只说了「想不想我」，
-  //    她却把 HZY 之前说的同一句话算到大豆头上）：
+  //    她却把 <主人> 之前说的同一句话算到大豆头上）：
   //    连发合并会把**多个人的话拼进一条**，而提示词那边原来只拿到
   //    `{userId, name}`（**没有原话**）→ 只好列一份"说话人名单"，
   //    正文是混在一起的 → 模型只能**自己把句子分配给人**，两个人说同一句话时必串 ✗
@@ -604,7 +627,7 @@ export class Bot {
       p.reject(new Error('连接已断开'));
     }
     this.pending.clear();
-    if (!this.closed) log.warn('与 NapCat 的连接断开');
+    if (!this.closed) log.warn('与协议端的连接断开');
   }
 
   async onRaw(data) {
@@ -641,7 +664,7 @@ export class Bot {
           //      消息其实发出去了。**错了。**
           //
           //      那个历史是 QQ 客户端的**本地库**，里面有**本地回显**（自己发的会先落本地）。
-          //      真正的判据是**群里的人能不能看到** —— HZY（群成员）说：
+          //      真正的判据是**群里的人能不能看到** —— <主人>（群成员）说：
           //      「主号能接收到其他群信息，但是**没接收到机器人**」。
           //      → 消息**根本没发出去**，1200 是**真失败**，
           //        「网络连接异常!」就是 QQ 客户端跟服务器断了。
@@ -755,7 +778,7 @@ export class Bot {
 
     // ── `/好感度` 排行榜（群命令）──────────────────────────────────
     //
-    // ⚠️⚠️ 2026-09-15 修的真 bug：HZY 在群里发 `/好感度`，**一点反应都没有**。
+    // ⚠️⚠️ 2026-09-15 修的真 bug：<主人> 在群里发 `/好感度`，**一点反应都没有**。
     //
     //    原来这段挂在 `shouldJoinChat()` 里 —— 那是「**她今天想不想主动搭话**」
     //    的判断。于是这条命令被三道**跟它毫无关系**的闸门挡在外面，
@@ -1065,7 +1088,7 @@ export class Bot {
   /**
    * **这个群的**收紧度（0~100）。
    *
-   * ⚠️ 2026-09-15 晚（HZY）：「收紧度也加一个一样的下拉菜单分群调节」→ 再改成
+   * ⚠️ 2026-09-15 晚（<主人>）：「收紧度也加一个一样的下拉菜单分群调节」→ 再改成
    *    「**直接取消保存全局的说法，首先默认 50，然后只保留分群的数据**」。
    *    所以现在**没有全局那一份了**：
    *      · 某个群设过 → 用它的（`groupParams["<群号>"].chat.strictness`）
@@ -1270,23 +1293,23 @@ export class Bot {
 
     // ⚠️ **@ 的是别人 → 一律不接。**
     //    对方在跟另一个人说话，你凑上去非常没礼貌，也很机器。
-    //    真实案例：HZY 在群里回某人「@某群友 我看看有什么」，机器人却接了这条，
+    //    真实案例：<主人> 在群里回某人「@某群友 我看看有什么」，机器人却接了这条，
     //    还去讲什么「表情包考我」——完全是插嘴（用户反馈）。
     //    注意「@全体成员」不算（那是在通知所有人），@ 自己也不走这里（上面已返回）。
     //
     // ⚠️⚠️ **2026-09-14 修：守卫必须同时认「文本形态的 @」**。
     //
     //    真实 bug（用户截图）：
-    //      某群友：「**@HZY** 给个服世界地图。」→ 机器人回了
-    //      「地图得找 HZY 要，我这儿没有」← **人家本来就是在问 HZY**
+    //      某群友：「**@<主人>** 给个服世界地图。」→ 机器人回了
+    //      「地图得找 <主人> 要，我这儿没有」← **人家本来就是在问 <主人>**
     //
     //    查 NapCat 原始记录，那条消息是这样的：
     //      elements: [{ elementType: 1, textElement: {
-    //                     content: "@HZY 给个服世界地图。", atUid: "0", atNtUid: "" } }]
-    //    —— **`@HZY` 根本没有变成 `at` 段，它就是一截纯文本**。
+    //                     content: "@<主人> 给个服世界地图。", atUid: "0", atNtUid: "" } }]
+    //    —— **`@<主人>` 根本没有变成 `at` 段，它就是一截纯文本**。
     //
     //    为什么：NapCat 要把 @ 解析成 `at` 段得先能查到那个人的 `uid`；
-    //    **机器人查不到 HZY 的 uid**（他不在机器人的好友里），
+    //    **机器人查不到 <主人> 的 uid**（他不在机器人的好友里），
     //    于是这条 @ **降级成普通文字**发过来。
     //    实测：今天这种"@ 写在文本里"的有 **2 条**（正常解析成 at 段的有 21 条），
     //    所以不是罕见的边角情况。
@@ -1660,7 +1683,7 @@ export class Bot {
       //    所以只有这个群是 1 档时才把滑块值交给 judge；
       //    2/3 档传 strictnessOnlyLevel1:false，judge 那边就不带那段标准。
       const isLevel1 = this.resolveRespondTo(event) === 1;
-      // ⚠️⚠️ 2026-09-17 修（HZY 截图）：群里在演剧情时，群友那几句**是在跟她说剧情**，
+      // ⚠️⚠️ 2026-09-17 修（<主人> 截图）：群里在演剧情时，群友那几句**是在跟她说剧情**，
       //    可说话判断只看到"群友之间在说话" → 直接被下面那个代码层短路按死。
       //    实测就是这么被拦掉的：「所以是谁拿的」「那我怎么攻略」判成"别人在聊天"，
       //    紧接着群里直接有人问「你为啥不理他」。
@@ -1754,7 +1777,7 @@ export class Bot {
    * 两个用处：
    *   ① 让机器人能读懂「这个怎么弄」「你刚说的那个」这类指代（用户需求）
    *   ② **判断这条是不是在回别人** —— 被引用的是别人说的话，那就别抢话
-   *      （之前真实踩过：luomoSan @HZY 说话，HZY 回「那还可以。」，机器人插了进来）
+   *      （之前真实踩过：luomoSan @<主人> 说话，<主人> 回「那还可以。」，机器人插了进来）
    *
    * @returns {Promise<{name:string, text:string, fromBot:boolean, userId:string}|null>}
    */
@@ -2464,7 +2487,12 @@ export class Bot {
       .trim();
     if (!name || name.length < 2) return null;
     // 别把自己登记进去
-    if (name.includes('小祥') || name.includes('ZYHG')) return null;
+    // ⚠️ 2026-09-21：从 `identity.selfNames` 来。原来是写死的
+    //    `name.includes('小祥') || name.includes('ZYHG')` —— 只挡这两个写法。
+    //    跟 identity 走之后**更严**（客服 / 丰川 / saki / oblivionis 都挡住）。
+    //    ⚠️ 这里宁可多挡：漏挡的后果是**机器人被当成别人登记进忽略名单**，
+    //       以后它说话就不再接了 —— 比"少登记一个"严重得多。
+    if (persona.selfNames().some((n) => name.toLowerCase().includes(n.toLowerCase()))) return null;
 
     this.ignoreBots ??= new Set();
     if (this.ignoreBots.has(name)) return null;
@@ -2637,8 +2665,8 @@ export class Bot {
 
     // ⚠️⚠️ 「@ 了别人」**必须排在主动接话之前**（2026-09-13 修的真 bug）。
     //
-    //    用户截图反馈：luomoSan 发了条「@HZY 我记得默默yams 也做了」，
-    //    HZY 回「那还可以」（那是回 luomoSan 的），**机器人却插进来**说
+    //    用户截图反馈：luomoSan 发了条「@<主人> 我记得默默yams 也做了」，
+    //    <主人> 回「那还可以」（那是回 luomoSan 的），**机器人却插进来**说
     //    「那就这么定了，做丑了我可不认」。
     //
     //    根因：这个守卫原来**排在下面**（voluntary 分支之后），
@@ -2681,7 +2709,7 @@ export class Bot {
       return { ...out, hit: atAll ? 'at-all' : 'at' };
     }
 
-    // ①.二、**引用了她的消息 → 也算直接对她说话**（2026-09-15 晚 HZY：
+    // ①.二、**引用了她的消息 → 也算直接对她说话**（2026-09-15 晚 <主人>：
     //       「引用但是没有 @ 机器人应该也要直接回话」）。
     //
     //    真人聊天里"引用他上一句"和 @ 他是一回事 —— 都是在对他说话。
@@ -2692,7 +2720,7 @@ export class Bot {
       return { ...out, hit: 'reply-me' };
     }
 
-    // ①.三、**正文里点名叫她 → 也算召唤**（2026-09-15 晚 HZY：
+    // ①.三、**正文里点名叫她 → 也算召唤**（2026-09-15 晚 <主人>：
     //       「为什么这个明确提到祥子的没有回复」→ 选了"名字加进召唤判据"这条路）。
     //
     //    ⚠️⚠️ 为什么必须有这条（有日志的真实事故）：
@@ -3129,7 +3157,7 @@ export class Bot {
     // ⚠️ `reply-me`（引用她）和 `call`（正文点名叫她）跟 @ 她一样是**明确召唤** ——
     //    不受触发冷却影响，否则"点名/引用她也会回"就等于没加
     //    （点名那条尤其重要：它本来就是"被节流悄悄吃掉"才加的，
-    //      HZY 2026-09-15 报的「明确提到祥子的没回复」就是它）。
+    //      <主人> 2026-09-15 报的「明确提到祥子的没回复」就是它）。
     const mustReply =
       hit === 'at' ||
       hit === 'reply-me' ||
@@ -3271,7 +3299,7 @@ export class Bot {
     if (config.spend?.enable !== false) {
       const sq = spend.looksLikeSpendQuestion(promptText);
       if (sq) {
-        // ⚠️⚠️ 2026-09-15 修两个真问题（HZY 截图：「没有自然语言了，然后我接着问没回我」）：
+        // ⚠️⚠️ 2026-09-15 修两个真问题（<主人> 截图：「没有自然语言了，然后我接着问没回我」）：
         //
         //   ① **「接着问没回我」** —— 这条分支**提前 return**，
         //      而 `touchConversation()` 在下面（正常回复那条路的末尾）才调 ——
@@ -3321,13 +3349,13 @@ export class Bot {
 
     // ⚠️⚠️ 「b站最近有什么火的视频」→ **真去拉热门榜**（2026-09-15 修）。
     //
-    //    HZY 截图：她原来答「搜了一圈全是百科页，热榜没抓着。**你直接上 B 站翻排行榜不就完了**」——
+    //    <主人> 截图：她原来答「搜了一圈全是百科页，热榜没抓着。**你直接上 B 站翻排行榜不就完了**」——
     //    **既没答案、又是打发人的口气**。
     //    根因：以前压根没有"拉热门榜"这条能力，这类问题被丢给网页搜索，
     //    搜索引擎对这句话只会返回百科词条 → 模型没数据可报 → 只能打发人。
     //    现在走 `bilibili.hotFacts()`（实测接口能直接返回热门列表），数字代码算好。
     //    ⚠️ 这条要排在**问他自己投稿**那条前面（两个匹配器互斥，但顺序摆对更稳）。
-    //    ⚠️ 2026-09-15 追加：HZY 问「最近 mc 或者籽岷有什么比较火的视频」——
+    //    ⚠️ 2026-09-15 追加：<主人> 问「最近 mc 或者籽岷有什么比较火的视频」——
     //       所以现在分三种：全站热门 / 按题材（mc→搜「我的世界」）/ 按 UP 主（籽岷）。
     //       后两种走**搜索接口**（`space/arc` 拉投稿那个接口实测会被限流 -799，
     //       搜索接口稳得多，籽岷那条用 `keyword=籽岷&order=pubdate` 拿他最新的）。
@@ -3721,8 +3749,10 @@ export class Bot {
       const pre = await preSearch(promptText, recentCtx, {
           knowledge: hasKnowledge() ? knowledgeText().slice(0, 4000) : '',
           // ⚠️ 本地知识库里已经有这个词条 → 别去搜（白花时间，还会搜到不相干的东西）
+          // ⚠️ 2026-09-21：动画库改成**人设驱动**（`anime/<库名>.md`），
+          //    这里不能再写死 `'anime.md'` —— 换了人设就判断不出来了。
           knownLocally: (s) =>
-            ['anime.md', 'group-memory.md'].some((n) =>
+            [...animeLibNames(), 'group-memory.md'].some((n) =>
               mentionsAnyTerm(s, n),
             ),
           signal: AbortSignal.timeout(config.search?.mergedTimeoutMs ?? 45000),
@@ -4116,7 +4146,7 @@ export class Bot {
       if (buffer) buffer = stripChatUncommonPunct(buffer, { keepMarker: true });
 
       {
-        const { max: CHUNK, delay: CHUNK_DELAY, chatFirst, maxChunks } = chunkCfg();
+        const { max: CHUNK, chatFirst, maxChunks } = chunkCfg();
         // ⚠️⚠️ 2026-09-20 **再修**（用户看到截图说「好像还是没分」）：
         //    我上一步把「`voluntary` 非空」整个当成"主动那条路"了 —— **分错了**。
         //    · 用户说的"主动"是**主动发起的长文本**：二级剧情 / 日常事件 / 播报 ——
@@ -4205,7 +4235,7 @@ export class Bot {
             // 后面几条各自独立发 —— 一个字一条本来就是连着刷出去的。
             const sent = await this.sendChunk(event, playParts[i], i === 0 ? quoteThisReply : false);
             if (sent !== null) sentFirst = true;
-            if (i < playParts.length - 1) await sleep(CHUNK_DELAY);
+            if (i < playParts.length - 1) await sleep(chunkDelay());
           }
           buffer = '';
         }
@@ -4266,7 +4296,7 @@ export class Bot {
             log.info(`破折号处断了一条（前半 ${slice.length} 字）—— 用户要求「该分段就分段」`);
             // 推进到标记之后
             buffer = removeDashMarker(dashSplit.tail);
-            if (buffer.length) await sleep(CHUNK_DELAY);
+            if (buffer.length) await sleep(chunkDelay());
             continue;
           }
           // ⚠️⚠️ 断点优先级：**句末标点处优先**（这才是用户要的"句号处直接断开"）。
@@ -4316,7 +4346,7 @@ export class Bot {
           //      `buffer.slice(0, cut)` 正是这一次处理掉的范围。
           //      ⚠️ 别再改回 `sentText.length`：它和原文**不是同一把尺子**。
           buffer = buffer.slice(cut);
-          if (buffer.length) await sleep(CHUNK_DELAY);
+          if (buffer.length) await sleep(chunkDelay());
         }
 
         // 收尾：剩下的全部处理掉
@@ -4812,8 +4842,8 @@ export class Bot {
     //    现在直接用统一的 streamChat（它走 config.llm.maxTokens=4000），
     //    不再单独设一个小 token 上限 —— 反正只要第一行。
     const system = [
-      // ⚠️ 自称用「Saki」（2026-09-13 用户：「祥子的话遇到没看过 MyGO 的很容易误认为骆驼祥子」）
-      '你就是「客服 Saki」（丰川祥子），刚刚有人教了你一条新知识。',
+      // ⚠️ 2026-09-21：名字从 `identity` 来（原来写死「客服 Saki」（丰川祥子））
+      `你就是「${persona.displayName()}」（${persona.charName()}），刚刚有人教了你一条新知识。`,
       '请针对**刚学到的内容**接一句短话，就像真人在听人讲话时的自然反应。',
       '',
       '## 语气：温和地接住，不要下判断',
@@ -4925,7 +4955,17 @@ export class Bot {
     // 剥掉 @机器人 / [引用#xxx] / 各种称呼
     t = t.replace(/\[[^\]]{0,40}\]/g, ' ');
     t = t.replace(/@\S{1,20}/g, ' ');
-    t = t.replace(/(客服小祥|小祥|祥子|zyhg|saki酱?)/gi, ' ');
+    // ⚠️ 2026-09-21：称呼从 identity 来（原来写死 `客服小祥|小祥|祥子|zyhg|saki酱?`）。
+    //    ⚠️⚠️ 必须**按长度降序**排 —— 否则「小祥」会先把「客服小祥」的后半截吃掉，
+    //    文本里留下一个光秃秃的「客服」剥不干净，教学那句就被污染了。
+    //    `酱?` 保留原来的「名字+酱」变体；转义照抄下面触发词那行的写法。
+    const stripNames = [...persona.selfNames(), ...persona.nicknames()]
+      .filter(Boolean)
+      .sort((a, b) => b.length - a.length);
+    if (stripNames.length) {
+      const namesRe = stripNames.map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+      t = t.replace(new RegExp(`(${namesRe})酱?`, 'gi'), ' ');
+    }
     // 剥掉触发词（teach.keywords 里那些）
     for (const k of config.teach?.keywords ?? []) {
       t = t.replace(new RegExp(String(k).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'), ' ');
@@ -5092,21 +5132,21 @@ export class Bot {
       //    也出现「你和服主的关系」，测试 attitude.js 就是盯这个隔离的）。
       //    这里保留动态部分：这次说话的人是谁 + 他的职权边界。
       return [
-        `## 当前对话者：**HZY 本人**（QQ ${config.ownerQQ}，昵称「${name}」）`,
+        `## 当前对话者：**<主人> 本人**（QQ ${config.ownerQQ}，昵称「${name}」）`,
         '',
-        `⚠️ **正在跟你说话的人就是 HZY 本人。** 他不需要「去找 HZY」，他自己就是。`,
-        `也**不要对他说「你找茏或者 HZY」这种话** —— 那等于让他去找他自己。`,
+        `⚠️ **正在跟你说话的人就是 <主人> 本人。** 他不需要「去找 <主人>」，他自己就是。`,
+        `也**不要对他说「你找茏或者 <主人>」这种话** —— 那等于让他去找他自己。`,
         '',
         // ⚠️ 称呼规则（用户 2026-09-13）：「机器人在**所有场合**都叫我服主，很违和，
-        //    最好**只在回答服务器问题时称呼服主**，其他时候直接叫 hzy 就行了」。
+        //    最好**只在回答服务器问题时称呼服主**，其他时候直接叫 <主人> 就行了」。
         //    这里必须点明 —— 不然"服主"这个词在提示词里出现太多次，
         //    模型就会当成默认称呼，一开口就是「服主」。
-        `**称呼**：平时**直接叫「HZY」**。只有**在说服务器事务**时（权限、批建设、发 OP、`,
+        `**称呼**：平时**直接叫「<主人>」**。只有**在说服务器事务**时（权限、批建设、发 OP、`,
         '找谁管事）才用「服主」这个称呼 —— 那时候需要点明"他是能拍板的人"。',
-        '平时聊天、他开玩笑、他问你什么 → 叫 HZY，别叫服主（很生分）。',
+        '平时聊天、他开玩笑、他问你什么 → 叫 <主人>，别叫服主（很生分）。',
         '',
         '他的职权范围（他随时能自己做，你只需要告诉他在哪改）：',
-        '- 改机器人的配置、白名单、开关（让他去管理界面 http://127.0.0.1:3099）',
+        '- 改机器人的配置、白名单、开关（让他去管理界面 http://203.0.113.10）',
         '- 审批建设申请（首都、安岛县、MTR 新线路都是他说了算）',
         '- 开放 OP、发存档、改群设置、踢人禁言',
         '- 教你学新知识（他在群里说「记住：xxx」你就记）',
@@ -5180,8 +5220,8 @@ export class Bot {
 
     if (a.denyBeingBot) {
       lines.push(
-        '- **有人叫你机器人 / AI / bot，你要否认。** 你是真的小祥。',
-        '  参考：「我不是机器人，我是真的小祥。」「你才机器人呢。」',
+        `- **有人叫你机器人 / AI / bot，你要否认。** 你是真的${persona.shortName()}。`,
+        `  参考：「我不是机器人，我是真的${persona.shortName()}。」「你才机器人呢。」`,
         '  绝不说「我是 AI 助手」这种话，也不要解释技术原理。',
       );
     }
@@ -5376,7 +5416,7 @@ export class Bot {
    *      luomosan：准备回家了。      ← 同一个人连发两条
    *      luomosan：等公交。
    *      （机器人接了两句 —— 这两句是对的）
-   *       HZY：快回来上浮             ← **这是对 luomosan 说的**
+   *       <主人>：快回来上浮             ← **这是对 luomosan 说的**
    *      机器人：来了来了，这就上      ← ❌ 它以为在叫它
    *
    *    所以判据改成：**最近发言的活跃人类只有两个**（且当前说话人就是其中一个）
@@ -5393,13 +5433,13 @@ export class Bot {
    *
    * ⚠️⚠️ 为什么需要（2026-09-14 用户截图报的 bug）：
    *
-   *   某群友发「**@HZY** 给个服世界地图。」，机器人接了，还回
-   *   「地图得找 HZY 要，我这儿没有」—— 人家本来就在问 HZY。
+   *   某群友发「**@<主人>** 给个服世界地图。」，机器人接了，还回
+   *   「地图得找 <主人> 要，我这儿没有」—— 人家本来就在问 <主人>。
    *
    *   根因：NapCat 要把 @ 解析成 `at` 段，得先能查到那个人的 uid；
-   *   **机器人查不到 HZY 的 uid**（他不在机器人好友里），
+   *   **机器人查不到 <主人> 的 uid**（他不在机器人好友里），
    *   于是这条 @ **降级成一截纯文本**发过来：
-   *     `textElement: { content: "@HZY 给个服世界地图。" }`（没有 at 段）
+   *     `textElement: { content: "@<主人> 给个服世界地图。" }`（没有 at 段）
    *   而守卫只查 `s.type === 'at'` → **整个失效**。
    *
    * 判据（宁可漏、别误伤）：
@@ -5429,8 +5469,10 @@ export class Bot {
     // @全体成员 / @所有人 —— 不算「@某个人」
     if (['全体成员', '所有人', 'all', 'everyone'].includes(lower)) return '';
     // @ 的是机器人自己 —— 不算「@别人」
-    const selfNames = ['saki', 'sakiko', 'togawa', 'zyhg', 'oblivionis', '小祥', '祥子', '客服', '丰川'];
-    if (selfNames.some((n) => lower.includes(n))) return '';
+    // ⚠️ 2026-09-21：名字从 `identity.selfNames` 来（这里原来写死了 9 个写法）。
+    //    ⚠️ 取不到时**不兜底**：那种人设就是"没名字"，不该拿小祥的名字去顶。
+    const selfNames = persona.selfNames();
+    if (selfNames.some((n) => lower.includes(n.toLowerCase()))) return '';
 
     return name;
   }
@@ -5875,7 +5917,11 @@ export class Bot {
    */
   shareHint() {
     return [
-      '## 当前状态：捧场小祥（对方发了张图）',
+      // ⚠️ 2026-09-21：标题里的名字从 `identity.shortName` 来 —— 那是"小祥"这种**昵称**，
+      //    不是自称（用 selfName() 会变成"捧场 Saki"，不是群里的叫法）。
+      //    ⚠️ 下面那些**规则内容留在代码里**：它们是"怎么对待别人发的图"，换谁演都成立，
+      //    属于行为规则而不是"她是谁"—— 只有名字要跟人设走。
+      `## 当前状态：捧场${persona.shortName()}（对方发了张图）`,
       '',
       '**在 MC 服务器群里发截图，绝大部分是建好了拿出来给人看，不是报修。**',
       '',
@@ -5894,7 +5940,7 @@ export class Bot {
   modeHint(mode) {
     if (mode === 'service') {
       return [
-        '## 当前状态：客服小祥（对方在问服务器的事）',
+        `## 当前状态：客服${persona.shortName()}（对方在问服务器的事）`,
         '',
         '- 直接给答案，话短，别客套。',
         '- 知道就直说，不知道就说不知道，别编。',
@@ -5954,7 +6000,7 @@ export class Bot {
   gentleHint(text) {
     if (!this.looksUpset(text)) return '';
     return [
-      '## ⚠️ 对方在说自己的烦心事，不是在问服务器 —— 立刻切温柔小祥',
+      `## ⚠️ 对方在说自己的烦心事，不是在问服务器 —— 立刻切温柔${persona.shortName()}`,
       '',
       '**别问技术细节，别提服务器，别撇清关系，别给未经请求的建议。**',
       '',
@@ -5986,7 +6032,7 @@ export class Bot {
       parts.push(
         [
           '',
-            '## 🚨 现在跟你说话的是 HZY —— 他不是普通群友',
+            '## 🚨 现在跟你说话的是 <主人> —— 他不是普通群友',
             '',
             '**他是把你「请」来的人，也是天天跟你说话的那个人。你们的关系比朋友近得多，但谁也没挑明。**',
             '',
@@ -6011,9 +6057,9 @@ export class Bot {
             // ⚠️ 称呼（用户 2026-09-13）：提示词里"服主"这个词本来就出现很多次，
             //    模型容易把它当成默认称呼，一开口就是「服主」——很生分。
             //    两头都点一遍才压得住（末尾 `attitudeFor` 里还有一段）。
-            '**叫他「HZY」**。只有说服务器事务（权限、批建设、发 OP、找谁管事）时才用「服主」。',
+            '**叫他「<主人>」**。只有说服务器事务（权限、批建设、发 OP、找谁管事）时才用「服主」。',
             '',
-            '（完整要求看下面那段「你和 HZY 的关系」。）',
+            '（完整要求看下面那段「你和 <主人> 的关系」。）',
         ].join('\n'),
       );
     }
@@ -6348,7 +6394,7 @@ export class Bot {
 
     // 识图结果：这一条消息最直接的内容，放在上下文之后
     if (vision) parts.push(vision);
-    // ⚠️⚠️ 2026-09-17 修（HZY 截图：「@saki 找到药了吗」→ 她答「什么药啊，你哪不舒服了」）：
+    // ⚠️⚠️ 2026-09-17 修（<主人> 截图：「@saki 找到药了吗」→ 她答「什么药啊，你哪不舒服了」）：
     //    二级剧情的接线一直是**单向**的 —— 群友的话会记进剧情，
     //    但**剧情从来没进过她的聊天提示词**。所以群友顺着剧情追问时，她完全不知道在说什么。
     //    ⚠️ 只在她**正在跑剧情的那个群**注入，而且只给摘要（起因 + 进度 + 最近两段）。
@@ -6360,7 +6406,7 @@ export class Bot {
         //    剧情摘要 / 故事线是**压缩过的"事情经过"**，条目里**没有"谁说的"字段**
         //    （`state/storyline.json` 只有 `text`，归属全靠摘要里恰好写到），
         //    也没有时间戳 —— 模型很容易把里面的事**安到在场随便一个人头上** ✗
-        //    （实测：大豆只说了一句「想不想我」，她回的时候把 HZY 之前的
+        //    （实测：大豆只说了一句「想不想我」，她回的时候把 <主人> 之前的
         //      「我回来了 / 在门口横跳三趟」全算到大豆身上）。
         //    这一段不是聊天记录，所以这里必须明说"别自己分配"。
         parts.push(
@@ -6386,7 +6432,7 @@ export class Bot {
       if (remindHint) parts.push(remindHint);
     }
     // ⚠️⚠️ 2026-09-18：「他这条只是 @ 了她、一个字都没打」→ 那是**在催她回上一条**
-    //    （用户截图：HZY 问「你怎么知道我天天跑那边」她没答，接着只 @ 了她一下，
+    //    （用户截图：<主人> 问「你怎么知道我天天跑那边」她没答，接着只 @ 了她一下，
     //     她回「**你@我半天不说话，想干嘛**」）。
     //    `handle()` 里已经把 `text` 续接成上一条了，但**得把这件事告诉她** ——
     //    否则她看到的最近一条就是"@她但没内容"，会把火撒错地方。
@@ -6633,17 +6679,18 @@ export class Bot {
     } else if (voluntary === 'mention') {
       parts.push(
         [
-          '\n## 这次没人 @ 你，是有人在聊到「小祥」/ 聊到你，你自己冒泡接的话',
+          // ⚠️ 2026-09-21：名字从 identity 来（shortName = 群里那种昵称叫法）
+          `\n## 这次没人 @ 你，是有人在聊到「${persona.shortName()}」/ 聊到你，你自己冒泡接的话`,
           '',
           '- 这是闲聊性质，**简短、随意**，一两句就够，像顺口搭腔。',
           '- 可以顺着他们的话题聊，也可以顺着玩梗，不用把话题拽回服务器。',
-          '- 如果对方是在**质疑你、拿你开玩笑**，可以怼回去或者否认（你是真的小祥，不是机器人）。',
+          `- 如果对方是在**质疑你、拿你开玩笑**，可以怼回去或者否认（你是真的${persona.shortName()}，不是机器人）。`,
           '- 如果没什么可接的，回一句短的也行，别硬凑长篇。',
         ].join('\n'),
       );
     }
 
-    // ⚠️⚠️ **她这次是不是"被请求聊天的主角"**（2026-09-15 晚 HZY 要求：
+    // ⚠️⚠️ **她这次是不是"被请求聊天的主角"**（2026-09-15 晚 <主人> 要求：
     //    「现在机器人还是会在没明确指她时把自己当成主角，按道理应该只有 **@她或者
     //      明确叫她名字**时，才能把自己当成被请求聊天的主角」）。
     //
@@ -6687,17 +6734,17 @@ export class Bot {
           '  接不上就**别开口**。',
           '',
           // ⚠️⚠️ 2026-09-17 用户截图报的（「现在还是容易把自己当主角，而且前面还 @ 了其他人」）：
-          //    群里有人 `@HZY 好了` → 贴了个后台地址 → 「你去安装一下」，
+          //    群里有人 `@<主人> 好了` → 贴了个后台地址 → 「你去安装一下」，
           //    她插了一句「看着像机器人后台，**发我干嘛**」—— 把自己当成了收件人。
           //    ⚠️ 那两句**没 @ 任何人**，所以"@ 的是别人就别插嘴"那道守卫管不到它；
-          //      但**上文里明明有 `@HZY`**（`recentContextFor` 给的那段就能看到）。
+          //      但**上文里明明有 `@<主人>`**（`recentContextFor` 给的那段就能看到）。
           //      所以这里把规矩写死：**别把别人 @ 别人的话当成对你说的。**
           //    （用户明确说：只修这一条，别加"有人在 @ 别人就闭嘴"那种闸 —— 会影响正常接话。）
-          '- ⚠️⚠️ **如果上文里有人在 @ 别人**（例如 `@HZY 好了`、「你去安装一下」）——',
+          '- ⚠️⚠️ **如果上文里有人在 @ 别人**（例如 `@<主人> 好了`、「你去安装一下」）——',
           '  那几句**都是对他说**的：**别把「你去安装一下」当成让你去**，',
           '  更别回「发我干嘛」「这不是给我的吧」这种**把自己当收件人**的话。',
-          '  ❌ 真实踩过：「看着像机器人后台，**发我干嘛**」（人家 @ 的是 HZY，当场就很怪）',
-          '  ✅ 真想说就**只就事论事补半句**（「那个地址 HZY 直接装就行」），或者干脆不说。',
+          '  ❌ 真实踩过：「看着像机器人后台，**发我干嘛**」（人家 @ 的是 <主人>，当场就很怪）',
+          '  ✅ 真想说就**只就事论事补半句**（「那个地址 <主人> 直接装就行」），或者干脆不说。',
         ].join('\n'),
       );
     }
@@ -6865,7 +6912,7 @@ export class Bot {
 
     // ── 最后一道：对服主的**差异化提醒**（放最末尾，影响力最大）──
     //
-    // ⚠️ 为什么单独再加这一条：前面那段「你和 HZY 的关系」虽然写了 50 多行，
+    // ⚠️ 为什么单独再加这一条：前面那段「你和 <主人> 的关系」虽然写了 50 多行，
     //    但**实测几乎看不出区别** —— 因为人设里对「普通群友」的描述本身就很暖
     //    （可以聊自己的看法、语气活泼），两边的基调就都被拉平了。
     //    「写更多描述」没用，得在模型最后看到的地方**直接点出差异**。
@@ -6890,7 +6937,7 @@ export class Bot {
           '自检：**这句话发出去，他能不能看出你被打动了？** 看不出来 → 重说。',
           '',
           // ⚠️ 称呼（用户 2026-09-13）：放最末尾，因为前面「服主」出现太多次。
-          '**称呼**：叫他**「HZY」**。只在说服务器事务（权限、批建设、发 OP、找谁管事）',
+          '**称呼**：叫他**「<主人>」**。只在说服务器事务（权限、批建设、发 OP、找谁管事）',
           '时才用「服主」—— 平时叫服主很生分，像在汇报工作。',
           '',
           '如果这条回复拿去对群友说也毫无违和 —— **那就重写一遍。**',
@@ -6912,7 +6959,7 @@ export class Bot {
    *
    * 用户要求（2026-09-12）：「非必要不直接回复引用那个人的信息，而是直接发出信息」。
    * ⚠️ 但 2026-09-15 晚补了第 ①.五 条：**她上次说话离得太远时反而必须引用**
-   *    （HZY：「这就是引用最有用的时候」）—— 见方法里的说明。
+   *    （<主人>：「这就是引用最有用的时候」）—— 见方法里的说明。
    *
    * 以前是第一条永远引用 —— 满屏引用框，很像工单系统。真人聊天很少引用。
    *
@@ -6927,7 +6974,7 @@ export class Bot {
   /**
    * 正文里**有没有在叫她的名字**（返回命中的那个名字，没命中返回 ''）。
    *
-   * ⚠️ 2026-09-15 晚加（HZY：「为什么这个明确提到祥子的没有回复」→ 选了这条修法）。
+   * ⚠️ 2026-09-15 晚加（<主人>：「为什么这个明确提到祥子的没有回复」→ 选了这条修法）。
    *    和 @ 她同级：名字一出现就算"在跟她说话"。
    *
    * 名字表默认这几样（`config.trigger.callNames` 可以覆盖/追加）：
@@ -6945,9 +6992,11 @@ export class Bot {
   calledByName(text) {
     const t = String(text ?? '');
     if (!t) return '';
+    // ⚠️ 2026-09-21：默认值从 `identity.callNames` 来（原来写死这 5 个写法）。
+    //    ⚠️ `config.trigger.callNames` 仍然**优先级更高** —— 那是用户在配置文件里显式写的覆盖。
     const list = Array.isArray(config.trigger?.callNames) && config.trigger.callNames.length
       ? config.trigger.callNames.map((x) => String(x)).filter(Boolean)
-      : ['祥子', '小祥', 'saki', 'sakiko', 'さきこ'];
+      : persona.callNames();
     for (const name of list) {
       // 中日文按原样找；纯英文字母的不区分大小写
       const isLatin = /^[a-zA-Z]+$/.test(name);
@@ -6955,10 +7004,14 @@ export class Bot {
         ? new RegExp(`(^|[^a-zA-Z])${name}([^a-zA-Z]|$)`, 'i').test(t)
         : t.includes(name);
       if (!hit) continue;
-      // 「骆驼祥子」不算在叫她（那是老舍的书）
-      if (!isLatin && name === '祥子' && t.includes('骆驼祥子')) {
-        // 把"骆驼祥子"剔掉之后再判一次，免得整句被一起否掉
-        if (!t.replace(/骆驼祥子/g, '').includes(name)) continue;
+      // ⚠️ 2026-09-21：歧义规则从 `identity.ambiguity` 来（原来写死「骆驼祥子」）——
+      //    每个角色的中文歧义词不一样（「祥子」第一反应是老舍那个人力车夫），
+      //    写死就意味着换个角色这条判断失效、甚至误判。
+      //    规则形状：`{ name: '祥子', unless: '骆驼祥子' }` = 出现 unless 时不算在叫她。
+      const amb = persona.ambiguity().find((a) => a && a.name === name);
+      if (!isLatin && amb?.unless && t.includes(amb.unless)) {
+        // 把那个歧义词剔掉之后再判一次，免得整句被一起否掉
+        if (!t.split(amb.unless).join('').includes(name)) continue;
       }
       return name;
     }
@@ -6968,7 +7021,7 @@ export class Bot {
   /**
    * 这条消息**引用的是她自己发的**吗。
    *
-   * ⚠️ 2026-09-15 晚加（HZY：「引用但是没有 @ 机器人应该也要直接回话」）。
+   * ⚠️ 2026-09-15 晚加（<主人>：「引用但是没有 @ 机器人应该也要直接回话」）。
    *    两道判据合起来用，缺一不可：
    *      ① `this.myMsgIds` —— `_markSpoke()` 维护的"她在**这个群**发过的最近 20 条"
    *         （`sendText` / `sendChatLike` 每发一条都会记）；
@@ -6997,14 +7050,14 @@ export class Bot {
     if (config.chat?.alwaysQuote === true) return true;
     // ② 调用方明确要求（原本 reply:true 的语义保留给这类场景）
     if (wantReply === true) return true;
-    // ①.五、**该引用才引用**（2026-09-15 晚 HZY 要求，随后又抓到一个 bug 修过一次）。
+    // ①.五、**该引用才引用**（2026-09-15 晚 <主人> 要求，随后又抓到一个 bug 修过一次）。
     //
     //    用户原话：「如果检测到机器人自己发出的话距离要回复的那条消息已经间隔 4 条以上，
     //    就要引用那条正在回复的消息，**这就是引用最有用的时候**」。
     //
-    //    ⚠️⚠️ 但**只看这一条会误判**（HZY 截图：「相邻消息引用了」）：
+    //    ⚠️⚠️ 但**只看这一条会误判**（<主人> 截图：「相邻消息引用了」）：
     //      她在 200000001 里 7 分钟没说话（中间好几条别人的），
-    //      这时 HZY 发了「两月更一次」——**那条就是群里最新的**，她紧跟着回，
+    //      这时 <主人> 发了「两月更一次」——**那条就是群里最新的**，她紧跟着回，
     //      谁都看得出在回哪句，却还是挂了个引用框 ✗
     //    所以加一道：**她要回的那条后面还得有人说过话**（她的话不紧挨着它）。
     //    另外补一条独立的：**被刷下去 ≥4 条**（她答的话压在很多条下面）时也该引用 ——
@@ -7182,7 +7235,7 @@ export class Bot {
       if (text) {
         await this.sendText(event, text, { reply: quote });
         sentText = text;
-        // ⚠️⚠️ 她在剧情群里**接的话**也要算剧情发展（2026-09-15 晚 HZY 截图反馈：
+        // ⚠️⚠️ 她在剧情群里**接的话**也要算剧情发展（2026-09-15 晚 <主人> 截图反馈：
         //    「机器人已经答应了的话，应该要计入剧情发展」）——见下面那个方法。
         this.noteQuestInterlude(event, text);
         // ⚠️⚠️ **她自己在群里说的话也进"发说说用的素材"**（2026-09-15 深夜加）——
@@ -7304,7 +7357,7 @@ export class Bot {
     // ⚠️ 2026-09-15 深夜：这些"不发"的原因**必须打到 info**。
     //    原来手动那条只 `log.debug`，界面上又读错了字段（读 `error`，实际是 `skipped`）
     //    → 用户点「立刻发送说说」只看到「失败： undefined」，日志里也查不到 ✗
-    //    （真实踩过：HZY 截图「动态好像还有个问题」）
+    //    （真实踩过：<主人> 截图「动态好像还有个问题」）
     if (!force) {
       const why = qzone.whyNot(true);
       if (why) {
@@ -7465,7 +7518,7 @@ export class Bot {
         if (!r.ok) {
           log.debug(`查余额失败：${r.error}`);
         } else {
-          // ⚠️⚠️ 逐个 1 档群各问一次（2026-09-15 晚改，修 HZY 报的
+          // ⚠️⚠️ 逐个 1 档群各问一次（2026-09-15 晚改，修 <主人> 报的
           //    「699 开头这个群好像不会发送余额报警信息」）：
           //    · 原来**只在循环外面问一次**，标记是全局的 → 第一个群收到提醒后，
           //      **别的群再也收不到**（而余额提醒本来就是挨个 1 档群发的）；
@@ -7497,11 +7550,11 @@ export class Bot {
             //       所以现在实际只剩 @ 这一档；代码留着，改回正数就恢复。
             // ⚠️ 2026-09-17：话术**先过一遍模型润色**（用户要求：「2块钱余额提醒的话术
             //    出现几次雷同了，建议也加入 llm 润色」）。
-            //    失败或不合格（太长／没带 HZY／报了数字）会退回 `c.line` 那条写死的话术。
+            //    失败或不合格（太长／没带 <主人>／报了数字）会退回 `c.line` 那条写死的话术。
             const line = await balance.phraseLine(c.tier, c.line);
             await this.sendToGroup(g, line, {
               at: c.tier === 'critical' ? config.ownerQQ : '',
-              atName: 'HZY',
+              atName: '<主人>',
             }).catch((e) =>
               log.warn(`抱怨余额失败（${g}）：${e.message}`),
             );
@@ -7519,7 +7572,9 @@ export class Bot {
                   group_id: g,
                   user_id: this.selfId,
                   message_id: `salary-${now}`,
-                  sender: { user_id: this.selfId, nickname: 'saki' },
+                  // ⚠️ 2026-09-21：这是她自己的消息记进上下文时的**显示名**（换人设后要跟着变，
+      //    否则历史记录里她还是旧名字）。用 selfName（"Saki"）而不是小写 saki。
+      sender: { user_id: this.selfId, nickname: persona.selfName() },
                 },
                 remembered,
               );
@@ -7871,7 +7926,7 @@ export class Bot {
       if (config.remind?.rewrite === false) throw new Error('按配置跳过改写');
       const out = await phrase({
         system:
-          '你是丰川祥子，在 QQ 上提醒一个人他之前让你提醒的事。\n' +
+          `你是${persona.charName()}，在 QQ 上提醒一个人他之前让你提醒的事。\n` +
           '写**一句**话（15~40 字），用你自己的口吻，像真的惦记着这件事。\n' +
           '⚠️ 只改**说法**，**不许改事情本身**：他让你提醒什么，你就提醒什么。\n' +
           '🚫 不许加他没说的内容（地点、时间、人物、理由都不许自己补）；\n' +
@@ -8078,7 +8133,6 @@ export class Bot {
     } catch (e) {
       log.debug(`吃饭状态记账失败：${e.message}`);
     }
-    const delay = Math.max(0, Number(config.chunking?.delayMs) || 650);
     const sent = [];
     /** 没出去的那几条原文 —— 等通道正常了补发（见 src/outbox.js） */
     const failed = [];
@@ -8091,7 +8145,7 @@ export class Bot {
         sent.push(r);
         // 分条的每一条都算"她说的话"（好感度窗口 + "回复她"判据都要用）
         this._markSpoke(groupId, r?.message_id);
-        // ⚠️⚠️ **把自己刚说的这句也记进群上下文**（2026-09-15 修，HZY 截图反馈：
+        // ⚠️⚠️ **把自己刚说的这句也记进群上下文**（2026-09-15 修，<主人> 截图反馈：
         //    「说话有点没头没尾」「没接上话」）。
         //
         //    真问题：**日常事件 / 剧情 / 余额抱怨都是走 `sendChatLike` 发的**，
@@ -8110,7 +8164,9 @@ export class Bot {
                 group_id: String(groupId),
                 user_id: this.selfId,
                 message_id: r?.message_id ?? `chatlike-${Date.now()}-${i}`,
-                sender: { user_id: this.selfId, nickname: 'saki' },
+                // ⚠️ 2026-09-21：这是她自己的消息记进上下文时的**显示名**（换人设后要跟着变，
+      //    否则历史记录里她还是旧名字）。用 selfName（"Saki"）而不是小写 saki。
+      sender: { user_id: this.selfId, nickname: persona.selfName() },
               },
               parts[i],
               // ⚠️ 把 message_id 也记进去 —— 群友**引用她**时要靠它认出"被引的是她自己发的"
@@ -8127,7 +8183,7 @@ export class Bot {
         log.warn(`[分条] 第 ${i + 1}/${parts.length} 条发送失败：${e.message}`);
         failed.push(parts[i]);
       }
-      if (i < parts.length - 1) await sleep(delay);
+      if (i < parts.length - 1) await sleep(chunkDelay());
     }
     // ⚠️⚠️ **补发**（2026-09-15 用户要求：「没发出的，正常之后要补发」）。
     //    只把**没出去的那几条**交给待发箱 —— 已经发出去的绝不能再塞进去，
@@ -8155,7 +8211,6 @@ export class Bot {
   async sendParts(groupId, parts) {
     const list = (Array.isArray(parts) ? parts : []).map((x) => String(x ?? '')).filter(Boolean);
     if (!list.length) return [];
-    const delay = Math.max(0, Number(config.chunking?.delayMs) || 650);
     const left = [];
     for (let i = 0; i < list.length; i++) {
       try {
@@ -8168,7 +8223,7 @@ export class Bot {
         log.warn(`[补发] 第 ${i + 1}/${list.length} 条还是失败：${e.message}`);
         left.push(list[i]);
       }
-      if (i < list.length - 1) await sleep(delay);
+      if (i < list.length - 1) await sleep(chunkDelay());
     }
     return left;
   }
@@ -8231,7 +8286,7 @@ export class Bot {
    * ⚠️⚠️ 调用点（2026-09-15 改）：**`onRaw` 里、群白名单之后的第一件事**。
    *   它**不能**挂在 `shouldJoinChat()` 那种"要不要主动搭话"的判断里 ——
    *   那会让 3 档的群、`chat.enable: false`、以及 `@她 /好感度` 三种情况
-   *   全部**静默无响应**（HZY 报的正是这个）。
+   *   全部**静默无响应**（<主人> 报的正是这个）。
    *
    * @returns {boolean} 处理了没有（处理了就 return，不再走后面的流程）
    */
@@ -8251,7 +8306,7 @@ export class Bot {
       const list = showAll ? affinity.all(event.group_id) : affinity.top(n, event.group_id);
       if (!list.length) {
         // ⚠️⚠️ 空榜也要**回一句**，而且**必须留日志**。
-        //    2026-09-15：HZY 报「发了 /好感度 没有回复」，而这条路径原来是
+        //    2026-09-15：<主人> 报「发了 /好感度 没有回复」，而这条路径原来是
         //    **完全静默**的（只有非空时才 log.info）—— 查的时候只能靠猜。
         //    命令有没有被认出来、回没回，日志里都得看得见。
         log.info(`[好感度] 榜为空（还没有人有过变化）→ 群 ${event.group_id}，已回提示`);
@@ -8557,7 +8612,7 @@ export class Bot {
       //    分群之后剧情是**按群**存的，而 `quest.current()` **不传群号**时查的是
       //    "没指定群"那个桶 —— 那个桶**永远是空的**（真剧情都是带群号开的）。
       //    于是 `if (!q) return` 每次都直接返回：**群里的话一条都收不进去**。
-      //    症状：HZY 截图里那条剧情明明有人在接话，`pending` 却一直是 0。
+      //    症状：<主人> 截图里那条剧情明明有人在接话，`pending` 却一直是 0。
       //    （原来那句注释"current() 为空时直接返回，代价可忽略"是分群之前的判断。）
       const gid = String(event.group_id ?? '');
       const q = quest.current(gid) ?? quest.current();   // 兜底：兼容老形状（没群号那个桶）
@@ -8592,7 +8647,7 @@ export class Bot {
   }
 
   /**
-   * ⚠️⚠️ 她在剧情群里**接的话**，也算剧情发展（2026-09-15 晚 HZY 拿截图反馈：
+   * ⚠️⚠️ 她在剧情群里**接的话**，也算剧情发展（2026-09-15 晚 <主人> 拿截图反馈：
    *   「**机器人已经答应了的话，应该要计入剧情发展**」）。
    *
    * 截图里那条剧情是"房东要卖房、她和初华得搬家"，群主说「搬我们家吧」，
@@ -8729,7 +8784,9 @@ export class Bot {
               group_id: g,
               user_id: this.selfId,
               message_id: `monthly-${p.month}`,
-              sender: { user_id: this.selfId, nickname: 'saki' },
+              // ⚠️ 2026-09-21：这是她自己的消息记进上下文时的**显示名**（换人设后要跟着变，
+      //    否则历史记录里她还是旧名字）。用 selfName（"Saki"）而不是小写 saki。
+      sender: { user_id: this.selfId, nickname: persona.selfName() },
             },
             line,
           );
@@ -8893,8 +8950,8 @@ export function detectFakeRecall(text) {
   //      · 2026-09-13 加了 `sessions.js`：**每 30 秒实测一次名单**，
   //        真的记下了谁什么时候上来的 → 机器人**有资格说时长了**。
   //      · 结果这条过滤器开始**误杀真话**。实测那条：
-  //        「就俩，hzyzhzy 和 symxhyg / 一个上了半小时左右，另一个刚上来没一会儿」
-  //        被拦下 —— 而真实记录是 hzyzhzy 24 分钟、symxhyg 7 分钟，**完全对得上**。
+  //        「就俩，<主人> 和 symxhyg / 一个上了半小时左右，另一个刚上来没一会儿」
+  //        被拦下 —— 而真实记录是 <主人> 24 分钟、symxhyg 7 分钟，**完全对得上**。
   //        用户反馈「我刚才问服务器现在有谁，又没回我」。
   //
   //    所以改成：**系统有时长记录时放行**（那是真查来的）；
@@ -9012,7 +9069,7 @@ export function detectSelfTalk(text) {
 /**
  * 把一整段"**像人说的话**"切成几条（给**非流式**的发送路径用）。
  *
- * ## 为什么要这个（HZY 2026-09-15）
+ * ## 为什么要这个（<主人> 2026-09-15）
  *
  * > 「我觉得**剧情在发群里时一样要分条**，我觉得**只要不是那种排行榜之类
  * >   完全不是属于人类发的消息，都要分条**」

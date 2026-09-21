@@ -44,7 +44,7 @@ console.log('\n──── 见底档在群里**实际长什么样**（带 @）�
   console.log(
     `  ${JSON.stringify(
       [
-        { type: 'at', data: { qq: String(at), name: 'HZY' } },
+        { type: 'at', data: { qq: String(at), name: '<主人>' } },
         { type: 'text', data: { text: ' ' } },
         { type: 'text', data: { text: demo } },
       ],
@@ -52,7 +52,7 @@ console.log('\n──── 见底档在群里**实际长什么样**（带 @）�
       2,
     ).replace(/^/gm, '  ')}`,
   );
-  console.log(`\n  群里显示成：[@HZY] ${demo}`);
+  console.log(`\n  群里显示成：[@<主人>] ${demo}`);
 }
 
 console.log('\n──── 给提示词的语气要求 ────\n');
@@ -78,10 +78,10 @@ for (const [name, total] of [
 if (!plain) {
   console.log('\n──── 让模型照这套语气现说几条（见底档）────\n');
   // ⚠️⚠️ 这里的规则**必须和生产路径一致**（2026-09-13 踩过）：
-  //    我原来在这写的是旧规格（"工资是 HZY 发给你的，他还没发"
+  //    我原来在这写的是旧规格（"工资是 <主人> 发给你的，他还没发"
   //    "不要在句子里写名字""认下是我自己花超了"）——
   //    全是当天被用户否掉的那套，于是**预览显示"你"、而生产提示词早就
-  //    要求点名 HZY**，两边对不上，白让人以为改坏了。
+  //    要求点名 <主人>**，两边对不上，白让人以为改坏了。
   //    现在**直接从 `balanceNote()` 里抽出规则**，改一处两边同步。
   balance.setLastForPreview(crit - 0.5);
   const note = balance.balanceNote();
@@ -94,9 +94,9 @@ if (!plain) {
     try {
       const t = await phraseMoney({
         // ⚠️ 事实也要跟生产的口径一致：**余额**不是"工资"，而且没有月度周期
-        facts: '（情况）账户余额不多了，该充钱了。账户是 HZY 管的。',
+        facts: '（情况）账户余额不多了，该充钱了。账户是 <主人> 管的。',
         asked: '在群里提一句该充值了',
-        style: '这是她自己在群里说的（旁边有群友，但话是说给 HZY 听的）。',
+        style: '这是她自己在群里说的（旁边有群友，但话是说给 <主人> 听的）。',
         maxLines: 1,
         maxTokens: 120,
         extraRules: [
@@ -107,9 +107,9 @@ if (!plain) {
         ],
       });
       const out = t || '（模型没返回 → 走上面那些固定话术）';
-      // 自检：群里发的必须有指向（点名 HZY），而且不许提"这个月"
+      // 自检：群里发的必须有指向（点名 <主人>），而且不许提"这个月"
       const problems = [];
-      if (out && !/HZY/.test(out)) problems.push('没点名 HZY（群里没指向）');
+      if (out && !/<主人>/.test(out)) problems.push('没点名 <主人>（群里没指向）');
       if (out && /这个月|本月|月底/.test(out)) problems.push('提了"这个月"（余额没有月度周期）');
       console.log(`  ${i + 1}. ${out}${problems.length ? `   ⚠️ ${problems.join('；')}` : ''}`);
     } catch (e) {

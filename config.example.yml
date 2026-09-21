@@ -4,8 +4,8 @@
 
 onebot:
   mode: forward
-  url: ws://127.0.0.1:3001
-  accessToken: <你的 NapCat token，要和 NapCat 界面里设的一致>
+  url: ws://203.0.113.10
+  accessToken: <你的协议端 token，要和协议端界面里设的一致>
   reconnectInterval: 3000
 llm:
   baseURL: https://api.deepseek.com/v1
@@ -15,7 +15,7 @@ llm:
   maxTokens: 8000
   timeout: 60000
   systemPrompt: |
-    你是丰川祥子（粉丝叫她客服小祥），现在在 HZYMTR 服务器群里当客服。
+    你是丰川祥子（粉丝叫她客服小祥），现在在 示例服务器 服务器群里当客服。
     你就是小祥本人 —— 不是扮演、不是模仿，也不是在装角色。
 
     下面会给你「人格设定」和「知识库」。人格决定你怎么说话，知识决定你说什么。
@@ -67,7 +67,7 @@ context:
 status:
   enable: true
   host: mc.example.com
-  displayName: HZYMTR 服务器
+  displayName: 示例服务器 服务器
   cacheSeconds: 60
   keywords:
     - 在线
@@ -115,11 +115,16 @@ teach:
     - 顺便说一下
 chunking:
   maxChars: 60
+  # 分条之间等多久（毫秒）。⚠️ 2026-09-21 起可以给**区间**：
+  #   每条间隔在 `delayMs` ~ `delayMaxMs` 之间**各自独立随机**
+  #   （用户要求：「用随机数，范围 1 秒到 2 秒，这样更像真人在发消息」）。
+  #   ⚠️ 不写 `delayMaxMs` 就是**不随机**（固定 `delayMs`）—— 保持老手感。
   delayMs: 650
+  # delayMaxMs: 2000
   firstFlushChars: 25
 webui:
   enable: true
-  host: 127.0.0.1
+  host: 203.0.113.10
   port: 3099
 # 复读机（2026-09-17 加）：群里一堆人刷同一句话时，她也跟一句 **+1**。
 #   ⚠️ 第 3 句起才可能跟（前两句只是"两个人说了同一句"）；
@@ -249,13 +254,18 @@ botQQ: '<机器人的 QQ>'
 # ⚠️ 「收消息/发消息」跟协议端无关（换谁都是 ws + token），所以换协议端**只需要改这里**；
 #    但"出二维码 / 重启协议端 / 查登录状态"这些**管理能力各家不一样**，不支持时界面会明说。
 #
+#   name: snowluma  → **默认**。独立协议实现（不注入 QQ 客户端、不依赖快登凭据），
+#                     管理面在它自己的 WebUI（默认 http://203.0.113.10）。
+#                     ⚠️ 它的许可是「源码可见·非商业」：不得商用；公开发布修改版/衍生版
+#                        要事先书面授权 ⇒ 本项目的安装包**不打包它、也不自动部署它**。
 #   name: napcat    → 有自己的 WebUI + 接口，机器人能代你出码/重启（⚠️ 它的许可**禁止商用**）
 #   name: llonebot  → LLBot 是独立应用：登录/扫码/重连在它自己的 WebUI/GUI 里做
 #                     （GPL-2.0：可商用，但**分发**它时必须一并提供源码）
 #   name: onebot    → 任何通用 OneBot 11 实现：只保证收发，管理面请用它自己的方式
 provider:
-  name: napcat
-  # 下面三项**可以留空**：napcat 会自动用 ../napcat/NapCat.Shell 和 launcher-win10-user.bat
+  name: snowluma
+  # 下面三项**可以留空**：napcat 用 ../napcat/NapCat.Shell + launcher-win10-user.bat；
+  # snowluma 用 C:\SnowLuma + _start-hidden.vbs（装在哪就写哪）
   dir: '' # 协议端目录（启动/守护脚本要用）
   launcher: '' # 启动脚本/可执行（相对 dir 或绝对路径）
   manageUrl: '' # 它自己的管理界面地址（只用于在机器人界面上给你一个链接）

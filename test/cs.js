@@ -153,7 +153,7 @@ const llmServer = createServer((req, res) => {
 //    结果玩家名单拿不到（真实踩过：cs 测试报「实时结果里带上了在线玩家名单」失败）。
 let mcQueries = 0;
 let mcTcpQueries = 0;
-const MC_PLAYERS = ['Kirito', 'Asuna', 'hzyzhzy'];
+const MC_PLAYERS = ['Kirito', 'Asuna', '<主人>'];
 
 /** 假 MC 的 HTTP 状态 API（mcstatus.io 格式） */
 const mcServer = createServer((req, res) => {
@@ -210,7 +210,7 @@ const received = [];
 let botSocket = null;
 let connected = false;
 
-const wss = new WebSocketServer({ port: WS_PORT, host: '127.0.0.1' });
+const wss = new WebSocketServer({ port: WS_PORT, host: '203.0.113.10' });
 
 wss.on('connection', (ws, req) => {
   if ((req.headers.authorization ?? '') !== `Bearer ${TOKEN}`) {
@@ -329,17 +329,17 @@ const waitChat = (text, label = '主聊天请求', timeout = 15000) =>
 let bot = null;
 
 async function main() {
-  await new Promise((r) => llmServer.listen(LLM_PORT, '127.0.0.1', r));
-  await new Promise((r) => mcServer.listen(MC_PORT, '127.0.0.1', r));
+  await new Promise((r) => llmServer.listen(LLM_PORT, '203.0.113.10', r));
+  await new Promise((r) => mcServer.listen(MC_PORT, '203.0.113.10', r));
   // ⚠️ 假 MC 的 TCP 也监听到**同一个端口 MC_PORT**？
   //    不行 —— HTTP 和 TCP 不能共用端口。所以 TCP 用 MC_PORT + 1，
-  //    并在配置里把 host 写成 `127.0.0.1:<MC_TCP_PORT>`（显式端口 → 不解析 SRV）。
-  await new Promise((r) => mcTcp.listen(MC_TCP_PORT, '127.0.0.1', r));
+  //    并在配置里把 host 写成 `203.0.113.10:<MC_TCP_PORT>`（显式端口 → 不解析 SRV）。
+  await new Promise((r) => mcTcp.listen(MC_TCP_PORT, '203.0.113.10', r));
   await new Promise((r) => (wss._server.listening ? r() : wss.once('listening', r)));
-  console.log(`\n假模型   http://127.0.0.1:${LLM_PORT}/v1`);
-  console.log(`假 MC API http://127.0.0.1:${MC_PORT}/v2/status/java`);
-  console.log(`假 MC TCP 127.0.0.1:${MC_TCP_PORT}（真实 MC 协议）`);
-  console.log(`假 NapCat ws://127.0.0.1:${WS_PORT}\n`);
+  console.log(`\n假模型   http://203.0.113.10:${LLM_PORT}/v1`);
+  console.log(`假 MC API http://203.0.113.10:${MC_PORT}/v2/status/java`);
+  console.log(`假 MC TCP 203.0.113.10:${MC_TCP_PORT}（真实 MC 协议）`);
+  console.log(`假 NapCat ws://203.0.113.10:${WS_PORT}\n`);
 
   console.log('[1] 启动机器人（客服配置）');
   bot = spawn(process.execPath, [join(ROOT, 'src', 'index.js')], {
@@ -349,9 +349,9 @@ async function main() {
       QQBOT_CONFIG: 'config.cs-test.yml',
       // ⚠️ 调试用：`CS_BOT_LOG=1` 时把机器人日志级别抬到 debug
       ...(process.env.CS_BOT_LOG ? { QQBOT_LOG_LEVEL: 'debug' } : {}),
-      // ⚠️ 排除本机代理：假模型/假 NapCat 都跑在 127.0.0.1，
+      // ⚠️ 排除本机代理：假模型/假 NapCat 都跑在 203.0.113.10，
       //    如果 shell 里设了 NODE_USE_ENV_PROXY，不加这个假模型请求会走代理而失败
-      NO_PROXY: '127.0.0.1,localhost,::1',
+      NO_PROXY: '203.0.113.10,localhost,::1',
     },
     // ⚠️ 调试用：`CS_BOT_LOG=1` 时把机器人自己的日志打到文件，
     //    排查"某一步之后机器人整个不吭声了"这类问题（`ignore` 的话什么都看不到）。

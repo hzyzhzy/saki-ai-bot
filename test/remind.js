@@ -59,7 +59,7 @@ console.log('\n【记录・落盘】');
     at,
     what: '交作业',
     by: '30003',
-    byName: 'HZY',
+    byName: '<主人>',
     targets: [{ uid: '30004', name: '喵喵三三' }],
     groupId: '20002',
   });
@@ -96,7 +96,7 @@ console.log('\n【到点发送・群里】');
     id: 1,
     what: '交作业',
     by: '30003',
-    byName: 'HZY',
+    byName: '<主人>',
     targets: [{ uid: '30004', name: '喵喵三三' }],
     groupId: '20002',
   };
@@ -124,7 +124,7 @@ console.log('\n【找不到的人不 @】');
     id: 2,
     what: '开会',
     by: '30003',
-    byName: 'HZY',
+    byName: '<主人>',
     targets: [{ uid: '', name: '查无此人' }],
     groupId: '20002',
   });
@@ -136,7 +136,7 @@ console.log('\n【找不到的人不 @】');
 console.log('\n【只在原地・私聊】');
 {
   sent.length = 0;
-  await fake.sendReminder({ id: 3, what: '吃药', by: '30003', byName: 'HZY', targets: [], groupId: '' });
+  await fake.sendReminder({ id: 3, what: '吃药', by: '30003', byName: '<主人>', targets: [], groupId: '' });
   ok(sent[0]?.action === 'send_private_msg', '私聊定的 → 发私聊（不回群里说）');
   ok(String(sent[0]?.params?.user_id) === '30003', '发给提要求的那个人');
   ok(!(sent[0]?.params?.message ?? []).some((s) => s.type === 'at'), '私聊里不带 @ 段');
@@ -146,7 +146,7 @@ console.log('\n【只在原地・私聊】');
 console.log('\n【发完销账】');
 {
   remind.__clear();
-  remind.add({ at: Date.now() + 40, what: '马上就到点', by: '30003', byName: 'HZY', groupId: '20002' });
+  remind.add({ at: Date.now() + 40, what: '马上就到点', by: '30003', byName: '<主人>', groupId: '20002' });
   await new Promise((r) => setTimeout(r, 60));
   const due = remind.due();
   ok(due.length === 1, '到点后被 `due()` 捞出来');
@@ -211,7 +211,7 @@ console.log('\n【补充式修改】');
     at: Date.now() + 30 * MIN,
     what: '起床',
     by: '30003',
-    byName: 'HZY',
+    byName: '<主人>',
     targets: [],
     groupId: '20002',
   });
@@ -239,7 +239,7 @@ console.log('\n【进上下文】');
     at: Date.now() + 3 * 3600 * 1000,
     what: '起床',
     by: '30003',
-    byName: 'HZY',
+    byName: '<主人>',
     targets: [{ uid: '30004', name: 'MEI' }],
     groupId: '20002',
   });

@@ -39,7 +39,7 @@ const base = readFileSync(join(ROOT, 'config.yml'), 'utf8');
 writeFileSync(
   join(ROOT, cfgFile),
   base
-    .replace(/url:\s*ws:\/\/127\.0\.0\.1:\d+/, `url: ws://127.0.0.1:${PORT}`)
+    .replace(/url:\s*ws:\/\/127\.0\.0\.1:\d+/, `url: ws://203.0.113.10:${PORT}`)
     // ⚠️⚠️ `accessToken` 在 `config.yml` 里是**不带引号**的（`accessToken: islbjh…`）。
     //    这里原来要求**有引号**（`"[^"]*"`）→ **根本匹配不上** →
     //    密钥没被换掉 → 探针服务器鉴权失败 → 机器人连上就被踢 →
@@ -55,7 +55,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const replies = [];
 let sock = null;
 
-const wss = new WebSocketServer({ port: PORT, host: '127.0.0.1' });
+const wss = new WebSocketServer({ port: PORT, host: '203.0.113.10' });
 wss.on('connection', (ws, req) => {
   if ((req.headers.authorization ?? '') !== `Bearer ${TOKEN}`) {
     console.error('鉴权失败:', req.headers.authorization);
@@ -103,7 +103,7 @@ async function ask(question) {
       user_id: ASKER,
       self_id: BOT_QQ,
       time: Math.floor(Date.now() / 1000),
-      sender: { user_id: ASKER, nickname: 'HZY' },
+      sender: { user_id: ASKER, nickname: '<主人>' },
       message: [{ type: 'text', data: { text: question } }],
     }),
   );
@@ -139,7 +139,7 @@ async function ask(question) {
 let bot = null;
 
 (async () => {
-  console.log(`探针 ws://127.0.0.1:${PORT}，启动机器人…\n`);
+  console.log(`探针 ws://203.0.113.10:${PORT}，启动机器人…\n`);
   bot = spawn(process.execPath, [join(ROOT, 'src', 'index.js')], {
     cwd: ROOT,
     env: { ...process.env, QQBOT_CONFIG: cfgFile },

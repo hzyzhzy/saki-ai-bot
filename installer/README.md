@@ -32,11 +32,24 @@ installer\dist\saki-setup-1.0.0.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART `
 ├─ node_modules\          npm 依赖（ws / undici / js-yaml / qrcode / sharp）
 ├─ src\ tools\ test\ library\ knowledge\
 ├─ config.yml             向导里填的内容生成的（token 自动随机）
-├─ 安装信息.txt             ⚠️ NapCat 要用的 token 写在这里
-├─ THIRD-PARTY-NOTICES.md  第三方许可声明（Node=MIT；NapCat 没打包，只给官方地址）
+├─ 安装信息.txt             ⚠️ 协议端要用的 token + 上手步骤（按你选的协议端生成）
+├─ THIRD-PARTY-NOTICES.md  第三方许可声明（Node=MIT；NapCat / SnowLuma 都没打包）
 ├─ build-info.txt          这一版是用哪次提交打的
 └─ napcat\                 留给用户放 NapCat.Shell（安装包**不含** NapCat）
 ```
+
+## 协议端怎么选（2026-09-21 加）
+
+向导第 2 页选协议端，**默认 SnowLuma**。三家**都没有打包**进安装包，区别只在
+"安装器能替你做到哪一步"：
+
+| 选择 | 安装器做什么 | 会自动下载吗 |
+| --- | --- | --- |
+| **snowluma（默认）** | 只把 `config.yml` 的 `provider.name` 写对；弹一次许可说明；给官方下载页链接 | ❌ **不行** —— 它的 EULA 5.4 明确要求事先书面授权才能"并入第三方安装包"或"通过自动化脚本部署"（**跟地址公不公开无关**）。所以它需要用户自己去 [官方 Release](https://github.com/SnowLuma/SnowLuma/releases) 下载并装好 |
+| NapCat | 从官方 Release 下载 → 校验 SHA256 → 解压 → 写 `onebot11_<QQ>.json` | ✅ |
+| LLBot | 只写配置（它自己的登录/启动在它的 GUI 里） | ❌ |
+
+⚠️ 选非 NapCat 时，"NapCat 怎么来"那一页会**整页跳过**（`ShouldSkipPage`）。
 
 ## 这个目录里有什么
 
@@ -70,9 +83,16 @@ installer\dist\saki-setup-1.0.0.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART `
 
 ## 还没做（下一步）
 
+- **LLBot 的自动下载**（它也是官方 Release，GPL-2.0 可以分发，但**分发时要带源码**，
+  所以只做"从官方地址下载"、不镜像）。
+- 代码签名（否则杀软误报率会很高）。
+- 自动更新（比对 GitHub Release 的版本号）。
+
+## 已做
+
 - **NapCat 自动下载 + 自动配置**：勾选后从官方 Release 直链下载 → 校验 SHA256 → 解压到
   `<安装目录>\napcat\NapCat.Shell\` → 自动写 `onebot11_<QQ>.json`（端口/token）。
   ⚠️ 下载前必须把 NapCat 的许可弹给用户确认；**不镜像、不打包**（它是 Limited
   Redistribution License：再分发要附许可全文 + 标来源 + 不得商用）。
-- 代码签名（否则杀软误报率会很高）。
-- 自动更新（比对 GitHub Release 的版本号）。
+- **协议端选择页**（2026-09-21）：默认 SnowLuma；SnowLuma 只写配置、**不下载也不部署**
+  （EULA 5.4），见上面那张表。

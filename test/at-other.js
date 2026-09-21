@@ -3,18 +3,18 @@
  *
  * ## 真实 bug
  *
- *   某群友在群里发：「**@HZY** 给个服世界地图。」
- *   机器人接了，回「地图得找 HZY 要，我这儿没有」
- *   —— **人家本来就是在问 HZY**，机器人插嘴了。
+ *   某群友在群里发：「**@<主人>** 给个服世界地图。」
+ *   机器人接了，回「地图得找 <主人> 要，我这儿没有」
+ *   —— **人家本来就是在问 <主人>**，机器人插嘴了。
  *
  * ## 根因：`@` 有两种形态，守卫只认了一种
  *
  * NapCat 要把 `@` 解析成 `at` 段，得先能查到那个人的 `uid`。
- * **机器人查不到 HZY 的 uid**（他不在机器人的好友里），
+ * **机器人查不到 <主人> 的 uid**（他不在机器人的好友里），
  * 于是那条 @ **降级成一截纯文本**发过来 —— 原始记录：
  *
  *   elements: [{ elementType: 1, textElement: {
- *                 content: "@HZY 给个服世界地图。", atUid: "0", atNtUid: "" } }]
+ *                 content: "@<主人> 给个服世界地图。", atUid: "0", atNtUid: "" } }]
  *
  * 守卫原来只查 `s.type === 'at'` → 这种情况**整个失效** → 机器人当成在问它。
  * 实测当天这种"@ 写在文本里"的有 **2 条**（正常解析成 at 段的有 21 条），
@@ -42,14 +42,14 @@ const CFG_REL = 'logs/__test-at-other.yml';
 
 const GROUP = '200000001'; // 1 档 + 在白名单里 → 光看闸门是"能接"的
 const BOT = '10000002'; // 机器人自己（真实号）
-const HZY = '10000001'; // 别人（真实号）
+const <主人> = '10000001'; // 别人（真实号）
 
 // ⚠️ 配置必须在 import `src/*` **之前**写好（`config.js` 是加载时读的）
 writeFileSync(
   join(ROOT, CFG_REL),
   [
     'llm:',
-    '  baseURL: http://127.0.0.1:1/v1',
+    '  baseURL: http://203.0.113.10:1/v1',
     '  apiKey: "sk-test"',
     '  model: t',
     'trigger:',
@@ -107,8 +107,8 @@ const atSeg = (qq) => ({ type: 'at', data: { qq: String(qq) } });
 console.log('\n【1】`at` 段 @ 别人 → 不接（老行为，别改坏）');
 {
   check(
-    wouldJoin([atSeg(HZY), textSeg(' 给个服世界地图。')]) === false,
-    'at 段 @HZY → 不接',
+    wouldJoin([atSeg(<主人>), textSeg(' 给个服世界地图。')]) === false,
+    'at 段 @<主人> → 不接',
   );
   // 对照组：把 @ 拿掉就得接 —— 证明拦住它的确实是 @，不是别的原因
   check(wouldJoin([textSeg('给个服世界地图。')]) === true, '★ 对照：同一句话不带 @ → 接');
@@ -118,16 +118,16 @@ console.log('\n【2】★ 文本形态的 @ 别人 → 不接（这次修的 bug
 {
   // 这就是用户截图的原文
   check(
-    wouldJoin([textSeg('@HZY 给个服世界地图。')]) === false,
-    '★ 文本 `@HZY 给个服世界地图。` → **不接**（改前会接）',
+    wouldJoin([textSeg('@<主人> 给个服世界地图。')]) === false,
+    '★ 文本 `@<主人> 给个服世界地图。` → **不接**（改前会接）',
   );
-  check(wouldJoin([textSeg('@HZY 给个服世界地图。')]) === false, '再跑一次（确定性）');
+  check(wouldJoin([textSeg('@<主人> 给个服世界地图。')]) === false, '再跑一次（确定性）');
   // 同一句话去掉 @ → 必须接
-  check(wouldJoin([textSeg('给个服世界地图。')]) === true, '★ 对照：去掉 `@HZY` → 接');
+  check(wouldJoin([textSeg('给个服世界地图。')]) === true, '★ 对照：去掉 `@<主人>` → 接');
   // 别的名字、别的句式也一样
   check(wouldJoin([textSeg('@某群友 我看看有什么')]) === false, '文本 `@某群友 …` → 不接');
   check(wouldJoin([textSeg('@某同学 这题你会吗')]) === false, '文本 `@某同学 …` → 不接');
-  check(wouldJoin([textSeg('@HZY')]) === false, '只有 `@HZY` 没正文 → 也不接');
+  check(wouldJoin([textSeg('@<主人>')]) === false, '只有 `@<主人>` 没正文 → 也不接');
 }
 
 console.log('\n【3】不许误伤：这几种必须放行');
@@ -154,7 +154,7 @@ console.log('\n【3】不许误伤：这几种必须放行');
     wouldJoin([textSeg('我的邮箱是 abc@163.com，你记一下')]) === true,
     '@ 不在开头（邮箱）→ 放行',
   );
-  check(wouldJoin([textSeg('你们看 @HZY 说的那个')]) === true, '@ 在句子中间 → 不拦');
+  check(wouldJoin([textSeg('你们看 @<主人> 说的那个')]) === true, '@ 在句子中间 → 不拦');
 }
 
 console.log('\n【4】`textAtOf()` 本身的判据');
@@ -162,17 +162,17 @@ console.log('\n【4】`textAtOf()` 本身的判据');
   const b = new Bot();
   b.selfId = BOT;
   const t = (text, segs = []) => b.textAtOf(text, segs);
-  check(t('@HZY 给个服世界地图。') === 'HZY', '取到名字 HZY', `实际 ${JSON.stringify(t('@HZY 给个服世界地图。'))}`);
-  check(t('@HZY') === 'HZY', '只有 @名字 也取得到');
-  check(t('@  HZY 在吗') === 'HZY', '中间多空格也认');
+  check(t('@<主人> 给个服世界地图。') === '<主人>', '取到名字 <主人>', `实际 ${JSON.stringify(t('@<主人> 给个服世界地图。'))}`);
+  check(t('@<主人>') === '<主人>', '只有 @名字 也取得到');
+  check(t('@  <主人> 在吗') === '<主人>', '中间多空格也认');
   check(t('@全体成员 注意') === '', '@全体成员 不算某个人');
   check(t('@小祥 在吗') === '', '@自己 → 空');
   check(t('@Saki 在吗') === '', '@Saki → 空');
   check(t('abc@163.com') === '', '邮箱 → 空');
   check(t('给个服世界地图。') === '', '没 @ → 空');
-  check(t('[图片] @HZY 看看') === '', '@ 不在开头 → 空');
+  check(t('[图片] @<主人> 看看') === '', '@ 不在开头 → 空');
   check(
-    t('@HZY 看看', [atSeg(HZY)]) === '',
+    t('@<主人> 看看', [atSeg(<主人>)]) === '',
     '已经有 at 段时 → 空（那条路由 at 段负责，别重复判）',
   );
   check(t('') === '' && t(null) === '', '空值不炸');
@@ -198,7 +198,7 @@ console.log('\n【5】守卫接线：两路都要在');
   );
 }
 
-console.log('\n【5】★★ 没指名她时，**她不是主角**（HZY 2026-09-15 晚要求）');
+console.log('\n【5】★★ 没指名她时，**她不是主角**（<主人> 2026-09-15 晚要求）');
 console.log('        「只有 @她 或者明确叫她名字时，才能把自己当成被请求聊天的主角」');
 {
   const { Bot } = await import('../src/bot.js');
@@ -230,11 +230,11 @@ console.log('        「只有 @她 或者明确叫她名字时，才能把自�
   check(notMain([R('m1'), T('这句怎么说')], '这句怎么说') === false, '★★ 引用她的消息 → 她是主角');
   const priv = {
     message_type: 'private',
-    user_id: HZY,
+    user_id: <主人>,
     self_id: BOT,
     message_id: 'p1',
     message: [T('在吗')],
-    sender: { nickname: 'HZY' },
+    sender: { nickname: '<主人>' },
   };
   check(
     b.buildSystemPrompt('', priv, 'chat', '在吗', '', '', '', '', false).includes('没人在指名跟你说话') === false,

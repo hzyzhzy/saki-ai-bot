@@ -164,7 +164,7 @@ console.log('\n【4】起始账的闸门');
 // ─────────────────────────────────────────────────────────────
 console.log('\n【★】★★ 每一处打模型的地方都必须记账（2026-09-15 加的"结构性"断言）');
 //
-// ⚠️⚠️ 为什么要有这一条：HZY 报「刚才几段对话余额变动异常，掉的比以前快很多」。
+// ⚠️⚠️ 为什么要有这一条：<主人> 报「刚才几段对话余额变动异常，掉的比以前快很多」。
 //    查下来 ① 当时是**高峰时段**（周二 9:00-12:00，按价格表是**双倍**），
 //    ② `src/extract.js` / `src/search-plan.js` / `src/vision.js` 这三处
 //       是**各自直接 fetch 打 `/chat/completions`** 的，
@@ -214,7 +214,7 @@ console.log('\n【★★】直接 fetch 那条路**真的**会记账（端到端
       );
     });
   });
-  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  await new Promise((r) => srv.listen(0, '203.0.113.10', r));
   const port = srv.address().port;
 
   const { config } = await import('../src/config.js');
@@ -223,7 +223,7 @@ console.log('\n【★★】直接 fetch 那条路**真的**会记账（端到端
   //    所以这里临时改指向假服务是安全的（跑完改回去）
   const oldBase = config.llm.baseURL;
   const oldKey = config.llm.apiKey;
-  config.llm.baseURL = `http://127.0.0.1:${port}/v1`;
+  config.llm.baseURL = `http://203.0.113.10:${port}/v1`;
   config.llm.apiKey = 'sk-test';
 
   const before = spend.dayStats().calls;
@@ -245,7 +245,7 @@ console.log('\n【★★】直接 fetch 那条路**真的**会记账（端到端
   check(d.prompt >= 1000 && d.completion >= 500, `★★ token 也记对了（输入 ${d.prompt}、输出 ${d.completion}）`);
 }
 
-console.log('\n【★★】报账那条路必须「记一笔对话」（HZY 截图：接着问没回我）');
+console.log('\n【★★】报账那条路必须「记一笔对话」（<主人> 截图：接着问没回我）');
 {
   // 用户原话：「两个问题，没有自然语言了，然后我接着问没回我」
   // ⚠️ 根因：报账是 `handle()` 里**提前 return 的特殊回复**，

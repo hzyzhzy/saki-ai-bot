@@ -1,19 +1,19 @@
 # 仅用于客服模式自动化测试，由 test/cs.js 通过 QQBOT_CONFIG 加载。
 onebot:
   mode: forward
-  url: ws://127.0.0.1:39101
+  url: ws://203.0.113.10
   accessToken: "test-token"
   reconnectInterval: 300
 
 llm:
-  baseURL: http://127.0.0.1:39102/v1
+  baseURL: http://203.0.113.10/v1
   apiKey: "sk-test-fake-key"
   model: test-model
   temperature: 0.5
   maxTokens: 200
   timeout: 10000
   systemPrompt: |
-    你是 HZYMTR 服务器群的客服小祥，负责解答群友关于服务器、整合包、模组和玩法的疑问。
+    你是 示例服务器 服务器群的客服小祥，负责解答群友关于服务器、整合包、模组和玩法的疑问。
     严格按照下面给出的人格设定说话，回答只能依据知识库。
 
 trigger:
@@ -30,10 +30,10 @@ trigger:
 status:
   enable: true
   # ⚠️ 用显式 host:port 指向假 MC 的 TCP —— 这样 status.js 不会去解析真实域名的 SRV
-  host: 127.0.0.1:39104
-  displayName: HZYMTR 服务器
+  host: 203.0.113.10
+  displayName: 示例服务器 服务器
   cacheSeconds: 60
-  apiBase: http://127.0.0.1:39103/v2/status/java
+  apiBase: http://203.0.113.10/v2/status/java
   keywords:
     - 在线
     - 几个人

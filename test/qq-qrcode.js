@@ -97,20 +97,20 @@ const server = createServer((req, res) => {
   });
 });
 
-await new Promise((r) => server.listen(0, '127.0.0.1', r));
+await new Promise((r) => server.listen(0, '203.0.113.10', r));
 const PORT = server.address().port;
 
 writeFileSync(
   join(ROOT, CFG_REL),
   [
     'llm:',
-    '  baseURL: http://127.0.0.1:1/v1',
+    '  baseURL: http://203.0.113.10:1/v1',
     '  apiKey: "sk-test"',
     '  model: t',
     'botQQ: "10000002"',
     'napcat:',
     '  enable: true',
-    '  webuiHost: 127.0.0.1',
+    '  webuiHost: 203.0.113.10',
     `  webuiPort: ${PORT}`,
     '  webuiToken: "test-token"',
     '',

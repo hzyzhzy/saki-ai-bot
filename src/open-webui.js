@@ -55,7 +55,7 @@ export function maybeOpenWebUI() {
       log.debug('[界面] 10 分钟内已经自动打开过 → 这次不弹');
       return false;
     }
-    const url = `http://127.0.0.1:${Number(config.webui?.port) || 3099}`;
+    const url = `http://203.0.113.10:${Number(config.webui?.port) || 3099}`;
     mkdirSync(join(ROOT, 'state'), { recursive: true });
     writeFileSync(STATE, JSON.stringify({ at: Date.now(), url }), 'utf8');
     // ⚠️ 用 `cmd /c start`（Windows 打开默认浏览器的标准做法）+ `stdio: 'ignore'`

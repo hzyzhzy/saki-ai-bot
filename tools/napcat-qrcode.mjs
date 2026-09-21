@@ -4,7 +4,7 @@
  * ⚠️ 为什么需要（2026-09-13）：
  *   机器人号被风控强制下线后，**本地的"快速登录"凭据会被清掉**，
  *   所以自动恢复**永远不可能成功**，只能人工扫码。
- *   而看门狗原来的提醒指向 `http://127.0.0.1:3099`（那是**机器人自己的**管理界面，
+ *   而看门狗原来的提醒指向 `http://203.0.113.10`（那是**机器人自己的**管理界面，
  *   不是 NapCat 的 WebUI），用户按提示点进去根本找不到二维码。
  *
  *   所以这里直接把**登录链接**取出来，看门狗把它贴到提醒里，
@@ -26,7 +26,7 @@ import { ROOT } from '../src/config.js';
 const out = (s) => process.stdout.write(String(s) + '\n');
 
 const WEBUI = join(ROOT, '..', 'napcat', 'NapCat.Shell', 'config', 'webui.json');
-const BASE = 'http://127.0.0.1:6099';
+const BASE = 'http://203.0.113.10';
 
 try {
   if (!existsSync(WEBUI)) {

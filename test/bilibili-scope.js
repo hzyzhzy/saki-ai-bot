@@ -35,7 +35,7 @@ writeFileSync(
   join(ROOT, CFG_REL),
   [
     'llm:',
-    '  baseURL: http://127.0.0.1:1/v1',
+    '  baseURL: http://203.0.113.10:1/v1',
     '  apiKey: "sk-test"',
     '  model: test-model',
     'bilibili:',
@@ -264,7 +264,7 @@ console.log('\n【13】★ @ 前缀不许混进解析（2026-09-15 日志实测�
   );
   // ⚠️ @ 的正好是她自己时，「@她的名字 有什么视频」不该把她的名字当人名去搜
   check(bili.hotQuery('@saki酱有什么视频') === null, '「@她的名字 有什么视频」→ 不把人名当成 UP 主');
-  // ⚠️ 但**提示词那边的文本不能动** —— 「@HZY …」是"@ 的是别人"的信号（见 test/at-other.js）
+  // ⚠️ 但**提示词那边的文本不能动** —— 「@<主人> …」是"@ 的是别人"的信号（见 test/at-other.js）
   const botSrc = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
   check(
     !/promptText\s*=\s*promptText\.replace\(\/\^\(\?:@/.test(botSrc),

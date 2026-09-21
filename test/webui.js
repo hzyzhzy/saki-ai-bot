@@ -19,7 +19,7 @@ import { dirname, join } from 'node:path';
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const PORT = 39701;
 const CFG = join(ROOT, 'config.webui-test.yml');
-const BASE = `http://127.0.0.1:${PORT}`;
+const BASE = `http://203.0.113.10:${PORT}`;
 // ⚠️ 剧情 / 故事线的**隔离文件**：[9] 那条测试会真的清空它们（见 main() 开头那段说明）。
 //    用相对路径，因为要作为 `QQBOT_*_FILE` 传给被起的机器人（它 cwd = ROOT）。
 const QUEST_TMP = 'logs/__webui-quest.json';
@@ -38,7 +38,7 @@ writeFileSync(
   CFG,
   realCfg
     .replace(/port:\s*3099/, `port: ${PORT}`)
-    .replace(/url:\s*ws:\/\/127\.0\.0\.1:\d+/, 'url: ws://127.0.0.1:39999'),
+    .replace(/url:\s*ws:\/\/127\.0\.0\.1:\d+/, 'url: ws://203.0.113.10'),
   'utf8',
 );
 
@@ -124,9 +124,9 @@ async function main() {
       // ⚠️ 上面说的隔离：指向 logs/ 下的临时文件，绝不碰真实 state/
       QQBOT_QUEST_FILE: QUEST_TMP,
       QQBOT_STORYLINE_FILE: STORY_TMP,
-      // ⚠️ 排除本机代理：假模型/假 NapCat 都跑在 127.0.0.1，
+      // ⚠️ 排除本机代理：假模型/假 NapCat 都跑在 203.0.113.10，
       //    如果 shell 里设了 NODE_USE_ENV_PROXY，不加这个假模型请求会走代理而失败
-      NO_PROXY: '127.0.0.1,localhost,::1',
+      NO_PROXY: '203.0.113.10,localhost,::1',
     },
     stdio: ['ignore', 'ignore', 'ignore'],
   });
@@ -261,6 +261,51 @@ async function main() {
   const badName = await api('/api/knowledge?name=../config.yml');
   check(badName.ok === false, '路径穿越被拒绝');
 
+  console.log('\n[7b] ★★ 人设 API —— **真的调一遍**（路由注册了 ≠ 调得通）');
+  {
+    // ⚠️⚠️ 这一段是拿教训换来的（2026-09-21）：
+    //    第一版 `/api/persona/list` 里我用了**没导入**的 `personaId` ⇒ 一调就 500，
+    //    而 `node --check` **查不出未定义标识符**。
+    //    后果是界面上整页空白 —— 用户看到的是"下拉是空的、字段也是空的"，
+    //    完全不知道出了什么错（前端那句 `if (!r.ok) return;` 还把错误吞了）。
+    //    ⇒ 所以这里**真的发一遍请求**：只读那几条，写/删/切换会碰真实人设包，
+    //      留给 `test/persona-admin.js`（它用临时的 `QQBOT_PERSONAS_DIR`）。
+    const list = await api('/api/persona/list');
+    check(list && list.ok === true, '★ 人设列表调得通（不是 500）', (list && list.error) || '');
+    check(Array.isArray(list?.packs) && list.packs.length >= 1, '列出了一个以上人设包', `${list?.packs?.length ?? 0} 个`);
+    const cur = list?.current;
+    check(!!cur, '返回了"当前用的是哪个包"', String(cur ?? ''));
+
+    const one = await api('/api/persona?id=' + encodeURIComponent(cur));
+    check(one && one.ok === true, '★ 单个包读得出来', (one && one.error) || '');
+    check(!!one?.identity?.name, '　identity 里至少有「角色全名」', one?.identity?.name ?? '');
+    check(Array.isArray(one?.docs) && one.docs.length >= 1, '　文档清单非空', `${one?.docs?.length ?? 0} 份`);
+
+    const doc = await api(`/api/persona/doc?id=${encodeURIComponent(cur)}&path=persona.md`);
+    check(
+      doc && doc.ok === true && typeof doc.text === 'string' && doc.text.length > 100,
+      '★ 人设正文读得出来',
+      `${doc?.text?.length ?? 0} 字`,
+    );
+
+    const evil = await api('/api/persona?id=' + encodeURIComponent('../../etc'));
+    check(evil && evil.ok === false, '★ id 里带 `../` 被拒绝');
+    const evilDoc = await api(
+      `/api/persona/doc?id=${encodeURIComponent(cur)}&path=${encodeURIComponent('../../config.yml')}`,
+    );
+    check(evilDoc && evilDoc.ok === false, '★ 文档名穿越也被拒绝');
+
+    // ⚠️ QQ 昵称/头像：这个套件里**没有真协议端**，所以这里要验的不是"读到了昵称"，
+    //    而是"**接口本身是活的**" —— 离线时必须给一个明确的 ok:false + 原因，
+    //    绝不该是 500（那正是 `/api/persona/list` 第一次交付时的样子）。
+    const prof = await api('/api/qq/profile');
+    check(
+      prof && typeof prof.ok === 'boolean',
+      '★ QQ 资料接口调得通（离线时也要给明确答复，不是 500）',
+      prof?.ok ? `nickname=${prof.nickname}` : (prof?.error ?? ''),
+    );
+  }
+
   console.log('\n[8] 更新表情库（扫描 library/ 目录）');
   {
     const { writeFileSync: wf, unlinkSync: uf, readFileSync: rf } = await import('node:fs');
@@ -328,7 +373,7 @@ async function main() {
     console.log('     （已还原 library/index.json）');
   }
 
-  // ── 分群的界面：故事线卡片 + 按群设定（2026-09-15 HZY 要求）──
+  // ── 分群的界面：故事线卡片 + 按群设定（2026-09-15 <主人> 要求）──
   {
     console.log('\n【★】分群：故事线卡片 / 按群设定');
     const js = readFileSync(join(ROOT, 'src', 'webui.js'), 'utf8');
@@ -367,7 +412,7 @@ async function main() {
       '★★ 压完**自动展开那个群**（点一次就马上看到结果）',
     );
 
-    // ④ ⚠️ 「挡位 2 不能进事件系统，只有 1 才能设置」（HZY 2026-09-15）
+    // ④ ⚠️ 「挡位 2 不能进事件系统，只有 1 才能设置」（<主人> 2026-09-15）
     const lifeMod = await import('../src/life.js');
     check(lifeMod.isEventGroup('200000001') === true, '★ 1 档群 = 进事件系统');
     check(lifeMod.isEventGroup('200000005') === false, '★★ 2 档群**不进**事件系统（200000005 是 2 档）');
@@ -385,7 +430,7 @@ async function main() {
     check(/const isEvent =/.test(html), '★ 界面用 `isEvent` 过滤过');
     check(/只有 1 档群才进/.test(html), '★ 界面上写明了"只有 1 档群才进"');
 
-    // ⑤ 日常事件的「预览 / 立即发送」（HZY 2026-09-15：「日常事件也加一个预览和立即发送」）
+    // ⑤ 日常事件的「预览 / 立即发送」（<主人> 2026-09-15：「日常事件也加一个预览和立即发送」）
     check(/api\/life\/preview/.test(js), '★ 有「预览一条日常」的接口');
     check(/api\/life\/send-now/.test(js), '★ 有「立即发送日常」的接口');
     check(/lifePreview/.test(html) && /lifeSendNow/.test(html), '★ 界面上那两个按钮在');
@@ -396,7 +441,7 @@ async function main() {
       check(typeof pv.text === 'string' && pv.text.length > 0, '★ 预览真的返回了润色文本', pv.text);
     }
 
-    // ⑥ ★「预览和发送要合为一条」（HZY 2026-09-15：「这个预览和发送的建议合为一条」）
+    // ⑥ ★「预览和发送要合为一条」（<主人> 2026-09-15：「这个预览和发送的建议合为一条」）
     //    ⚠️ 原来 `立即发送` 是**重新抽一条再润色** → 界面里看到的和真发出去的
     //       不是同一句话（还白花一次模型调用）。现在发的是**刚预览的那条**。
     check(
@@ -411,7 +456,7 @@ async function main() {
     );
     check(/life\.preview\(\)/.test(js), '  ↳ 没预览过（直接点发送）才现抽一条');
 
-    // ⑦ ★★「旧页面点发送也要发预览的那条」（HZY 2026-09-15 晚：「点一下立即发送，
+    // ⑦ ★★「旧页面点发送也要发预览的那条」（<主人> 2026-09-15 晚：「点一下立即发送，
     //    抽到的事件马上就变了一个然后发出去了，是不是bug」）
     //    ⚠️ 那不是发送分支的 bug，是**浏览器那一页还是旧的**（界面没有轮询，不会自己更新）：
     //       旧页面的 lifeSendNow() 不传 preview → 服务端只好重新抽 → 看到的和发出去的不是同一条。
@@ -424,7 +469,7 @@ async function main() {
     check(/checkPageVer/.test(html) && /setInterval\(checkPageVer/.test(html), '★★ 界面每 60 秒比一次版本，旧页面会提示刷新');
     check(/pageStaleShown/.test(html), '★ 那条提示只挂一次（别每轮都加一条）');
 
-    // ⑧ ★★「手动开剧情要能选群」（HZY 2026-09-15 晚：「我手动开剧情，699开头的群没启动」）
+    // ⑧ ★★「手动开剧情要能选群」（<主人> 2026-09-15 晚：「我手动开剧情，699开头的群没启动」）
     //    ⚠️ 原来 `questStartNow()` 只传 text、**不传 groupId** → 服务端退回 `groups[0]`
     //       （配置里第一个 1 档群）→ "想开在 699，实际开在 621"。
     //       日志证据：`管理界面手动开了一条剧情 → 群 200000002`，而 699 一个字都没收到。
@@ -435,7 +480,7 @@ async function main() {
     check(/const asked = String\(b\.groupId/.test(js), '★ 服务端区分「页面给了群号」和「没给」');
     check(/手动开始没带群号/.test(js), '★★ 没带群号时打 warn 写明退回到哪个群（旧页面兜底可见）');
 
-    // ⑨ ★★「清空上一次的剧情和故事线」（HZY 2026-09-15 晚：
+    // ⑨ ★★「清空上一次的剧情和故事线」（<主人> 2026-09-15 晚：
     //    「加一个清空上次故事的按钮吧，现在还在测试中」）
     //    ⚠️ 这是**破坏性**接口，所以这里真刀真枪验一遍（不是只看正则）：
     //       先造两个群各有一条正在跑的剧情 + 一条故事线，清掉 111，
@@ -471,7 +516,7 @@ async function main() {
     check((slAll.status?.byGroup || []).length === 0, '★ 每个群那几行也都没了');
 
     // ⑩ ★★「剧情发展更详细 + 一套真剧情控制按钮」
-    //    （HZY 2026-09-15 晚：「把剧情发展呈现在 webui 上更详细一点，然后也和模拟一样
+    //    （<主人> 2026-09-15 晚：「把剧情发展呈现在 webui 上更详细一点，然后也和模拟一样
     //      也加一套剧情控制按钮」）
     check(/api\/quest\/next/.test(js), '★★ 有「推进下一段」的接口（不等那 30 分钟）');
     check(/questNext/.test(html) && /推进下一段/.test(html), '★★ 界面上有那套控制按钮');
@@ -496,7 +541,7 @@ async function main() {
       '★★ 那个群没有在跑的剧情 → 明确报错（别静默什么都没发生）',
     );
 
-    // ⑪ ★★「下次二级事件」按群存（HZY 2026-09-15 晚：「最好也加个群选择…
+    // ⑪ ★★「下次二级事件」按群存（<主人> 2026-09-15 晚：「最好也加个群选择…
     //    因为每个群的故事线不一样」）
     //    ⚠️ 原来整个机器人只有一份，哪个群下次自动开剧情都用它 —— 而那句由头是
     //       照着某个群的故事线写的，塞到别的群里完全不对味。
@@ -519,7 +564,7 @@ async function main() {
     await post('/api/quest/hint', { groupId: '111', text: '' });
     await post('/api/quest/hint', { groupId: '222', text: '' });
 
-    // ⑫ ★★「收紧度也能按群调」（HZY 2026-09-15 晚：「收紧度也加一个一样的下拉菜单分群调节」）
+    // ⑫ ★★「收紧度也能按群调」（<主人> 2026-09-15 晚：「收紧度也加一个一样的下拉菜单分群调节」）
     //    ⚠️ 写进来的是**临时配置**（`config.webui-test.yml`），不碰真实 config.yml。
     //    ⚠️ 先把这个群配成"1 档 + 在白名单里" —— 前面几节改过临时配置，
     //       而接口对"不进事件系统的群"是**明确拒绝**的（`isEventGroup` 要求档位 1 且在 allowGroups 里）。

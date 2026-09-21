@@ -58,14 +58,14 @@ const server = createServer((req, res) => {
     res.end(JSON.stringify({ choices: [{ message: { content: nextReply } }], usage: { prompt_tokens: 10, completion_tokens: 10 } }));
   });
 });
-await new Promise((r) => server.listen(0, '127.0.0.1', r));
+await new Promise((r) => server.listen(0, '203.0.113.10', r));
 const PORT = server.address().port;
 
 writeFileSync(
   join(ROOT, CFG_REL),
   [
     'llm:',
-    `  baseURL: http://127.0.0.1:${PORT}/v1`,
+    `  baseURL: http://203.0.113.10:${PORT}/v1`,
     '  apiKey: "sk-test"',
     '  model: t',
     'trigger:',
@@ -136,7 +136,11 @@ function arm(now, patch = {}) {
 // ─────────────────────────────────────────────────────────────
 console.log('\n【1】事件库解析：皮实、能吃手改的 md');
 {
-  const md = readFileSync(join(KNOW, 'life-events.md'), 'utf8');
+  // ⚠️ 2026-09-21：事件库搬进**人设包**了（它是角色专属的：换个角色，
+  //    "今天遇到什么事"完全不同），所以不能再从 KNOW（共用的 `knowledge/`
+  //    或它的隔离副本）里读 —— 那里已经没有它了。
+  const { personaDataFile } = await import('../src/knowledge.js');
+  const md = readFileSync(personaDataFile('life-events.md'), 'utf8');
   const slots = life.parse(md);
   check(slots.length >= 5, `解析出 ${slots.length} 个时段`);
   check(life.templateCount() >= 30, `共 ${life.templateCount()} 条事件`);
@@ -351,7 +355,7 @@ console.log('\n【11】★★ 事件里点名了谁，就把那个人补进提�
   check(/Ave Mujica/.test(call.user), '★ 那一档的基调也进去了（"四个人都说开了"）');
   check(/别写得像陌生人/.test(call.user), '★ 提示了"是你认识的人，别写得像陌生人"');
   check(/别人当然可以出现/.test(call.sys), '★★ 系统提示词不再逼着模型写独角戏');
-  // ⚠️⚠️ 2026-09-15 HZY 截图反馈：「这个很明显，群友看不懂在说什么」
+  // ⚠️⚠️ 2026-09-15 <主人> 截图反馈：「这个很明显，群友看不懂在说什么」
   //    （那条是「房租的那条消息，回了个知道了，然后就把手机扣桌上了」——
   //      "那条消息"是哪个？群里没人知道。就是把事件摘要当话说了。）
   check(/群里的人不知道这件事/.test(call.sys), '★★ 提示词写明了「群里的人不知道这件事」');
@@ -360,7 +364,7 @@ console.log('\n【11】★★ 事件里点名了谁，就把那个人补进提�
   check(/谁 \+ 干了什么 \+ 结果/.test(call.sys), '★ 给了可执行的骨架：谁 + 干了什么 + 结果');
   check(/别在对白里再套引号/.test(call.sys), '★ 禁止对白里套引号');
   check(/先让人看懂/.test(call.sys), '★ 长度那条改为"先让人看懂"（不再一味压字数）');
-  // ⚠️ 2026-09-15 HZY 截图反馈：「说话对象应该是群友，而不是对祥子队友说的」
+  // ⚠️ 2026-09-15 <主人> 截图反馈：「说话对象应该是群友，而不是对祥子队友说的」
   //    一级事件也有这个风险（事件里有人在场 ≠ 她在跟那个人说话）
   check(/听你说话的人是群友/.test(call.sys), '★★ 系统提示词写明了「听你说话的人是群友」');
   check(/别写成你在对她们说话/.test(call.sys), '★ 而且禁止写成对着出场的人说话');
@@ -377,7 +381,7 @@ console.log('\n【11】★★ 事件里点名了谁，就把那个人补进提�
   check(/罕见的背景档/.test(call3.user), '★ 而且标了"罕见"（不会被写成天天混在一起）');
 }
 
-console.log('\n【12】★★ 预览一条：会润色，但**不发、不记账、不排程**（HZY 要求加的按钮）');
+console.log('\n【12】★★ 预览一条：会润色，但**不发、不记账、不排程**（<主人> 要求加的按钮）');
 {
   reset();
   arm(at(12, 30), { target: 4, fired: 0, lastFireAt: 0, nextAt: at(12, 30) });

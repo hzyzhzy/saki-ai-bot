@@ -212,7 +212,21 @@ fs.writeFileSync(
 - 完整许可文本见 \`node\\LICENSE-node.txt\`
 - 官方：https://nodejs.org/
 
-## 2. NapCatQQ（**没有内嵌**，需要你自己安装）
+## 2. SnowLuma（**没有内嵌**，需要你自己安装）
+
+- 一份 OneBot 11 协议端实现（独立应用，不依赖 QQ 客户端的快速登录凭据）。
+- 项目：https://github.com/SnowLuma/SnowLuma （官方发行包在它的 Releases 里）
+- 许可：**SnowLuma Source-Available Non-Commercial License**（**不是** OSI 开源许可），要点：
+  1. 可以查看、学习、**非商业**自用，并在规定条件下修改或再分发；
+  2. **不得用于任何商业用途**；
+  3. **公开发布修改版或衍生版，须事先取得著作权人的书面授权**；
+  4. 官方发行包中的**专有组件**不在源码许可范围内 —— 其 EULA 第 5.4 条明确要求
+     事先书面授权，才能「将其并入第三方安装包或 Docker 镜像」或「通过自动化脚本部署」。
+- 本项目因此：**既不打包它、也不自动下载/部署它** —— 安装器只把 \`config.yml\` 里的
+  协议端写对，剩下的按它的官方渠道**由你自己安装**（**这一步是你与它作者之间的关系**）。
+- ⚠️ 顺带一句：它是**注入式**的（会注入所有被发现的 QQ 进程）⇒ 建议只登机器人那一个号。
+
+## 3. NapCatQQ（**没有内嵌**，需要你自己安装）
 
 - 项目：https://github.com/NapNeko/NapCatQQ
 - 许可：**Limited Redistribution License for NapCat**（Copyright © 2024 Mlikiowa）
@@ -226,18 +240,18 @@ fs.writeFileSync(
   由你自行下载安装（**这一步是你与 NapCat 作者之间的关系**）。
 - ⚠️ 因为依赖 NapCat，**本项目的整体使用也不得用于商业用途**。
 
-## 3. 表情图片（\`library\\\` 目录）
+## 4. 表情图片（\`library\\\` 目录）
 
 - 来源：网络与群聊，版权归各自原作者，仅作演示；
   介意的话把 \`library\\\` 换成你自己的图片（或整个删掉，机器人只是没有表情包可用）。
 
-## 4. 其它依赖
+## 5. 其它依赖
 
 - \`package.json\` 里列出的 npm 包，各自的许可见 \`node_modules\\<包>\\LICENSE\`。
 
 ## ⚠️ 风险提示
 
-本程序通过第三方协议端（NapCat）接入 QQ，**这可能违反腾讯的服务条款**，
+本程序通过第三方协议端（NapCat / SnowLuma / LLBot 等）接入 QQ，**这可能违反腾讯的服务条款**，
 账号存在被限制/风控的风险，请自行评估。本程序按"原样"提供，不提供任何担保。
 `,
   'utf8',

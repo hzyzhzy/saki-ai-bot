@@ -30,7 +30,7 @@ writeFileSync(
   join(ROOT, CFG_REL),
   [
     'llm:',
-    '  baseURL: http://127.0.0.1:1/v1',
+    '  baseURL: http://203.0.113.10:1/v1',
     '  apiKey: "sk-test"',
     '  model: test-model',
     'trigger:',
@@ -62,64 +62,64 @@ const { Bot } = await import('../src/bot.js');
 
 const T0 = 1_700_000_000_000;
 const GID = '200000001';
-const HZY = '10000001';
+const <主人> = '10000001';
 const OTHER = '10000008';
 
 console.log('\n【1】状态机：这一段对话的计数与分段');
 {
-  let conv = d.userTurn(null, { uid: HZY, name: 'HZY', text: '在吗', now: T0 });
+  let conv = d.userTurn(null, { uid: <主人>, name: '<主人>', text: '在吗', now: T0 });
   check(conv.theirTurns === 1 && conv.herTurns === 0, '对方说话 → 对方 1 句、她 0 句');
   check(conv.lastSpeaker === 'user' && conv.lastUserText === '在吗', '最后开口的是对方，且记下了原话');
 
-  conv = d.botTurn(conv, { uid: HZY, name: 'HZY', text: '在。', now: T0 + 5000 });
+  conv = d.botTurn(conv, { uid: <主人>, name: '<主人>', text: '在。', now: T0 + 5000 });
   check(conv.herTurns === 1 && conv.theirTurns === 1, '她说话 → 她 1 句');
-  check(conv.lastBotText === '在。' && conv.lastBotReplyTo === HZY, '记下她上一句 + 她在回谁');
+  check(conv.lastBotText === '在。' && conv.lastBotReplyTo === <主人>, '记下她上一句 + 她在回谁');
   check(conv.lastBotReplyAt === T0 + 5000, '兼容字段 `lastBotReplyAt` 还在（别的地方在读）');
   check(conv.followUpChain === 1, '兼容字段 `followUpChain` 还在（防刷屏计数）');
 
-  conv = d.userTurn(conv, { uid: HZY, text: '籽岷最近有什么视频', now: T0 + 20000 });
+  conv = d.userTurn(conv, { uid: <主人>, text: '籽岷最近有什么视频', now: T0 + 20000 });
   check(conv.theirTurns === 2 && conv.herTurns === 1, '同一段里继续累加');
 
   // ⚠️ 隔太久（> 10 分钟）→ 算**新的一段**，计数从头来，别把半小时前的对话算进来
-  const far = d.userTurn(conv, { uid: HZY, text: '还在吗', now: T0 + 40 * 60 * 1000 });
+  const far = d.userTurn(conv, { uid: <主人>, text: '还在吗', now: T0 + 40 * 60 * 1000 });
   check(far.theirTurns === 1 && far.herTurns === 0, '隔了 40 分钟 → **新的一段**（计数归零）');
 }
 
 console.log('\n【2】状态机：三种"谁在说话"（him / other / alone）');
 {
-  const conv = d.botTurn(d.userTurn(null, { uid: HZY, text: '在吗', now: T0 }), {
-    uid: HZY,
+  const conv = d.botTurn(d.userTurn(null, { uid: <主人>, text: '在吗', now: T0 }), {
+    uid: <主人>,
     text: '在。',
     now: T0 + 5000,
   });
 
-  const him = d.snapshot(conv, { now: T0 + 25000, uid: HZY, idleMs: 30000, sameUserMs: 180000 });
+  const him = d.snapshot(conv, { now: T0 + 25000, uid: <主人>, idleMs: 30000, sameUserMs: 180000 });
   check(him.phase === 'active' && him.who === 'him', '★ 同一个人接着说 → `him`（默认该接）');
 
   const other = d.snapshot(conv, { now: T0 + 25000, uid: OTHER, idleMs: 30000, sameUserMs: 180000 });
   check(other.who === 'other', '★ 换个人插话 → `other`（要判断）');
 
   // ★ 用户截图那次：他隔了 85 秒接着说 —— 超过 idleMs 但在 sameUserMs 里
-  const late = d.snapshot(conv, { now: T0 + 90000, uid: HZY, idleMs: 30000, sameUserMs: 180000 });
+  const late = d.snapshot(conv, { now: T0 + 90000, uid: <主人>, idleMs: 30000, sameUserMs: 180000 });
   check(late.who === 'him' && late.inWindow === false, '★ 隔了 85 秒（超 idleMs）**还是 him** —— 这次不许再漏接');
 
-  const over = d.snapshot(conv, { now: T0 + 190000, uid: HZY, idleMs: 30000, sameUserMs: 180000 });
+  const over = d.snapshot(conv, { now: T0 + 190000, uid: <主人>, idleMs: 30000, sameUserMs: 180000 });
   check(over.phase === 'idle' && over.who === 'alone', '超过 sameUserMs → 这段散了（idle）');
 
-  const none = d.snapshot(null, { now: T0, uid: HZY });
+  const none = d.snapshot(null, { now: T0, uid: <主人> });
   check(none.phase === 'idle' && none.who === 'alone', '没有对话 → idle / alone（不炸）');
 }
 
 console.log('\n【3】喂给说话判断的那段状态（#4）');
 {
-  const conv = d.botTurn(d.userTurn(null, { uid: HZY, name: 'HZY', text: '在吗', now: T0 }), {
-    uid: HZY,
-    name: 'HZY',
+  const conv = d.botTurn(d.userTurn(null, { uid: <主人>, name: '<主人>', text: '在吗', now: T0 }), {
+    uid: <主人>,
+    name: '<主人>',
     text: '在。',
     now: T0 + 5000,
   });
-  const conv2 = d.userTurn(conv, { uid: HZY, text: '籽岷最近有什么视频', now: T0 + 60000 });
-  const txt = d.describe(conv2, { now: T0 + 65000, uid: HZY, idleMs: 30000, sameUserMs: 180000 });
+  const conv2 = d.userTurn(conv, { uid: <主人>, text: '籽岷最近有什么视频', now: T0 + 60000 });
+  const txt = d.describe(conv2, { now: T0 + 65000, uid: <主人>, idleMs: 30000, sameUserMs: 180000 });
   check(/跟你聊的就是他/.test(txt), '说清"现在就是在跟他聊"', '');
   check(/你上一次开口：1 分钟前/.test(txt) || /你上一次开口/.test(txt), '带上"你上一次开口是多久前"');
   check(txt.includes('在。'), '带上她上一句的原话（判断才知道有没有重复）');
@@ -134,13 +134,13 @@ console.log('\n【3】喂给说话判断的那段状态（#4）');
 console.log('\n【4】接线：两个钩子真的走状态机');
 {
   const bot = new Bot();
-  const ev = (text, uid = HZY) => ({
+  const ev = (text, uid = <主人>) => ({
     post_type: 'message',
     message_type: 'group',
     group_id: GID,
     user_id: uid,
     self_id: '10000002',
-    sender: { user_id: uid, nickname: 'HZY', card: 'HZY', role: 'member' },
+    sender: { user_id: uid, nickname: '<主人>', card: '<主人>', role: 'member' },
     message: [{ type: 'text', data: { text } }],
   });
   const key = `group:${GID}`;

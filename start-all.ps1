@@ -19,7 +19,7 @@ $ErrorActionPreference = 'Continue'
 $NapCatDir = if ($env:NAPCAT_DIR) { $env:NAPCAT_DIR } else { Join-Path (Split-Path -Parent $PSScriptRoot) 'napcat\NapCat.Shell' }
 $BotDir    = Split-Path -Parent $MyInvocation.MyCommand.Path
 $LogFile   = Join-Path $BotDir 'logs\bot.log'
-$UiUrl     = 'http://127.0.0.1:3099'
+$UiUrl     = 'http://203.0.113.10'
 
 # 要快速登录的 QQ 号。留空则从 config.yml 里读 botQQ，读不到就问/扫码。
 if (-not $BotQQ) {
@@ -279,13 +279,16 @@ Start-Process -FilePath 'cmd.exe' `
   -WorkingDirectory $BotDir `
   -WindowStyle Hidden
 
-Write-Step '      等待机器人连上 NapCat...'
+Write-Step '      等待机器人连上协议端...'
 $waited = 0
 $ok = $false
 while ($waited -lt 45) {
   Start-Sleep -Milliseconds 1500
   $waited += 1.5
-  if ((Test-Path $LogFile) -and (Select-String -Path $LogFile -Pattern '已连接到 NapCat' -Quiet -ErrorAction SilentlyContinue)) {
+  # ⚠️⚠️ 2026-09-21 修：原来只认 `已连接到 NapCat`，协议端换成 SnowLuma 后日志是
+  #    `已连接到协议端（snowluma），等待消息…` ⇒ 匹配不上 → 这里也会白等 45 秒后报警告。
+  #    改成认通用那句，旧的 NapCat 写法留着兼容。
+  if ((Test-Path $LogFile) -and (Select-String -Path $LogFile -Pattern '已连接到协议端|已连接到 NapCat' -Quiet -ErrorAction SilentlyContinue)) {
     $ok = $true
     break
   }

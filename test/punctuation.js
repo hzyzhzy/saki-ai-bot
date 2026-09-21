@@ -22,7 +22,8 @@ import { WebSocketServer } from 'ws';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { writeFileSync, rmSync, mkdirSync } from 'node:fs';
-import { firstSentenceBreak } from '../src/bot.js';
+import { firstSentenceBreak, chunkDelay } from '../src/bot.js';
+import { config } from '../src/config.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 mkdirSync(join(ROOT, 'logs'), { recursive: true });
@@ -51,7 +52,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const CFG_REL = 'logs/__test-punct.yml';
 writeFileSync(
   join(ROOT, CFG_REL),
-  ['llm:', '  baseURL: http://127.0.0.1:1/v1', '  apiKey: "sk-test"', '  model: test-model', ''].join('\n'),
+  ['llm:', '  baseURL: http://203.0.113.10:1/v1', '  apiKey: "sk-test"', '  model: test-model', ''].join('\n'),
   'utf8',
 );
 process.env.QQBOT_CONFIG = CFG_REL;
@@ -181,7 +182,7 @@ const llmServer = createServer((req, res) => {
   });
 });
 
-const wss = new WebSocketServer({ port: WS_PORT, host: '127.0.0.1' });
+const wss = new WebSocketServer({ port: WS_PORT, host: '203.0.113.10' });
 wss.on('connection', (ws, req) => {
   if ((req.headers.authorization ?? '') !== `Bearer ${TOKEN}`) return ws.close(1008);
   sock = ws;
@@ -221,11 +222,11 @@ writeFileSync(
   [
     'onebot:',
     '  mode: forward',
-    `  url: ws://127.0.0.1:${WS_PORT}`,
+    `  url: ws://203.0.113.10:${WS_PORT}`,
     `  accessToken: "${TOKEN}"`,
     '  reconnectInterval: 300',
     'llm:',
-    `  baseURL: http://127.0.0.1:${LLM_PORT}/v1`,
+    `  baseURL: http://203.0.113.10:${LLM_PORT}/v1`,
     '  apiKey: "sk-test-fake"',
     '  model: test-model',
     '  maxTokens: 200',
@@ -271,7 +272,7 @@ async function waitFor(fn, timeout = 15000, label = '条件') {
 }
 
 async function main() {
-  await new Promise((r) => llmServer.listen(LLM_PORT, '127.0.0.1', r));
+  await new Promise((r) => llmServer.listen(LLM_PORT, '203.0.113.10', r));
   await new Promise((r) => (wss._server.listening ? r() : wss.once('listening', r)));
 
   proc = spawn(process.execPath, [join(ROOT, 'src', 'index.js')], {
@@ -280,8 +281,8 @@ async function main() {
       ...process.env,
       QQBOT_CONFIG: botCfg,
       ...(process.env.QQBOT_TRACE_DASH ? { QQBOT_TRACE_DASH: '1' } : {}),
-      NO_PROXY: '127.0.0.1,localhost,::1',
-      no_proxy: '127.0.0.1,localhost,::1',
+      NO_PROXY: '203.0.113.10,localhost,::1',
+      no_proxy: '203.0.113.10,localhost,::1',
     },
     stdio: process.env.QQBOT_TRACE_DASH ? ['ignore', 'inherit', 'inherit'] : ['ignore', 'ignore', 'ignore'],
   });
@@ -344,6 +345,49 @@ console.log('\n[✓] 分条切点：找最后一个句末标点（不受 chunk �
   check(firstSentenceBreak('先这样；再说') === 4, '分号也切');
   check(firstSentenceBreak('没有标点的一句话') === -1, '没有句末标点 → 不切（-1）');
   check(firstSentenceBreak('') === -1, '空串 → -1');
+}
+
+// ⚠️⚠️ 2026-09-21 加（用户要求）：**分条间隔用随机数（1~2 秒），更像真人**。
+//
+//    用户原话：「分条消息的时间间隔可以用随机数，范围 1 秒到 2 秒吧，
+//    这样更像真人在发消息」。
+//    ⇒ 要害是「**每个分条点各摇一次**」：以前是进函数算一次、整条回复一个节奏，
+//      那样即便那个值是随机的，看着照样机械（三段都等 1.5 秒）。
+console.log('\n[✓] 分条间隔：区间随机 + 每段独立摇');
+{
+  const keep = { ...config.chunking };
+  try {
+    config.chunking.delayMs = 1000;
+    config.chunking.delayMaxMs = 2000;
+    const vals = Array.from({ length: 300 }, () => chunkDelay());
+    check(
+      vals.every((v) => v >= 1000 && v <= 2000),
+      `★ 每次都在 1000~2000 之间（实测 ${Math.min(...vals)}~${Math.max(...vals)}）`,
+    );
+    check(new Set(vals).size > 30, `★ 确实是随机数（300 次里 ${new Set(vals).size} 种取值）`);
+    check(
+      !(vals[0] === vals[1] && vals[1] === vals[2]),
+      '★ 连着摇不会都是同一个值（不是整条回复一个节奏）',
+    );
+
+    config.chunking.delayMs = 1000;
+    config.chunking.delayMaxMs = 1001;
+    const two = Array.from({ length: 300 }, () => chunkDelay());
+    check(two.includes(1000) && two.includes(1001), '★ 上限取得到（1000 和 1001 都出现过）');
+
+    config.chunking.delayMs = 700;
+    delete config.chunking.delayMaxMs;
+    check(
+      chunkDelay() === 700 && chunkDelay() === 700,
+      '★ 没配上限 → 不随机（等于原来的固定间隔，不动别人已有的手感）',
+    );
+
+    config.chunking.delayMs = 2000;
+    config.chunking.delayMaxMs = 500;
+    check(chunkDelay() === 2000, '★ 上限比下限小 → 按下限走（配置写反不倒着算）');
+  } finally {
+    Object.assign(config.chunking, keep);
+  }
 }
 
 async function cleanup() {

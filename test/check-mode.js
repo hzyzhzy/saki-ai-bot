@@ -16,7 +16,7 @@ const CFG = join(ROOT, 'config.mode.yml');
 
 const sent = [];
 let ws = null;
-const wss = new WebSocketServer({ port: WS_PORT, host: '127.0.0.1' });
+const wss = new WebSocketServer({ port: WS_PORT, host: '203.0.113.10' });
 wss.on('connection', (s) => {
   ws = s;
   s.on('message', (raw) => {
@@ -40,7 +40,7 @@ const base = readFileSync(join(ROOT, 'config.yml'), 'utf8');
 writeFileSync(
   CFG,
   base
-    .replace(/url:\s*ws:\/\/127\.0\.0\.1:\d+/, `url: ws://127.0.0.1:${WS_PORT}`)
+    .replace(/url:\s*ws:\/\/127\.0\.0\.1:\d+/, `url: ws://203.0.113.10:${WS_PORT}`)
     .replace(/accessToken:\s*"?[^"\r\n]*"?/, 'accessToken: "mode"')
     .replace(/respondTo:\s*\d/, 'respondTo: 2'),
   'utf8',
@@ -51,9 +51,9 @@ const proc = spawn(process.execPath, [join(ROOT, 'src', 'index.js')], {
     env: {
       ...process.env,
       QQBOT_CONFIG: 'config.mode.yml',
-      // ⚠️ 排除本机代理：假模型/假 NapCat 都跑在 127.0.0.1，
+      // ⚠️ 排除本机代理：假模型/假 NapCat 都跑在 203.0.113.10，
       //    如果 shell 里设了 NODE_USE_ENV_PROXY，不加这个假模型请求会走代理而失败
-      NO_PROXY: '127.0.0.1,localhost,::1',
+      NO_PROXY: '203.0.113.10,localhost,::1',
     },
   stdio: ['ignore', 'ignore', 'ignore'],
 });
@@ -61,7 +61,7 @@ const t0 = Date.now();
 while (!ws && Date.now() - t0 < 15000) await sleep(150);
 await sleep(1500);
 
-const say = (text, { id = 1, uid = '10000001', nick = 'HZY', img = false } = {}) => {
+const say = (text, { id = 1, uid = '10000001', nick = '<主人>', img = false } = {}) => {
   const message = [{ type: 'at', data: { qq: '10000002' } }];
   if (text) message.push({ type: 'text', data: { text } });
   if (img) message.push({ type: 'image', data: { file: 'a.png', sub_type: 0 } });

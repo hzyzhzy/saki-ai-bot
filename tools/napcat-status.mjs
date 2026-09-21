@@ -36,7 +36,7 @@ if (!TOK) {
   process.exit(0);
 }
 
-const BASE = process.env.NAPCAT_WEBUI ?? 'http://127.0.0.1:6099';
+const BASE = process.env.NAPCAT_WEBUI ?? 'http://203.0.113.10';
 
 try {
   const hash = createHash('sha256').update(TOK + '.napcat').digest('hex');

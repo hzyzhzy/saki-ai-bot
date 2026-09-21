@@ -409,6 +409,8 @@
     <button data-tab="groups">群与触发</button>
     <button data-tab="faces">表情包</button>
     <button data-tab="knowledge">知识库</button>
+    <!-- ⚠️ 2026-09-21：人设**单独一页**（能直接切换核心人设 + 改名字/称呼/口癖/动画库） -->
+    <button data-tab="persona">人设</button>
     <button data-tab="qzone">QQ空间</button>
     <button data-tab="life">日常事件</button>
     <button data-tab="quest">二级剧情</button>
@@ -600,6 +602,7 @@
         <div><label>冷却（毫秒）</label><input type="number" id="trigger-cooldownMs"></div>
         <div><label>单条最多字数</label><input type="number" id="chunking-maxChars"></div>
         <div><label>分条间隔（毫秒）</label><input type="number" id="chunking-delayMs"></div>
+        <div><label>分条间隔上限（毫秒，留空=不随机）</label><input type="number" id="chunking-delayMaxMs"></div>
       </div>
       <div class="btns">
         <button class="act" onclick="saveTrigger()">保存以上设置</button>
@@ -665,7 +668,7 @@
         <tr><td>它**自己**是什么、会干什么（比如「你会自己发说说」）</td><td><b>persona.md</b>（人设）</td></tr>
         <tr><td>服务器的事：进服、排障、规则、存档、价格</td><td><b>hzymtr-server.md</b></td></tr>
         <tr><td>**群友是谁**、什么性格、群里发生过什么（比如「luomosan 上初三，压力大」）</td><td><b>group-memory.md</b>（群资料库）</td></tr>
-        <tr><td>二次元作品、乐队、角色</td><td><b>anime.md</b></td></tr>
+        <tr><td>二次元作品、乐队、角色</td><td><b>knowledge/anime/&lt;库名&gt;.md</b>（⚠️ 由人设的 <span class="mono">anime.works</span> 决定读哪几个 —— 见「人设」页）</td></tr>
         <tr><td>群里临时教的一句话（「记住：…」）</td><td><b>learned.md</b>（自动维护，这里只读）</td></tr>
       </table>
       <p class="hint" style="margin-top:8px">
@@ -695,6 +698,162 @@
       <h2>它学到的 <span class="pill" id="learned-count"></span></h2>
       <p class="hint">群主在群里教它的内容。想删就在群里说「忘记：主题名」。</p>
       <div id="learned-list" class="mono"></div>
+    </div>
+  </section>
+
+  <!-- 人设（2026-09-21 加：直接切换机器人核心人设） -->
+  <section id="tab-persona" class="hidden">
+    <div class="card">
+      <h2>当前人设 <span class="pill" id="p-cur-pill"></span></h2>
+      <p class="hint">
+        「人设包」= 一个角色的**一整套**：名字 / 自称 / 别人怎么叫她 / 口癖 / 性格正文 /
+        示例对话 / 引用哪些动画库。一个包 = 一个目录（<span class="mono">personas/&lt;id&gt;/</span>）。
+      </p>
+      <p class="hint">
+        ⚠️ 切换和保存都**不用重启机器人** —— 人设包是热重载的，存完立刻生效。
+      </p>
+      <div id="p-cur" class="kvs"></div>
+    </div>
+
+    <div class="card">
+      <h2>切换 / 新建 / 删除</h2>
+      <div class="row">
+        <div style="flex:2">
+          <label>切到哪个人设包</label>
+          <select id="p-pick" onchange="personaPickChange()"></select>
+        </div>
+        <div style="flex:1">
+          <label>&nbsp;</label>
+          <button class="act" onclick="personaSwitch()">切到这个</button>
+        </div>
+      </div>
+      <p class="hint" id="p-pick-hint" style="margin-top:6px"></p>
+
+      <div class="row" style="margin-top:12px">
+        <div>
+          <label>新建（id：小写字母数字开头）</label>
+          <input id="p-new-id" placeholder="例：miku" style="width:180px">
+        </div>
+        <div>
+          <label>照谁复制</label>
+          <select id="p-new-from" style="width:180px"></select>
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button onclick="personaCreate()">新建</button>
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button onclick="personaDelete()">删除选中的那个</button>
+        </div>
+      </div>
+      <p class="hint" style="margin-top:8px">
+        ⚠️ 删除是**挪走**（<span class="mono">logs/persona-removed-*</span>，还会留一份 persona.md），
+        不是真销毁；而且**正在用的那个删不了**，先切走。
+      </p>
+
+      <div class="row" style="margin-top:14px">
+        <div>
+          <label>联网自动填 · 角色名</label>
+          <input id="p-draft-name" placeholder="例：丰川祥子" style="width:180px">
+        </div>
+        <div>
+          <label>出自哪部作品</label>
+          <input id="p-draft-work" placeholder="例：BanG Dream!" style="width:180px">
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button class="act" onclick="personaDraftStart()" id="p-draft-btn">搜集并起草</button>
+        </div>
+      </div>
+      <p class="hint" style="margin-top:6px">
+        用上面那个 <b>id</b>，联网搜资料 + 让模型起草一份完整人设（一般 30~60 秒）。<br>
+        ⚠️ 结果**先给你看，点了保存才落盘**；不给真人做人设；已有动画库**只读不写**；
+        <span class="mono">persona.md</span> 限 3000 字（它每次请求都进提示词，越长越贵）。
+      </p>
+      <div id="p-draft"></div>
+      <div class="btns"><span class="msg" id="msg-p"></span></div>
+    </div>
+
+    <div class="card">
+      <h2>QQ 昵称 / 头像 <span class="pill" id="p-qq-pill"></span></h2>
+      <p class="hint">
+        ⚠️ 这两样**跟着人设走**：把昵称 / 头像存进这个人设包，**切换人设时会自动改成它的**
+        （改的是 <b>QQ 上真实的</b>昵称 / 头像，所有群和好友都看得见）。<br>
+        留空 = 切换时**不动**那一项（不是清空）。
+      </p>
+      <div class="row">
+        <div style="flex:0 0 auto">
+          <label>这个人设的头像</label>
+          <img id="p-avatar" src="" alt="（还没设）"
+               style="width:96px;height:96px;border-radius:12px;object-fit:cover;background:#1a1a2e;display:block">
+          <p class="hint" id="p-avatar-name" style="margin:6px 0 0"></p>
+        </div>
+        <div style="flex:1">
+          <label>这个人设的 QQ 昵称</label>
+          <input id="p-nick" placeholder="（留空 = 切换时不动昵称）">
+          <label style="margin-top:10px">换这个人设的头像（png / jpg / gif / webp，≤8MB）</label>
+          <div class="row">
+            <div style="flex:1"><input type="file" id="p-avatar-file" accept="image/png,image/jpeg,image/gif,image/webp"></div>
+            <div style="flex:0 0 auto"><label>&nbsp;</label><button onclick="qqSaveAvatar()">上传进人设包</button></div>
+          </div>
+          <div class="btns">
+            <button class="act" onclick="qqSaveNick()">把昵称存进人设包</button>
+            <button onclick="qqApplyNow()">立即应用到 QQ</button>
+          </div>
+        </div>
+      </div>
+      <p class="hint" id="p-qq-now" style="margin-top:10px"></p>
+      <div class="btns"><span class="msg" id="msg-qqp"></span></div>
+    </div>
+
+    <div class="card">
+      <h2>结构化设置</h2>
+      <p class="hint">
+        这些字段是**代码要用的**（判"这句话是不是在叫她""该不该去搜"）—— 换名字时她会跟着变，不用改代码。<br>
+        ⚠️ <b>「主人是谁」不在这里</b>：那是**共用事实**（QQ 号在「模型」页、资料在
+        <span class="mono">owner.md</span>），换人设改的是「<b>你叫他什么</b>」。
+      </p>
+      <div id="p-fields"></div>
+      <div class="btns">
+        <button class="act" onclick="personaSaveIdentity()" id="p-save">保存</button>
+        <span class="msg" id="msg-pi"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>提示词里的整句（prompt.*）</h2>
+      <p class="hint">
+        ⚠️⚠️ 这些是**整句替换**的 —— 直接写"这个角色会说的那句话"，**别指望代码帮你拼**。
+        不同角色的自我介绍结构本来就不一样，拼出来只会是个谁也不像的平均角色。<br>
+        ⚠️ <b>留空 = 那一段不出现</b>（代码不会兜底编一句，编出来的不是这个人设说的话）。
+      </p>
+      <div id="p-prompts"></div>
+      <div class="btns">
+        <button class="act" onclick="personaSaveIdentity()">保存</button>
+        <span class="msg" id="msg-pp"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>人设文档</h2>
+      <p class="hint">
+        改完保存立即生效（不用重启）。<span class="mono">cast.md</span> / <span class="mono">life-events.md</span> /
+        <span class="mono">quest-ideas.md</span> 是这个角色**专属的数据**（名册、日常事件库、剧情点子），
+        它们不进聊天提示词，但剧情和日常事件要用。
+      </p>
+      <div class="row">
+        <div>
+          <label>选择文件</label>
+          <select id="p-doc" onchange="personaLoadDoc()"></select>
+        </div>
+      </div>
+      <label>内容</label>
+      <textarea id="p-doc-text" rows="20"></textarea>
+      <div class="btns">
+        <button class="act" onclick="personaSaveDoc()">保存</button>
+        <span class="msg" id="msg-pd"></span>
+      </div>
     </div>
   </section>
 
@@ -869,7 +1028,7 @@
         每个群的故事线是分开的，所以那句子由头也<b>各群各存一句</b>。
         ⚠️ 「立即开始剧情」会<b>真的往群里发消息</b>。
       </p>
-      <!-- ⚠️ 这个选择器是 2026-09-15 补的：HZY「我手动开剧情，699开头的群没启动」——
+      <!-- ⚠️ 这个选择器是 2026-09-15 补的：<主人>「我手动开剧情，699开头的群没启动」——
            原来按钮**根本不传 groupId**，服务端只会退回 groups[0]（配置里第一个 1 档群），
            所以不管想开在哪个群，它都开在 200000002。 -->
       <div class="kv" style="margin:6px 0">
@@ -884,7 +1043,7 @@
         <button class="ghost" onclick="questSaveHint()">替换这个群下次的二级事件</button>
         <span class="msg" id="msg-quest2"></span>
       </div>
-      <!-- 清空（2026-09-15 晚 HZY：「加一个清空上次故事的按钮吧，现在还在测试中」）-->
+      <!-- 清空（2026-09-15 晚 <主人>：「加一个清空上次故事的按钮吧，现在还在测试中」）-->
       <hr style="border:0;border-top:1px dashed var(--line);margin:12px 0">
       <p class="hint" style="margin:0 0 6px">
         <b>清空／重来（测试用）</b>：把上一次那条剧情当没发生过 ——
@@ -1624,11 +1783,12 @@ document.querySelectorAll('nav button').forEach(b => {
     b.classList.add('on');
     // ⚠️ 这个列表必须跟 nav 里的 data-tab 一一对应 —— 漏了哪个，哪个标签就切不过去
     //    （qzone 就漏过一阵子，面板永远显示不出来）
-    ['model','groups','faces','knowledge','qzone','life','quest','groupcfg','affinity','qqlogin','status'].forEach(t => {
+    ['model','groups','faces','knowledge','persona','qzone','life','quest','groupcfg','affinity','qqlogin','status'].forEach(t => {
       const el = $('tab-' + t);
       if (el) el.classList.toggle('hidden', t !== b.dataset.tab);
     });
     if (b.dataset.tab === 'knowledge') loadKnowledge();
+    if (b.dataset.tab === 'persona') personaRefresh();
     if (b.dataset.tab === 'faces') renderFaces();
     if (b.dataset.tab === 'groups') { loadGroupRespond(); fillStrictForGroup(); }
     if (b.dataset.tab === 'qzone') renderQzone();
@@ -1717,6 +1877,7 @@ async function reloadAll() {
   //    早就过时了；配置读不到时界面会显示错的数字。
   $('chunking-maxChars').value = c.chunking?.maxChars ?? 60;
   $('chunking-delayMs').value = c.chunking?.delayMs ?? 1000;
+  $('chunking-delayMaxMs').value = c.chunking?.delayMaxMs ?? '';
 
   // 教学
   $('teach-teachers').value = (c.teach.teachers || []).join('\n');
@@ -1954,7 +2115,7 @@ async function saveLife() {
   if (r.ok) { await reloadAll(); renderLife(); }
 }
 
-// ── 日常事件：预览 / 立即发送（HZY：「日常事件也加一个预览和立即发送」）──
+// ── 日常事件：预览 / 立即发送（<主人>：「日常事件也加一个预览和立即发送」）──
 // ⚠️ 「预览一条」抽到的那条（2026-09-15 用户要求「预览和发送合为一条」）：
 //    点「立即发送」时把它一起传上去，**发的就是你看过的那一句**，
 //    不再重新抽（原来是重新抽，所以你看到的和发出去的不是同一句）。
@@ -2001,7 +2162,7 @@ async function lifeSendNow() {
   renderLife();
 }
 
-// ── 剧情发展时间线（2026-09-15 晚 HZY：「把剧情发展呈现在 webui 上更详细一点」）──
+// ── 剧情发展时间线（2026-09-15 晚 <主人>：「把剧情发展呈现在 webui 上更详细一点」）──
 // ⚠️ 原来只列「第N段 + 群友回复」，既看不出**先后顺序**，也看不到
 //    她自己在群里**顺口接的话**（那句"答应了"的话原来哪儿都没显示）。
 //    这里把三段数据合成一条按时间排的时间线：
@@ -2047,7 +2208,7 @@ function questDevHtml(s) {
     });
   }
   // ⚠️ 2026-09-17 用户要求："等下一段"要能看出**每一条是靠哪条判据进来的**。
-  //    ⚠️⚠️ 但**不再分第二类** —— HZY 当时追问了一句很关键的话：
+  //    ⚠️⚠️ 但**不再分第二类** —— <主人> 当时追问了一句很关键的话：
   //    「**现在不是本来就会筛选一部分消息进入影响剧情的范围吗**」。
   //    对：能进 `pending` 的每一条都已经过了 `isPlotReply()` 那道筛
   //    （`at`/`reply`/`suggest`/`question`/`loose` 五档**都算**"可能改变走向"）。
@@ -2229,7 +2390,7 @@ async function saveQuest() {
   if (r.ok) renderQuest();
 }
 
-// ⚠️ 2026-09-15 晚：「替换下次二级事件」**按群存**（HZY：「最好也加个群选择…
+// ⚠️ 2026-09-15 晚：「替换下次二级事件」**按群存**（<主人>：「最好也加个群选择…
 //    因为每个群的故事线不一样」）。所以这里必须把「发到哪个群」那个选择器的值带上 ——
 //    不传的话存的是"全局兜底"那份（老页面会那样），界面文案也会说清是哪个群。
 async function questSaveHint() {
@@ -2248,7 +2409,7 @@ async function questSaveHint() {
 }
 
 // ── 「立即开始剧情」发到哪个群（2026-09-15 补）──
-// ⚠️ 起因：HZY「我手动开剧情，699开头的群没启动」。
+// ⚠️ 起因：<主人>「我手动开剧情，699开头的群没启动」。
 //    查日志：`管理界面手动开了一条剧情 → 群 200000002` —— 那个按钮**压根没传 groupId**，
 //    服务端只能退回 `groups[0]`（配置里第一个 1 档群），所以想开在 699 也会开在 621。
 //    现在界面上明确列出 1 档群让人选，并且记住上次选的（localStorage）。
@@ -2278,7 +2439,7 @@ function fillQuestGroup() {
   }
 }
 
-// ── 真剧情控制：推进下一段 / 收尾（2026-09-15 晚 HZY：「也和模拟一样也加一套剧情控制按钮」）──
+// ── 真剧情控制：推进下一段 / 收尾（2026-09-15 晚 <主人>：「也和模拟一样也加一套剧情控制按钮」）──
 // `noReply = true` → 不把上面那个框里的话当成群友发言（＝模拟面板的「不发话，直接推进一段」）；
 // `forceEnd` = 'good' / 'bad' → 强制收尾（跟模拟面板那两颗按钮一个意思）。
 // ⚠️ 服务端会**真的发到群里**，并且真的结算好感度（好结局 +N / 坏结局 −N）。
@@ -2331,7 +2492,7 @@ async function questStartNow() {
     const r = await api('/api/quest/start', {
       method: 'POST', headers: {'Content-Type':'application/json'},
       // ⚠️ groupId **必须带上** —— 不带的话服务端只会退回 groups[0]（配置里第一个 1 档群），
-      //    于是"想开在 699，结果开在 621"（HZY 2026-09-15 踩到）
+      //    于是"想开在 699，结果开在 621"（<主人> 2026-09-15 踩到）
       body: JSON.stringify({ text: $('q-hint').value, groupId: gid })
     });
     flash(el, r.ok, r.ok ? `已发到群 ${r.groupId}：${r.text}` : ('失败：' + r.error));
@@ -2342,7 +2503,7 @@ async function questStartNow() {
 }
 
 // ── 清空剧情 / 故事线（测试用，2026-09-15 晚加）──
-// HZY：「加一个清空上次故事的按钮吧，现在还在测试中」
+// <主人>：「加一个清空上次故事的按钮吧，现在还在测试中」
 //   `all=true` → 所有群；否则只清「发到哪个群」里选中的那个。
 //   ⚠️ 服务端走的是 `quest.abort()`（**不写结局、不动好感度**）+ `storyline.clear()`，
 //      别拿"正常收尾"去凑合 —— 那会改好感度、还会往她记忆里写一条假结局。
@@ -2441,7 +2602,7 @@ async function simReset() {
   renderSim(r);
 }
 
-// ── 故事线（**每个群一份**，2026-09-15 HZY 要求）──
+// ── 故事线（**每个群一份**，2026-09-15 <主人> 要求）──
 //
 // 用户原话：「一个群设一个故事线知识库……知识库调用时一定要分清就行了。
 //   然后再做故事线卡片」。
@@ -2538,7 +2699,7 @@ async function slCompress(groupId) {
   await renderStoryline();
 }
 
-// ── 按群设定（HZY：「参数也可以分群设定」）──
+// ── 按群设定（<主人>：「参数也可以分群设定」）──
 //
 // ⚠️⚠️ 2026-09-16 改造（用户要求）：
 //    「把**日常事件的节奏设置**和**二级事件的参数**也加一个**下拉群菜单**分群调节，
@@ -2561,7 +2722,7 @@ async function renderGroupParams() {
     const lv = (st.config && st.config.trigger && st.config.trigger.groupRespondTo) || {};
     const allow = ((st.config && st.config.trigger && st.config.trigger.allowGroups) || []).map(String);
     const inSl = ((sl.status && sl.status.byGroup) || []).map((x) => String(x.groupId));
-    // ⚠️⚠️ **只有 1 档群才进事件系统**（HZY 2026-09-15：
+    // ⚠️⚠️ **只有 1 档群才进事件系统**（<主人> 2026-09-15：
     //    「挡位 2 不能进事件系统，只有 1 才能设置」）—— 所以下拉里**只有 1 档群**。
     const isEvent = (g) => Number(lv[g]) === 1 && (!allow.length || allow.includes(g));
     const all = [...new Set([...Object.keys(lv), ...inSl])];
@@ -3000,6 +3161,7 @@ async function saveTrigger() {
       chunking: {
         maxChars: Number($('chunking-maxChars').value),
         delayMs: Number($('chunking-delayMs').value),
+        delayMaxMs: $('chunking-delayMaxMs').value === '' ? undefined : Number($('chunking-delayMaxMs').value),
       },
       teach: {
         teachers: lines($('teach-teachers').value),
@@ -3424,7 +3586,7 @@ async function qzonePost() {
     const r = await api('/api/qzone/post', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
     // ⚠️ 2026-09-15 深夜：接口"不发"时给的是 `skipped` / `reason`，**不是 `error`**。
     //    原来直接读 `r.error` → 界面只显示「失败： undefined」，看不出为什么没发 ✗
-    //    （真实踩过：HZY 截图「动态好像还有个问题」）
+    //    （真实踩过：<主人> 截图「动态好像还有个问题」）
     if (r.skipped) { flash(el, null, '没有发：' + r.skipped); return; }
     if (!r.ok) { flash(el, false, '失败：' + (r.error || '（没给原因，去看日志）')); return; }
     if (!r.posted) { flash(el, null, `没有发。${r.reason || ''}`); return; }
@@ -3503,11 +3665,11 @@ function onStrictInput() {
   d.innerHTML = '<b style="color:' + color + '">' + v + '</b> · ' + txt;
 }
 
-// ⚠️ 2026-09-15 晚（HZY：「直接取消保存全局的说法，首先默认 50，然后只保留分群的数据」）：
+// ⚠️ 2026-09-15 晚（<主人>：「直接取消保存全局的说法，首先默认 50，然后只保留分群的数据」）：
 //    **全局那个滑块和"保存收紧度（全局）"按钮已经删掉了** —— 现在只按群设，
 //    没设过的群 = 默认 50。落盘在 `config.groupParams[<群号>].chat.strictness`。
 
-// ── 收紧度**按群**单独调（2026-09-15 晚 HZY 要求）──────────────────
+// ── 收紧度**按群**单独调（2026-09-15 晚 <主人> 要求）──────────────────
 // 上面那个滑块是**全局默认**；这里是"只改某一个群"。
 // ⚠️ 落盘在 `config.groupParams[<群号>].chat.strictness`；留空 = 删掉覆盖 → 回到默认 50。
 
@@ -3822,6 +3984,578 @@ loadKnowledgeList().then(() => loadKnowledge());
 
 // 启动
 reloadAll();
+// ─────────────────────────────────────────────────────────────
+// 人设页（2026-09-21 加：能直接切换机器人核心人设）
+// ─────────────────────────────────────────────────────────────
+//
+// ⚠️ 后端那几条路由在 `webui.js` 的 `/api/persona*`；
+//    文件层（读 / 写 / 校验 / 备份 / 新建 / 删除）在 `src/persona-admin.js`。
+// ⚠️ **保存和切换都不重启机器人** —— 后端会热重载（用户 2026-09-21 定的）。
+
+/** 界面上正在看的那个包 */
+let PJ = { id: '', identity: {}, packs: [], current: '' };
+
+/** 结构化字段 · 顶层字符串：[键, 标签, 说明] */
+const PJ_STR = [
+  ['name', '角色全名', '提示词里要用它（例：丰川祥子）'],
+  ['selfName', '自称', '她自己提自己时用哪个词（例：Saki）'],
+  ['displayName', '对外显示的身份', '例：客服 Saki'],
+  ['shortName', '群里的昵称', '状态标题那种「捧场小祥」用它（例：小祥）'],
+  ['narrativeName', '剧情里的第三人称名', '例：祥子'],
+];
+/** 结构化字段 · 数组（界面上按顿号/逗号分隔） */
+const PJ_ARR = [
+  ['selfNames', '判断「是不是在说她」要用的写法', '中英文都写上'],
+  ['callNames', '群友怎么叫她算「点名叫她」', '这些名字一出现就必须回'],
+  ['nicknames', '所有外号', '别人叫她任何一个外号，她都应该正常回应'],
+  ['matchNames', '判据用的名字原子', '允许单字和变体（「祥」能匹配「小祥」「祥子」）；留空＝自动从上面几个凑'],
+];
+/** 她怎么称呼别人（`address`） */
+const PJ_ADDR = [
+  ['owner', '平时怎么叫主人', '例：<主人>'],
+  ['ownerFormal', '正式场合怎么叫', '例：服主；没有这种场合就留空'],
+  ['ownerRule', '什么时候用正式称呼', '⚠️ 整句规矩，不在代码里拼'],
+];
+
+const PJ_DOC_ONLY = ['cast.md', 'life-events.md', 'quest-ideas.md', 'persona-money.md', 'persona-media.md'];
+
+/** HTML 转义：凡是要拼进 innerHTML 的值都得过一遍（`escAttr` 连引号一起挡） */
+const escHtml = (s) => String(s ?? '').replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+const escAttr = (s) =>
+  escHtml(s)
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+
+function pjShow(el, ok, text) {
+  flash(el, ok, text);
+}
+
+/** 渲染一次人设页（进标签页时调） */
+async function personaRefresh() {
+  const r = await api('/api/persona/list');
+  // ⚠️⚠️ **不要静默 return** —— 第一版就是 `if (!r.ok) return;`，
+  //    结果后端 500（`personaId is not defined`）时整页**全空**，
+  //    用户只看到"下拉是空的、字段也是空的"，完全不知道出了什么错（2026-09-21 真实踩到）。
+  //    现在把错误**显示在页面上**。
+  if (!r || !r.ok) {
+    $('p-cur').innerHTML = `<div class="hint">⚠️ 读不到人设列表：${escHtml((r && r.error) || '接口没响应')}</div>`;
+    $('p-cur-pill').textContent = '?';
+    return;
+  }
+  PJ.packs = r.packs || [];
+  PJ.current = r.current || '';
+  $('p-cur-pill').textContent = PJ.current;
+  const cur = PJ.packs.find((p) => p.id === PJ.current);
+  $('p-cur').innerHTML = cur
+    ? [
+        ['id', cur.id],
+        ['角色全名', cur.name || '（空）'],
+        ['自称', cur.selfName || '（空）'],
+        ['显示名', cur.displayName || '（空）'],
+        ['文档', `${cur.docs} 份 · ${(cur.chars / 1000).toFixed(1)}K 字`],
+      ]
+        .map(([k, v]) => `<div><span class="k">${k}</span><span class="v">${String(v)}</span></div>`)
+        .join('')
+    : `<div class="hint">⚠️ 配置里写的 persona.id =「${PJ.current}」，但 personas/ 下没有这个包
+       —— 她这会儿**没有名字**，赶紧切一个或新建一个。</div>`;
+  $('p-pick').innerHTML = PJ.packs
+    .map(
+      (p) =>
+        `<option value="${p.id}"${p.id === PJ.current ? ' selected' : ''}>${p.id}` +
+        `${p.name ? '　' + p.name : ''}${p.broken ? '　⚠️ ' + p.broken : ''}</option>`,
+    )
+    .join('');
+  $('p-new-from').innerHTML = ['_template', ...PJ.packs.map((p) => p.id)]
+    .map((x) => `<option value="${x}">${x}</option>`)
+    .join('');
+  personaPickChange();
+  await personaOpen(PJ.current);
+  qqProfileRefresh(); // ⚠️ 必须在 personaOpen 之后 —— 它读的是 PJ.identity.qq
+}
+
+// ── QQ 昵称 / 头像（**跟着人设走**：存进人设包，切换时自动应用）──
+async function qqProfileRefresh() {
+  // ① 这个人设包里写的值（切到别人时，这两样会跟着变）
+  const q = PJ.identity.qq && typeof PJ.identity.qq === 'object' ? PJ.identity.qq : {};
+  $('p-nick').value = q.nickname ?? '';
+  $('p-avatar-name').textContent = q.avatar ? `文件：${q.avatar}` : '（没设头像）';
+  $('p-avatar').src = q.avatar ? `/api/persona/avatar?id=${encodeURIComponent(PJ.id)}&t=${Date.now()}` : '';
+  $('p-qq-pill').textContent = PJ.id;
+  // ② QQ 上**现在**是什么 —— 好让你一眼看出"该不该点立即应用"
+  const r = await api('/api/qq/profile');
+  $('p-qq-now').textContent =
+    r && r.ok
+      ? `QQ 上现在：昵称「${r.nickname}」 · 账号 ${r.uin}`
+      : `⚠️ 读不到 QQ 上的当前值：${(r && r.error) || '接口没响应'}`;
+}
+
+async function qqSaveNick() {
+  const nickname = $('p-nick').value.trim();
+  const it = JSON.parse(JSON.stringify(PJ.identity));
+  it.qq = { ...(it.qq || {}), nickname };
+  pjShow($('msg-qqp'), true, '保存中…');
+  const r = await api('/api/persona', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: PJ.id, identity: it }),
+  });
+  if (r && r.ok) {
+    PJ.identity = r.identity;
+    pjShow($('msg-qqp'), true, '✅ 已存进人设包 —— 以后切到它时会自动改成这个昵称');
+    qqProfileRefresh();
+  } else {
+    pjShow($('msg-qqp'), false, (r && r.error) || '保存失败');
+  }
+}
+
+async function qqSaveAvatar() {
+  const f = $('p-avatar-file').files[0];
+  if (!f) {
+    pjShow($('msg-qqp'), false, '先选一张图片');
+    return;
+  }
+  pjShow($('msg-qqp'), true, '上传中…');
+  const r = await api(
+    `/api/persona/avatar?id=${encodeURIComponent(PJ.id)}&name=${encodeURIComponent(f.name)}`,
+    { method: 'POST', body: f },
+  );
+  if (r && r.ok) {
+    const ap = r.applied;
+    const tail =
+      ap && ap.avatar
+        ? '，并且已经应用到 QQ 了'
+        : ap && ap.problems && ap.problems.length
+          ? `（应用到 QQ 时：${ap.problems.join('；')}）`
+          : '';
+    pjShow($('msg-qqp'), true, `✅ 头像已存进人设包${tail}`);
+    await personaOpen(PJ.id);
+    qqProfileRefresh();
+  } else {
+    pjShow($('msg-qqp'), false, (r && r.error) || '上传失败');
+  }
+}
+
+async function qqApplyNow() {
+  pjShow($('msg-qqp'), true, '应用中…');
+  const r = await api('/api/persona/apply-qq', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: PJ.id }),
+  });
+  if (r && r.ok) {
+    pjShow($('msg-qqp'), true, `✅ 已应用到 QQ：昵称「${r.nickname || '没改'}」头像「${r.avatar || '没改'}」`);
+  } else {
+    const why = r && r.problems && r.problems.length ? r.problems.join('；') : (r && r.error) || '应用失败';
+    pjShow($('msg-qqp'), false, `⚠️ ${why}`);
+  }
+  qqProfileRefresh();
+}
+
+function personaPickChange() {
+  const id = $('p-pick').value;
+  const p = PJ.packs.find((x) => x.id === id);
+  const bits = [];
+  if (p) bits.push(`${p.docs} 份文档 · ${(p.chars / 1000).toFixed(1)}K 字`);
+  if (id === PJ.current) bits.push('（**正在用的就是它**）');
+  if (p && p.broken) bits.push(`⚠️ ${p.broken}`);
+  $('p-pick-hint').textContent = bits.join('　');
+}
+
+/** 打开一个包：拉 identity + 文档清单，渲染表单 */
+async function personaOpen(id) {
+  if (!id) return;
+  const r = await api('/api/persona?id=' + encodeURIComponent(id));
+  if (!r || !r.ok) {
+    pjShow($('msg-pi'), false, r && r.error ? r.error : '读不出来');
+    return;
+  }
+  PJ.id = r.id;
+  PJ.identity = r.identity || {};
+  personaRenderFields();
+  personaRenderPrompts();
+  const sel = $('p-doc');
+  sel.innerHTML = (r.docs || []).map((d) => `<option value="${d.path}">${d.path}　(${d.size} 字节)</option>`).join('');
+  await personaLoadDoc();
+}
+
+function personaRenderFields() {
+  const it = PJ.identity;
+  const row = (label, input, hint) =>
+    `<div class="row" style="margin-bottom:8px"><div style="flex:1"><label>${label}</label>${input}` +
+    `${hint ? `<p class="hint" style="margin:4px 0 0">${hint}</p>` : ''}</div></div>`;
+  const out = [];
+  for (const [k, label, hint] of PJ_STR) {
+    out.push(row(label, `<input id="pf-${k}" value="${escAttr(it[k] ?? '')}">`, hint));
+  }
+  for (const [k, label, hint] of PJ_ARR) {
+    const v = Array.isArray(it[k]) ? it[k].join('、') : '';
+    out.push(row(label, `<input id="pf-${k}" value="${escAttr(v)}">`, hint));
+  }
+  const an = it.anime && typeof it.anime === 'object' ? it.anime : {};
+  out.push(
+    row(
+      '读哪几个动画库（anime.works）',
+      `<input id="pf-anime-works" value="${escAttr((an.works || []).join('、'))}">`,
+      '⚠️ 一个名字对应一个文件 <span class="mono">knowledge/anime/&lt;名字&gt;.md</span>；' +
+        '<b>没声明就一份都不读</b>（换角色才不会串味）',
+    ),
+  );
+  out.push(
+    row(
+      '问到这些词要联网搜（anime.keywords）',
+      `<input id="pf-anime-keywords" value="${escAttr((an.keywords || []).join('、'))}">`,
+      '作品名、同作品的角色名',
+    ),
+  );
+  out.push('<h2 style="margin-top:16px">她怎么称呼别人</h2>');
+  const ad = it.address && typeof it.address === 'object' ? it.address : {};
+  for (const [k, label, hint] of PJ_ADDR) {
+    out.push(row(label, `<input id="pf-addr-${k}" value="${escAttr(ad[k] ?? '')}">`, hint));
+  }
+  const st = it.style && typeof it.style === 'object' ? it.style : {};
+  out.push('<h2 style="margin-top:16px">口癖</h2>');
+  out.push(
+    row(
+      '口癖词（每行一个也行，用顿号分隔）',
+      `<input id="pf-tics" value="${escAttr((st.verbalTics || []).join('、'))}">`,
+      '说到这些词太频繁时会被提醒换说法',
+    ),
+  );
+  out.push('<h2 style="margin-top:16px">高级（JSON，改坏了会被拒绝保存）</h2>');
+  out.push(
+    row(
+      '歧义词 ambiguity',
+      `<textarea id="pf-ambiguity" rows="3">${escHtml(JSON.stringify(it.ambiguity ?? [], null, 1))}</textarea>`,
+      '例：<span class="mono">[{"name":"祥子","unless":"骆驼祥子"}]</span>',
+    ),
+  );
+  out.push(
+    row(
+      '不喜欢被叫 renameObjection',
+      `<textarea id="pf-rename" rows="3">${escHtml(JSON.stringify(it.renameObjection ?? {}, null, 1))}</textarea>`,
+      '例：<span class="mono">{"dislike":["祥子"],"prefer":"Saki"}</span>',
+    ),
+  );
+  $('p-fields').innerHTML = out.join('');
+}
+
+/** 提示词整句：把 identity.prompt 里现有的键都渲染出来（`_说明` 除外） */
+function personaRenderPrompts() {
+  const p = PJ.identity.prompt && typeof PJ.identity.prompt === 'object' ? PJ.identity.prompt : {};
+  const keys = Object.keys(p).filter((k) => k !== '_说明');
+  const hint = {
+    personaLine: '自我介绍（最常见的那句「你是谁」）',
+    styleLine: '性格那一段',
+    quickAside: '只能塞一句时的紧凑版人设',
+    spokenNames: '群里怎么叫她 —— **带括号**，接在「直接点了它的名」后面',
+    attributionTone: '发言前核对归属时提醒的语气 —— **带括号**',
+    followUpLine: '「说完又想补一句」那次的人格声明',
+    castNames: '故事里最常出现的那几个人（同团）',
+    questHomeDirs: '剧情里「家里」这个方向的题材',
+    questPastThreads: '「过去找上门」那类的题材',
+    questOtherGroups: '偶尔碰上的其他团 / 旧识',
+  };
+  if (!keys.length) {
+    $('p-prompts').innerHTML = '<p class="hint">这个人设包还没有 <span class="mono">prompt</span> 段。</p>';
+    return;
+  }
+  $('p-prompts').innerHTML = keys
+    .map(
+      (k) =>
+        `<div class="row" style="margin-bottom:8px"><div style="flex:1">` +
+        `<label>prompt.${k}</label>` +
+        `<p class="hint" style="margin:4px 0 4px">${hint[k] || '（这个键喂给哪段提示词请看 personas/README.md）'}</p>` +
+        `<textarea id="pp-${k}" rows="2">${escHtml(p[k] ?? '')}</textarea>` +
+        `</div></div>`,
+    )
+    .join('');
+}
+
+const pjList = (s) =>
+  String(s || '')
+    .split(/[、,，\n]/)
+    .map((x) => x.trim())
+    .filter(Boolean);
+
+/** 从表单收集出一个完整的 identity（**保留没在界面上出现的键**） */
+function personaCollectIdentity() {
+  const it = JSON.parse(JSON.stringify(PJ.identity || {}));
+  for (const [k] of PJ_STR) it[k] = $('pf-' + k).value.trim();
+  for (const [k] of PJ_ARR) {
+    const v = pjList($('pf-' + k).value);
+    if (v.length) it[k] = v;
+    else delete it[k];
+  }
+  const an = it.anime && typeof it.anime === 'object' ? it.anime : {};
+  const works = pjList($('pf-anime-works').value);
+  const kws = pjList($('pf-anime-keywords').value);
+  if (works.length) an.works = works;
+  else delete an.works;
+  if (kws.length) an.keywords = kws;
+  else delete an.keywords;
+  if (Object.keys(an).length) it.anime = an;
+  else delete it.anime;
+
+  const ad = it.address && typeof it.address === 'object' ? it.address : {};
+  for (const [k] of PJ_ADDR) {
+    const v = $('pf-addr-' + k).value.trim();
+    if (v) ad[k] = v;
+    else delete ad[k];
+  }
+  it.address = ad;
+
+  const st = it.style && typeof it.style === 'object' ? it.style : {};
+  const tics = pjList($('pf-tics').value);
+  if (tics.length) st.verbalTics = tics;
+  else delete st.verbalTics;
+  it.style = st;
+
+  it.ambiguity = JSON.parse($('pf-ambiguity').value || '[]');
+  it.renameObjection = JSON.parse($('pf-rename').value || '{}');
+
+  const pr = it.prompt && typeof it.prompt === 'object' ? it.prompt : {};
+  for (const k of Object.keys(pr)) {
+    if (k === '_说明') continue;
+    const el = $('pp-' + k);
+    if (el) pr[k] = el.value;
+  }
+  it.prompt = pr;
+  return it;
+}
+
+async function personaSaveIdentity() {
+  let identity;
+  try {
+    identity = personaCollectIdentity();
+  } catch (e) {
+    pjShow($('msg-pi'), false, 'JSON 写坏了：' + e.message);
+    return;
+  }
+  pjShow($('msg-pi'), true, '保存中…');
+  const r = await api('/api/persona', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: PJ.id, identity }),
+  });
+  if (r && r.ok) {
+    PJ.identity = r.identity;
+    pjShow($('msg-pi'), true, r.reloaded ? '✅ 存好了，已热重载（没重启）' : '✅ 存好了（这个包当前没在用）');
+    pjShow($('msg-pp'), true, '✅ 存好了');
+    await personaRefresh();
+  } else {
+    pjShow($('msg-pi'), false, (r && r.error) || '保存失败');
+  }
+}
+
+async function personaSwitch() {
+  const id = $('p-pick').value;
+  pjShow($('msg-p'), true, '切换中…');
+  const r = await api('/api/persona/switch', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id }),
+  });
+  if (r && r.ok) {
+    pjShow($('msg-p'), true, `✅ 已经切到「${id}」，立刻生效（没重启机器人）`);
+    await personaRefresh();
+    await reloadAll();
+    await loadKnowledgeList(true);
+  } else {
+    pjShow($('msg-p'), false, (r && r.error) || '切换失败');
+  }
+}
+
+async function personaCreate() {
+  const id = $('p-new-id').value.trim();
+  const from = $('p-new-from').value;
+  if (!id) {
+    pjShow($('msg-p'), false, '先填一个 id');
+    return;
+  }
+  const r = await api('/api/persona/create', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id, from }),
+  });
+  if (r && r.ok) {
+    pjShow($('msg-p'), true, `✅ 建好了「${id}」（照 ${from} 复制）—— 填好人设再点「切到这个」`);
+    $('p-new-id').value = '';
+    await personaRefresh();
+  } else {
+    pjShow($('msg-p'), false, (r && r.error) || '新建失败');
+  }
+}
+
+async function personaDelete() {
+  const id = $('p-pick').value;
+  if (!id) return;
+  if (!confirm(`确定删除人设包「${id}」？\n\n它是**挪走**（logs/persona-removed-*，还会留一份 persona.md），不是真销毁。`)) return;
+  const r = await api('/api/persona/delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id }),
+  });
+  if (r && r.ok) {
+    pjShow($('msg-p'), true, `✅ 「${id}」已挪走`);
+    await personaRefresh();
+  } else {
+    pjShow($('msg-p'), false, (r && r.error) || '删除失败');
+  }
+}
+
+async function personaLoadDoc() {
+  const path = $('p-doc').value;
+  if (!path) {
+    $('p-doc-text').value = '';
+    return;
+  }
+  const r = await api('/api/persona/doc?id=' + encodeURIComponent(PJ.id) + '&path=' + encodeURIComponent(path));
+  $('p-doc-text').value = r && r.ok ? r.text : '';
+  if (r && !r.ok) pjShow($('msg-pd'), false, r.error || '读不出来');
+}
+
+async function personaSaveDoc() {
+  const path = $('p-doc').value;
+  if (!path) return;
+  pjShow($('msg-pd'), true, '保存中…');
+  const r = await api('/api/persona/doc', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: PJ.id, path, text: $('p-doc-text').value }),
+  });
+  if (r && r.ok) {
+    pjShow($('msg-pd'), true, r.reloaded ? '✅ 存好了，已热重载（没重启）' : '✅ 存好了');
+    await personaOpen(PJ.id);
+  } else {
+    pjShow($('msg-pd'), false, (r && r.error) || '保存失败');
+  }
+}
+// ─────────────────────────────────────────────────────────────
+// 联网自动填（P3）：角色名 + 作品 → 搜资料 → 模型起草 → 你过一眼 → 保存
+// ─────────────────────────────────────────────────────────────
+//
+// ⚠️ 起草在服务端（`src/persona-draft.js`）**只产出、不落盘**；
+//    "保存"这一步才走 `/api/persona/create` + `/api/persona` + `/api/persona/doc`。
+// ⚠️ 保存完**自动打开那个人设包** —— 这样能立刻用上面的完整表单**逐节改**
+//    （起草出来的东西一次到位是不可能的，必须留个"改"的入口）。
+
+let PDRAFT = null;
+
+async function personaDraftStart() {
+  const id = $('p-new-id').value.trim();
+  const name = $('p-draft-name').value.trim();
+  const work = $('p-draft-work').value.trim();
+  if (!id) {
+    pjShow($('msg-p'), false, '先在「新建」那里填一个 id（小写字母数字）');
+    return;
+  }
+  if (!name) {
+    pjShow($('msg-p'), false, '填一下角色名');
+    return;
+  }
+  $('p-draft-btn').disabled = true;
+  pjShow($('msg-p'), true, '联网搜资料 + 起草中…（30~60 秒，别关页面）');
+  try {
+    const r = await api('/api/persona/draft', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, name, work }),
+    });
+    if (!r || !r.ok) {
+      pjShow($('msg-p'), false, (r && r.error) || '起草失败');
+      return;
+    }
+    if (r.blocked) {
+      pjShow($('msg-p'), false, `⛔ 不做这个：${r.why}`);
+      return;
+    }
+    PDRAFT = r;
+    pjShow($('msg-p'), true, `✅ 起草好了（参考了 ${r.sources?.length ?? 0} 条资料）—— 下面过一眼再保存`);
+    renderDraft();
+  } catch (e) {
+    pjShow($('msg-p'), false, '起草出错：' + e.message);
+  } finally {
+    $('p-draft-btn').disabled = false;
+  }
+}
+
+function renderDraft() {
+  const box = $('p-draft');
+  if (!PDRAFT) {
+    box.innerHTML = '';
+    return;
+  }
+  const notes = (PDRAFT.notes || []).map((n) => `· ${escHtml(n)}`).join('<br>');
+  const src = (PDRAFT.sources || [])
+    .map((s) => `<a href="${escAttr(s.url)}" target="_blank" rel="noreferrer">${escHtml(s.title || s.url)}</a>`)
+    .join('　');
+  box.innerHTML =
+    '<h2 style="margin-top:18px">起草结果（还没保存）</h2>' +
+    (notes ? `<p class="hint">⚠️ 提醒：<br>${notes}</p>` : '') +
+    (src ? `<p class="hint">资料来自：${src}</p>` : '<p class="hint">⚠️ 一条资料都没搜到 —— 这份是模型凭自己的知识写的，务必仔细核对。</p>') +
+    '<label>identity.json（可直接改；保存时会校验）</label>' +
+    `<textarea id="pd-identity" rows="16">${escHtml(JSON.stringify(PDRAFT.identity, null, 2))}</textarea>` +
+    '<label style="margin-top:10px">persona.md（≤3000 字）</label>' +
+    `<textarea id="pd-persona" rows="14">${escHtml(PDRAFT.docs?.['persona.md'] || '')}</textarea>` +
+    '<label style="margin-top:10px">voices.md（示例对话 —— 人味就靠它）</label>' +
+    `<textarea id="pd-voices" rows="12">${escHtml(PDRAFT.docs?.['voices.md'] || '')}</textarea>` +
+    '<div class="btns">' +
+    '<button class="act" onclick="personaDraftSave()">保存成新人设包</button>' +
+    '<button onclick="personaDraftDrop()">不要了</button>' +
+    '<span class="msg" id="msg-pd2"></span>' +
+    '</div>';
+}
+
+function personaDraftDrop() {
+  PDRAFT = null;
+  renderDraft();
+  pjShow($('msg-p'), true, '草稿丢了（没写盘，什么都没变）');
+}
+
+async function personaDraftSave() {
+  const id = $('p-new-id').value.trim();
+  let identity;
+  try {
+    identity = JSON.parse($('pd-identity').value);
+  } catch (e) {
+    pjShow($('msg-pd2'), false, 'identity.json 有问题：' + e.message);
+    return;
+  }
+  pjShow($('msg-pd2'), true, '保存中…');
+  const post = (path, body) =>
+    api(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+
+  const c = await post('/api/persona/create', { id, from: '_template' });
+  if (!c || !c.ok) {
+    pjShow($('msg-pd2'), false, (c && c.error) || '建包失败');
+    return;
+  }
+  const s = await post('/api/persona', { id, identity });
+  if (!s || !s.ok) {
+    pjShow($('msg-pd2'), false, (s && s.error) || '写 identity 失败');
+    return;
+  }
+  for (const [path, key] of [
+    ['persona.md', 'pd-persona'],
+    ['voices.md', 'pd-voices'],
+  ]) {
+    const text = $(key).value;
+    if (!text.trim()) continue;
+    const d = await post('/api/persona/doc', { id, path, text });
+    if (!d || !d.ok) {
+      pjShow($('msg-pd2'), false, `${path} 写失败：${(d && d.error) || ''}`);
+      return;
+    }
+  }
+  PDRAFT = null;
+  renderDraft();
+  $('p-new-id').value = '';
+  await personaRefresh();
+  $('p-pick').value = id;
+  personaPickChange();
+  await personaOpen(id);
+  pjShow($('msg-p'), true, `✅ 新人设「${id}」建好了 —— 上面就是它，可以逐节改；要启用就点「切到这个」`);
+}
 </script>
 </body>
 </html>

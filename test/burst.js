@@ -60,7 +60,7 @@ writeFileSync(
   join(ROOT, CFG_REL),
   [
     'llm:',
-    '  baseURL: http://127.0.0.1:1/v1',
+    '  baseURL: http://203.0.113.10:1/v1',
     '  apiKey: "sk-test"',
     '  model: test-model',
     // 跟 config.yml 一致的两个窗口（连发那几个旋钮走 config.js 的默认值，

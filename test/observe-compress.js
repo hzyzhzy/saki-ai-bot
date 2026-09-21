@@ -35,7 +35,7 @@ writeFileSync(
   join(ROOT, CFG_REL),
   [
     'llm:',
-    `  baseURL: http://127.0.0.1:${LLM_PORT}/v1`,
+    `  baseURL: http://203.0.113.10:${LLM_PORT}/v1`,
     '  apiKey: "sk-test"',
     '  model: test-model',
     '  timeout: 8000',
@@ -79,7 +79,7 @@ const llm = createServer((req, res) => {
     res.end();
   });
 });
-await new Promise((r) => llm.listen(LLM_PORT, '127.0.0.1', r));
+await new Promise((r) => llm.listen(LLM_PORT, '203.0.113.10', r));
 
 // ⚠️ observe.js 的 FILE 指向 `knowledge/group-memory.md`（现在跟 `KNOWLEDGE_DIR` 走）。
 //    跑回归时它已经是**这套件自己的副本**了；单独跑（没设环境变量）时指的才是真实文件，

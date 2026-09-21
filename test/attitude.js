@@ -85,7 +85,7 @@ const llmServer = createServer((req, res) => {
 });
 
 let sock = null;
-const wss = new WebSocketServer({ port: WS_PORT, host: '127.0.0.1' });
+const wss = new WebSocketServer({ port: WS_PORT, host: '203.0.113.10' });
 wss.on('connection', (ws, req) => {
   if ((req.headers.authorization ?? '') !== `Bearer ${TOKEN}`) return ws.close(1008);
   sock = ws;
@@ -121,7 +121,7 @@ function say(userId, role, text, id) {
       user_id: userId,
       self_id: BOT_QQ,
       time: Math.floor(Date.now() / 1000),
-      sender: { user_id: userId, nickname: role === 'owner' ? 'HZY' : role === 'admin' ? '管理' : '路人', role },
+      sender: { user_id: userId, nickname: role === 'owner' ? '<主人>' : role === 'admin' ? '管理' : '路人', role },
       message: [
         { type: 'at', data: { qq: BOT_QQ } },
         { type: 'text', data: { text: ` ${text}` } },
@@ -149,7 +149,7 @@ const probeOf = (kw) => [...probes].reverse().find((p) => !isPresearch(p) && p.u
 let bot = null;
 
 async function main() {
-  await new Promise((r) => llmServer.listen(LLM_PORT, '127.0.0.1', r));
+  await new Promise((r) => llmServer.listen(LLM_PORT, '203.0.113.10', r));
   await new Promise((r) => (wss._server.listening ? r() : wss.once('listening', r)));
 
   bot = spawn(process.execPath, [join(ROOT, 'src', 'index.js')], {
@@ -157,9 +157,9 @@ async function main() {
     env: {
       ...process.env,
       QQBOT_CONFIG: 'config.attitude-test.yml',
-      // ⚠️ 排除本机代理：假模型/假 NapCat 都跑在 127.0.0.1，
+      // ⚠️ 排除本机代理：假模型/假 NapCat 都跑在 203.0.113.10，
       //    如果 shell 里设了 NODE_USE_ENV_PROXY，不加这个假模型请求会走代理而失败
-      NO_PROXY: '127.0.0.1,localhost,::1',
+      NO_PROXY: '203.0.113.10,localhost,::1',
     },
     stdio: ['ignore', 'ignore', 'ignore'],
   });
@@ -174,7 +174,7 @@ async function main() {
   await waitFor(() => !!probeOf('把群的回复关掉'), 20000);
   const pOwner = probeOf('把群的回复关掉');
   check(!!pOwner, '收到服主的消息');
-  check(!!pOwner?.sys.includes('服主 HZY'), '系统提示词标明了对方是服主');
+  check(!!pOwner?.sys.includes('服主 <主人>'), '系统提示词标明了对方是服主');
   check(!!pOwner?.sys.includes('同级口吻'), '要求用同级口吻');
   check(!!pOwner?.sys.includes('不用敬语'), '明确说了不用敬语');
   check(!!pOwner?.sys.includes('不是他的客服'), '明确说明对服主不是客服身份');
@@ -186,13 +186,13 @@ async function main() {
   };
   const ownerInjected = injected(pOwner);
   check(!!ownerInjected, '身份段落存在');
-  check(ownerInjected.includes('HZY 本人'), '身份段落明确了对方就是服主本人');
-  // 2026-09-13 用户要求：平时直接叫 HZY，「服主」只在说服务器事务时用
-  check(ownerInjected.includes('平时') && ownerInjected.includes('叫「HZY」'), '身份段落交代了称呼规则（平时叫 HZY）');
+  check(ownerInjected.includes('<主人> 本人'), '身份段落明确了对方就是服主本人');
+  // 2026-09-13 用户要求：平时直接叫 <主人>，「服主」只在说服务器事务时用
+  check(ownerInjected.includes('平时') && ownerInjected.includes('叫「<主人>」'), '身份段落交代了称呼规则（平时叫 <主人>）');
   check(ownerInjected.includes('服务器事务'), '身份段落限定了「服主」这个称呼的使用场合');
   check(!ownerInjected.includes('可以端着一点'), '身份段落没有套用「允许端着」那套');
   check(ownerInjected.includes('不要端着'), '身份段落明确说了不要端着');
-  check(ownerInjected.includes('不要对他说「你找茏或者 HZY」'), '身份段落禁止让服主去找自己');
+  check(ownerInjected.includes('不要对他说「你找茏或者 <主人>」'), '身份段落禁止让服主去找自己');
 
   console.log('\n[2] 普通群友说话 → 应该允许端着、可以怼');
   say(MEMBER, 'member', '服务器怎么进啊烦死了', 4002);
@@ -203,7 +203,7 @@ async function main() {
   check(!!pMember?.sys.includes('端着'), '允许对群友端着');
   check(!!pMember?.sys.includes('可以硬一点'), '允许怼不讲理的群友');
   check(!!pMember?.sys.includes('不是谁的佣人'), '明确了服务姿态的上限');
-  // ⚠️ 别用「同级口吻」「服主 HZY 本人」这种词判断 —— 知识库/人设里也会出现，会误伤。
+  // ⚠️ 别用「同级口吻」「服主 <主人> 本人」这种词判断 —— 知识库/人设里也会出现，会误伤。
   //    只查**只有服主那一段才有**的措辞。
   check(!pMember?.sys.includes('他自己就是'), '对群友没有套用服主那套');
   check(!pMember?.sys.includes('你不是他的客服，是他的助手'), '对群友没有套用「你是他助手」那套');

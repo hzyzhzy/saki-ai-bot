@@ -1,19 +1,19 @@
 # 仅用于教学功能自动化测试，由 test/teach.js 通过 QQBOT_CONFIG 加载。
 onebot:
   mode: forward
-  url: ws://127.0.0.1:39501
+  url: ws://203.0.113.10
   accessToken: "teach-token"
   reconnectInterval: 300
 
 llm:
-  baseURL: http://127.0.0.1:39502/v1
+  baseURL: http://203.0.113.10/v1
   apiKey: "sk-test-fake-key"
   model: test-model
   temperature: 0
   maxTokens: 200
   timeout: 10000
   systemPrompt: |
-    你是 HZYMTR 服务器群的客服小祥。
+    你是 示例服务器 服务器群的客服小祥。
 
 trigger:
   privateChat: true

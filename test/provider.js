@@ -25,7 +25,7 @@ import { dirname, join } from 'node:path';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const PORT = 39703;
-const BASE = `http://127.0.0.1:${PORT}`;
+const BASE = `http://203.0.113.10:${PORT}`;
 const PROBE = join(ROOT, 'logs', '__provider-probe.mjs');
 
 let failures = 0;
@@ -168,13 +168,13 @@ async function main() {
     const cfg = makeConfig(
       'llonebot',
       'config.provider-custom-test.yml',
-      "  dir: logs\n  launcher: __provider-probe.mjs\n  manageUrl: http://127.0.0.1:3080\n",
+      "  dir: logs\n  launcher: __provider-probe.mjs\n  manageUrl: http://203.0.113.10\n",
     );
     const p = probe(cfg);
     check(/logs[\\/]__provider-probe\.mjs$/.test(p.launcher), 'launcher 相对 dir 解析成绝对路径', p.launcher);
     check(p.launcherExists === true, '★ 文件真存在 → can("launch") 才算支持', String(p.launcherExists));
     check(p.canLaunch === true, 'can("launch") 随文件存在与否变化');
-    check(p.manageUrl === 'http://127.0.0.1:3080', 'manageUrl 用配置里的', p.manageUrl);
+    check(p.manageUrl === 'http://203.0.113.10', 'manageUrl 用配置里的', p.manageUrl);
     drop(cfg);
   }
 
@@ -184,7 +184,7 @@ async function main() {
     // 管理界面换端口 + OneBot 指向死端口（绝不碰真 NapCat 的唯一连接）
     const txt = readFileSync(cfg, 'utf8')
       .replace(/port:\s*3099/, `port: ${PORT}`)
-      .replace(/url:\s*ws:\/\/127\.0\.0\.1:\d+/, 'url: ws://127.0.0.1:39997');
+      .replace(/url:\s*ws:\/\/127\.0\.0\.1:\d+/, 'url: ws://203.0.113.10');
     writeFileSync(cfg, txt, 'utf8');
 
     const proc = spawn(process.execPath, ['src/index.js'], {
@@ -252,6 +252,33 @@ async function main() {
     rmSync(join(ROOT, 'logs', '__provider-req.json'), { force: true });
     rmSync(join(ROOT, 'logs', '__provider-req2.json'), { force: true });
   } catch {}
+
+  // ─────────────────────────────────────────────────────────────────
+  console.log('\n★ 启动脚本要认得「当前协议端」的连接日志（2026-09-21 修）');
+  //
+  // ⚠️ 用户截图报的：看门狗窗口一直刷「机器人未在 30 秒内连上」，但机器人其实好好的。
+  //    根因：`watchdog.ps1` 找的字符串是 `已连接到 NapCat`，而协议端换成 SnowLuma 之后
+  //    日志写的是 `已连接到协议端（snowluma），等待消息…` ⇒ **永远匹配不上**
+  //    （每次启动白等 30 秒，还误导排查）。
+  //    ⚠️ 同一个错在**三处**都有：`watchdog.ps1` / `start-all.ps1` / `启动机器人（后台）.bat`。
+  //    ⚠️ 所以这里不是"看一眼字符串"，而是**把 pattern 从源码里抽出来真跑一遍**：
+  //       它必须同时认新日志（当前协议端）和旧日志（别人还在用 NapCat）。
+  {
+    const sampleNew = '已连接到协议端（snowluma），等待消息…';
+    const sampleOld = '已连接到 NapCat，等待消息…';
+    for (const f of ['watchdog.ps1', 'start-all.ps1']) {
+      const m = /Pattern '([^']*已连接到[^']*)'/.exec(readFileSync(join(ROOT, f), 'utf8'));
+      check(!!m, `★ ${f}：抽到它判断"连上没连上"用的 pattern`, m ? m[1] : '(没抽到)');
+      if (!m) continue;
+      check(new RegExp(m[1]).test(sampleNew), `★ ${f} 认得当前协议端的日志（换协议端不再误报）`);
+      check(new RegExp(m[1]).test(sampleOld), `　${f} 也认旧 NapCat 的日志（别人还在用）`);
+    }
+    const bat = readFileSync(join(ROOT, '启动机器人（后台）.bat'), 'utf8');
+    const line = (bat.split(/\r?\n/).find((l) => /findstr/.test(l) && /已连接到/.test(l)) ?? '').trim();
+    check(!!line, '★ 启动机器人（后台）.bat 里那条 findstr 还在', line);
+    // ⚠️ 这条正则要求 `已连接到` 后面**紧跟引号** —— 所以写回 `已连接到 NapCat` 就会红
+    check(/findstr \/C:"已连接到"/.test(line), '★ 它找的是通用那句（不再只认 NapCat）', line);
+  }
 
   console.log(`\n结果: ${failures === 0 ? '全部通过 ✅' : `${failures} 项失败 ❌`}\n`);
   process.exit(failures === 0 ? 0 : 1);

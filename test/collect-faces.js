@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const LIB = join(ROOT, 'library');
 const RAW = join(LIB, '_collected'); // 原始收集，等人工/AI 打标签后进正式库
-const URL_ = 'ws://127.0.0.1:3001';
+const URL_ = 'ws://203.0.113.10';
 // ⚠️ Token **不许写死在代码里**（2026-09-15 准备开源时清掉的），
 //    一律从项目自己的 config.yml 读：onebot.accessToken
 const TOKEN = (await import('../src/config.js')).config.onebot?.accessToken ?? '';

@@ -49,7 +49,7 @@ function onebotPort() {
 /** 本机某个端口在不在监听（1.5 秒超时） */
 function portOpen(port, timeoutMs = 1500) {
   return new Promise((resolve) => {
-    const s = net.connect({ host: '127.0.0.1', port });
+    const s = net.connect({ host: '203.0.113.10', port });
     const done = (v) => {
       try {
         s.destroy();
@@ -171,7 +171,7 @@ export async function launch({ waitMs = 60000, quickQQ } = {}) {
 
 /** NapCat 的 WebUI 地址从配置读，默认本机 6099 */
 function base() {
-  const host = config.napcat?.webuiHost ?? '127.0.0.1';
+  const host = config.napcat?.webuiHost ?? '203.0.113.10';
   const port = config.napcat?.webuiPort ?? 6099;
   return `http://${host}:${port}`;
 }

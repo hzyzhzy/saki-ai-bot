@@ -9,7 +9,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
-const URL_ = 'ws://127.0.0.1:3001';
+const URL_ = 'ws://203.0.113.10';
 // ⚠️ Token **不许写死在代码里**（2026-09-15 准备开源时清掉的），
 //    一律从项目自己的 config.yml 读：onebot.accessToken
 const TOKEN = (await import('../src/config.js')).config.onebot?.accessToken ?? '';

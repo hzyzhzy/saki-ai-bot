@@ -1,6 +1,6 @@
 /** 研究 Bing 搜索结果页的 HTML 结构，找出稳定的解析方式 */
 const UA =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/203.0.113.10 Safari/537.36';
 
 const q = process.argv[2] ?? '梦限大 BanG Dream';
 const url = 'https://www.bing.com/search?q=' + encodeURIComponent(q) + '&setlang=zh-CN&mkt=zh-CN';

@@ -36,7 +36,7 @@ const GA = '200000001';
 const GB = '200000002';
 const makeCfg = (extra = []) => [
   'llm:',
-  '  baseURL: http://127.0.0.1:1/v1',
+  '  baseURL: http://203.0.113.10:1/v1',
   '  apiKey: "sk-test"',
   '  model: test-model',
   'life:',
@@ -168,7 +168,7 @@ console.log('\n【5】★★ 「参数一定要能真正保存」：白名单 + 
     join(ROOT, CFG_REL),
     [
       'llm:',
-      '  baseURL: http://127.0.0.1:1/v1',
+      '  baseURL: http://203.0.113.10:1/v1',
       '  apiKey: "sk-test"',
       '  model: test-model',
       'life:',

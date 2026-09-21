@@ -31,7 +31,7 @@ writeFileSync(
   join(ROOT, CFG_REL),
   [
     'llm:',
-    '  baseURL: http://127.0.0.1:1/v1',
+    '  baseURL: http://203.0.113.10:1/v1',
     '  apiKey: "sk-test"',
     '  model: test-model',
     'affinity:',
@@ -149,7 +149,7 @@ console.log('\n【4】★ 落盘（重启不丢）');
   check(aff.get(A) === onDisk.byGroup[''].users[A].v, 'reload 之后还是那个值');
 }
 
-console.log('\n【4.五】★★ 好感度**按群各记各的**（HZY：「好感度也还没有分群」）');
+console.log('\n【4.五】★★ 好感度**按群各记各的**（<主人>：「好感度也还没有分群」）');
 {
   aff.__clear();
   const G1 = '200000006';
@@ -203,7 +203,7 @@ console.log('\n【6】注入的内容要合格（别让她把数字说出来）'
   check(/\d+/.test(line) && !/\/100/.test(line), '给了数值，而且不写 /100（上限无限）');
   check(/不许说出数字|别说出来/.test(line), '★ 明确要求**不许说出数字**');
   check(/好感度/.test(line) && /别说|出戏/.test(line), '也要求不许提「好感度」这个词');
-  check(/HZY/.test(line), '★ 写明"管不到 HZY"（优先级约束传达到了）');
+  check(/<主人>/.test(line), '★ 写明"管不到 <主人>"（优先级约束传达到了）');
   check(/优先级|高于/.test(line), '写明了优先级关系');
   check(/该给的答案要给|该答的还是答/.test(line), '低好感度也不能不干活');
 }

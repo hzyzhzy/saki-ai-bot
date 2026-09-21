@@ -1,7 +1,7 @@
 /**
  * 好友系统（`src/friend.js` + `affinity.recentTop`）回归。
  *
- * ## 盯的是 HZY 拍板的三条硬规矩
+ * ## 盯的是 <主人> 拍板的三条硬规矩
  *
  * 1. **到 90 才发**，而且**只发一次**（不是每次加分都发）
  * 2. **不是所有好友都会收到私聊** —— 每天掷一次骰子，中了才挑**一个**
@@ -37,7 +37,7 @@ writeFileSync(
   join(ROOT, CFG_REL),
   [
     'llm:',
-    '  baseURL: http://127.0.0.1:1/v1',
+    '  baseURL: http://203.0.113.10:1/v1',
     '  apiKey: "sk-test"',
     '  model: t',
     'affinity:',
@@ -307,7 +307,7 @@ console.log('\n【8】★★ 接线：三根线都接上了');
   check(/测试\*\*不记账\*\*|测试不记账/.test(js2), '★ 测试通知不记账（不然测一次，真到 90 就不发了）');
 }
 
-console.log('\n【9】★★ 群友回应她 → 好感度 +1，而且**建议要写进故事线**（HZY 举的那个例子）');
+console.log('\n【9】★★ 群友回应她 → 好感度 +1，而且**建议要写进故事线**（<主人> 举的那个例子）');
 {
   reset();
   const sl = await import('../src/storyline.js');

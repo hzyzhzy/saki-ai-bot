@@ -1,5 +1,5 @@
 /**
- * 知识库**分群**（2026-09-15 晚 HZY 要求）。
+ * 知识库**分群**（2026-09-15 晚 <主人> 要求）。
  *
  * ## 用户原话
  *
@@ -35,10 +35,29 @@ const check = (ok, label, extra = '') => {
 // ── 造一份临时知识库（必须在 import src/* 之前设好）────────────────
 const G699 = '200000006';
 const GMC = '200000001';
+// ⚠️ 2026-09-21：人设的 md（`persona.md`）现在住在**人设包**里，不在 `knowledge/`。
+//    所以这个套件要**同时**把两处都搬到临时目录 —— 否则要么加载不到人设，
+//    要么误读真实的那份（而真实那份是用户的，测试绝不能碰）。
+const PERSONA_TMP = 'logs/__test-persona-groups';
 rmSync(join(ROOT, TMP), { recursive: true, force: true });
+rmSync(join(ROOT, PERSONA_TMP), { recursive: true, force: true });
 mkdirSync(join(ROOT, TMP, 'groups'), { recursive: true });
-writeFileSync(join(ROOT, TMP, 'persona.md'), '# 人设\n\n你叫祥子。\n', 'utf8');
-writeFileSync(join(ROOT, TMP, 'anime.md'), '# 二次元常识\n\nBanG Dream / MyGO 的常识都在这儿。\n', 'utf8');
+mkdirSync(join(ROOT, TMP, 'anime'), { recursive: true });
+mkdirSync(join(ROOT, PERSONA_TMP), { recursive: true });
+writeFileSync(join(ROOT, PERSONA_TMP, 'persona.md'), '# 人设\n\n你叫祥子。\n', 'utf8');
+// ⚠️ 2026-09-21：动画库从"根目录一个共用 `anime.md`"改成 **`anime/<库名>.md` + 人设声明**
+//    （`identity.anime.works`）。所以这里必须连 `identity.json` 一起造 ——
+//    没有它 `animeWorks()` 返回空数组，**动画库一份都不会加载**，断言就假红了。
+writeFileSync(
+  join(ROOT, PERSONA_TMP, 'identity.json'),
+  JSON.stringify({ id: 'test', name: '测试角色', anime: { works: ['bangdream'] } }, null, 2),
+  'utf8',
+);
+writeFileSync(
+  join(ROOT, TMP, 'anime', 'bangdream.md'),
+  '# 二次元常识\n\nBanG Dream / MyGO 的常识都在这儿。\n',
+  'utf8',
+);
 // 共享群记忆：里面夹一个"只在 699 用"的标签块（模拟"复制出来之后原文还留着"）
 writeFileSync(
   join(ROOT, TMP, 'group-memory.md'),
@@ -73,6 +92,8 @@ writeFileSync(
   'utf8',
 );
 process.env.QQBOT_KNOWLEDGE_DIR = TMP;
+// ⚠️ 人设包也要搬走 —— 人设的 md 在那儿，不搬就加载不到（会变成"没性格"）
+process.env.QQBOT_PERSONA_DIR = join(ROOT, PERSONA_TMP);
 
 const K = await import('../src/knowledge.js');
 
@@ -128,7 +149,10 @@ console.log('\n【4】★★ 二次元库依然全局可用（用户明确要求
   }
   const p1 = K.selectFor('梦限大是谁', { groupId: G699 }).names;
   const p2 = K.selectFor('梦限大是谁', { groupId: GMC }).names;
-  check(p1.includes('anime.md') && p2.includes('anime.md'), '★★ 问二次元 → 两个群都会带上 anime.md');
+  check(
+    p1.includes('anime/bangdream.md') && p2.includes('anime/bangdream.md'),
+    '★★ 问二次元 → 两个群都会带上动画库（anime/bangdream.md）',
+  );
 }
 
 console.log('\n【5】★ 界面/观察那边的接线（源码层面）');
@@ -192,7 +216,12 @@ console.log('\n【7】★★ "连不上"的说法必须能把**服务器库**带
   check(/先查[^\n]{0,8}网络/.test(srv), '★★ 而且写明"先查自己网络"');
   check(/再问管理员/.test(srv), '★ 最后一步是"一直进不去再问管理员"');
   check(/跟备份一点关系都没有/.test(srv), '★ 仍然写着"跟备份没关系"（上次那条没丢）');
-  check(/回滚点/.test(readFileSync(join(ROOT, 'knowledge', 'persona.md'), 'utf8')), '★ 人设里那条"别造词"也在（拿回滚点当反例）');
+  // ⚠️ 这里读的是**真实**的人设包（不是上面那份临时的）——
+  //    这条断言盯的是"用户实际的人设里有没有这段话"，所以必须在搬走之前读。
+  check(
+    /回滚点/.test(readFileSync(join(ROOT, 'personas', 'saki', 'persona.md'), 'utf8')),
+    '★ 人设里那条"别造词"也在（拿回滚点当反例）',
+  );
 }
 
 rmSync(join(ROOT, TMP), { recursive: true, force: true });

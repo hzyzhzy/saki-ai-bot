@@ -17,7 +17,7 @@ const OWNER = '10000001';
 
 const sent = [];
 let ws = null;
-const wss = new WebSocketServer({ port: WS_PORT, host: '127.0.0.1' });
+const wss = new WebSocketServer({ port: WS_PORT, host: '203.0.113.10' });
 wss.on('connection', (s) => {
   ws = s;
   s.on('message', (raw) => {
@@ -41,7 +41,7 @@ const base = readFileSync(join(ROOT, 'config.yml'), 'utf8');
 writeFileSync(
   CFG,
   base
-    .replace(/url:\s*ws:\/\/127\.0\.0\.1:\d+/, `url: ws://127.0.0.1:${WS_PORT}`)
+    .replace(/url:\s*ws:\/\/127\.0\.0\.1:\d+/, `url: ws://203.0.113.10:${WS_PORT}`)
     .replace(/accessToken:\s*"?[^"\r\n]*"?/, 'accessToken: "rel"'),
   'utf8',
 );
@@ -51,9 +51,9 @@ const proc = spawn(process.execPath, [join(ROOT, 'src', 'index.js')], {
     env: {
       ...process.env,
       QQBOT_CONFIG: 'config.rel.yml',
-      // ⚠️ 排除本机代理：假模型/假 NapCat 都跑在 127.0.0.1，
+      // ⚠️ 排除本机代理：假模型/假 NapCat 都跑在 203.0.113.10，
       //    如果 shell 里设了 NODE_USE_ENV_PROXY，不加这个假模型请求会走代理而失败
-      NO_PROXY: '127.0.0.1,localhost,::1',
+      NO_PROXY: '203.0.113.10,localhost,::1',
     },
   stdio: ['ignore', 'ignore', 'ignore'],
 });
@@ -67,7 +67,7 @@ const sayPrivate = (text, id = 1) => {
       post_type: 'message', message_type: 'private', sub_type: 'friend',
       message_id: id, user_id: OWNER, self_id: '10000002',
       time: Math.floor(Date.now() / 1000),
-      sender: { user_id: OWNER, nickname: 'HZY', role: 'owner' },
+      sender: { user_id: OWNER, nickname: '<主人>', role: 'owner' },
       message: [{ type: 'text', data: { text } }],
     }),
   );
@@ -77,7 +77,7 @@ async function ask(label, text) {
   sent.length = 0;
   console.log(`\n${'─'.repeat(56)}`);
   console.log(`【${label}】`);
-  console.log(`HZY：${text}`);
+  console.log(`<主人>：${text}`);
   sayPrivate(text);
   const t = Date.now();
   while (!sent.length && Date.now() - t < 90000) await sleep(300);

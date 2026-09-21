@@ -1,13 +1,16 @@
 import { config } from './config.js';
 import { log } from './log.js';
 import * as spend from './spend.js';
+// ⚠️ 2026-09-21：人设文案从 `personas/<id>/identity.json` 来（见 src/persona.js）。
+//    这里原来写死「Saki（丰川祥子）」—— 换人设时它不会跟着变，等于换了个名字还在演小祥。
+import * as persona from './persona.js';
 import { ProxyAgent } from 'undici';
 import net from 'node:net';
 
 // ⚠️⚠️ 2026-09-16 深夜：**运行中自动切换网络出口**（用户要求：
 //    「要能自动切换网络，比如关掉代理」）。
 //
-//    背景：那晚机器人整晚不能聊天 —— `_run-bot.bat` 写死走本地代理 127.0.0.1:7890，
+//    背景：那晚机器人整晚不能聊天 —— `_run-bot.bat` 写死走本地代理 203.0.113.10，
 //    而代理软件关着 → 每个模型请求 ECONNREFUSED。
 //    bat 那边已经能在**启动时**自动选（探端口）；这里再补**运行中**的：
 //      · 先用当前出口发请求
@@ -16,7 +19,7 @@ import net from 'node:net';
 //      · 记住这次哪种通了，之后的请求优先用它
 //
 //    ⚠️ 只在**网络类**错误时切换；402/401/风控这些业务错误原样抛（那是另一套处理）。
-const PROXY_URL = process.env.QQBOT_PROXY || 'http://127.0.0.1:7890';
+const PROXY_URL = process.env.QQBOT_PROXY || 'http://203.0.113.10';
 let egress = 'unknown'; // 'direct' | 'proxy' | 'unknown'
 let proxyAgent = null;
 let probedAt = 0;
@@ -311,8 +314,9 @@ export async function quickAck(p = {}) {
   const extra = String(p.extra ?? '').trim();
 
   const sys = [
-    // ⚠️ 自称用「Saki」（2026-09-13 用户：「祥子的话遇到没看过 MyGO 的很容易误认为骆驼祥子」）
-    '你在一 QQ 群里当客服，人设：Saki（丰川祥子），有点傲娇、说话短、不像客服腔。',
+    // ⚠️ 2026-09-21：这句搬到 `personas/<id>/identity.json` 的 `prompt.quickAside` 了 ——
+    //    换人设时它跟着换，代码不用动（取不到就是空串，那种人设自己负责补上）。
+    persona.promptText('quickAside'),
     '',
     '现在对方刚发来一条消息，**你还在处理**（可能是在想怎么说，也可能真的要去查一下），需要先说一句让他别等急。',
     '',
@@ -419,9 +423,20 @@ export async function quickAck(p = {}) {
  *    很容易误认为骆驼祥子」——中文里「祥子」第一反应是老舍那个车夫）。
  *    别人怎么叫她另说（小祥/祥子都认，见 `knowledge/anime.md` 的外号表）。
  */
-export const PERSONA_LINE =
-  '你是丰川祥子（自称一律用 **Saki**；群里管你叫「客服 Saki」「客服小祥」，' +
-  '但**别人喊你什么外号都照常应答，别去纠正称呼**），在一 QQ 群里当客服。';
+/**
+ * ⚠️ 2026-09-21：从 `const` 改成**函数**。
+ *
+ *    原来它在**模块加载时求值** —— 换人设（热切换）时这个常量不会更新，
+ *    表现就是"人换了、开场白还是旧的"，而且查起来很难想到是常量求值时机的问题。
+ *    内容搬到了 `personas/<id>/identity.json` 的 `prompt.personaLine`。
+ *
+ *    历史（为什么自称不用「祥子」）：2026-09-13 用户说「祥子的话遇到没看过 MyGO 的
+ *    很容易误认为骆驼祥子」—— 中文里「祥子」第一反应是老舍那个人力车夫。
+ *    这条现在写在 identity.json 的那句里，不再由代码保证。
+ */
+export function personaLine() {
+  return persona.promptText('personaLine');
+}
 
 /**
  * 「把一段事实用她的口吻说出来」—— 一次**非流式、关思考**的短调用。
@@ -506,8 +521,8 @@ export async function phraseMoney(p = {}) {
   const maxLines = Math.max(1, Number(p.maxLines) || 2);
 
   const sys = [
-    PERSONA_LINE,
-    '性格：有点傲娇、说话短、自然，**绝对不要客服腔**（不要「您好」「请查收」「为您统计」）。',
+    personaLine(),
+    persona.promptText('styleLine'),
     '',
     '系统已经把**准确的数字**给你了。你的任务只是**用你自己的口吻把数字说出来**。',
     '',
@@ -516,11 +531,11 @@ export async function phraseMoney(p = {}) {
     '· ⚠️ 系统没给的数字**不要编**（比如余额、单价、汇率）',
     '· ⚠️ **不要解释算式**（别说"成本乘一百"这种）—— 就当是你自己挣的钱',
     '· ⚠️ **绝对不要说「净赚」「利润」这两个词** —— 用「工资」',
-    // ⚠️⚠️ 方向问题（2026-09-13 用户截图）：HZY 问「你现在工资多少钱」，
+    // ⚠️⚠️ 方向问题（2026-09-13 用户截图）：<主人> 问「你现在工资多少钱」，
     //    她答「1876，就这点，**别嫌少了**」——「别嫌少」是**发钱的人**说的话，
     //    一句话就把自己摆到老板位置上，人设整个翻掉。
     //    这条必须放进**每一个报钱路径**（不能只写在余额那段，报账/月结也要有）。
-    '· ⚠️⚠️ **你是领工资的那个，HZY 是发工资的**（他雇你）—— 别说发钱方的台词：',
+    '· ⚠️⚠️ **你是领工资的那个，<主人> 是发工资的**（他雇你）—— 别说发钱方的台词：',
     '  不说「别嫌少」「将就一下」「这个月就发这么多」「省着点用」—— 那是老板口吻。',
     // ⚠️⚠️ 这里**故意不给领钱方的示例台词**（2026-09-14 用户反馈）。
     //
@@ -577,11 +592,25 @@ export async function phraseMoney(p = {}) {
   //    ⚠️ 不能简单搜「我祥子」：**"别喊我祥子，叫我 Saki" 是她在纠正别人**，
   //      那句话该放行（把纠正也拦掉，等于逼她接受这个称呼）。
   //      所以只拦**自我断言**的形状：「我祥子」后面紧跟动词/助词。
-  if (/我祥子[可也的确是不没就别能会要想来在说从干做]/.test(t) || /祥子我[觉认以想说]/.test(t)) return '';
+  {
+    const nn = persona.escapeRe(persona.narrativeName());
+    if (
+      nn &&
+      (new RegExp(`我${nn}[可也的确是不没就别能会要想来在说从干做]`).test(t) ||
+        new RegExp(`${nn}我[觉认以想说]`).test(t))
+    )
+      return '';
+  }
   // ⚠️⚠️ 她**不该去管别人怎么叫她**（用户 2026-09-13：「别人叫她所有外号都应该
   //    没关系，正常回应」）。纠正称呼 = 答非所问，而且显得在意外号。
   //    只有对方**认真问"该怎么称呼"**时才该答，那种情况下面这些形状也不会出现。
-  if (/我不叫(祥子|小祥)|别叫我(祥子|小祥)|叫我\s*Saki\s*就(行|好)|请叫我\s*Saki/.test(t)) return '';
+  {
+    const ro = persona.renameObjection();
+    const alt = ro.dislike.map((x) => persona.escapeRe(x)).join('|');
+    const prefer = persona.escapeRe(ro.prefer);
+    if (alt && new RegExp(`我不叫(?:${alt})|别叫我(?:${alt})`).test(t)) return '';
+    if (prefer && new RegExp(`叫我\\s*${prefer}\\s*就(?:行|好)|请叫我\\s*${prefer}`).test(t)) return '';
+  }
   // ⚠️⚠️ 168 亿 **不是她的债、她没有偿还义务** —— 但**也不能因此撇清**
   //    （用户 2026-09-13：「**反正也不是我要还的**感觉也有点 OOC 了，
   //      她之前努力打工也有一部分努力在这里」）。

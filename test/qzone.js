@@ -46,7 +46,7 @@ writeFileSync(
   join(ROOT, CFG_REL),
   [
     'llm:',
-    '  baseURL: http://127.0.0.1:1/v1',
+    '  baseURL: http://203.0.113.10:1/v1',
     '  apiKey: "sk-test"',
     '  model: test-model',
     'qzone:',
@@ -168,7 +168,7 @@ console.log('\n【4】每天上限仍然生效');
   check(why !== null && /6 条/.test(why), `到上限就拦住（"${why}"）`);
 }
 
-console.log('\n【5】★★ 素材里必须**带上她自己说过的话**（HZY 2026-09-15 深夜）');
+console.log('\n【5】★★ 素材里必须**带上她自己说过的话**（<主人> 2026-09-15 深夜）');
 console.log('        「她自己造的这个词，自己居然还不知道自己说过了」');
 {
   // ⚠️ 起因：她在群里自己造了「回滚点」，发说说时素材里**只有群友那句**
@@ -193,7 +193,17 @@ console.log('        「她自己造的这个词，自己居然还不知道自�
   d.clearAll();
 
   // 提示词层面：必须给模型讲清这个标记 + 禁止"怀疑自己说过"
-  const src = readFileSync(join(ROOT, 'src', 'qzone-compose.js'), 'utf8');
+  // ⚠️ 2026-09-21：这段提示词已搬进**人设包**（`personas/<id>/prompt/qzone-guide.md`），
+  //    所以**不能再读 `src/qzone-compose.js` 的源码** —— 那查的是"字还在不在代码里"，
+  //    而搬家之后它本来就不该在代码里。改成读人设包的实际出口，
+  //    测的是**真的会进模型的那段**，比读源码更强。
+  // ⚠️⚠️ 这里**必须动态 import**，不能挪到文件顶上去 —— 见上面第 44 行那条：
+  //     `src/*` 一被加载，`config.js` 就把配置固化住了。顶上写成静态 import 的话，
+  //     ESM 会把它提升到**设 env 之前**求值 → 隔离全废 → `publish()` 走真实路径，
+  //     报「拿不到 h5.qzone.qq.com 的 cookies」（2026-09-21 真踩了这一次）。
+  const { promptFile } = await import('../src/persona.js');
+  const src = promptFile('qzone-guide');
+  check(!!src, '★ 人设包里读到了说说提示词（qzone-guide）');
   check(/别怀疑、别否认自己说过什么/.test(src), '★★ 提示词里禁止"怀疑/否认自己说过的话"');
   check(/我说过这个词吗/.test(src), '★ 而且把真实踩过的例子写进去了（当反面教材）');
   check(/别把素材里的话安错人/.test(src), '★ 也说清了别把"你自己"的行当成群友说的');

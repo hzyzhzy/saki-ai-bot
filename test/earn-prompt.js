@@ -56,7 +56,7 @@ writeFileSync(
   join(ROOT, CFG_REL),
   [
     'llm:',
-    `  baseURL: http://127.0.0.1:${PORT}/v1`,
+    `  baseURL: http://203.0.113.10:${PORT}/v1`,
     '  apiKey: "sk-test"',
     '  model: test-model',
     '  maxTokens: 300',
@@ -101,7 +101,7 @@ const llmServer = createServer((req, res) => {
   });
 });
 
-await new Promise((r) => llmServer.listen(PORT, '127.0.0.1', r));
+await new Promise((r) => llmServer.listen(PORT, '203.0.113.10', r));
 
 const spend = await import('../src/spend.js');
 

@@ -1,7 +1,7 @@
 /**
  * 本地图形化管理界面。
  *
- * 只监听 127.0.0.1，不做登录（本机使用）。可以：
+ * 只监听 203.0.113.10，不做登录（本机使用）。可以：
  *   - 改模型 / API Key / baseURL，并当场测试连通性
  *   - 改机器人能在哪些群说话、谁能教它、要不要 @
  *   - 管理表情包（上传图片、写标签和适用场合、删除）
@@ -15,7 +15,7 @@ import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import yaml from 'js-yaml';
 
-import { config, reloadConfig, validate, ROOT, CONFIG_FILE, KNOWLEDGE_DIR, paramsFor } from './config.js';
+import { config, reloadConfig, validate, ROOT, CONFIG_FILE, KNOWLEDGE_DIR, paramsFor, personaDir, personaId } from './config.js';
 import { log } from './log.js';
 import { ping } from './llm.js';
 import { queryServer, describe, clearCache } from './status.js';
@@ -35,6 +35,9 @@ import { listEntries } from './learned.js';
 import { faceTags, reload as reloadFaces } from './faces.js';
 import { hasKnowledge, reloadKnowledge, knowledgeText } from './knowledge.js';
 import * as life from './life.js';
+import * as persona from './persona.js';
+import * as personaAdmin from './persona-admin.js';
+import * as personaDraft from './persona-draft.js';
 import * as quest from './quest.js';
 // ⚠️ 故事线（**每个群一份**）—— 2026-09-15 加的故事线卡片要用
 import * as storyline from './storyline.js';
@@ -112,7 +115,7 @@ function simSnapshot() {
  *
  * ⚠️⚠️ 沙箱是**全局开关**（`quest.setSandbox`），所以**绝不允许两个请求重叠**。
  *
- *    踩过的真 bug（2026-09-15，HZY 发现「没发到群里却写进了故事线」）：
+ *    踩过的真 bug（2026-09-15，<主人> 发现「没发到群里却写进了故事线」）：
  *      ```
  *      请求A：swapState → setSandbox(true) → 等模型…（几秒）
  *      请求B：swapState → setSandbox(true) → 等模型…
@@ -161,6 +164,21 @@ export function __withSandboxForTest(fn) {
 
 const LIB = join(ROOT, 'library');
 const KNOW = KNOWLEDGE_DIR;
+
+/**
+ * 知识文件的真实路径：**人设包优先，其次共用库**（2026-09-21 加）。
+ *
+ * ⚠️ 人设的 md（`persona.md` / `persona-money.md` / `persona-media.md` / `voices.md`…）
+ *    搬到了 `personas/<id>/`，理由见 `knowledge.js` 里那段注释。
+ * ⚠️ 判据是「**这个文件在人设包里存不存在**」，不是按文件名硬编码 ——
+ *    这样人设包以后多出什么文件，界面自动就能编辑，不用改代码。
+ * ⚠️ `personaDir()` 从 `knowledge.js` 拿 —— **别在这儿再实现一遍**（两份逻辑会漂移，
+ *    那种 bug 最难查：界面上看到的是 A 文件，机器人加载的是 B 文件）。
+ */
+function knowPath(name) {
+  const p = join(personaDir(), name);
+  return existsSync(p) ? p : join(KNOW, name);
+}
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -335,7 +353,7 @@ function saveConfig(patch) {
 
   writeFileSync(
     CONFIG_FILE,
-    '# 由管理界面 http://127.0.0.1:' +
+    '# 由管理界面 http://203.0.113.10:' +
       config.webui.port +
       ' 维护。\n# 详细注释和说明见 README.md。\n' +
       yaml.dump(out, { lineWidth: 200, noRefs: true, quotingType: '"' }),
@@ -396,6 +414,55 @@ function facesWithMeta() {
 //    而 `life.preview()` 是通用的抽签接口（将来别处也可能调）。
 let lastLifePreview = null;              // { at, p }
 const LIFE_PREVIEW_TTL = 10 * 60 * 1000;
+
+/**
+ * 把**某个人设包**的 QQ 昵称 / 头像应用到真号上（2026-09-21 加）。
+ *
+ * ⚠️ 用户定：「昵称和头像应该就是自动改的，要不然就没意义了」——
+ *    所以 `POST /api/persona/switch` 切完**自动**调它，不用用户再点一次。
+ * ⚠️ 改的是**真号**（所有群、所有好友都看得见），所以：
+ *    · 两个字段**留空 = 那一项不动**（不是清空）—— 新角色没填头像时不会把头像抹掉；
+ *    · 任何一步失败都**如实返回**，不假装成功；
+ *    · 昵称改完 `get_login_info` **读回来核对**（"以为改了其实没改"要过很久才发现）。
+ */
+async function applyPersonaQQ(id) {
+  const out = { nickname: '', avatar: '', problems: [] };
+  if (!bot?.call) {
+    out.problems.push('机器人还没连上协议端');
+    return out;
+  }
+  let q = { nickname: '', avatar: '' };
+  try {
+    q = personaAdmin.readPack(id).qq;
+  } catch (e) {
+    out.problems.push(`读人设包失败：${e.message}`);
+    return out;
+  }
+  if (q.nickname) {
+    try {
+      await bot.call('set_qq_profile', { nickname: q.nickname });
+      const info = await bot.call('get_login_info').catch(() => null);
+      const now = info?.nickname ?? '';
+      if (now === q.nickname) out.nickname = now;
+      else out.problems.push(`昵称没改成（现在还是「${now}」）`);
+    } catch (e) {
+      out.problems.push(`改昵称失败：${e.message}`);
+    }
+  }
+  if (q.avatar) {
+    const f = personaAdmin.avatarFile(id, q.avatar);
+    if (!f) out.problems.push(`人设包里的头像文件找不到：${q.avatar}`);
+    else {
+      try {
+        await bot.call('set_qq_avatar', { file: f });
+        out.avatar = q.avatar;
+      } catch (e) {
+        out.problems.push(`换头像失败：${e.message}`);
+      }
+    }
+  }
+  return out;
+}
 
 const routes = {
   'GET /api/state': async (_req, res) => {
@@ -797,7 +864,7 @@ const routes = {
   // ⚠️ 不改任何状态：只是问 NapCat 要一下转写结果。
   'GET /api/qq/ptt-text': async (req, res) => {
     try {
-      const u = new URL(req.url, 'http://127.0.0.1');
+      const u = new URL(req.url, 'http://203.0.113.10');
       const id = String(u.searchParams.get('messageId') ?? '').trim();
       if (!id) return send(res, 200, { ok: false, error: '缺少 messageId' });
       const r = await bot.call('fetch_ptt_text', { message_id: /^\d+$/.test(id) ? Number(id) : id });
@@ -878,7 +945,7 @@ const routes = {
    * 界面上要看的：真实剧情状态 + 模拟状态。
    * ⚠️ 2026-09-15 分群：可以带 `?groupId=` 看**某一个群**的（默认给总览）。
    */
-  // ── 日常事件：预览 / 立即发送（2026-09-15 HZY：「日常事件也加一个预览和立即发送」）──
+  // ── 日常事件：预览 / 立即发送（2026-09-15 <主人>：「日常事件也加一个预览和立即发送」）──
   //
   // ⚠️ 和二级剧情那两个按钮一个路子，但**日常事件有个不一样的地方**：
   //    「立即发送」是**真的一条日常事件**，所以它会**算进今天那条配额**
@@ -897,7 +964,7 @@ const routes = {
   // ── 开机自启（2026-09-17 加）──
   // ⚠️ 这两个接口会**动系统设置**（注册表启动项），而且是我这边起 powershell 去改。
   //    参数一律走环境变量传，不拼命令行 —— 见 src/autostart.js 顶部那段注释。
-  //    界面只监听 127.0.0.1、不做登录，信任级别和「重启 NapCat」那些按钮一样，
+  //    界面只监听 203.0.113.10、不做登录，信任级别和「重启 NapCat」那些按钮一样，
   //    所以这里不再加额外鉴权。
   'GET /api/autostart': async (_req, res) => send(res, 200, autostart.status()),
 
@@ -1039,7 +1106,7 @@ const routes = {
     });
   },
 
-  // ── 故事线（**每个群一份**，2026-09-15 HZY 要求）────────────────
+  // ── 故事线（**每个群一份**，2026-09-15 <主人> 要求）────────────────
   //
   // 用户原话：「一个群设一个故事线知识库……知识库调用时一定要分清就行了。
   //   然后再做故事线卡片」。
@@ -1080,7 +1147,7 @@ const routes = {
   },
 
   /**
-   * **按群覆盖参数**（HZY：「参数也可以分群设定」）。
+   * **按群覆盖参数**（<主人>：「参数也可以分群设定」）。
    *
    * 传 `{ groupId, patch: { life: {...}, quest: {...} } }`；
    * `patch` 里给 `null` 的项 = **删掉这个覆盖**（回到全局值）。
@@ -1107,7 +1174,7 @@ const routes = {
     const b = JSON.parse((await readBody(req)).toString('utf8'));
     const gid = String(b.groupId ?? '').trim();
     if (!gid) return send(res, 200, { ok: false, error: '要指定是哪个群' });
-    // ⚠️⚠️ **只有 1 档群才进事件系统**（HZY 2026-09-15：「挡位 2 不能进事件系统，只有 1 才能设置」）。
+    // ⚠️⚠️ **只有 1 档群才进事件系统**（<主人> 2026-09-15：「挡位 2 不能进事件系统，只有 1 才能设置」）。
     //    2 档群只是"她会在那儿说话"，没有日常事件也没有剧情 —— 给它设这些参数毫无意义，
     //    而且会让人以为"设了就会生效"。直接拒绝，并告诉他去哪儿改档位。
     if (!life.isEventGroup(gid)) {
@@ -1150,7 +1217,7 @@ const routes = {
   /**
    * 「替换下次二级事件」：存一句自定义由头，下次**这个群**自动开剧情时优先用它。
    *
-   * ⚠️ 2026-09-15 晚改**按群**（HZY：「最好也加个群选择…因为每个群的故事线不一样」）：
+   * ⚠️ 2026-09-15 晚改**按群**（<主人>：「最好也加个群选择…因为每个群的故事线不一样」）：
    *    每个群的故事线是分开的，一句由头只对写它的那个群有意义。
    *    `groupId` 空着 = 存那份**全局兜底**（老页面不传群号时走这条，不至于报错）。
    */
@@ -1169,7 +1236,7 @@ const routes = {
    */
   'POST /api/quest/start': async (req, res) => {
     const b = JSON.parse((await readBody(req)).toString('utf8'));
-    // ⚠️ **只有 1 档群才进事件系统**（HZY 2026-09-15：「挡位 2 不能进事件系统，只有 1 才能设置」）
+    // ⚠️ **只有 1 档群才进事件系统**（<主人> 2026-09-15：「挡位 2 不能进事件系统，只有 1 才能设置」）
     const groups = life.targetGroups();
     if (!groups.length) return send(res, 200, { ok: false, error: '没有 1 档群，不知道发哪儿（只有 1 档群会进事件系统）' });
     if (!bot?.selfId) return send(res, 200, { ok: false, error: 'QQ 没在线，先等它登上来' });
@@ -1218,7 +1285,7 @@ const routes = {
   },
 
   /**
-   * 「推进下一段 / 收尾」（2026-09-15 晚 HZY：「**也和模拟一样也加一套剧情控制按钮**」）。
+   * 「推进下一段 / 收尾」（2026-09-15 晚 <主人>：「**也和模拟一样也加一套剧情控制按钮**」）。
    *
    * 和自动推进（`index.js` 的 `questTickOne`）的区别：**不等那 30 分钟**，现在就推。
    *   · `reply` 非空 → 先把"群友这句话"塞进 `pending`（跟真群里攒发言是同一条路，
@@ -1291,7 +1358,7 @@ const routes = {
   },
 
   /**
-   * 「清空剧情和故事线」（HZY 2026-09-15 晚：「加一个清空上次故事的按钮吧，现在还在测试中」）。
+   * 「清空剧情和故事线」（<主人> 2026-09-15 晚：「加一个清空上次故事的按钮吧，现在还在测试中」）。
    *
    * ⚠️ 这是**破坏性**操作，所以语义要一次说清（界面上也写着同样的话）：
    *   ① **中止**正在跑的剧情 —— 走 `quest.abort()`，**不写结局、不动好感度、不留 recent**
@@ -1331,7 +1398,7 @@ const routes = {
     const r = await withSandbox(() =>
       // ⚠️ 模拟面板**必须**带 `manual: true`：
       //    它就是给人手动测试用的，总开关关着的时候更要能跑
-      //    （HZY 反馈：「现在自动生成剧情用不了，得开剧情自动开关」—— 就是这个）
+      //    （<主人> 反馈：「现在自动生成剧情用不了，得开剧情自动开关」—— 就是这个）
       quest.begin({ ask: llmAsk, extraHint: hint, groupId: '(模拟)', manual: true }),
     ).catch((e) => ({ ok: false, reason: e.message }));
     if (!r.ok) return send(res, 200, { ok: false, error: r.reason });
@@ -1606,29 +1673,54 @@ const routes = {
   'GET /api/knowledge/list': async (_req, res) => {
     const DESC = {
       'persona.md': '人设（性格、语气、行为规则、它自己的能力）',
+      // ⚠️ 这三份是**角色专属的数据文件**（2026-09-21 从共用的 knowledge/ 搬进人设包）。
+      //    它们**不进聊天提示词**（文件头有数据声明），但是剧情 / 日常事件的素材来源。
+      'cast.md': '出场人物名册（谁可以出现在故事里、什么频率）· **角色专属**',
+      'life-events.md': '一级日常事件库（她一天里会遇到哪些小事）· **角色专属**',
+      'quest-ideas.md': '剧情素材池（二级主线的点子）· **角色专属**',
       'hzymtr-server.md': '服务器知识库（进服、排障、规则、存档）',
-      'anime.md': '二次元常识（BanG Dream 各团等）',
       'group-memory.md': '群资料库（群友是谁、什么性格、群里的大事）',
       'learned.md':
         '学习档案（群里「记住：…」教的短知识，优先级最高）。⚠️ 格式有要求：每条必须是 `## 主题` 开头，' +
         '而且要保留 `<!-- LEARNED:BEGIN -->` / `END` 两行标记 —— 保存时会校验，不合格会拒绝保存',
     };
     try {
-      const order = ['persona.md', 'hzymtr-server.md', 'anime.md', 'group-memory.md'];
-      const files = readdirSync(KNOW)
-        .filter((n) => n.endsWith('.md'))
-        .map((n) => ({
-          name: n,
-          desc: DESC[n] ?? '',
-          readonly: false,
-          size: (() => {
-            try {
-              return readFileSync(join(KNOW, n), 'utf8').length;
-            } catch {
-              return 0;
-            }
-          })(),
-        }));
+      // ⚠️ 动画库的名字**不能写死在这张表里** —— 库名是人设声明的（`anime/<库名>.md`），
+      //    所以它的说明在下面列目录时现算。
+      const mk = (dir, n, from) => ({
+        name: n,
+        desc:
+          (DESC[n] ?? '') +
+          (from === 'persona' ? '　📌 **人设包里的**（换人设时会一起换）' : ''),
+        from,
+        readonly: false,
+        size: (() => {
+          try {
+            return readFileSync(join(dir, n), 'utf8').length;
+          } catch {
+            return 0;
+          }
+        })(),
+      });
+      const files = [];
+      // ⚠️ 2026-09-21：人设的 md 在 `personas/<id>/`，共用库在 `knowledge/`。
+      //    两边都要列出来 —— 只列 KNOW 的话界面上根本看不到人设，改都没法改。
+      const pdir = personaDir();
+      const inPersona = new Set();
+      if (existsSync(pdir)) {
+        for (const n of readdirSync(pdir)) {
+          if (!n.endsWith('.md')) continue;
+          inPersona.add(n.toLowerCase());
+          files.push(mk(pdir, n, 'persona'));
+        }
+      }
+      for (const n of readdirSync(KNOW)) {
+        if (!n.endsWith('.md')) continue;
+        // ⚠️ 人设包里已经有同名的 ⇒ 跳过。界面上只显示**真正生效**的那一份 ——
+        //    否则你会看到两份 persona.md，改了不生效的那个还以为"保存了没反应"。
+        if (inPersona.has(n.toLowerCase())) continue;
+        files.push(mk(KNOW, n, 'knowledge'));
+      }
       // ⚠️ 群资料库（`groups/<群号>.md`）也要列出来 —— 不然界面上根本看不到、改不了
       //    （2026-09-15 晚加：知识分群之后，用户要能在这儿直接编辑某个群的资料）
       try {
@@ -1653,7 +1745,40 @@ const routes = {
           }
         }
       } catch {}
+      // ⚠️ 动画库（`anime/<库名>.md`）也要列出来 —— 不然界面上看不到、改不了
+      //    （2026-09-21 加：动画库改成"人设声明哪个才读哪个"之后，它必须可编辑）。
+      try {
+        const adir = join(KNOW, 'anime');
+        if (existsSync(adir)) {
+          for (const n of readdirSync(adir)) {
+            if (!n.endsWith('.md')) continue;
+            const lib = n.replace(/\.md$/i, '');
+            files.push({
+              name: `anime/${n}`,
+              desc:
+                `动画库 · **${lib}**　—— 只有身份里写了 \`anime.works: ["${lib}"]\` 的` +
+                `人设才读得到它（换角色不会串味）`,
+              from: 'knowledge',
+              readonly: false,
+              size: (() => {
+                try {
+                  return readFileSync(join(adir, n), 'utf8').length;
+                } catch {
+                  return 0;
+                }
+              })(),
+            });
+          }
+        }
+      } catch {}
+      // ⚠️ 动画库的名字是人设声明的，写不进固定表 —— 这里现算一个顺序表。
+      const animeNames = files.filter((f) => f.name.startsWith('anime/')).map((f) => f.name);
+      const order = ['persona.md', 'hzymtr-server.md', ...animeNames, 'group-memory.md'];
       files.sort((a, b) => {
+        // ⚠️ 人设包的排最前（那是"她是谁"、最常改），其次共用库
+        const fa = a.from === 'persona' ? 0 : 1;
+        const fb = b.from === 'persona' ? 0 : 1;
+        if (fa !== fb) return fa - fb;
         // 群资料库排在"群资料库"那一项后面、其余按原顺序
         const ga = a.name.startsWith('groups/') ? 1 : 0;
         const gb = b.name.startsWith('groups/') ? 1 : 0;
@@ -1676,7 +1801,8 @@ const routes = {
   'GET /api/knowledge': async (_req, res, url) => {
     const name = safeKnowName(url.searchParams.get('name'));
     if (!name) return send(res, 400, { ok: false, error: '非法文件名' });
-    const p = join(KNOW, name);
+    // ⚠️ 走 `knowPath()`：人设的 md 在 `personas/<id>/`，别只认 knowledge/
+    const p = knowPath(name);
     if (!existsSync(p)) return send(res, 404, { ok: false, error: '文件不存在' });
     send(res, 200, { ok: true, name, content: readFileSync(p, 'utf8') });
   },
@@ -1709,8 +1835,10 @@ const routes = {
     }
 
     // ⚠️ 改之前先备份（这台机器上没有 git，手滑改坏了没法回滚）
-    backupKnowledge(join(KNOW, name));
-    writeFileSync(join(KNOW, name), content, 'utf8');
+    //    ⚠️ 写哪儿也走 `knowPath()` —— 写错地方会变成"保存成功但没生效"（真实踩过）
+    const target = knowPath(name);
+    backupKnowledge(target);
+    writeFileSync(target, content, 'utf8');
     log.info(`管理界面更新了知识文件 ${name}`);
     // ⚠️ 必须热重载：知识是**启动时读进内存**的，只写磁盘的话
     //    机器人答的还是旧内容，用户会以为「保存成功但没生效」（真实踩过）。
@@ -1853,6 +1981,262 @@ const routes = {
     }
   },
 
+  // ── 人设（2026-09-21 加，P2）────────────────────────────────
+  //
+  // ⚠️ 这里的"保存"**不重启机器人**（用户 2026-09-21 定）：
+  //    人设包和知识库都是**热重载**的（`persona.reload()` + `reloadKnowledge()`），
+  //    存完立刻生效。重启 = 一次 QQ 登录，而这个号是风险设备，能省则省。
+  'GET /api/persona/list': async (_req, res) => {
+    try {
+      send(res, 200, { ok: true, current: personaId(), packs: personaAdmin.listPacks() });
+    } catch (e) {
+      send(res, 500, { ok: false, error: e.message });
+    }
+  },
+
+  'GET /api/persona': async (_req, res, url) => {
+    try {
+      send(res, 200, { ok: true, ...personaAdmin.readPack(url.searchParams.get('id')) });
+    } catch (e) {
+      send(res, e.bad ? 400 : 500, { ok: false, error: e.message });
+    }
+  },
+
+  'POST /api/persona': async (req, res) => {
+    try {
+      const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+      const saved = personaAdmin.saveIdentity(body.id, body.identity);
+      // 改的是**当前正在用的**这个包 ⇒ 立刻热重载（存完就生效，不用重启）
+      const reloaded = String(body.id) === personaId() ? (persona.reload(), reloadKnowledge()) : null;
+      send(res, 200, { ok: true, identity: saved, reloaded });
+    } catch (e) {
+      send(res, e.bad ? 400 : 500, { ok: false, error: e.message });
+    }
+  },
+
+  'GET /api/persona/doc': async (_req, res, url) => {
+    try {
+      const text = personaAdmin.readDoc(url.searchParams.get('id'), url.searchParams.get('path'));
+      send(res, 200, { ok: true, text });
+    } catch (e) {
+      send(res, e.bad ? 400 : 500, { ok: false, error: e.message });
+    }
+  },
+
+  'POST /api/persona/doc': async (req, res) => {
+    try {
+      const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+      const r = personaAdmin.saveDoc(body.id, body.path, body.text);
+      const reloaded = String(body.id) === personaId() ? reloadKnowledge() : null;
+      send(res, 200, { ok: true, ...r, reloaded });
+    } catch (e) {
+      send(res, e.bad ? 400 : 500, { ok: false, error: e.message });
+    }
+  },
+
+  'POST /api/persona/switch': async (req, res) => {
+    try {
+      const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+      const id = String(body.id ?? '');
+      personaAdmin.readPack(id); // 先验证这个包**读得出来** —— 读不了就不许切过去
+      saveConfig({ persona: { id } });
+      reloadConfig();
+      persona.reload();
+      const knowledge = reloadKnowledge();
+      life.reload();
+      log.info(`管理界面切换人设 → 「${id}」（热重载，没重启机器人）`);
+      // ⚠️ 切完**自动**把 QQ 昵称 / 头像换成这个人设的（用户 2026-09-21 定）。
+      //    失败**不影响切换本身** —— 人设已经换好了，昵称头像单独报给界面。
+      const qqApply = await applyPersonaQQ(id);
+      if (qqApply.nickname || qqApply.avatar) {
+        log.info(
+          `QQ 资料跟着换了：昵称「${qqApply.nickname || '（没改）'}」头像「${qqApply.avatar || '（没改）'}」`,
+        );
+      }
+      if (qqApply.problems.length) log.warn(`QQ 资料没全换上：${qqApply.problems.join('；')}`);
+      send(res, 200, {
+        ok: true,
+        current: personaId(),
+        status: persona.status(),
+        knowledge,
+        qqApply,
+        problems: validate(),
+      });
+    } catch (e) {
+      send(res, e.bad ? 400 : 500, { ok: false, error: e.message });
+    }
+  },
+
+  'POST /api/persona/create': async (req, res) => {
+    try {
+      const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+      send(res, 200, { ok: true, ...personaAdmin.createPack(body.id, body.from || '_template') });
+    } catch (e) {
+      send(res, e.bad ? 400 : 500, { ok: false, error: e.message });
+    }
+  },
+
+  'POST /api/persona/delete': async (req, res) => {
+    try {
+      const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+      const id = String(body.id ?? '');
+      if (id === personaId()) throw new Error('这是**正在用**的人设 —— 先切到别的，再删它');
+      send(res, 200, { ok: true, ...personaAdmin.removePack(id) });
+    } catch (e) {
+      send(res, e.bad ? 400 : 500, { ok: false, error: e.message });
+    }
+  },
+
+  /** 手动把某个人设的昵称/头像**立刻**应用一次（自动那次失败、或改完想马上生效时用） */
+  'POST /api/persona/apply-qq': async (req, res) => {
+    try {
+      const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+      const id = String(body.id ?? '');
+      personaAdmin.readPack(id); // 先确认读得出来
+      const r = await applyPersonaQQ(id);
+      log.info(`手动应用 QQ 资料（${id}）：昵称「${r.nickname || '（没改）'}」头像「${r.avatar || '（没改）'}」`);
+      send(res, 200, { ok: r.problems.length === 0, ...r });
+    } catch (e) {
+      send(res, e.bad ? 400 : 500, { ok: false, error: e.message });
+    }
+  },
+
+  /**
+   * 上传**人设包里的头像**。
+   * ⚠️ 存进人设包（`personas/<id>/avatar.png`），**不是** `library/` ——
+   *    那是表情库，混进去她可能把头像当表情发出去。
+   */
+  'POST /api/persona/avatar': async (req, res, url) => {
+    try {
+      const id = String(url.searchParams.get('id') ?? '');
+      const name = String(url.searchParams.get('name') ?? 'avatar.png');
+      const buf = await readBody(req);
+      const r = personaAdmin.saveAvatar(id, buf, extname(name).toLowerCase());
+      // 换的是**当前正在用**的这个 ⇒ 顺手应用到 QQ 上（不然用户还得再点一次「立即应用」）
+      const applied = id === personaId() ? await applyPersonaQQ(id) : null;
+      send(res, 200, { ok: true, ...r, applied });
+    } catch (e) {
+      send(res, e.bad ? 400 : 500, { ok: false, error: e.message });
+    }
+  },
+
+  /** 读人设包里的头像（给界面预览） */
+  'GET /api/persona/avatar': async (_req, res, url) => {
+    try {
+      const id = String(url.searchParams.get('id') ?? '');
+      const pack = personaAdmin.readPack(id);
+      const f = personaAdmin.avatarFile(id, pack.qq.avatar);
+      if (!f) return send(res, 404, { ok: false, error: '这个人设包还没有头像文件' });
+      const ext = extname(f).toLowerCase();
+      sendBinary(res, 200, readFileSync(f), MIME[ext] ?? 'application/octet-stream');
+    } catch (e) {
+      send(res, e.bad ? 400 : 500, { ok: false, error: e.message });
+    }
+  },
+
+  // ── QQ 昵称 / 头像（2026-09-21 加）──────────────────────────
+  //
+  // ⚠️ 这两样**不跟人设绑定**（用户 2026-09-21 定：「祥子的昵称和头像直接取当前的就行了」）——
+  //    换人设**不会**自动改它们，这里只是"看当前是什么 + 想改的时候有个地方改"。
+  // ⚠️ 改的是**QQ 上真实的昵称/头像**（所有群、所有好友都看得见），不是机器人内部的设置。
+  // ⚠️ 走 OneBot 标准 action，**协议端不支持就如实报错**（`provider.unsupported` 那套精神：
+  //    绝不假装成功）。SnowLuma 有 `set_qq_profile` / `set_qq_avatar`，别的实现不一定有。
+  'GET /api/qq/profile': async (_req, res) => {
+    if (!bot?.call) return send(res, 200, { ok: false, error: '机器人还没连上协议端' });
+    try {
+      const info = await bot.call('get_login_info');
+      const uin = info?.user_id ? String(info.user_id) : '';
+      send(res, 200, {
+        ok: true,
+        uin,
+        nickname: info?.nickname ?? '',
+        // ⚠️ 头像用 QQ 官方的公开地址（qlogo），**不依赖协议端**支持什么 action ——
+        //    这样"看一眼现在长什么样"在任何实现下都能work。
+        avatarUrl: uin ? `https://q1.qlogo.cn/g?b=qq&nk=${uin}&s=640` : '',
+      });
+    } catch (e) {
+      send(res, 200, { ok: false, error: e.message });
+    }
+  },
+
+  'POST /api/qq/profile': async (req, res) => {
+    if (!bot?.call) return send(res, 200, { ok: false, error: '机器人还没连上协议端' });
+    let nickname = '';
+    try {
+      nickname = String(JSON.parse((await readBody(req)).toString('utf8') || '{}').nickname ?? '').trim();
+    } catch (e) {
+      return send(res, 400, { ok: false, error: `请求体不是合法 JSON：${e.message}` });
+    }
+    if (!nickname) return send(res, 400, { ok: false, error: '昵称不能为空' });
+    if (nickname.length > 36) return send(res, 400, { ok: false, error: '昵称太长了（QQ 上限比这还短）' });
+    try {
+      await bot.call('set_qq_profile', { nickname });
+      // ⚠️ **写完读回来核对** —— "以为改了其实没改"这种事，用户要过很久才发现
+      //    （跟 `autostart` 那条一个道理）。
+      const info = await bot.call('get_login_info').catch(() => null);
+      const now = info?.nickname ?? '';
+      const ok = now === nickname;
+      log.info(`管理界面改 QQ 昵称：目标「${nickname}」→ 现在「${now}」`);
+      send(res, 200, {
+        ok,
+        nickname: now,
+        error: ok ? '' : `协议端没改（现在还是「${now}」）—— 这个协议端可能不支持 set_qq_profile`,
+      });
+    } catch (e) {
+      send(res, 200, { ok: false, error: `协议端拒绝了改昵称：${e.message}` });
+    }
+  },
+
+  /** 换 QQ 头像：上传的图片先落到 logs/，再把**绝对路径**交给 `set_qq_avatar` */
+  'POST /api/qq/avatar': async (req, res, url) => {
+    if (!bot?.call) return send(res, 200, { ok: false, error: '机器人还没连上协议端' });
+    const name = String(url.searchParams.get('name') ?? 'avatar.png').trim();
+    const ext = extname(name).toLowerCase();
+    if (!['.png', '.jpg', '.jpeg', '.gif', '.webp'].includes(ext)) {
+      return send(res, 400, { ok: false, error: `不支持的格式 ${ext}` });
+    }
+    const buf = await readBody(req);
+    if (!buf.length) return send(res, 400, { ok: false, error: '文件是空的' });
+    if (buf.length > 8 * 1024 * 1024) return send(res, 400, { ok: false, error: '图片太大了（>8MB）' });
+    // ⚠️ 存 `logs/` 而**不是** `library/` —— library 是**表情库**，
+    //    丢一张头像进去，她下次发图就可能把这张头像当表情发出去。
+    const file = join(ROOT, 'logs', `upload-avatar-${Date.now()}${ext}`);
+    try {
+      mkdirSync(join(ROOT, 'logs'), { recursive: true });
+      writeFileSync(file, buf);
+    } catch (e) {
+      return send(res, 400, { ok: false, error: `图片存不下：${e.message}` });
+    }
+    try {
+      // ⚠️ OneBot 的 `file` 参数：给**本地绝对路径**（多数实现也认 `file://` 和 base64）
+      await bot.call('set_qq_avatar', { file });
+      log.info(`管理界面换了 QQ 头像（${(buf.length / 1024).toFixed(1)} KB）`);
+      send(res, 200, { ok: true, bytes: buf.length });
+    } catch (e) {
+      send(res, 200, { ok: false, error: `协议端拒绝了换头像：${e.message}` });
+    }
+  },
+
+  /**
+   * **联网自动填**（P3）：给「角色名 + 作品名」，搜资料 + 让模型起草一份人设。
+   *
+   * ⚠️ **只起草，不落盘** —— 起草要联网、要花模型钱，结果必须让用户过一眼、
+   *    改完、点保存，才走 `/api/persona/create` + `/api/persona`（那两条才是写盘的）。
+   * ⚠️ 用户原话：「自动化的关键就在这里，我希望尽量少地使用人力」——
+   *    所以能自动的都自动（搜索、字段、正文、示例对话），但**判断权留给他**。
+   * ⚠️ 超时给到 3 分钟：搜一轮 + 起一次长输出，慢的时候真的会到一分钟以上。
+   */
+  'POST /api/persona/draft': async (req, res) => {
+    try {
+      const body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+      const r = await personaDraft.draft(body, { signal: AbortSignal.timeout(180000) });
+      send(res, 200, r);
+    } catch (e) {
+      log.warn(`起草人设失败：${e.message}`);
+      send(res, e.bad ? 400 : 500, { ok: false, error: e.message });
+    }
+  },
+
   'POST /api/reload': async (_req, res) => {
     reloadConfig();
     reloadFaces();
@@ -1949,8 +2333,8 @@ export function startWebUI(botInstance = null) {
       log.error(`管理界面端口 ${config.webui.port} 被占用，换一个端口或关掉占用的程序`);
     } else if (e.code === 'EADDRNOTAVAIL' && config.webui.host === '::') {
       // 有些环境没有 IPv6，退回只监听 IPv4
-      log.warn('没有可用的 IPv6，退回只监听 127.0.0.1');
-      config.webui.host = '127.0.0.1';
+      log.warn('没有可用的 IPv6，退回只监听 203.0.113.10');
+      config.webui.host = '203.0.113.10';
       startWebUI();
     } else {
       log.error(`管理界面启动失败: ${e.message}`);
@@ -1958,12 +2342,12 @@ export function startWebUI(botInstance = null) {
   });
 
   // host 用 "::" 时 Node 默认同时接受 IPv4 和 IPv6（双栈），
-  // 这样浏览器无论是走 127.0.0.1 还是 localhost→::1 都能打开。
-  const host = config.webui.host === '127.0.0.1' ? '::' : config.webui.host;
+  // 这样浏览器无论是走 203.0.113.10 还是 localhost→::1 都能打开。
+  const host = config.webui.host === '203.0.113.10' ? '::' : config.webui.host;
 
   server.listen({ port: config.webui.port, host, ipv6Only: false }, () => {
     log.info('═══════════════════════════════════════');
-    log.info(` 管理界面: http://127.0.0.1:${config.webui.port}`);
+    log.info(` 管理界面: http://203.0.113.10:${config.webui.port}`);
     log.info('═══════════════════════════════════════');
   });
 

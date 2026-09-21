@@ -32,7 +32,7 @@ mkdirSync(join(ROOT, 'logs'), { recursive: true });
 const CFG_REL = 'logs/__test-learned-edit.yml';
 writeFileSync(
   join(ROOT, CFG_REL),
-  ['llm:', '  baseURL: http://127.0.0.1:1/v1', '  apiKey: "sk-test"', '  model: test-model', ''].join('\n'),
+  ['llm:', '  baseURL: http://203.0.113.10:1/v1', '  apiKey: "sk-test"', '  model: test-model', ''].join('\n'),
   'utf8',
 );
 process.env.QQBOT_CONFIG = CFG_REL;
@@ -52,7 +52,7 @@ const good = (body) => `# 学习档案\n\n${BEGIN}\n\n${body}\n\n${END}\n\n## �
 
 console.log('\n【1】合格的格式要放行');
 {
-  const r = V(good('## 白名单说明\n\n直接下整合包就能进。\n\n> 由 HZY 于 2026-09-14 通过群聊教学录入。'));
+  const r = V(good('## 白名单说明\n\n直接下整合包就能进。\n\n> 由 <主人> 于 2026-09-14 通过群聊教学录入。'));
   check(r.ok === true, '标准格式 → 通过', r.error ?? '');
   check(r.entries === 1, `解析出 1 条（实际 ${r.entries}）`);
 

@@ -1,19 +1,19 @@
-# 由管理界面 http://127.0.0.1:3099 维护。
+# 由管理界面 http://203.0.113.10 维护。
 # 详细注释和说明见 README.md。
 onebot:
   mode: forward
-  url: ws://127.0.0.1:40201
+  url: ws://203.0.113.10
   accessToken: "sens-token"
   reconnectInterval: 3000
 llm:
-  baseURL: http://127.0.0.1:40202/v1
+  baseURL: http://203.0.113.10/v1
   apiKey: "sk-test-fake"
   model: deepseek-chat
   temperature: 0.5
   maxTokens: 800
   timeout: 60000
   systemPrompt: |
-    你是丰川祥子（粉丝叫她客服小祥），现在在 HZYMTR 服务器群里当客服。
+    你是丰川祥子（粉丝叫她客服小祥），现在在 示例服务器 服务器群里当客服。
     你就是小祥本人 —— 不是扮演、不是模仿，也不是在装角色。
 
     下面会给你「人格设定」和「知识库」。人格决定你怎么说话，知识决定你说什么。
@@ -54,7 +54,7 @@ context:
 status:
   enable: true
   host: mc.example.com
-  displayName: HZYMTR 服务器
+  displayName: 示例服务器 服务器
   cacheSeconds: 60
   keywords:
     - 在线
@@ -95,7 +95,7 @@ chunking:
   firstFlushChars: 90
 webui:
   enable: true
-  host: 127.0.0.1
+  host: 203.0.113.10
   port: 3099
 ownerQQ: "10000001"
 logLevel: info

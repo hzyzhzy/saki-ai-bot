@@ -44,7 +44,7 @@ const OUTSIDER = '999999999'; // 不在白名单里
 const cfgFor = (allowList) =>
   [
     'llm:',
-    '  baseURL: http://127.0.0.1:1/v1',
+    '  baseURL: http://203.0.113.10:1/v1',
     '  apiKey: "sk-test"',
     '  model: t',
     'trigger:',
@@ -157,7 +157,7 @@ console.log('\n【6】白名单为空 = 不看群（和"消息收不收"同一�
   );
 }
 
-console.log('\n【7】★★ 收紧度**按群**（HZY 2026-09-15 晚：「收紧度也加一个一样的下拉菜单分群调节」）');
+console.log('\n【7】★★ 收紧度**按群**（<主人> 2026-09-15 晚：「收紧度也加一个一样的下拉菜单分群调节」）');
 {
   const { config } = await import('../src/config.js');
   const b = new Bot();
@@ -193,7 +193,7 @@ console.log('\n【7】★★ 收紧度**按群**（HZY 2026-09-15 晚：「收�
   // 3 档群：收紧度**本来就不适用**
   check(b.strictnessParams(ev(LV3)).active === false, '★ 3 档群：收紧度不适用（active=false，别把它算进去）');
 
-  // 源码层面：**谁都别再去读全局那份**（HZY：「取消保存全局的说法，只保留分群的数据」）
+  // 源码层面：**谁都别再去读全局那份**（<主人>：「取消保存全局的说法，只保留分群的数据」）
   const src = (await import('node:fs')).readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
   const codeLines = src.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l));
   const globalReads = codeLines.filter((l) => l.includes('config.chat?.strictness')).length;

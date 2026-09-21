@@ -1,5 +1,5 @@
 import { WebSocketServer, WebSocket } from 'ws';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, rmSync, statSync, utimesSync } from 'node:fs';
 import { join } from 'node:path';
 import { config, validate, ROOT, DEFAULT_LIFE, DEFAULT_QUEST, paramsFor } from './config.js';
 // ⚠️ 协议端适配层：启动横幅要报它、管理能力也由它决定（换协议端只改 config.yml）
@@ -36,6 +36,144 @@ if (problems.length) {
   process.exit(1);
 }
 
+// ── 单例锁（2026-09-21 加）─────────────────────────────
+// ⚠️⚠️ 为什么必须有：**重复实例会造出最难查的那类症状** ——
+//    两套定时器 ⇒ 主动接话 / 说说 / 剧情**重复发**（AGENTS 里记的
+//    「同一个梗连发三遍到 QQ 空间」就是这个）；协议端要是允许多个 WS 客户端，
+//    还会**每条消息回两次**（有人克隆仓库后报的「接一句回两句」就是它）。
+//    实测我自己也一次撞出 3 个实例（2026-09-21 19:06）。
+//    以前唯一的防线是 `webui.js` 那句"管理界面端口被占用" ——
+//    但它**只报错、不退出** ⇒ 第二个实例照样跑起来 ⇒ 等于没有防线。
+//
+// ⚠️ 判据：锁文件里记 PID，用 `process.kill(pid, 0)` 探活
+//    （跨平台、不用起子进程）。抛 ESRCH = 那个进程没了；EPERM = 活着但没权限 ⇒ 也算活着。
+//    ⚠️ Windows 的 PID 会复用，所以锁里另外记了启动时间 —— 万一真遇到
+//       "明明没别的实例却被拒绝启动"，按提示删掉锁文件即可（不丢数据）。
+// ⚠️ 测试必须隔离：`QQBOT_LOCK_FILE` 指到别处，否则 `test/behavior.js` 里
+//    `spawn(node, [src/index.js])` 会被正在跑的真机器人挡在门外。
+const LOCK_FILE = process.env.QQBOT_LOCK_FILE || join(ROOT, 'state', 'bot.lock');
+
+/**
+ * 锁**多久没被蹭过**就当作"那个实例已经没了"。
+ *
+ * ## 为什么光看 PID 不够（2026-09-21 踩了）
+ *
+ * `process.kill(pid, 0)` 只回答"**这个号码**有进程吗"，不回答"那是不是机器人"。
+ * 而 Windows 的 PID 会复用：机器人被强杀（任务管理器 / 断电 —— `on('exit')` 不跑）
+ * 之后锁文件残留，**那个 PID 很快会被别的进程用掉** ⇒ 探活成功 ⇒ 新实例被
+ * 一句「已经有本机器人在跑了」挡住，**而其实没有**。
+ *
+ * 实测：`test/punctuation.js` 连续两轮回归都失败，就是它 —— 残留锁里的 PID
+ * 被复用，它起的探针机器人每次都进不去（锁文件时间戳停在 20:32，再也没更新过）。
+ * ⚠️ 同样的事会发生在**用户身上**：强杀过机器人一次，之后双击启动就没反应，
+ *    屏幕上只有一句"已经有本机器人在跑了"，而他看不见任何实例。
+ *
+ * 解法：运行期间**每 30 秒蹭一次锁文件的 mtime**，判定时要求
+ * 「PID 活着 **并且** 锁在 5 分钟内被蹭过」才认定真有实例。
+ * 强杀留下的锁，最多 5 分钟后就不再挡人；正常运行的机器人一直在蹭，照挡不误。
+ *
+ * ⚠️ 阈值（5 分钟 = 10 个心跳）故意放宽：宁可多等一会儿，也别在机器人
+ *    正常运行时误判成"它死了"而放进第二个实例 —— 那后果（重复发消息、
+ *    两个进程写同一批 state）比"多等 5 分钟"严重得多。
+ */
+const LOCK_STALE_MS = 5 * 60 * 1000;
+const LOCK_BEAT_MS = 30 * 1000;
+
+function lockHolder() {
+  let raw;
+  let mtimeMs = 0;
+  try {
+    raw = JSON.parse(readFileSync(LOCK_FILE, 'utf8'));
+    mtimeMs = statSync(LOCK_FILE).mtimeMs;
+  } catch {
+    return null; // 没有锁文件 / 内容坏了 ⇒ 当作没人在跑
+  }
+  const pid = Number(raw?.pid);
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  let alive = false;
+  try {
+    process.kill(pid, 0);
+    alive = true;
+  } catch (e) {
+    if (e.code === 'EPERM') alive = true; // 活着，只是没权限给它发信号
+  }
+  if (!alive) return null; // ESRCH：那个 PID 早没了 ⇒ 是残留的锁
+  if (mtimeMs && Date.now() - mtimeMs > LOCK_STALE_MS) {
+    log.warn(
+      `锁文件里的 PID ${pid} 现在**有**进程占着，但锁已经 ` +
+        `${Math.round((Date.now() - mtimeMs) / 1000)} 秒没更新过 —— ` +
+        `那是 PID 被复用成了别的进程，不是机器人。这次照常启动。`,
+    );
+    return null;
+  }
+  return raw;
+}
+
+const holder = lockHolder();
+if (holder && Number(holder.pid) !== process.pid) {
+  log.error('已经有本机器人在跑了 —— 这一次不启动。');
+  log.error(`  · 那个实例：PID ${holder.pid}（启动于 ${holder.startedAt ?? '未知'}）`);
+  log.error(`  · 锁文件：${LOCK_FILE}`);
+  log.error('  重复实例会让主动接话 / 说说 / 剧情重复发，甚至"一条消息回两次"。');
+  log.error('  要重启它：先停掉那个进程（或双击「停止机器人.bat」），再启动。');
+  log.error(`  确认它早就不在了（任务管理器里强杀过、或者断过电）？删掉锁文件再试：${LOCK_FILE}`);
+  log.error('  （不删也行：它超过 5 分钟没有心跳，就自动不再挡人了。）');
+  process.exit(1);
+}
+
+try {
+  writeFileSync(
+    LOCK_FILE,
+    JSON.stringify(
+      {
+        pid: process.pid,
+        startedAt: new Date().toLocaleString('sv-SE'),
+        argv: process.argv.slice(1).join(' '),
+      },
+      null,
+      2,
+    ),
+  );
+} catch (e) {
+  // 锁写不成不该拦住启动（比如 state/ 不可写）—— 只能说单例保护这次没生效
+  log.warn(`单例锁没写成（不影响运行，但这次没有重复实例保护）：${e.message}`);
+}
+
+/**
+ * 心跳：运行期间每 30 秒把锁文件的 mtime 蹭一下（**只动时间，不动内容**）。
+ *
+ * ⚠️ 这是 `lockHolder()` 里那套"陈旧判定"的另一半 —— 没有它，
+ *    那个 5 分钟阈值会把**正在正常运行的**机器人也判成死的。
+ * ⚠️ 必须在写锁**之后**起：第一次蹭之前，mtime 本来就是刚写锁的时间。
+ * ⚠️ `unref()`：别让这个计时器把进程吊住不退（退出照旧走 `releaseLock`）。
+ * ⚠️ 蹭失败**不报警**（比如锁被人删了）：这只影响"重复实例保护"的强度，
+ *    每次刷一行警告反而会盖掉真正重要的日志。
+ */
+const lockBeat = setInterval(() => {
+  try {
+    const cur = JSON.parse(readFileSync(LOCK_FILE, 'utf8'));
+    if (Number(cur?.pid) !== process.pid) return; // 锁已经是别人的了，别去蹭
+    const now = new Date();
+    utimesSync(LOCK_FILE, now, now);
+  } catch {}
+}, LOCK_BEAT_MS);
+if (typeof lockBeat.unref === 'function') lockBeat.unref();
+
+/** 只删**自己的**那把锁 —— 别把后来者的锁删了 */
+function releaseLock() {
+  try {
+    const cur = JSON.parse(readFileSync(LOCK_FILE, 'utf8'));
+    if (Number(cur?.pid) === process.pid) rmSync(LOCK_FILE, { force: true });
+  } catch {}
+}
+process.on('exit', releaseLock);
+for (const sig of ['SIGINT', 'SIGTERM']) {
+  process.on(sig, () => {
+    releaseLock();
+    process.exit(0);
+  });
+}
+
 // ── 鉴权 ──────────────────────────────────────────────
 function tokenOf(req) {
   const header = req.headers?.authorization ?? '';
@@ -57,7 +195,12 @@ function authOk(provided) {
 // ── 正向连接：机器人主动连 NapCat ─────────────────────
 function connectForward() {
   const url = config.onebot.url;
-  log.info(`正在连接 NapCat：${url}`);
+  // ⚠️ 2026-09-21：别再写死 NapCat —— 协议端换成 SnowLuma 之后这句是误导的
+  //    （和看门狗那句"已连接到 NapCat"同一类毛病，那次害得看门狗一直误报）
+  // ⚠️⚠️ 注意是 `provider.name()` —— `provider.js` 导出的是**函数**，不是属性。
+  //    写成 `provider.name` 会打出 `function name() {`（2026-09-21 我这么踩了一次，
+  //    幸好日志里一眼就看出来了）。
+  log.info(`正在连接协议端（${provider.name()}）：${url}`);
 
   const headers = {};
   const token = config.onebot.accessToken?.trim();
@@ -97,7 +240,7 @@ function listenReverse() {
   const url = new URL(config.onebot.url);
   const port = Number(url.port || 80);
 
-  const wss = new WebSocketServer({ port, host: url.hostname || '0.0.0.0' });
+  const wss = new WebSocketServer({ port, host: url.hostname || '203.0.113.10' });
 
   wss.on('listening', () => {
     log.info(`已监听 ${url.hostname}:${port}，请在 NapCat 里新建「WebSocket 客户端」指向这个地址`);
@@ -182,7 +325,7 @@ startWebUI(bot);
 
 // ⚠️⚠️ 2026-09-16 深夜加：**开机就报一次"大模型从哪儿出去"**。
 //    那天"机器人忽然不能聊天"，查了半天才发现是 `_run-bot.bat` 里写死了
-//    `HTTPS_PROXY=127.0.0.1:7890`，而**代理软件没开** → 每个请求 ECONNREFUSED。
+//    `HTTPS_PROXY=203.0.113.10`，而**代理软件没开** → 每个请求 ECONNREFUSED。
 //    这一行以后一眼就能看出来（直连 / 走代理）。
 {
   const proxy = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || '';
@@ -357,7 +500,7 @@ if (true) {
         }
 
         // ★ 先掷骰：这个群这一格是一级还是二级？
-        //   ⚠️ 每个 1 档群**各掷各的**（HZY 选的是"每个群各跑一条"）。
+        //   ⚠️ 每个 1 档群**各掷各的**（<主人> 选的是"每个群各跑一条"）。
         //      中了骰子的群这一格走剧情、**不再发日常事件**。
         if (questRollFromLife && (await questRollFromLife(plan, g))) continue;
 
@@ -528,7 +671,7 @@ startOutboxTick();
 
   /**
    * 推**一个群**的剧情。
-   * ⚠️ 分群之后（2026-09-15 HZY：「每个群各跑一条」）—— 外面要**挨个群**调。
+   * ⚠️ 分群之后（2026-09-15 <主人>：「每个群各跑一条」）—— 外面要**挨个群**调。
    */
   const questTickOne = async (gid) => {
     const q = quest.current(gid);
@@ -602,7 +745,7 @@ startOutboxTick();
    * ⚠️ 一成这个数不是随便定的：一级每天 3-5 条 × 0.1 ≈ 每周 2-3 条，
    *    正好落在他定的"二级一周最多 2-3 个"里。
    *
-   * ⚠️⚠️ 2026-09-15 **分群**：**每个 1 档群各掷各的**（HZY 选的是"每个群各跑一条"）。
+   * ⚠️⚠️ 2026-09-15 **分群**：**每个 1 档群各掷各的**（<主人> 选的是"每个群各跑一条"）。
    *    所以一次 tick 里可能**两个群同时各开一条**剧情，也可能只有一个群中。
    *    中了骰子的群这一格就**不再发日常事件**（那个槽位被剧情占了）。
    *

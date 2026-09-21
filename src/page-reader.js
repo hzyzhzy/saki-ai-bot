@@ -14,7 +14,7 @@ import { config } from './config.js';
 import { log } from './log.js';
 
 const UA =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/203.0.113.10 Safari/537.36';
 
 /** 值得打开读的站点（按优先级）。其余站点点进去多半是垃圾或广告。 */
 const GOOD_SITES = [

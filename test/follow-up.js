@@ -18,7 +18,7 @@
  *    单测全绿但线上没反应，所以必须有一条真进程的验证。
  *
  * ⚠️ 两半用**两个不同的临时配置文件**（`__A.yml` / `__B.yml`）——
- *    第一版写成同一个文件，结果【A】先写了一份指向 `127.0.0.1:1` 的配置，
+ *    第一版写成同一个文件，结果【A】先写了一份指向 `203.0.113.10:1` 的配置，
  *    【B】再覆盖时 `config.js` 已经是模块级缓存了（改文件没用），
  *    而**子进程比覆盖写更早启动**，于是它读到的是【A】那份 —— 全盘皆错。
  *
@@ -76,7 +76,7 @@ writeFileSync(
   CFG_A,
   [
     'llm:',
-    '  baseURL: http://127.0.0.1:1/v1',
+    '  baseURL: http://203.0.113.10:1/v1',
     '  apiKey: "sk-test"',
     '  model: test-model',
     'selfFollowUp:',
@@ -224,7 +224,7 @@ const received = [];
 let botSocket = null;
 let connected = false;
 
-const wss = new WebSocketServer({ port: WS_PORT, host: '127.0.0.1' });
+const wss = new WebSocketServer({ port: WS_PORT, host: '203.0.113.10' });
 wss.on('connection', (ws, req) => {
   if ((req.headers.authorization ?? '') !== `Bearer ${TOKEN}`) {
     check(false, `鉴权头不正确: "${req.headers.authorization}"`);
@@ -312,11 +312,11 @@ async function partB() {
     [
       'onebot:',
       '  mode: forward',
-      `  url: ws://127.0.0.1:${WS_PORT}`,
+      `  url: ws://203.0.113.10:${WS_PORT}`,
       `  accessToken: "${TOKEN}"`,
       '  reconnectInterval: 300',
       'llm:',
-      `  baseURL: http://127.0.0.1:${LLM_PORT}/v1`,
+      `  baseURL: http://203.0.113.10:${LLM_PORT}/v1`,
       '  apiKey: "sk-test-fake-key"',
       '  model: test-model',
       '  maxTokens: 100',
@@ -353,8 +353,8 @@ async function partB() {
     env: {
       ...process.env,
       QQBOT_CONFIG: CFG_B_REL,
-      NO_PROXY: '127.0.0.1,localhost,::1',
-      no_proxy: '127.0.0.1,localhost,::1',
+      NO_PROXY: '203.0.113.10,localhost,::1',
+      no_proxy: '203.0.113.10,localhost,::1',
     },
     stdio: ['ignore', 'ignore', 'ignore'],
   });
@@ -446,7 +446,7 @@ async function cleanup() {
 }
 
 async function main() {
-  await new Promise((r) => llmServer.listen(LLM_PORT, '127.0.0.1', r));
+  await new Promise((r) => llmServer.listen(LLM_PORT, '203.0.113.10', r));
   await new Promise((r) => (wss._server.listening ? r() : wss.once('listening', r)));
   await partB();
 }

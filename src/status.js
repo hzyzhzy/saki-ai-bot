@@ -62,7 +62,7 @@ function varint(n) {
  */
 async function resolveTarget(host, explicitPort) {
   // ⚠️ 支持 `域名:端口` 这种写法（配置里可能这么写；测试也用它来指向假服务器）。
-  //    不解析的话会把 "127.0.0.1:39104" 当成域名去查 SRV，必然失败。
+  //    不解析的话会把 "203.0.113.10" 当成域名去查 SRV，必然失败。
   let h = String(host ?? '').trim();
   let p = explicitPort ? Number(explicitPort) : 0;
   const m = /^([^:\[\]]+|\[[^\]]+\]):(\d+)$/.exec(h);

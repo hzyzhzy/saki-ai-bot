@@ -100,7 +100,7 @@ async function setup(level, basePort, groupId = GROUP) {
   });
 
   let ws = null;
-  const wss = new WebSocketServer({ port: WS_PORT, host: '127.0.0.1' });
+  const wss = new WebSocketServer({ port: WS_PORT, host: '203.0.113.10' });
   wss.on('connection', (socket, req) => {
     if ((req.headers.authorization ?? '') !== `Bearer ${TOKEN}`) return socket.close(1008);
     ws = socket;
@@ -132,14 +132,14 @@ async function setup(level, basePort, groupId = GROUP) {
     );
   });
 
-  await new Promise((r) => llm.listen(LLM_PORT, '127.0.0.1', r));
+  await new Promise((r) => llm.listen(LLM_PORT, '203.0.113.10', r));
   await new Promise((r) => (wss._server.listening ? r() : wss.once('listening', r)));
 
   const base = readFileSync(join(ROOT, 'config.yml'), 'utf8');
   const cfgText = base
-    .replace(/url:\s*ws:\/\/127\.0\.0\.1:\d+/, `url: ws://127.0.0.1:${WS_PORT}`)
+    .replace(/url:\s*ws:\/\/127\.0\.0\.1:\d+/, `url: ws://203.0.113.10:${WS_PORT}`)
     .replace(/accessToken:\s*"?[^"\r\n]*"?/, `accessToken: "${TOKEN}"`)
-    .replace(/baseURL:\s*\S+/, `baseURL: http://127.0.0.1:${LLM_PORT}/v1`)
+    .replace(/baseURL:\s*\S+/, `baseURL: http://203.0.113.10:${LLM_PORT}/v1`)
     .replace(/apiKey:\s*\S+/, 'apiKey: "sk-test-fake"')
     .replace(/respondTo:\s*\d/, `respondTo: ${level}`)
     .replace(/probability:\s*0?\.\d+/g, 'probability: 1')
@@ -194,7 +194,7 @@ async function setup(level, basePort, groupId = GROUP) {
           time: Math.floor(Date.now() / 1000),
           sender: {
             user_id: opts.userId ?? MEMBER,
-            nickname: opts.role === 'owner' ? 'HZY' : '路人',
+            nickname: opts.role === 'owner' ? '<主人>' : '路人',
             role: opts.role ?? 'member',
           },
           message,

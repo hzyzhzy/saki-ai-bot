@@ -570,7 +570,7 @@ const llmServer = createServer((req, res) => {
 
 const sent = [];
 let sock = null;
-const wss = new WebSocketServer({ port: WS_PORT, host: '127.0.0.1' });
+const wss = new WebSocketServer({ port: WS_PORT, host: '203.0.113.10' });
 wss.on('connection', (ws, req) => {
   if ((req.headers.authorization ?? '') !== `Bearer ${TOKEN}`) return ws.close(1008);
   sock = ws;
@@ -632,7 +632,7 @@ async function waitFor(fn, timeout = 15000) {
 let botProc = null;
 
 async function e2eTests() {
-  await new Promise((r) => llmServer.listen(LLM_PORT, '127.0.0.1', r));
+  await new Promise((r) => llmServer.listen(LLM_PORT, '203.0.113.10', r));
   await new Promise((r) => (wss._server.listening ? r() : wss.once('listening', r)));
 
   botProc = spawn(process.execPath, [join(ROOT, 'src', 'index.js')], {
@@ -640,9 +640,9 @@ async function e2eTests() {
     env: {
       ...process.env,
       QQBOT_CONFIG: 'config.behavior-test.yml',
-      // ⚠️ 排除本机代理：假模型/假 NapCat 都跑在 127.0.0.1，
+      // ⚠️ 排除本机代理：假模型/假 NapCat 都跑在 203.0.113.10，
       //    如果 shell 里设了 NODE_USE_ENV_PROXY，不加这个假模型请求会走代理而失败
-      NO_PROXY: '127.0.0.1,localhost,::1',
+      NO_PROXY: '203.0.113.10,localhost,::1',
     },
     stdio: ['ignore', 'ignore', 'ignore'],
   });
@@ -688,9 +688,9 @@ async function e2eTests() {
     env: {
       ...process.env,
       QQBOT_CONFIG: 'config.behavior-test.yml',
-      // ⚠️ 排除本机代理：假模型/假 NapCat 都跑在 127.0.0.1，
+      // ⚠️ 排除本机代理：假模型/假 NapCat 都跑在 203.0.113.10，
       //    如果 shell 里设了 NODE_USE_ENV_PROXY，不加这个假模型请求会走代理而失败
-      NO_PROXY: '127.0.0.1,localhost,::1',
+      NO_PROXY: '203.0.113.10,localhost,::1',
     },
     stdio: ['ignore', 'ignore', 'ignore'],
   });

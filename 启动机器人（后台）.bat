@@ -46,7 +46,7 @@ if "%NAP%"=="0" (
 )
 
 echo 机器人正在后台启动，日志写入 logs\bot.log
-echo 管理界面： http://127.0.0.1:3099
+echo 管理界面： http://203.0.113.10
 echo.
 echo 这个窗口可以关掉，机器人会继续在后台运行。
 echo 想停止机器人，双击「停止机器人.bat」。
@@ -58,9 +58,11 @@ start "客服小祥" /min cmd /c "_run-bot.bat"
 rem 等待并轮询日志（用 ping 代替 timeout —— timeout 在重定向环境下会报错）
 set /a WAITED=0
 :wait
-ping -n 2 -w 1000 127.0.0.1 >nul 2>&1
+ping -n 2 -w 1000 203.0.113.10 >nul 2>&1
 set /a WAITED+=2
-findstr /C:"已连接到 NapCat" "logs\bot.log" >nul 2>&1
+rem ⚠️ 2026-09-21 修：原来只找 "已连接到 NapCat"，协议端换成 SnowLuma 之后日志写的是
+rem    "已连接到协议端（snowluma），等待消息…" ⇒ 匹配不上，会白等到超时。改用通用那句。
+findstr /C:"已连接到" "logs\bot.log" >nul 2>&1
 if not errorlevel 1 goto ready
 if %WAITED% GEQ 20 goto showlog
 <nul set /p "=."
@@ -78,4 +80,4 @@ echo.
 set "ANS="
 set /p "ANS=现在打开管理界面吗？(Y/n) "
 if /i "%ANS%"=="n" exit /b 0
-start "" "http://127.0.0.1:3099"
+start "" "http://203.0.113.10"

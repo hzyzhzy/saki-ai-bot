@@ -37,6 +37,7 @@ import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from '
 import { join } from 'node:path';
 import { ROOT, config } from './config.js';
 import { log } from './log.js';
+import * as persona from './persona.js';
 
 const STATE_DIR = join(ROOT, 'state');
 // ⚠️ 给测试留出口（和 QQBOT_AFFINITY_FILE / QQBOT_TIC_FILE 一个套路）
@@ -142,9 +143,15 @@ const NOT_CALLING = /[我你他她它咱俺尼]妈/;
 /** 「妈的」「妈呀」「妈耶」是感叹，不是叫人 */
 const EXCLAMATION = /妈(?:的|呀|耶|哟|了个|卖批)/;
 /** 句首的呼格：「妈妈」「妈咪」「祥妈」「小祥妈妈」… */
-const STARTS_WITH_MOM = /^[\s@,，。！!~～、]*(?:小?祥|祥子|saki)?\s*(?:妈妈|妈咪|妈)/i;
+const STARTS_WITH_MOM = new RegExp(
+  `^[\\s@,，。！!~～、]*(?:${persona.matchNamesAlt()})?\\s*(?:妈妈|妈咪|妈)`,
+  'i',
+);
 /** 名字挨着妈：「祥妈」「祥子妈妈」「妈妈祥子」这种 */
-const NEAR_NAME = /(?:祥|小祥|祥子|saki|sakiko)\s*(?:妈妈|妈咪|妈)|(?:妈妈|妈咪|妈)\s*(?:祥子?)/i;
+const NEAR_NAME = new RegExp(
+  `(?:${persona.matchNamesAlt()})\\s*(?:妈妈|妈咪|妈)|(?:妈妈|妈咪|妈)\\s*(?:${persona.matchNamesAlt()})`,
+  'i',
+);
 /**
  * 「让我/你当妈」这种句式 —— 明确是在**让她当妈**：
  *   当我妈妈 / 你可以做我妈吗 / 叫你一声妈行不行

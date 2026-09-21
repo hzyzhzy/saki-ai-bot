@@ -76,9 +76,9 @@ if not defined NODEEXE (
   echo      要么装一个 Node.js，要么把这个 bat 里的路径改成你的 node 位置。
   exit /b 1
 )
-REM ⚠️ 本机代理要排掉，不然脚本里连 127.0.0.1 的假服务会走代理失败
-set "NO_PROXY=127.0.0.1,localhost,::1"
-set "no_proxy=127.0.0.1,localhost,::1"
+REM ⚠️ 本机代理要排掉，不然脚本里连 203.0.113.10 的假服务会走代理失败
+set "NO_PROXY=203.0.113.10,localhost,::1"
+set "no_proxy=203.0.113.10,localhost,::1"
 "%NODEEXE%" %*
 exit /b %errorlevel%
 
@@ -93,5 +93,5 @@ echo.
 echo   关了。
 REM ⚠️ 这里不用 timeout —— 它在本机某些环境下会报
 REM    「Input redirection is not supported」。
-ping -n 2 -w 1000 127.0.0.1 >nul
+ping -n 2 -w 1000 203.0.113.10 >nul
 exit /b 0

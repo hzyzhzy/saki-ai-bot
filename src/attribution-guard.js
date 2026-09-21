@@ -25,6 +25,7 @@
 import { config } from './config.js';
 import { log } from './log.js';
 import { streamChat } from './llm.js';
+import * as persona from './persona.js';
 
 // ⚠️ 开头的「【归属核对】」是**给测试用的标记**（2026-09-13 加）：
 //    测试的假模型要能一眼分辨这是"归属核对"的请求还是"该不该说"的请求 ——
@@ -59,7 +60,7 @@ const PROMPT = `【归属核对】你在检查一条**即将发到 QQ 群里**�
 {"ok": false, "why": "一句话说明错在哪（15 字内）", "fixed": "改好的回复"}
 
 ## 改的时候注意
-- 保持**原来的语气和人设**（这是客服小祥，话短、不像客服腔）
+- 保持**原来的语气和人设**${persona.promptText('attributionTone')}
 - **保持短**（大部分不超过 15 字，除非原来是技术解答）
 - 只改「认错人」这部分，**别的别动**
 - 如果原回复其实没问题，就别改（宁可 ok:true）

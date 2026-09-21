@@ -279,7 +279,12 @@ function Start-Bot {
   for ($i = 0; $i -lt 30; $i++) {
     Start-Sleep -Seconds 1
     $log = Join-Path $BotDir 'logs\bot.log'
-    if ((Test-Path $log) -and (Select-String -Path $log -Pattern '已连接到 NapCat' -Quiet -ErrorAction SilentlyContinue)) {
+    # ⚠️⚠️ 2026-09-21 修：这里原来只认 `已连接到 NapCat`，而协议端换成 SnowLuma 之后
+    #    机器人的日志是 `已连接到协议端（snowluma），等待消息…` ⇒ **永远匹配不上** →
+    #    每次启动都白等满 30 秒、然后报「机器人未在 30 秒内连上」
+    #    （用户看到那个窗口，以为坏了，截图来问）。
+    #    ⇒ 认通用那句；旧的 NapCat 写法留着兼容（别人还在用 NapCat）。
+    if ((Test-Path $log) -and (Select-String -Path $log -Pattern '已连接到协议端|已连接到 NapCat' -Quiet -ErrorAction SilentlyContinue)) {
       Say '✅ 机器人已连接'
       return $true
     }
@@ -460,7 +465,7 @@ while ($true) {
 机器人报「发送一直失败（网络连接异常）」，而且本地快登凭据已经被腾讯清掉了 ——
 **这种情况只能扫一次码**，重启协议端也没用（反而会作废你刚要扫的码）。
 
-    ① 打开  http://127.0.0.1:3099
+    ① 打开  http://203.0.113.10
     ② 找「QQ 登录」那张卡片
     ③ 点「显示二维码」，用**机器人号**的手机 QQ 扫（别扫成服主主号）
 "@
@@ -641,7 +646,7 @@ while ($true) {
           #    （原来因为读错字段名，一直画一张过期的缓存码）。
           #    所以直接指向界面最省事。
           $qrLine = "**去机器人管理界面点一下就能扫**（比找文件方便）：`n`n" +
-            "    ① 打开  http://127.0.0.1:3099`n" +
+            "    ① 打开  http://203.0.113.10`n" +
             "    ② 找「QQ 登录」那张卡片`n" +
             "    ③ 点「一键恢复登录」（先试免扫码）`n" +
             "    ④ 不行再点「显示二维码」，手机 QQ 扫"

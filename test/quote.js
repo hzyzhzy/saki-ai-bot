@@ -1,5 +1,5 @@
 /**
- * 「引用」的两条新规矩（2026-09-15 晚 HZY 提的）。
+ * 「引用」的两条新规矩（2026-09-15 晚 <主人> 提的）。
  *
  * ## 用户原话
  *
@@ -31,7 +31,7 @@ const CFG_REL = 'logs/__test-quote.yml';
 
 const GROUP = '200000001'; // 1 档 + 在白名单里
 const BOT = '10000002'; // 机器人自己
-const HZY = '10000001'; // 别人（服主）
+const <主人> = '10000001'; // 别人（服主）
 const OTHER = '10000003'; // 另一个群友
 
 // ⚠️ 配置必须在 import `src/*` **之前**写好（`config.js` 是加载时读的）
@@ -39,7 +39,7 @@ writeFileSync(
   join(ROOT, CFG_REL),
   [
     'llm:',
-    '  baseURL: http://127.0.0.1:1/v1',
+    '  baseURL: http://203.0.113.10:1/v1',
     '  apiKey: "sk-test"',
     '  model: t',
     'trigger:',
@@ -53,7 +53,7 @@ writeFileSync(
     '  quoteAfterGap: 4',
     'context:',
     '  enable: true',
-    'ownerQQ: "' + HZY + '"',
+    'ownerQQ: "' + <主人> + '"',
     '',
   ].join('\n'),
   'utf8',
@@ -152,7 +152,7 @@ console.log('\n【5】★★ 引用 + @ 别的群友 → 仍然不接（@ 别人
 }
 
 console.log('\n【6】★★ 引用条件：她上次说话隔 ≥4 条 **且** 要回的那条不紧挨着她');
-console.log('        （HZY 2026-09-15 晚截图抓的 bug：「相邻消息引用了」）');
+console.log('        （<主人> 2026-09-15 晚截图抓的 bug：「相邻消息引用了」）');
 {
   const b = botWith(['9001']);
   /**
@@ -259,7 +259,7 @@ console.log('\n【8】★★ 阈值可关（`chat.quoteAfterGap: 0`）+ 调用�
   cfg.chat.quoteAfterGap = old;
   check(b.shouldQuote(ev(), true) === true, '★ 调用方要求引用时照旧引用（老语义没变）');
   // ⚠️ 私聊不受这条影响（私聊没有"群里刷过去了"这个问题）
-  const priv = { message_type: 'private', user_id: HZY, self_id: BOT, message: [textSeg('在吗')], sender: { nickname: 'HZY' } };
+  const priv = { message_type: 'private', user_id: <主人>, self_id: BOT, message: [textSeg('在吗')], sender: { nickname: '<主人>' } };
   check(recent.messagesSinceBotLast('') === -1, '★ 私聊那个桶是空的（-1 = 不知道）');
   check(b.shouldQuote(priv) === false, '★★ 私聊**不**因为这条去引用（只管群里）');
   recent.clearAll();
@@ -284,7 +284,7 @@ console.log('\n【10】★★ 余额见底那条提醒的 @ **不许动**（用�
     /at: c\.tier === 'critical' \? config\.ownerQQ : ''/.test(src),
     '★★ 见底档（<2 元）照旧 @ 服主（`at: c.tier === \'critical\' ? config.ownerQQ : \'\'`）',
   );
-  check(/atName: 'HZY'/.test(src), '★ 而且带上了 atName（QQ 客户端才显示得对）');
+  check(/atName: '<主人>'/.test(src), '★ 而且带上了 atName（QQ 客户端才显示得对）');
   check(
     /偏低档不 @/.test(src),
     '★★ 而且**只有见底档 @**：偏低档（现在按用户要求关掉了，代码留着）不 @',
@@ -300,7 +300,7 @@ console.log('\n【11】★ 新路不受触发冷却影响（和 @ 她一样是�
   );
 }
 
-console.log('\n【12】★★ 正文里**点名叫她** → 也算召唤（HZY：「明确提到祥子的没有回复」）');
+console.log('\n【12】★★ 正文里**点名叫她** → 也算召唤（<主人>：「明确提到祥子的没有回复」）');
 {
   const b = botWith([]);
   // ① 就是用户报的那一句
@@ -332,7 +332,7 @@ console.log('\n【12】★★ 正文里**点名叫她** → 也算召唤（HZY�
     '★★ 3 档群（只认 @）里，正文点名叫她**也照样回**（和 @ 同级）',
   );
   // ⑦ 私聊不受影响（私聊本来就回）
-  const priv = { message_type: 'private', user_id: HZY, self_id: BOT, message: [textSeg('祥子')], sender: { nickname: 'HZY' } };
+  const priv = { message_type: 'private', user_id: <主人>, self_id: BOT, message: [textSeg('祥子')], sender: { nickname: '<主人>' } };
   check(b.decide(priv)?.hit === 'private', '★ 私聊还是 private（不走这条）');
   // ⑧ 名字表可配（config.trigger.callNames）
   const cfg2 = (await import('../src/config.js')).config;

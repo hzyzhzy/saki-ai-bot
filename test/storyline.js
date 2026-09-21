@@ -65,14 +65,14 @@ const server = createServer((req, res) => {
     res.end(JSON.stringify({ choices: [{ message: { content: nextReply } }] }));
   });
 });
-await new Promise((r) => server.listen(0, '127.0.0.1', r));
+await new Promise((r) => server.listen(0, '203.0.113.10', r));
 const PORT = server.address().port;
 
 writeFileSync(
   join(ROOT, CFG_REL),
   [
     'llm:',
-    `  baseURL: http://127.0.0.1:${PORT}/v1`,
+    `  baseURL: http://203.0.113.10:${PORT}/v1`,
     '  apiKey: "sk-test"',
     '  model: t',
     'storyline:',
@@ -375,7 +375,7 @@ console.log('\n【12】★★ JSON 容错：裸换行 / 围栏 / 客套话，都
 }
 
 // ─────────────────────────────────────────────────────────────
-console.log('\n【★】★★ 分群：A 群的条目绝不许串到 B 群（HZY：「知识库调用时一定要分清」）');
+console.log('\n【★】★★ 分群：A 群的条目绝不许串到 B 群（<主人>：「知识库调用时一定要分清」）');
 {
   const A = '200000001';
   const B = '200000002';

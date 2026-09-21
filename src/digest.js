@@ -17,6 +17,7 @@ import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from '
 import { join } from 'node:path';
 import { config, ROOT } from './config.js';
 import { log } from './log.js';
+import * as persona from './persona.js';
 
 const STATE_DIR = join(ROOT, 'state');
 // ⚠️ 路径可以用环境变量覆盖 —— **给测试用**（2026-09-14 加）。
@@ -107,7 +108,7 @@ export function note(event, parsed = {}, isInteresting = null) {
  * 为什么必须收：素材库原来**只收群友说的** ✗ —— 于是发说说的时候，
  * 她只看到「有人问我回滚点是什么」，**看不到那句话是她自己先说的** ✗，
  * 结果发了一条「有人问我回滚点是什么。……我说过这个词吗。」
- * （HZY 的原话：「她自己造的这个词自己居然还不知道自己说过了」）
+ * （<主人> 的原话：「她自己造的这个词自己居然还不知道自己说过了」）
  *
  * 所以：她在群里说的话也进素材（标上"你自己"），发说说 / 汇总时才不会
  * 把自己的话当成别人的、或者怀疑自己的记忆。
@@ -124,7 +125,7 @@ export function noteBot(groupId, text) {
   if (t.length < (config.qzone?.minChars ?? 4)) return;
   if (t.length > 400) return;
   if (/^[\s\d.、，,。!！?？~～h]+$/i.test(t)) return;
-  items.push({ name: '祥子', userId: '__self__', self: true, groupId: gid, text: t, time: Date.now() });
+  items.push({ name: persona.narrativeName(), userId: '__self__', self: true, groupId: gid, text: t, time: Date.now() });
   const maxAge = config.qzone?.windowMs ?? 12 * 3600 * 1000;
   const now = Date.now();
   items = items.filter((m) => now - m.time < maxAge).slice(-MAX_ITEMS);

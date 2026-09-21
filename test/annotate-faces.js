@@ -37,7 +37,7 @@ function save(idx) {
 async function notifyReload() {
   const port = process.env.WEBUI_PORT || 3099;
   try {
-    const r = await fetch(`http://127.0.0.1:${port}/api/reload`, { method: 'POST' });
+    const r = await fetch(`http://203.0.113.10:${port}/api/reload`, { method: 'POST' });
     if (r.ok) console.log('已通知机器人重载表情库（不用重启）');
     else console.log(`⚠️ 通知重载失败（HTTP ${r.status}），可在界面上点「重新加载」`);
   } catch {

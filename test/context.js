@@ -3,7 +3,7 @@
  *
  * ⚠️ 为什么要有它（2026-09-13 用户截图）：
  *    群里先说「心上江渡轮站那个入口太像**足球门**了」，
- *    隔了几分钟 HZY 问「准备改成什么球门」，
+ *    隔了几分钟 <主人> 问「准备改成什么球门」，
  *    机器人答「……**什么球门，你要改哪个**」——**它没看到前面那条**。
  *
  *    根因：`recent.js` 的 `remember()` 存的时候就**按时间裁**
@@ -83,7 +83,7 @@ console.log('\n【1】★ 时间久一点的消息也要看得到（用户截图
       `注入偏移 2 小时，缓冲区里现有 ${(recent.__storeForTest().get(G) ?? []).length} 条`,
   );
 
-  say(G, 'HZY', '10000001', '准备改成什么球门');
+  say(G, '<主人>', '10000001', '准备改成什么球门');
   const txt2 = recent.contextText(G, '准备改成什么球门', []);
   check(txt2.includes('足球门'), '问「改成什么球门」时，前面那条**仍然在**');
   check(!txt2.includes('准备改成什么球门'), '当前这句不会重复出现在上下文里');
@@ -107,7 +107,7 @@ console.log('\n【2】窗口是**按条数**的（maxMessages）');
 console.log('\n【3】自己发的要标出来，且自称是 Saki');
 {
   recent.clearAll();
-  say(G, 'HZY', '10000001', '你工资多少');
+  say(G, '<主人>', '10000001', '你工资多少');
   recent.rememberBot(
     { message_type: 'group', group_id: G, user_id: '10000002', sender: { nickname: 'saki' } },
     '1850，就这点。',

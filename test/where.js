@@ -28,7 +28,7 @@ const check = (ok, label, extra = '') => {
 
 writeFileSync(
   join(ROOT, CFG_REL),
-  ['llm:', '  baseURL: http://127.0.0.1:1/v1', '  apiKey: "sk-test"', '  model: t', ''].join('\n'),
+  ['llm:', '  baseURL: http://203.0.113.10:1/v1', '  apiKey: "sk-test"', '  model: t', ''].join('\n'),
   'utf8',
 );
 process.env.QQBOT_CONFIG = CFG_REL;

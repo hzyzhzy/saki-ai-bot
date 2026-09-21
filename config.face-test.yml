@@ -1,12 +1,12 @@
 # 仅用于表情包功能测试，由 test/face.js 通过 QQBOT_CONFIG 加载。
 onebot:
   mode: forward
-  url: ws://127.0.0.1:39601
+  url: ws://203.0.113.10
   accessToken: "face-token"
   reconnectInterval: 300
 
 llm:
-  baseURL: http://127.0.0.1:39602/v1
+  baseURL: http://203.0.113.10/v1
   apiKey: "sk-test-fake-key"
   model: test-model
   temperature: 0

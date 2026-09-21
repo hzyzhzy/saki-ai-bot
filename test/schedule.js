@@ -37,7 +37,7 @@ writeFileSync(
   join(ROOT, CFG_REL),
   [
     'llm:',
-    '  baseURL: http://127.0.0.1:1/v1',
+    '  baseURL: http://203.0.113.10:1/v1',
     '  apiKey: "sk-test"',
     '  model: test-model',
     '',
@@ -118,7 +118,8 @@ console.log('\n【4】★ 提示词里真的注入了（最靠近对话的那一
 
 console.log('\n【5】★ 人设那边也补了（光靠代码不够：模型会编理由）');
 {
-  const persona = readFileSync(join(KNOW, 'persona.md'), 'utf8');
+  // ⚠️ 2026-09-21：人设的 md 搬到了 `personas/<id>/`（见 personas/README.md）
+  const persona = readFileSync(join(ROOT, 'personas', 'saki', 'persona.md'), 'utf8');
   check(/别演串的四件事/.test(persona), '★ 人设写的是"四件事"（原来三件）');
   check(/坐了一天/.test(persona), '★ 那条硬规矩在：不许说"一整天都在客服室/坐了一天"');
   check(/凭空|没放假就别说放假/.test(persona), '★ 也不许凭空放假');

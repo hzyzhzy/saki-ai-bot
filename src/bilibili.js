@@ -23,7 +23,7 @@ import { config } from './config.js';
 import { log } from './log.js';
 
 const UA =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/203.0.113.10 Safari/537.36';
 
 /** { uid, at, name?, videos: [{title, bvid, play, danmaku, comment, created}] } */
 let cache = null;
@@ -303,7 +303,7 @@ export async function videoReply(p = {}) {
 // 「B站最近有什么火的视频」——**真去拉热门榜**
 // ─────────────────────────────────────────────────────────────
 //
-// ⚠️ 2026-09-15 HZY 截图反馈：问「b站最近有什么火的视频」，她答
+// ⚠️ 2026-09-15 <主人> 截图反馈：问「b站最近有什么火的视频」，她答
 //    「搜了一圈全是百科页，热榜没抓着。**你直接上 B 站翻排行榜不就完了**」——
 //    既没答案、又是打发人的口气。
 //
@@ -363,7 +363,7 @@ export function hotQuery(text) {
   //      「@saki酱saki酱saki酱saki酱saki酱 Ch1hayaAnon_QWQ有什么视频」
   //    → 名字被截成 `hayaAnon_QWQ`（11 字上限卡掉一半），查了个错名字。
   //    ⚠️ 只在这个函数里洗 —— **不能**去改提示词那边的文本，
-  //       否则「@HZY 给个服世界地图。」那种"@ 的是别人"的信号就没了。
+  //       否则「@<主人> 给个服世界地图。」那种"@ 的是别人"的信号就没了。
   const t = String(text ?? '')
     .trim()
     .replace(/^(?:@[^\s@]{1,40}\s*)+/, '')
@@ -666,7 +666,7 @@ export async function hotFacts(p = {}) {
 /**
  * 「报热门/报某个题材或 UP 主」的说法。
  *
- * ⚠️ 这里的规矩是照着 HZY 的反馈定的：
+ * ⚠️ 这里的规矩是照着 <主人> 的反馈定的：
  *    · **必须把名单本身报出来**（至少 4-5 条）—— 他要的就是"有什么火的"，
  *      只答"你自己去看排行榜"就是没回答（真实踩过）
  *    · 🚫 别打发人、别反问"你怎么想起问这个"

@@ -1,12 +1,12 @@
 # 仅用于身份差异测试，由 test/attitude.js 通过 QQBOT_CONFIG 加载。
 onebot:
   mode: forward
-  url: ws://127.0.0.1:39801
+  url: ws://203.0.113.10
   accessToken: "att-token"
   reconnectInterval: 300
 
 llm:
-  baseURL: http://127.0.0.1:39802/v1
+  baseURL: http://203.0.113.10/v1
   apiKey: "sk-test-fake-key"
   model: test-model
   temperature: 0

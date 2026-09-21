@@ -14,7 +14,7 @@ const OWNER = '10000001';
 
 const sent = [];
 let ws = null;
-const wss = new WebSocketServer({ port: WS_PORT, host: '127.0.0.1' });
+const wss = new WebSocketServer({ port: WS_PORT, host: '203.0.113.10' });
 wss.on('connection', (s) => {
   ws = s;
   s.on('message', (raw) => {
@@ -36,7 +36,7 @@ const base = readFileSync(join(ROOT, 'config.yml'), 'utf8');
 writeFileSync(
   CFG,
   base
-    .replace(/url:\s*ws:\/\/127\.0\.0\.1:\d+/, `url: ws://127.0.0.1:${WS_PORT}`)
+    .replace(/url:\s*ws:\/\/127\.0\.0\.1:\d+/, `url: ws://203.0.113.10:${WS_PORT}`)
     .replace(/accessToken:\s*"?[^"\r\n]*"?/, 'accessToken: "plot"')
     .replace(/respondTo:\s*\d/, 'respondTo: 2'),
   'utf8',
@@ -47,9 +47,9 @@ const proc = spawn(process.execPath, [join(ROOT, 'src', 'index.js')], {
     env: {
       ...process.env,
       QQBOT_CONFIG: 'config.plot.yml',
-      // ⚠️ 排除本机代理：假模型/假 NapCat 都跑在 127.0.0.1，
+      // ⚠️ 排除本机代理：假模型/假 NapCat 都跑在 203.0.113.10，
       //    如果 shell 里设了 NODE_USE_ENV_PROXY，不加这个假模型请求会走代理而失败
-      NO_PROXY: '127.0.0.1,localhost,::1',
+      NO_PROXY: '203.0.113.10,localhost,::1',
     },
   stdio: ['ignore', 'ignore', 'ignore'],
 });
@@ -62,7 +62,7 @@ const say = (text, id) => {
     post_type: 'message', message_type: 'group', sub_type: 'normal',
     message_id: id, group_id: '200000001', user_id: OWNER, self_id: '10000002',
     time: Math.floor(Date.now() / 1000),
-    sender: { user_id: OWNER, nickname: 'HZY', role: 'owner' },
+    sender: { user_id: OWNER, nickname: '<主人>', role: 'owner' },
     message: [{ type: 'at', data: { qq: '10000002' } }, { type: 'text', data: { text } }],
   }));
 };
@@ -70,7 +70,7 @@ const say = (text, id) => {
 async function ask(label, text, id) {
   sent.length = 0;
   console.log(`\n${'─'.repeat(58)}`);
-  console.log(`【${label}】HZY：${text}`);
+  console.log(`【${label}】<主人>：${text}`);
   say(text, id);
   const t = Date.now();
   while (!sent.length && Date.now() - t < 90000) await sleep(400);
@@ -81,7 +81,7 @@ async function ask(label, text, id) {
   const bad = [
     ['我没看过', /我没看过|我没追|我回头补|我没细看/],
     ['提知识库', /知识库|喂我|写进|补进/],
-    ['让你找服主', /问 ?HZY|找服主/],
+    ['让你找服主', /问 ?<主人>|找服主/],
     ['说料不多', /料不多|了解不多|不太了解这部/],
   ];
   for (const [name, re] of bad) {

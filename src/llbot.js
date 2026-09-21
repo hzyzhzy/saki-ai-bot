@@ -42,7 +42,7 @@ const FRESH_MS = 3 * 60 * 1000;
  * 「LLBot 已经停止出码了」的统一话术（后端 409 和界面提示共用一份，免得两边说法不一致）。
  */
 export const STOPPED_HINT =
-  'LLBot 已经停止自动出码了（它连出 10 张没人扫就会停）—— 打开 LLBot 自己的界面 http://127.0.0.1:3081，在登录页点「刷新」；或者重启 LLBot';
+  'LLBot 已经停止自动出码了（它连出 10 张没人扫就会停）—— 打开 LLBot 自己的界面 http://203.0.113.10，在登录页点「刷新」；或者重启 LLBot';
 
 /** LLBot 的安装目录：优先 `provider.dir`，否则用这台机器上的实际位置 */
 function llbotDir() {

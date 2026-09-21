@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { dirname, join, isAbsolute } from 'node:path';
 import yaml from 'js-yaml';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -34,8 +34,30 @@ export const CONFIG_FILE = process.env.QQBOT_CONFIG
  *    以前那个路径在 9 个文件里各写了一遍，加隔离时漏一个就等于没隔离。
  */
 export const KNOWLEDGE_DIR = process.env.QQBOT_KNOWLEDGE_DIR
-  ? join(ROOT, process.env.QQBOT_KNOWLEDGE_DIR)
-  : join(ROOT, 'knowledge');
+  ? join(ROOT, process.env.QQBOT_KNOWLEDGE_DIR)  : join(ROOT, 'knowledge');
+
+/**
+ * ⚠️ 2026-09-21 加：**人设包目录**（`personas/<id>/`）。
+ *
+ * 为什么放在 config.js：`knowledge.js` 要按人设选 anime 库、`persona.js` 要读
+ * `identity.json` —— 两边都需要这个路径，而它们**不能互相依赖**（会成环）。
+ * 纯路径计算，放最底层最合适。
+ *
+ * ⚠️ **不要缓存**：`persona.id` 是可以在界面上热切换的，缓存住就换不动了。
+ * ⚠️ `id` 做白名单校验（只允许字母数字点横线）—— 它从配置来，
+ *    不能让一个 `../` 把读取带出项目目录。
+ * ⚠️ `QQBOT_PERSONA_DIR` 让测试把整个人设包搬走；**绝对路径直接用**，
+ *    相对路径按项目根解析（两种写法测试里都有人用，别拼出 `C:\x\C:\y` 那种怪东西）。
+ */
+export function personaId() {
+  const raw = String(config?.persona?.id ?? 'saki').trim();
+  return /^[\w.-]+$/.test(raw) ? raw : 'saki';
+}
+export const personaDir = () => {
+  const env = process.env.QQBOT_PERSONA_DIR;
+  if (env) return isAbsolute(env) ? env : join(ROOT, env);
+  return join(ROOT, 'personas', personaId());
+};
 
 /**
  * 「**有限数才认**」的取值 —— 配置里读数字**一律用它**，别写 `Number(x) || 默认值`。
@@ -44,7 +66,7 @@ export const KNOWLEDGE_DIR = process.env.QQBOT_KNOWLEDGE_DIR
  *   · `Number(undefined) ?? 默认值` —— `??` 只挡 null/undefined，**挡不住 NaN**
  *     （`friend.dailyChance` 就是这么算成 `null` 的）
  *   · `Number(0) || 默认值` —— **`0` 会被当成"没填"**
- *     （`quest.affinityBad: 0` 被悄悄改成 `1`；HZY 想要"坏结局掉好感度"，
+ *     （`quest.affinityBad: 0` 被悄悄改成 `1`；<主人> 想要"坏结局掉好感度"，
  *      结果配了个 0 反而变成 +1。见下面的 `affinityBad`。）
  */
 const nz = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
@@ -56,7 +78,7 @@ let __explicit = {};
 const DEFAULTS = {
   onebot: {
     mode: 'forward',
-    url: 'ws://127.0.0.1:3001',
+    url: 'ws://203.0.113.10',
     accessToken: '',
     reconnectInterval: 3000,
   },
@@ -127,7 +149,7 @@ const DEFAULTS = {
   /** NapCat 自己的管理接口（看 QQ 登录状态、出二维码） */
   napcat: {
     enable: true,
-    webuiHost: '127.0.0.1',
+    webuiHost: '203.0.113.10',
     webuiPort: 6099,
     /** 留空则自动从 napcat/NapCat.Shell/config/webui.json 读 */
     webuiToken: '',
@@ -149,6 +171,21 @@ const DEFAULTS = {
    *    NapCat 自定义许可**禁止商用**；LLBot 是 GPL-2.0（可商用，但**分发**要带源码）；
    *    真正"官方许可"的只有 QQ 开放平台 / 企业微信。
    */
+  /**
+   * ⚠️ 2026-09-21 加：**用哪个人设包**（`personas/<id>/`）。
+   *
+   * 人设相关的 md（persona.md / persona-money.md / persona-media.md / voices.md）
+   * 从 `personas/<id>/` 读；`knowledge/` 只剩"所有角色共用"的那些
+   * （服务器库、群记忆、owner、learned、anime…）。
+   * ⇒ **换人设 = 改这一个值**，别的都不用动。
+   *
+   * ⚠️ 不写就是 `saki`（老配置不受影响）。
+   * ⚠️ 这里的值会被 `knowledge.js` 做白名单校验（只允许字母数字点横线），
+   *    免得一个 `../` 把它带出项目目录。
+   */
+  persona: {
+    id: 'saki',
+  },
   provider: {
     /** napcat | llonebot | snowluma | onebot（通用：只保证 OneBot 收发） */
     name: 'napcat',
@@ -357,7 +394,7 @@ const DEFAULTS = {
   },
   webui: {
     enable: true,
-    host: '127.0.0.1',
+    host: '203.0.113.10',
     port: 3099,
   },
   logLevel: 'info',
@@ -417,7 +454,7 @@ function load() {
   //
   // 优先级：**命令行参数 > 环境变量 > config.yml**（越临时的越优先）。
   // 两种写法都行：
-  //   node src/index.js --onebot-url ws://127.0.0.1:3001 --onebot-token abc --bot-qq 123456
+  //   node src/index.js --onebot-url ws://203.0.113.10 --onebot-token abc --bot-qq 123456
   //   QQBOT_ONEBOT_URL=… QQBOT_ONEBOT_TOKEN=… QQBOT_BOT_QQ=… node src/index.js
   //
   // ⚠️ **只覆盖这三项** —— 别把它扩成"通用配置通道"：那样 config.yml 会失去意义，
@@ -909,7 +946,7 @@ function load() {
   /** 一次都没人回时，最多自动续几段就收尾 */
   cfg.quest.coldAutoLimit = Math.max(0, Number(cfg.quest.coldAutoLimit) ?? 1);
   /**
-   * 「群友哪句话能改变剧情」的宽严档（HZY 2026-09-15：「标准再放宽一点」）。
+   * 「群友哪句话能改变剧情」的宽严档（<主人> 2026-09-15：「标准再放宽一点」）。
    *   strict = 只认 @她/回她/明显建议
    *   normal = 再加"对着她问的句子"（默认）
    *   loose  = 再加"任何 6 字以上、不是纯起哄"的发言
@@ -920,7 +957,7 @@ function load() {
   /**
    * 结局对好感度的影响。
    *
-   * ⚠️⚠️ 2026-09-15 HZY 拍板：**坏结局要「掉」好感度**（负数）。
+   * ⚠️⚠️ 2026-09-15 <主人> 拍板：**坏结局要「掉」好感度**（负数）。
    *    「我一开始是想坏结局要掉好感度的，然后下一个二级事件的开头
    *      可以直接参考坏结局剧情，就可以进行挽回了。」
    *
@@ -951,7 +988,7 @@ function load() {
    * 一开始我给了 6 小时（想的是"剧情是连续的故事线，晚点送到也看得懂"），
    * 但 2026-09-15 被现实打脸：通道坏掉时排进待发箱的那几句，
    * 在一两个小时后才发出去 —— 而那时**那条剧情已经结束了**（甚至已经被丢掉了），
-   * 群里看着就是"凭空冒出两句没头没尾的话"（HZY 截图反馈「说话有点没头没尾」）。
+   * 群里看着就是"凭空冒出两句没头没尾的话"（<主人> 截图反馈「说话有点没头没尾」）。
    *
    * 所以收成 **1 小时**：够覆盖"通道抖一下/机器人重启一下"，
    * 又不会把半条旧剧情拖到下一个时段去。想放宽就改这个值。
@@ -978,7 +1015,7 @@ function load() {
   /** 两次请求之间至少隔多久（重启 = 一次登录，别把风控喂饱） */
   cfg.napcatRecover.throttleMs = Math.max(60000, nz(cfg.napcatRecover.throttleMs, 30 * 60 * 1000));
 
-  // ── 分群参数覆盖（2026-09-15 HZY：「参数也可以分群设定」）────────────
+  // ── 分群参数覆盖（2026-09-15 <主人>：「参数也可以分群设定」）────────────
   //
   // 形状：`groupParams: { "<群号>": { life: {...}, quest: {...}, chat: {...} } }`
   //   · 只写**要覆盖的那几项**，没写的自动用全局那套（见 `paramsFor()`）
@@ -1111,7 +1148,7 @@ function load() {
   // ── 好感度（2026-09-14 用户要求）──────────────────────
   // 「加一个机器人对这个人的好感度，类似 galgame 的，默认 50，最小 0 最大 100。
   //   但是其中优先级是低于我和机器人的特殊关系的。」
-  // ⚠️ 它**管不到**对 HZY 的态度 —— 见 src/affinity.js 顶部铁律①。
+  // ⚠️ 它**管不到**对 <主人> 的态度 —— 见 src/affinity.js 顶部铁律①。
   cfg.affinity ??= {};
   cfg.affinity.enable = cfg.affinity.enable !== false;
   /** 好感度到多少算「可以加好友了」 */
@@ -1156,7 +1193,7 @@ function load() {
   cfg.attitude.denyBeingBot = cfg.attitude.denyBeingBot !== false;
 
   cfg.webui.enable = cfg.webui.enable !== false;
-  cfg.webui.host = String(cfg.webui.host ?? '127.0.0.1');
+  cfg.webui.host = String(cfg.webui.host ?? '203.0.113.10');
   cfg.webui.port = Math.max(1, Number(cfg.webui.port) || 3099);
 
   return cfg;

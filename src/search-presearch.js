@@ -22,6 +22,7 @@
  */
 import { config } from './config.js';
 import { log } from './log.js';
+import * as persona from './persona.js';
 import { search, searchBlock, looksInternal } from './search.js';
 import { readFromResults } from './page-reader.js';
 
@@ -107,11 +108,12 @@ function looksLikeSelfLore(t) {
     /(说过话|聊过|认识|见过|熟|同团|队友|成员|乐队|退团|解散|关系|前辈|后辈|剧情|设定|动画里|手游里|原作|第一季|第二季|第三季)/.test(
       s,
     );
-  // ③ 提到企划里的人物/乐队名（从 anime.md 那份表里也覆盖得到）
+  // ③ 提到企划里的人物/乐队名 —— 名单来自**人设**（`identity.anime.keywords`）。
+  //    ⚠️ 2026-09-21 改：原来整串写死在这条正则里，换成人设包驱动。
+  //    另外补上她**自己的名字**（原正则里那个「祥子」）—— 那也是在说企划里的人。
+  const kw = [...persona.animeKeywords(), persona.narrativeName()].filter(Boolean);
   const franchise =
-    /(邦邦|BanG|香澄|户山|MyGO|高松灯|Ave Mujica|Mujica|梦限大|ゆめみた|Poppin|破琵琶|祥子|睦|若麦|初华|海铃|乐奈|素世|立希|爱音)/i.test(
-      s,
-    );
+    kw.length > 0 && new RegExp(kw.map((x) => persona.escapeRe(x)).join('|'), 'i').test(s);
 
   // ⚠️⚠️ ④ **用外号在第三人称提她**（2026-09-13 补的真 bug）。
   //
@@ -197,7 +199,7 @@ export async function preSearch(text, context = '', opts = {}) {
 
   // ⚠️⚠️ 「关于小祥自己 / 她跟别人的关系」的问题**一律不搜**（2026-09-12 加）。
   //
-  //    真实踩过：HZY 问「你和她（户山香澄）说过话吗」，
+  //    真实踩过：<主人> 问「你和她（户山香澄）说过话吗」，
   //    系统去搜「户山香澄 丰川祥子 说过话 关系」→ Bing 解析不到、百度弹验证码，
   //    全失败 → 机器人回了一堆「这我真不确定」「说不准」「我没查到」。
   //
