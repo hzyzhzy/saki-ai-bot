@@ -84,9 +84,69 @@ console.log('\n【3】上限常量在（用户 2026-09-21 定的「限长」）'
   );
 }
 
+console.log('\n【4】★★ 模板字段清单（"按模板填"的唯一依据 —— 模板漏字段，起草就永远填不出来）');
+{
+  const tpl = pd.templateIdentity();
+  check(Object.keys(tpl).length > 0, '读得到 `_template/identity.json`');
+  // ⚠️⚠️ 这几个是 2026-09-22 **实测漏过的**：模板里没有 ⇒ 联网起草根本填不出来
+  for (const k of ['shortName', 'narrativeName', 'qq', 'voices']) {
+    check(k in tpl, `★★ 模板里有 \`${k}\`（曾经漏过）`, k in tpl ? '' : '⚠️ 又漏了');
+  }
+  const promptKeys = [
+    'personaLine',
+    'styleLine',
+    'quickAside',
+    'spokenNames',
+    'attributionTone',
+    'followUpLine',
+    'castNames',
+    'questHomeDirs',
+    'questPastThreads',
+    'questOtherGroups',
+  ];
+  const miss = promptKeys.filter((k) => !(k in (tpl.prompt || {})));
+  check(miss.length === 0, '`prompt` 段里 10 个键都在', miss.length ? `少了：${miss.join('、')}` : '');
+  const arrMiss = ['selfNames', 'callNames', 'nicknames', 'matchNames'].filter((k) => !Array.isArray(tpl[k]));
+  check(arrMiss.length === 0, '四个"名字数组"都在', arrMiss.length ? `少了：${arrMiss.join('、')}` : '');
+  check(!!tpl.anime && Array.isArray(tpl.anime.works), '`anime.works` 在');
+  check(!!tpl.qq && 'nickname' in tpl.qq && 'avatar' in tpl.qq, '`qq` 段有 nickname / avatar');
+}
+
+console.log('\n【5】★ 动画库选项的校验（全部要在**联网之前**拦住）');
+{
+  let threw = '';
+  try {
+    await pd.draft({ name: 'x', id: 'abc', animeMode: 'reuse', animeLib: '根本不存在的库' });
+  } catch (e) {
+    threw = e.message;
+  }
+  check(/不存在/.test(threw), '★ 「复用」一个不存在的库被拒', threw);
+
+  const libs = pd.availableAnimeLibs();
+  if (libs.length) {
+    threw = '';
+    try {
+      await pd.draft({ name: 'x', id: 'abc', animeMode: 'new', animeName: libs[0] });
+    } catch (e) {
+      threw = e.message;
+    }
+    check(/已经存在/.test(threw), '★ 「新建」一个已存在的库名被拒（提示去选"复用"）', threw);
+  } else {
+    check(true, '（现在一个库都没有，跳过"新建已存在的库"这条）');
+  }
+
+  threw = '';
+  try {
+    await pd.draft({ name: 'x', id: 'abc', animeMode: 'new', animeName: '  ' });
+  } catch (e) {
+    threw = e.message;
+  }
+  check(/名字/.test(threw), '★ 「新建」但没给库名被拒', threw);
+}
+
 console.log(
   failures === 0
-    ? '\n结果: 全部通过 ✅（动画库清单 / 联网前校验 / 字数上限）\n'
+    ? '\n结果: 全部通过 ✅（动画库清单 / 联网前校验 / 字数上限 / 模板字段齐全）\n'
     : `\n结果: ${failures} 项失败 ❌\n`,
 );
 process.exit(failures === 0 ? 0 : 1);

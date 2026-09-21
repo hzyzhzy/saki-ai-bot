@@ -172,14 +172,29 @@ console.log('\n【5】写文档 + 新建 + 删除');
   check(made.id === 'beta', '新建了 beta');
   const bi = JSON.parse(readFileSync(join(ROOT, POOL, 'beta', 'identity.json'), 'utf8'));
   check(bi.id === 'beta', '★★ 新包的 id 是**新目录名**（照抄模板会把 `miku` 带进来）', String(bi.id));
+  // ⚠️ 2026-09-22 改：现在是**整包复制** —— `_template` 里有 persona.md 就带过来，
+  //    只有源包**没有**的文档才写骨架。（旧行为是"永远写骨架"，那根本不叫复刻。）
   check(
-    existsSync(join(ROOT, POOL, 'beta', 'persona.md')) && existsSync(join(ROOT, POOL, 'beta', 'voices.md')),
-    '★ 骨架里的 persona.md / voices.md 都生成了（没模板文件也得有骨架）',
+    readFileSync(join(ROOT, POOL, 'beta', 'persona.md'), 'utf8').includes('模板人设'),
+    '★ 源包里的 persona.md 被**复制**过来了（不是无视它去写骨架）',
   );
   check(
-    readFileSync(join(ROOT, POOL, 'beta', 'persona.md'), 'utf8').includes('一、你是谁'),
-    '骨架是"带小标题的空架子"，不是一个空文件',
+    readFileSync(join(ROOT, POOL, 'beta', 'voices.md'), 'utf8').includes('示例对话'),
+    '★ 源包**没有**的文档才写骨架（beta 的 voices.md 是骨架）',
   );
+  check(bi.name === '', '★ 从 `_template` 复制时，说明性的名字被清掉', JSON.stringify(bi.name));
+
+  // ★★ 2026-09-22 加：从**真实角色**复制 = 完整副本（这才是这个下拉框最常用的用法）
+  {
+    pa.createPack('gamma', 'alpha');
+    const gdir = join(ROOT, POOL, 'gamma');
+    check(existsSync(join(gdir, 'prompt', 'guide.md')), '★★ 从真实包复制会带上 `prompt/` 下的长段提示词');
+    check(readFileSync(join(gdir, 'persona.md'), 'utf8').includes('你是阿尔法'), '★★ 也带上了它的人设正文');
+    const gi = JSON.parse(readFileSync(join(gdir, 'identity.json'), 'utf8'));
+    check(gi.id === 'gamma', '★ 但 `id` 换成了新目录名');
+    check(gi.name === '阿尔法', '★ 名字**保留**（从真实角色复制时不清空 —— 用户想要的是"另一个它"）');
+    pa.removePack('gamma');
+  }
 
   let threw = '';
   try {

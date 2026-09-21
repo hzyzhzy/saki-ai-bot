@@ -235,6 +235,16 @@
   button.danger{background:transparent;border:1px solid var(--err);color:var(--err);
     padding:6px 12px;border-radius:7px;cursor:pointer}
   .btns{display:flex;gap:10px;align-items:center;margin-top:16px;flex-wrap:wrap}
+  /* ⚠️ 2026-09-21 加：人设页那几组"标签在上、输入框在下"的字段。
+     为什么要这三个类：原来用 `.row` + `label>&nbsp;` 硬凑，结果
+     输入框宽窄不一、按钮跟输入框**基线对不齐**，一屏看着很乱。
+     · `.flds` 横向排一组、**底部对齐**（按钮和输入框底部一条线）
+     · `.fld`  一个字段：标签上、控件下
+     · `.grp`  组标题（同一张卡片里分几段用） */
+  .flds{display:flex;gap:14px;flex-wrap:wrap;align-items:flex-end;margin-top:10px}
+  .fld{display:flex;flex-direction:column;gap:4px;min-width:200px}
+  .fld>label{margin:0}
+  .grp{font-weight:600;font-size:14px;margin:16px 0 0;color:var(--text)}
   .msg{font-size:13px;padding:7px 12px;border-radius:7px;display:none;white-space:pre-wrap}
   .msg.show{display:inline-block}
   .msg.ok{background:rgba(63,185,80,.12);color:var(--ok);border:1px solid rgba(63,185,80,.35)}
@@ -716,63 +726,93 @@
     </div>
 
     <div class="card">
-      <h2>切换 / 新建 / 删除</h2>
-      <div class="row">
-        <div style="flex:2">
+      <h2>切换人设</h2>
+      <p class="hint">
+        换角色 = 换这一整个包：名字 / 自称 / 外号 / 口癖 / 人设正文 / 示例对话 /
+        读哪几个动画库 / QQ 昵称头像。<b>切换和保存都不用重启机器人</b>。
+      </p>
+      <div class="flds">
+        <div class="fld" style="flex:1;min-width:260px">
           <label>切到哪个人设包</label>
           <select id="p-pick" onchange="personaPickChange()"></select>
         </div>
-        <div style="flex:1">
-          <label>&nbsp;</label>
-          <button class="act" onclick="personaSwitch()">切到这个</button>
-        </div>
+        <button class="act" onclick="personaSwitch()">切到这个</button>
       </div>
-      <p class="hint" id="p-pick-hint" style="margin-top:6px"></p>
+      <p class="hint" id="p-pick-hint" style="margin-top:8px"></p>
+      <div class="btns"><span class="msg" id="msg-p-switch"></span></div>
+    </div>
 
-      <div class="row" style="margin-top:12px">
-        <div>
-          <label>新建（id：小写字母数字开头）</label>
-          <input id="p-new-id" placeholder="例：miku" style="width:180px">
-        </div>
-        <div>
-          <label>照谁复制</label>
-          <select id="p-new-from" style="width:180px"></select>
-        </div>
-        <div>
-          <label>&nbsp;</label>
-          <button onclick="personaCreate()">新建</button>
-        </div>
-        <div>
-          <label>&nbsp;</label>
-          <button onclick="personaDelete()">删除选中的那个</button>
-        </div>
-      </div>
-      <p class="hint" style="margin-top:8px">
-        ⚠️ 删除是**挪走**（<span class="mono">logs/persona-removed-*</span>，还会留一份 persona.md），
-        不是真销毁；而且**正在用的那个删不了**，先切走。
+    <div class="card">
+      <h2>新建人设</h2>
+      <p class="hint">
+        填 id + 角色名 →「搜集并起草」：联网搜资料，然后**按模板把人设逐字段填满**
+        （每个字段都会给值，填不出来的会留空并**列出来告诉你**）。
+        ⚠️ 结果**先给你看，点了保存才落盘**。
       </p>
 
-      <div class="row" style="margin-top:14px">
-        <div>
-          <label>联网自动填 · 角色名</label>
-          <input id="p-draft-name" placeholder="例：丰川祥子" style="width:180px">
+      <div class="flds">
+        <div class="fld">
+          <label>新的 id（小写字母数字）</label>
+          <input id="p-new-id" placeholder="例：miku">
         </div>
-        <div>
+        <div class="fld">
+          <label>角色名</label>
+          <input id="p-draft-name" placeholder="例：初音未来">
+        </div>
+        <div class="fld">
           <label>出自哪部作品</label>
-          <input id="p-draft-work" placeholder="例：BanG Dream!" style="width:180px">
-        </div>
-        <div>
-          <label>&nbsp;</label>
-          <button class="act" onclick="personaDraftStart()" id="p-draft-btn">搜集并起草</button>
+          <input id="p-draft-work" placeholder="例：VOCALOID">
         </div>
       </div>
-      <p class="hint" style="margin-top:6px">
-        用上面那个 <b>id</b>，联网搜资料 + 让模型起草一份完整人设（一般 30~60 秒）。<br>
-        ⚠️ 结果**先给你看，点了保存才落盘**；不给真人做人设；已有动画库**只读不写**；
-        <span class="mono">persona.md</span> 限 3000 字（它每次请求都进提示词，越长越贵）。
+
+      <div class="flds">
+        <div class="fld">
+          <label>动画库怎么办</label>
+          <select id="p-anime-mode" onchange="onAnimeModeChange()">
+            <option value="none">不用动画库</option>
+            <option value="reuse">复用已有的库（只读，不往里写）</option>
+            <option value="new">新建一个库（把搜到的资料填进去）</option>
+          </select>
+        </div>
+        <div class="fld" id="p-anime-reuse-wrap" style="display:none">
+          <label>复用哪一个</label>
+          <select id="p-anime-lib"></select>
+        </div>
+        <div class="fld" id="p-anime-new-wrap" style="display:none">
+          <label>新库的名字</label>
+          <input id="p-anime-name" placeholder="例：bangdream">
+        </div>
+        <button class="act" onclick="personaDraftStart()" id="p-draft-btn">搜集并起草</button>
+      </div>
+
+      <p class="hint" style="margin-top:10px">
+        ⚠️ 不给真人做人设；<span class="mono">persona.md</span> 限 3000 字（它每次请求都进提示词）。<br>
+        「复用」= 只在她的人设里**声明**引用那份库，**绝不动库里的内容**；
+        「新建」= 才把资料写进 <span class="mono">knowledge/anime/&lt;新库名&gt;.md</span>。
       </p>
-      <div id="p-draft"></div>
       <div class="btns"><span class="msg" id="msg-p"></span></div>
+
+      <div class="grp" style="margin-top:20px">不想联网？建一个空的 / 复刻现成的</div>
+      <div class="flds">
+        <div class="fld">
+          <label>照谁复制</label>
+          <select id="p-new-from"></select>
+        </div>
+        <button class="ghost" onclick="personaCreate()">建一个（id 用上面那个）</button>
+      </div>
+      <div id="p-draft"></div>
+    </div>
+
+    <div class="card">
+      <h2>删除人设</h2>
+      <p class="hint">
+        删除是**挪走**（<span class="mono">logs/persona-removed-*</span>，还会留一份 persona.md），
+        不是真销毁。<br>
+        而且**正在用的那个删不了** —— 先切到别的再删它。
+      </p>
+      <div class="btns">
+        <button class="danger" onclick="personaDelete()">删除「<span id="p-del-name">（上面选中的）</span>」</button>
+      </div>
     </div>
 
     <div class="card">
@@ -4068,6 +4108,14 @@ async function personaRefresh() {
   $('p-new-from').innerHTML = ['_template', ...PJ.packs.map((p) => p.id)]
     .map((x) => `<option value="${x}">${x}</option>`)
     .join('');
+  // 动画库那个下拉：只能从"现在真有的库"里挑（复用模式下）
+  const libs = r.animeLibs || [];
+  $('p-anime-lib').innerHTML = libs.length
+    ? libs.map((x) => `<option value="${x}">${x}</option>`).join('')
+    : '<option value="">（现在一个库都没有）</option>';
+  // ⚠️ 一个库都没有时，"复用"是没法选的 ⇒ 默认跳到"新建"
+  if (!libs.length && $('p-anime-mode').value === 'reuse') $('p-anime-mode').value = 'new';
+  onAnimeModeChange();
   personaPickChange();
   await personaOpen(PJ.current);
   qqProfileRefresh(); // ⚠️ 必须在 personaOpen 之后 —— 它读的是 PJ.identity.qq
@@ -4156,9 +4204,12 @@ function personaPickChange() {
   const p = PJ.packs.find((x) => x.id === id);
   const bits = [];
   if (p) bits.push(`${p.docs} 份文档 · ${(p.chars / 1000).toFixed(1)}K 字`);
-  if (id === PJ.current) bits.push('（**正在用的就是它**）');
+  if (id === PJ.current) bits.push('（正在用的就是它）');
   if (p && p.broken) bits.push(`⚠️ ${p.broken}`);
   $('p-pick-hint').textContent = bits.join('　');
+  // 「删除」那张卡片上的按钮要显示**当前选中哪个** —— 免得点错了还不知道删的是谁
+  const del = $('p-del-name');
+  if (del) del.textContent = id || '（上面选中的）';
 }
 
 /** 打开一个包：拉 identity + 文档清单，渲染表单 */
@@ -4349,19 +4400,26 @@ async function personaSaveIdentity() {
 
 async function personaSwitch() {
   const id = $('p-pick').value;
-  pjShow($('msg-p'), true, '切换中…');
+  // ⚠️ 反馈要显示在**这张卡片里**（`msg-p-switch`）——
+  //    原来用的 `msg-p` 在下面「新建人设」那张卡片里，用户点了按钮**什么都看不见**，
+  //    于是报「这个好像切不动」（2026-09-22 真踩了）。
+  pjShow($('msg-p-switch'), true, '切换中…');
   const r = await api('/api/persona/switch', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ id }),
   });
   if (r && r.ok) {
-    pjShow($('msg-p'), true, `✅ 已经切到「${id}」，立刻生效（没重启机器人）`);
+    const q = r.qqApply || {};
+    let tail = '';
+    if (q.nickname || q.avatar) tail = `，QQ 昵称头像也换成了「${q.nickname || '—'}」/「${q.avatar || '—'}」`;
+    if (q.problems && q.problems.length) tail += `（⚠️ QQ 资料没全换上：${q.problems.join('；')}）`;
+    pjShow($('msg-p-switch'), true, `✅ 已经切到「${id}」，立刻生效（没重启机器人）${tail}`);
     await personaRefresh();
     await reloadAll();
     await loadKnowledgeList(true);
   } else {
-    pjShow($('msg-p'), false, (r && r.error) || '切换失败');
+    pjShow($('msg-p-switch'), false, (r && r.error) || '切换失败');
   }
 }
 
@@ -4441,6 +4499,13 @@ async function personaSaveDoc() {
 
 let PDRAFT = null;
 
+/** 动画库那三个选项：选了"复用/新建"才显示对应的输入框 */
+function onAnimeModeChange() {
+  const m = $('p-anime-mode').value;
+  $('p-anime-reuse-wrap').style.display = m === 'reuse' ? '' : 'none';
+  $('p-anime-new-wrap').style.display = m === 'new' ? '' : 'none';
+}
+
 async function personaDraftStart() {
   const id = $('p-new-id').value.trim();
   const name = $('p-draft-name').value.trim();
@@ -4459,7 +4524,14 @@ async function personaDraftStart() {
     const r = await api('/api/persona/draft', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id, name, work }),
+      body: JSON.stringify({
+        id,
+        name,
+        work,
+        animeMode: $('p-anime-mode').value,
+        animeLib: $('p-anime-lib').value,
+        animeName: $('p-anime-name').value.trim(),
+      }),
     });
     if (!r || !r.ok) {
       pjShow($('msg-p'), false, (r && r.error) || '起草失败');
@@ -4489,16 +4561,33 @@ function renderDraft() {
   const src = (PDRAFT.sources || [])
     .map((s) => `<a href="${escAttr(s.url)}" target="_blank" rel="noreferrer">${escHtml(s.title || s.url)}</a>`)
     .join('　');
+  const fill =
+    PDRAFT.totalFields != null
+      ? `<p class="hint">模板字段：<b>${PDRAFT.filledFields} / ${PDRAFT.totalFields}</b> 填上了` +
+        (PDRAFT.filledFields < PDRAFT.totalFields
+          ? '（其余留空 —— 看上面那条提醒）'
+          : '（一个都没漏）') +
+        '</p>'
+      : '';
   box.innerHTML =
     '<h2 style="margin-top:18px">起草结果（还没保存）</h2>' +
+    fill +
     (notes ? `<p class="hint">⚠️ 提醒：<br>${notes}</p>` : '') +
-    (src ? `<p class="hint">资料来自：${src}</p>` : '<p class="hint">⚠️ 一条资料都没搜到 —— 这份是模型凭自己的知识写的，务必仔细核对。</p>') +
+    (src
+      ? `<p class="hint">资料来自：${src}</p>`
+      : '<p class="hint">⚠️ 一条资料都没搜到 —— 这份是模型凭自己的知识写的，务必仔细核对。</p>') +
     '<label>identity.json（可直接改；保存时会校验）</label>' +
-    `<textarea id="pd-identity" rows="16">${escHtml(JSON.stringify(PDRAFT.identity, null, 2))}</textarea>` +
+    `<textarea id="pd-identity" rows="18">${escHtml(JSON.stringify(PDRAFT.identity, null, 2))}</textarea>` +
     '<label style="margin-top:10px">persona.md（≤3000 字）</label>' +
     `<textarea id="pd-persona" rows="14">${escHtml(PDRAFT.docs?.['persona.md'] || '')}</textarea>` +
     '<label style="margin-top:10px">voices.md（示例对话 —— 人味就靠它）</label>' +
     `<textarea id="pd-voices" rows="12">${escHtml(PDRAFT.docs?.['voices.md'] || '')}</textarea>` +
+    (PDRAFT.animeLibName
+      ? '<label style="margin-top:10px">新建的动画库 ' +
+        escHtml(PDRAFT.animeLibName) +
+        '（保存时写进 knowledge/anime/）</label>' +
+        `<textarea id="pd-animelib" rows="12">${escHtml(PDRAFT.animeLib || '')}</textarea>`
+      : '') +
     '<div class="btns">' +
     '<button class="act" onclick="personaDraftSave()">保存成新人设包</button>' +
     '<button onclick="personaDraftDrop()">不要了</button>' +
@@ -4544,6 +4633,17 @@ async function personaDraftSave() {
     const d = await post('/api/persona/doc', { id, path, text });
     if (!d || !d.ok) {
       pjShow($('msg-pd2'), false, `${path} 写失败：${(d && d.error) || ''}`);
+      return;
+    }
+  }
+  // ③ 新建的动画库（只有选了"新建"才有这份）—— 写进 `knowledge/anime/<名字>.md`
+  //    ⚠️ 用户的规矩：**复用已有的库时只读不写**，只有"新建"才往库里写东西。
+  const libName = PDRAFT && PDRAFT.animeLibName;
+  const libText = ($('pd-animelib') && $('pd-animelib').value.trim()) || '';
+  if (libName && libText) {
+    const dl = await post('/api/knowledge', { name: `anime/${libName}.md`, content: libText });
+    if (!dl || !dl.ok) {
+      pjShow($('msg-pd2'), false, `动画库写失败：${(dl && dl.error) || ''}`);
       return;
     }
   }

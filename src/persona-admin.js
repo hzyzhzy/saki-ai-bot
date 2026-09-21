@@ -64,9 +64,6 @@ const bad = (msg) => {
   return e;
 };
 
-/** 新角色要照抄的那几个文件（有就复制，没有就写个空骨架） */
-const TEMPLATE_FILES = ['identity.json'];
-
 function readJson(file) {
   // ⚠️ 剥 BOM：记事本 / PowerShell 写出来的 JSON 常带 BOM，JSON.parse 会当场报错
   return JSON.parse(readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
@@ -276,21 +273,65 @@ export function createPack(id, from = TEMPLATE) {
   if (!existsSync(src)) throw bad(`来源包「${from}」不存在`);
 
   mkdirSync(target, { recursive: true });
-  for (const f of TEMPLATE_FILES) {
-    const p = join(src, f);
-    if (!existsSync(p)) continue;
-    let obj;
-    try {
-      obj = readJson(p);
-    } catch {
-      copyFileSync(p, join(target, f));
-      continue;
+
+  // ── ① 先把源包**整个**复制过来（含 `prompt/` 下的长段和 `avatar.png`）──
+  //
+  // ⚠️⚠️ 2026-09-22 改：原来这里只有一句 `for (const f of TEMPLATE_FILES)`，
+  //    而 `TEMPLATE_FILES` 只有 `identity.json` ⇒ **只复制身份文件**，
+  //    `persona.md` / `voices.md` 一律写空骨架。
+  //    后果：点「照 saki 复制」**拿不到 saki 的人设正文**、名册、事件库、头像
+  //    （用户问「从模板复刻是怎么复刻的」时我才回去看，才发现是这个行为）。
+  //    而"复刻一份现有的角色来改"正是这个下拉框最常用的用法。
+  //    ⇒ 现在：**整包复制**，只有 `identity.json` 需要特判（见下）。
+  const copied = [];
+  const walk = (dir, rel = '') => {
+    for (const e of readdirSync(dir)) {
+      const s = join(dir, e);
+      const r = rel ? `${rel}/${e}` : e;
+      let isDir = false;
+      try {
+        isDir = statSync(s).isDirectory();
+      } catch {
+        continue;
+      }
+      if (isDir) {
+        mkdirSync(join(target, r), { recursive: true });
+        walk(s, r);
+        continue;
+      }
+      if (e === 'identity.json') continue; // 下面单独处理（要改 id）
+      copyFileSync(s, join(target, r));
+      copied.push(r);
     }
-    // ⚠️ id 必须换成新目录名，否则新包里的 id 还指着模板的（`id` 不一致最难查）
-    obj.id = String(id);
-    obj.name = String(obj.name ?? '').replace(/^角色全名.*$/, '') || '';
-    writeFileSync(join(target, f), `${JSON.stringify(obj, null, 2)}\n`, 'utf8');
+  };
+  walk(src);
+
+  // ── ② `identity.json`：复制，但只改**必须改**的 ──
+  const idSrc = join(src, 'identity.json');
+  if (existsSync(idSrc)) {
+    let obj = null;
+    try {
+      obj = readJson(idSrc);
+    } catch {
+      copyFileSync(idSrc, join(target, 'identity.json')); // 坏的 JSON 就原样带过去，别把内容弄丢
+    }
+    if (obj) {
+      // ⚠️ `id` 必须换成新目录名，否则新包里的 id 还指着来源包（不一致最难查）
+      obj.id = String(id);
+      // ⚠️ **只从 `_template` 复制时**才清掉模板说明文字；
+      //    从真实角色复制时名字要**保留** —— 用户就是想要"另一个 saki"，然后自己改。
+      if (fromName === TEMPLATE) obj.name = String(obj.name ?? '').replace(/^角色全名.*$/, '') || '';
+      writeFileSync(join(target, 'identity.json'), `${JSON.stringify(obj, null, 2)}\n`, 'utf8');
+    }
+  } else {
+    // 来源包连身份文件都没有 ⇒ 给一个最小骨架，让她至少不"没有名字"
+    writeFileSync(
+      join(target, 'identity.json'),
+      `${JSON.stringify({ id: String(id), name: '', selfName: '' }, null, 2)}\n`,
+      'utf8',
+    );
   }
+  log.debug(`人设包「${id}」从「${fromName}」复制了 ${copied.length} 个文件`);
   const skeleton = {
     'persona.md': [
       '# 人设',

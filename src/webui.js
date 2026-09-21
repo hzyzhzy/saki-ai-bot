@@ -321,14 +321,40 @@ function saveConfig(patch) {
   put('quest', patch.quest);
   put('affinity', patch.affinity);
   put('friend', patch.friend);
+  // ⚠️⚠️ 2026-09-22 加：**`persona`**（人设包 id）。
+  //    踩到的：这一行原来没有它 ⇒ `POST /api/persona/switch` 里那句
+  //    `saveConfig({ persona: { id } })` **什么也没发生**，而接口照样返回
+  //    `ok:true`、日志还打印了「切换人设 → xxx」—— 看着像切了，其实
+  //    `config.yml` 里连 `persona:` 段都没有，`personaId()` 一路回落到默认的 saki。
+  //    界面上就是"点『切到这个』没反应"（用户报的「这个好像切不动」）。
+  put('persona', patch.persona);
+  // ⚠️ 2026-09-22 加：**谁在改人设**要留下痕迹。
+  //    查"config.yml 被莫名改成别的人设"时，就是靠这行定位到是哪个套件干的。
+  //    带上 CONFIG_FILE 一眼能看出改的是**真实配置**还是套件的临时配置。
+  if (patch.persona) {
+    log.info(`配置写入 persona.id → ${JSON.stringify(patch.persona?.id ?? '')}（文件：${CONFIG_FILE}）`);
+  }
   // ⚠️ 分群参数（2026-09-15）——和 configForUi 里那一行是**一对**，别只加一个
   put('groupParams', patch.groupParams);
   if (patch.ownerQQ !== undefined) raw.ownerQQ = patch.ownerQQ;
   if (patch.botQQ !== undefined) raw.botQQ = patch.botQQ;
   if (patch.logLevel !== undefined) raw.logLevel = patch.logLevel;
 
+  // ⚠️⚠️ 2026-09-22 加：**白名单外的顶层键要吵出来**。
+  //    这个函数是"逐段白名单"，漏加一段就**静默丢弃** —— 上面 `persona` 那次
+  //    静默丢了一整天才被发现（还是靠用户说"切不动"）。宁可在日志里吵一行。
+  const HANDLED = new Set([
+    'llm', 'onebot', 'trigger', 'context', 'qzone', 'status', 'faces', 'chat', 'attitude',
+    'teach', 'chunking', 'webui', 'life', 'quest', 'affinity', 'friend', 'persona',
+    'groupParams', 'ownerQQ', 'botQQ', 'logLevel',
+  ]);
+  for (const k of Object.keys(patch ?? {})) {
+    if (!HANDLED.has(k)) log.warn(`saveConfig 收到没处理的字段「${k}」—— 白名单里没有它，这次它**不会被写进 config.yml**`);
+  }
+
   // 顶层字段顺序：保持一个可读的顺序
   const order = [
+    'persona',
     'onebot',
     'llm',
     'trigger',
@@ -1988,7 +2014,14 @@ const routes = {
   //    存完立刻生效。重启 = 一次 QQ 登录，而这个号是风险设备，能省则省。
   'GET /api/persona/list': async (_req, res) => {
     try {
-      send(res, 200, { ok: true, current: personaId(), packs: personaAdmin.listPacks() });
+      send(res, 200, {
+        ok: true,
+        current: personaId(),
+        packs: personaAdmin.listPacks(),
+        // ⚠️ 顺手把"现在有哪些动画库"带上 —— 新建人设时的那个下拉框要用
+        //    （「复用已有的库」只能从这里面选）
+        animeLibs: personaDraft.availableAnimeLibs(),
+      });
     } catch (e) {
       send(res, 500, { ok: false, error: e.message });
     }
