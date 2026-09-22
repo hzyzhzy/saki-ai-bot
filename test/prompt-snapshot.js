@@ -53,7 +53,7 @@ const ISOLATED = {
 };
 for (const [k, v] of Object.entries(ISOLATED)) process.env[k] = v;
 
-const { readFileSync, writeFileSync, existsSync, rmSync } = await import('node:fs');
+const { readFileSync, writeFileSync, existsSync, rmSync, mkdirSync, cpSync } = await import('node:fs');
 const { join, dirname } = await import('node:path');
 const { fileURLToPath } = await import('node:url');
 
@@ -209,6 +209,65 @@ const SCENES = {
 };
 
 // ── 生成 ────────────────────────────────────────────────
+
+// ⚠️⚠️ 2026-09-22 加：**把"玩家在线记录"钉成一份固定历史**。
+//
+//    为什么要这一手：提示词里那段 `# 【在线情况】` 只在
+//    「最后一个人下线距今 ≤ 12 小时」时才输出（见 `src/sessions.js` 的 `sessionsText()`）。
+//    以前这里读的是**真实的** `state/player-sessions.json`，于是：
+//      · 有人在服务器上玩过 → 那段在  → 基线对得上 ✅
+//      · 超过 12 小时没人上  → 那段没了 → 提示词**少一行** → 后面整体错位，
+//        报出来是"上百行不同"（2026-09-22 就是这么红的，看着像改了人设）
+//    ⇒ 一个哨兵有一半时间是红的 = 没有哨兵。
+//
+//    ⚠️ 钉住它**不会**削弱"检测人设改动"的能力：这段是**环境数据**，
+//       本来就不该当人设的哨兵（和上面归一化 `# 【在线情况】` 整段是同一个理由）。
+const SESS_FILE = 'logs/__snapshot-sessions.json';
+process.env.QQBOT_SESSIONS_FILE = SESS_FILE;
+mkdirSync(join(ROOT, 'logs'), { recursive: true });
+writeFileSync(
+  join(ROOT, SESS_FILE),
+  JSON.stringify({
+    // `since` 空 = 现在没人在线 ⇒ 走"报最后一个在线的人"那条分支（就是会被归一化那条）
+    since: {},
+    // `to` 用"半小时前" ⇒ 永远落在 12 小时窗口内 ⇒ 那段**永远在**
+    history: [{ name: '（快照占位）', from: Date.now() - 3600000, to: Date.now() - 1800000, minutes: 30 }],
+  }),
+  'utf8',
+);
+
+// ⚠️⚠️ 2026-09-22 加：**把生图钉成"已经配好了"**，别跟着用户的 `config.yml` 变。
+//
+//    为什么：人设里那段「你可以拍照」**只在 `imagegen.ready().ok` 时才注入**
+//    （那是故意的 —— 没配就一个字都不提，免得冒出"相机没带"这种莫名其妙的台词，
+//      见 `src/bot.js` 的 `buildSystemPrompt`）。
+//    于是用户在管理界面**一开生图**，提示词就多 14 行 ⇒ 快照立刻红，
+//    而且报出来像"人设被改了"（2026-09-22 实测：用户启用生图之后就是这么红的）。
+//
+//    ⇒ **一个哨兵取决于用户的开关 ＝ 没有哨兵**（和上面【在线情况】那段同一个道理）。
+//      钉成"开"还有个好处：那段也就进了哨兵的保护范围（以后改它能被抓到）。
+const { config: cfg } = await import('../src/config.js');
+cfg.imagegen = { ...(cfg.imagegen ?? {}), enable: true, apiKey: 'sk-snapshot-fake' };
+
+// ⚠️⚠️ 2026-09-23 加：**把知识库也钉住**（第三次遇到同一类问题了）。
+//
+//    为什么：这个套件读的是**真实的 `knowledge/`** —— `run-all.js` 的隔离只管
+//    `state/*.json`（它自己那句注释就写着「knowledge/ 一直是共用的真实目录」）。
+//    于是**群主在群里教一句、或更正一条**，提示词就变 ⇒ 快照无缘无故变红。
+//    实测（00:0x）：只有 `group-voluntary` 一个场景变了，多出一段
+//    「# 【最高优先级】群主后来补充/更正的知识」—— 它恰好选中了那段。
+//
+//    ⇒ 首次运行时把**当前的知识库复制一份固定的**（放 `logs/`，不进版本库），
+//      之后一直用它 —— 和上面【玩家在线记录】是同一个道理：
+//      **哨兵不能取决于会变的东西**。
+const KDIR = 'logs/__snapshot-knowledge';
+const kAbs = join(ROOT, KDIR);
+if (!existsSync(kAbs)) {
+  mkdirSync(kAbs, { recursive: true });
+  cpSync(join(ROOT, 'knowledge'), kAbs, { recursive: true });
+}
+process.env.QQBOT_KNOWLEDGE_DIR = KDIR;
+
 const { Bot } = await import('../src/bot.js');
 
 const bot = new Bot();
@@ -340,6 +399,13 @@ if (saveMode || !existsSync(SNAP_FILE)) {
       console.log(`         否则这就是"改了味"，去把你刚动的地方看一遍。`);
     }
   }
+}
+
+// ⚠️ 收尾：把钉住"在线记录"的那份临时状态删掉（`logs/` 不进版本库，但别留垃圾）
+try {
+  rmSync(join(ROOT, SESS_FILE), { force: true });
+} catch {
+  /* 删不掉就算了 */
 }
 
 console.log(

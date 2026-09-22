@@ -378,7 +378,37 @@ Get-Content logs\bot.log | Select-String -Pattern '知识库|已连接|已登录
 1. **按 PID** 杀掉机器人（绝不按名字杀，见下）；
 2. **等 10~15 秒，先看门狗**：它多半会自己补一个。
    - 补上了 → **就用它的，我不要自己再起**（它还会等"已连接到协议端"）；
-   - 没补 → 这才自己 `_run-bot.bat`。
+   - 没补 → 这才自己起，**照下面这个写法**：
+
+   ```powershell
+   # ⚠️⚠️ 必须是 `start "" /min cmd /c _run-bot.bat`。
+   #    漏掉 `cmd /c`、写成 `start "" /min _run-bot.bat` 的话 ——
+   #    `start` 对 .bat 的**默认**行为是 `cmd /K`（**跑完保留窗口**）⇒
+   #    每重启一次就留一个**永不关闭的黑窗**。
+   #    2026-09-22 用户截图问我：「现在有好几个这个窗口，已经分不清哪个属于
+   #    正在运行的机器人了，为什么不会自动关闭」—— 就是我一晚上攒出来的 6 个。
+   #    项目自己的「启动机器人（后台）.bat」第 56 行写的就是
+   #    `start "客服小祥" /min cmd /c "_run-bot.bat"`，照它抄就对了。
+   Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{
+     CommandLine = "cmd.exe /c cd /d `"$dir`" && start `"`" /min cmd /c _run-bot.bat"
+   } | Out-Null
+   ```
+
+   ⚠️⚠️ **想"零窗口"，用 `Start-Process -WindowStyle Hidden`**（2026-09-22 实测可行）：
+   ```powershell
+   # 机器人（bat 自己重定向日志，这里**不要**加 -RedirectStandardOutput —— 那会让脚本卡死）
+   Start-Process -FilePath 'cmd.exe' -ArgumentList '/c','_run-bot.bat' -WorkingDirectory $dir -WindowStyle Hidden
+   # 协议端 SnowLuma 同理（它自带 node.exe，必须在它自己目录里跑）
+   Start-Process -FilePath 'C:\SnowLuma\node.exe' -ArgumentList 'index.mjs' -WorkingDirectory 'C:\SnowLuma' -WindowStyle Hidden
+   ```
+   · 它**建一个隐藏的控制台**（`conhost` 还在，但**界面上看不见**）⇒ 任务栏 / 任务视图里都不会冒出来；
+   · ⚠️ 别用 `start "" /min _run-bot.bat`（那是 `cmd /K`，留一个**看得见**的黑窗，
+     而且永远不关 —— 用户 2026-09-22 就是被这个坑到"分不清哪个是机器人"，
+     还**误把协议端那个黑窗关掉了**，机器人于是连不上）；
+   · ⚠️ 也别指望 `wscript _run-bot-hidden.vbs`（试过两次都不行：WMI 直接起 `wscript`
+     起不来；`start /min wscript …` 也不起来）—— **`Start-Process -WindowStyle Hidden` 才是正解**。
+   ⚠️ 还有一条：**刚杀过一批进程时，别在同一条命令里立刻起** ——
+   实测会静默失败（WMI 返回 `ReturnValue=0`，但 node 压根没起来）。隔几秒、分成两条命令。
 3. **最后必须数实例数，必须是 1**：
    ```powershell
    (Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
@@ -630,11 +660,22 @@ Stop-Process -Id <PID> -Force
 结果**把我自己那条 pwsh 也杀了**：因为**我的命令行里就写着这个正则**，
 它当然匹配上了。表现是命令直接 `exit code -1`、什么都没输出，查半天。
 
+⚠️⚠️ **2026-09-22 又踩了一次，而且是更狠的版本**：过滤条件是
+`-Filter "Name='node.exe'"` + `CommandLine -match 'index\.mjs'`（想找协议端）。
+问题在于 —— **DSH 跑我的命令时，外面套的 runner 本身就是 `node.exe`，
+而且它的命令行里带着我这一整段脚本的原文**（见全局 AGENTS 里那条）。
+⇒ 正则命中了 runner ⇒ **我把正在执行这条命令的 runner 杀了** ⇒
+命令报 `Windows Job runner exited with exit code 4294967295 before proving its managed range empty`，
+**什么都没输出**，而且那半截命令只执行到一半（SnowLuma 被杀光了，起它的那行没跑到）。
+
 **所以**：
 
-- 杀进程前**先 `Where-Object { $_.ProcessId -ne $PID }`**（排除自己）；
-- 或者**把模式拆开拼**，别让整串字面量出现在自己的命令行里；
-- 更稳的：**先 `Select-Object ProcessId,Name,CommandLine` 打印出来看一眼**，再按 PID 杀。
+- 🚫 **凡是 `Name='node.exe'` 再配 `CommandLine -match` 的过滤，一律先想想会不会打中 runner**；
+- ✅ 稳的做法：**先只读列出全部 node 进程**（这条命令里**不要出现**那个匹配字面量），
+  **人工认出 PID**，再 `Stop-Process -Id <确切PID>`；
+- 或者**把模式拆开拼**（`'index' + '\.mjs'`），别让整串字面量出现在自己的命令行里；
+- 杀进程前先 `Where-Object { $_.ProcessId -ne $PID }`（排除自己）——
+  ⚠️ 但这**挡不住 runner**（它是父进程，不是 `$PID`），所以只能靠"不匹配"或"按 PID"。
 
 **另外**：我（AI 助手）用后台任务方式起的机器人，会被我的会话生命周期牵连。**交付给用户长期跑的，应该用 `启动机器人（后台）.bat` 或 `一键启动（QQ+机器人）.bat`**，那样和我解耦。
 
@@ -842,6 +883,7 @@ node test/holiday.js     # 节日：农历自动算 + 闰月跳过 + 日本/中�
 node test/quest.js       # 二级剧情：阶段数≤10/最佳3指数下降 + 冷场最多续1次 + 硬上限 + 落盘可恢复
 node test/qzone.js        # 发说说的计数/冷却**必须落盘**（不然重启就重置）+ 陈旧时间戳不采信
 node test/bilibili-scope.js # 「问B站热门视频」不许被当成「查我的投稿」+ 退避按接口 + 不泄露错误码
+node test/imagegen.js    # ★ 生图（她「拍个照」）：标记剥净 + **失败话术不许泄露故障码** + 换服务商只改配置 + 串行只跑一个（**离线假服务器，不花钱**）
 node test/learned-edit.js # learned.md 能在界面改（保存时校验格式）+ /api/reload 带知识库
 node test/affinity.js     # 好感度（默认50/0~100）+ 对服主不注入 + 自动机制不许改它
 node test/observe-compress.js # 群记忆压缩：性格条数不许变少（少了整次作废）

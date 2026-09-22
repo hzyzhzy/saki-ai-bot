@@ -18,6 +18,15 @@ import yaml from 'js-yaml';
 import { config, reloadConfig, validate, ROOT, CONFIG_FILE, KNOWLEDGE_DIR, paramsFor, personaDir, personaId } from './config.js';
 import { log } from './log.js';
 import { ping } from './llm.js';
+// 生图（群里说的「拍个照」）—— 界面上的「测试生图」用它，见下面 /api/imagegen/test
+import * as imagegen from './imagegen.js';
+// 「这次拍什么」—— 单独跑一次模型理解（见 src/photo-plan.js 文件头）
+import * as photoPlan from './photo-plan.js';
+// 「她此刻在哪、在做什么」—— 时间/地点的事实来源。
+// ⚠️ 用 `whereNow()`（它会把"她说过的话"和日程做一致性检查），**不要**直接用
+//    `whereAmI()` —— 那个返回的是对象，而且不做冲突检查（2026-09-22 踩过）。
+// ⚠️ webui 和 bot 在**同一个进程**里，而 bot.js 不 import webui.js，所以方向不成环。
+import { whereNow } from './bot.js';
 import { queryServer, describe, clearCache } from './status.js';
 import * as napcat from './napcat.js';
 // ⚠️ 协议端适配层（2026-09-17 加）：管理面按它分派，换协议端只改 config.yml
@@ -261,6 +270,9 @@ function readBody(req, limit = MAX_UPLOAD) {
 function configForUi() {
   return {
     llm: { ...config.llm },
+    // ⚠️ 和 saveConfig 里那行 `put('imagegen', …)` 是**一对**，别只加一个
+    //    （这个文件里"存得进去、显示不出来"的坑踩过一次，见下面 `chat` 那段注释）。
+    imagegen: { ...config.imagegen },
     onebot: { ...config.onebot },
     trigger: { ...config.trigger },
     context: { ...config.context },
@@ -306,6 +318,7 @@ function saveConfig(patch) {
   };
 
   put('llm', patch.llm);
+  put('imagegen', patch.imagegen);
   put('onebot', patch.onebot);
   put('trigger', patch.trigger);
   put('context', patch.context);
@@ -346,7 +359,7 @@ function saveConfig(patch) {
   const HANDLED = new Set([
     'llm', 'onebot', 'trigger', 'context', 'qzone', 'status', 'faces', 'chat', 'attitude',
     'teach', 'chunking', 'webui', 'life', 'quest', 'affinity', 'friend', 'persona',
-    'groupParams', 'ownerQQ', 'botQQ', 'logLevel',
+    'imagegen', 'groupParams', 'ownerQQ', 'botQQ', 'logLevel',
   ]);
   for (const k of Object.keys(patch ?? {})) {
     if (!HANDLED.has(k)) log.warn(`saveConfig 收到没处理的字段「${k}」—— 白名单里没有它，这次它**不会被写进 config.yml**`);
@@ -357,6 +370,7 @@ function saveConfig(patch) {
     'persona',
     'onebot',
     'llm',
+    'imagegen',
     'trigger',
     'context',
     'status',
@@ -577,6 +591,168 @@ const routes = {
     } finally {
       Object.assign(config.llm, saved); // 测试不改真实配置
     }
+  },
+
+  /**
+   * 生图可选的模型列表 = **内置候选 ∪ 平台 `/models`**（2026-09-22，用户要求「自动拉取列表选择」）。
+   *
+   * ⚠️ 为什么**两条路都要走**：`/models` 不是所有生图平台都实现，而且
+   *    **火山方舟的模型还要先在控制台开通**才会出现在列表里。
+   *    拉不到时下拉框不能是空的 —— 否则用户只能去翻文档手抄
+   *    `doubao-seedream-4-0-250828` 这种带日期后缀的 id（抄错一个字符就是"模型不存在"）。
+   * ⚠️ 返回的是一整份清单（硅基流动上百个聊天+生图模型混在一起），
+   *    所以把"看起来是生图的"排到前面 —— 界面用 `<datalist>`，打字时浏览器自己会过滤。
+   */
+  'POST /api/imagegen/models': async (req, res) => {
+    const t = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+    const over = t.imagegen ?? {};
+    const pre = imagegen.presets(over);
+    const baseURL = String(over.baseURL ?? '').trim().replace(/\/+$/, '') || pre.baseURL;
+    const apiKey = String(over.apiKey ?? '').trim();
+
+    let live = [];
+    let error = '';
+    if (baseURL && apiKey) {
+      try {
+        const r = await fetch(`${baseURL}/models`, {
+          headers: { Authorization: `Bearer ${apiKey}` },
+          signal: AbortSignal.timeout(15000),
+        });
+        if (r.ok) {
+          const j = await r.json();
+          const list = Array.isArray(j.data) ? j.data : Array.isArray(j.models) ? j.models : [];
+          live = list
+            .map((m) => (typeof m === 'string' ? m : (m.id ?? m.name ?? m.model)))
+            .filter((x) => typeof x === 'string' && x.trim())
+            .map((x) => x.trim());
+        } else {
+          error = `HTTP ${r.status}`;
+        }
+      } catch (e) {
+        error = e.message;
+      }
+    }
+
+    const looksImage =
+      /image|seedream|seededit|wanx|kolors|flux|stable-?diffusion|sdxl|dall|gpt-image|imagen|painting|draw|sd3/i;
+    const ordered = [...new Set([...pre.models, ...live.filter((m) => looksImage.test(m)), ...live])];
+
+    log.info(
+      `生图模型列表：内置 ${pre.models.length} + 平台 ${live.length}（${baseURL || '没填地址'}）` +
+        `${error ? `，平台那边失败（${error}）` : ''}`,
+    );
+    // ⚠️ 平台失败**不算整体失败** —— 内置候选照旧可用，所以把原因单独带回去给界面提示
+    send(res, 200, {
+      ok: true,
+      provider: pre.provider,
+      baseURL,
+      models: ordered,
+      builtin: pre.models.length,
+      live: live.length,
+      error,
+    });
+  },
+
+  /**
+   * 生图缓存：查占用 / 立即清理（2026-09-22 用户要求「图片越积越多，发出 1 天之后删掉」）。
+   *
+   * ⚠️ `dryRun: true` = **只统计不删**（界面一进「模型」页就用它显示占用）。
+   *    实现方式是拿一个"保留期无穷大"跑一遍 sweep —— 什么都不算过期，自然一张不删。
+   * ⚠️ 只动 `library/photo/`；`library/` 根目录是**表情库**，绝不碰。
+   */
+  'POST /api/imagegen/cache': async (req, res) => {
+    const t = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+    const keepHours = Number(config.imagegen?.keepHours ?? 24);
+    if (t.dryRun) {
+      const s = imagegen.sweep(Number.MAX_SAFE_INTEGER);
+      return send(res, 200, { ok: true, dryRun: true, count: s.kept, bytes: s.keptBytes, keepHours });
+    }
+    const s = imagegen.sweep();
+    send(res, 200, {
+      ok: true,
+      enabled: s.enabled,
+      removed: s.removed,
+      freedBytes: s.freedBytes,
+      count: s.kept,
+      bytes: s.keptBytes,
+      keepHours,
+    });
+  },
+
+  /**
+   * 测试生图 —— ⚠️ **会真的出一张图**（火山方舟 0.20 元/张），界面上写明了。
+   *
+   * 为什么不做成"只测连通性"：生图的失败模式几乎全在**提示词 / 参考图 / 平台审核**上，
+   * 单测一个 `/models` 什么也证明不了。真出一张、直接回给界面预览，
+   * 用户点一下就能判断「像不像她」—— 这比任何 ping 都有信息量。
+   */
+  'POST /api/imagegen/test': async (req, res) => {
+    const t = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+    if (!imagegen.ready(t.imagegen).ok) {
+      const why = imagegen.ready(t.imagegen).why;
+      return send(res, 200, { ok: false, reason: 'off', error: why, hint: imagegen.hint('off') });
+    }
+    // ⚠️⚠️ **界面测试必须走和群里完全相同的这条路** ——
+    //    否则用户在界面上调半天提示词，群里实际用的是另一套 ✗
+    //    ⚠️ 2026-09-22 改成：这里也**先跑一次"理解"**、时间地点也取**真实状态**。
+    //       所以界面上那个输入框 = **"假装群友说的那句话"**（例：拍张你现在的样子）。
+    const nowAt = new Date();
+    const hh = nowAt.getHours();
+    const period =
+      hh < 5 ? '深夜' : hh < 8 ? '清晨' : hh < 11 ? '上午' : hh < 13 ? '中午' : hh < 17 ? '下午' : hh < 19 ? '傍晚' : hh < 23 ? '晚上' : '深夜';
+    const facts = {
+      now: `${String(hh).padStart(2, '0')}:${String(nowAt.getMinutes()).padStart(2, '0')}（${period}）`,
+      // 和 `bot.js` 的 `runPhoto()` 用**同一个**来源（含覆盖/日程一致性检查）
+      where: whereNow(nowAt).where,
+    };
+    // 界面上可以强制"有她 / 没有她 / 让理解自己判断"（对应三种标记写法）
+    const kind = String(t.kind ?? 'auto');
+    const marker =
+      kind === 'self'
+        ? { raw: '[拍照]', withSelf: true, scene: '' }
+        : kind === 'scene'
+          ? { raw: '[拍]', withSelf: false, scene: '' }
+          : null;
+    const text = String(t.prompt ?? '').trim() || '拍张照片看看，你现在什么样';
+    const picked = await photoPlan.plan({ text, said: '', marker, facts });
+    const withSelf = picked.withSelf;
+    const prompt = imagegen.buildPrompt({
+      what: picked.what,
+      withSelf,
+      time: picked.time || facts.now,
+      place: picked.place || facts.where,
+    });
+    const refs = withSelf ? persona.refImages() : [];
+    const r = await imagegen.generate({ prompt, refs, expectRef: withSelf, over: t.imagegen ?? {} });
+    if (!r.ok) {
+      // ⚠️ 两条信息**分开**给（2026-09-22 实测踩到 `ModelNotOpen` 之后改的）：
+      //    · `error` —— 角色口吻那句，和群里听到的一致（方便用户对上号）
+      //    · `hint`  —— **给管理员的下一步**（「去控制台开通这个模型」这种，
+      //                 群里永远不会看到）
+      //    · 真实错误码仍然只进 `logs/bot.log`，**不回给界面**（用户说不要看到故障码）
+      return send(res, 200, {
+        ok: false,
+        reason: r.reason,
+        error: imagegen.deflect(r.reason),
+        hint: imagegen.hint(r.reason),
+      });
+    }
+    send(res, 200, {
+      ok: true,
+      ms: r.ms,
+      file: r.file,
+      withSelf,
+      // ⚠️ 把"理解成了什么"和"最终提示词"回给界面 —— 调画风/调场景时**只有看得见才调得动**
+      picked,
+      facts,
+      prompt,
+      // ⚠️ 参考图是"像不像她"的唯一保证 —— 没配就**明确告诉用户**，
+      //    否则他看到一张不像的图会以为是模型不行（真因是没传立绘）。
+      //    ⚠️ 拍景物那条**本来就不带**参考图，别在这儿报"没有参考图"吓人。
+      refNames: refs.map((f) => String(f).split(/[\\/]/).pop()),
+      // 只在本地回环上把预览图回给界面，不额外落一份
+      dataUrl: imagegen.toDataUrl(r.file),
+    });
   },
 
   'POST /api/test-server': async (_req, res) => {
@@ -2143,23 +2319,36 @@ const routes = {
     try {
       const id = String(url.searchParams.get('id') ?? '');
       const name = String(url.searchParams.get('name') ?? 'avatar.png');
+      const kind = String(url.searchParams.get('kind') ?? 'avatar');
       const buf = await readBody(req);
-      const r = personaAdmin.saveAvatar(id, buf, extname(name).toLowerCase());
+      // ⚠️ 头像 / 生图参考图是**两个字段、两个文件**，见 `persona-admin.saveRefImage()` 的注释
+      const ext = extname(name).toLowerCase();
+      const r = kind === 'ref'
+        ? personaAdmin.saveRefImage(id, buf, ext)
+        : personaAdmin.saveAvatar(id, buf, ext);
       // 换的是**当前正在用**的这个 ⇒ 顺手应用到 QQ 上（不然用户还得再点一次「立即应用」）
-      const applied = id === personaId() ? await applyPersonaQQ(id) : null;
+      // ⚠️ 参考图**没有**"应用到 QQ"这回事（它只喂给生图 API），别白跑一趟
+      const applied = kind !== 'ref' && id === personaId() ? await applyPersonaQQ(id) : null;
       send(res, 200, { ok: true, ...r, applied });
     } catch (e) {
       send(res, e.bad ? 400 : 500, { ok: false, error: e.message });
     }
   },
 
-  /** 读人设包里的头像（给界面预览） */
+  /** 读人设包里的头像 / 生图参考图（给界面预览） */
   'GET /api/persona/avatar': async (_req, res, url) => {
     try {
       const id = String(url.searchParams.get('id') ?? '');
+      const kind = String(url.searchParams.get('kind') ?? 'avatar');
       const pack = personaAdmin.readPack(id);
-      const f = personaAdmin.avatarFile(id, pack.qq.avatar);
-      if (!f) return send(res, 404, { ok: false, error: '这个人设包还没有头像文件' });
+      const rel = kind === 'ref' ? (pack.identity?.image?.refs ?? [])[0] : pack.qq.avatar;
+      const f = personaAdmin.avatarFile(id, rel);
+      if (!f) {
+        return send(res, 404, {
+          ok: false,
+          error: kind === 'ref' ? '这个人设包还没有生图参考图' : '这个人设包还没有头像文件',
+        });
+      }
       const ext = extname(f).toLowerCase();
       sendBinary(res, 200, readFileSync(f), MIME[ext] ?? 'application/octet-stream');
     } catch (e) {

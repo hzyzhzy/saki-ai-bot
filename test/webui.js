@@ -175,6 +175,35 @@ async function main() {
   check(savedYaml.includes('allowGroups'), '保存时保留了 yaml 里的其它字段（allowGroups）');
   check(savedYaml.includes('debugInject') === false || true, '（字段保留检查）');
 
+  // ⚠️ 2026-09-22 加：**生图配置也要能存能读**。
+  //    这个文件正是踩过一次"saveConfig 白名单漏了某段 → 静默丢弃、但界面报保存成功"
+  //    （`persona` 那次，用户怎么切都不生效）—— 所以以后**新加的配置段一律在这儿钉一条**。
+  console.log('\n[3b] 生图配置：存得进去、读得回来（白名单不能漏）');
+  const ig = await post('/api/config', {
+    imagegen: { enable: true, provider: 'openai', model: 'Qwen/Qwen-Image-Edit-2509', apiKey: 'sk-ig-test' },
+  });
+  check(ig.ok === true, '保存成功');
+  check(ig.config.imagegen.provider === 'openai', '返回的新配置已是新值（说明白名单里有它）');
+  check(ig.config.imagegen.apiKey === 'sk-ig-test', 'apiKey 也存进去了');
+  const st3 = await api('/api/state');
+  check(st3.config.imagegen.provider === 'openai', '重新读取仍是新值（已写盘）');
+  check(readFileSync(CFG, 'utf8').includes('Qwen/Qwen-Image-Edit-2509'), '配置文件里能看到生图模型名');
+
+  // ⚠️ 2026-09-22 加（用户要求「模型应该要能自动拉取列表选择」）：
+  //    **没填 key 时下拉框也不能是空的** —— 火山方舟的模型要先去控制台开通才会出现在
+  //    `/models` 里，很多生图平台干脆没实现这个接口。所以内置候选是兜底，必须回。
+  console.log('\n[3c] 生图模型列表：没填 key 也要有内置候选（否则下拉框是空的）');
+  const igm = await post('/api/imagegen/models', { imagegen: { provider: 'ark' } });
+  check(igm.ok === true, '接口返回 ok');
+  check(
+    Array.isArray(igm.models) && igm.models.includes('doubao-seedream-4-0-250828'),
+    '★ 没 key 也回内置候选（界面才有得选）',
+  );
+  check(igm.builtin >= 5, `内置候选 ${igm.builtin} 个`);
+  check(igm.models[0] === 'doubao-seedream-4-0-250828', '默认模型排第一');
+  const igm2 = await post('/api/imagegen/models', { imagegen: { provider: 'openai' } });
+  check(igm2.models.includes('Qwen/Qwen-Image-Edit-2509'), '换服务商 → 候选跟着换');
+
   console.log('\n[4] 改群白名单与触发开关');
   const r2 = await post('/api/config', {
     trigger: { allowGroups: ['111', '222'], requireAtInGroup: false },

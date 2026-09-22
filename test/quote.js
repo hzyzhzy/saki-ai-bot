@@ -291,6 +291,30 @@ console.log('\n【10】★★ 余额见底那条提醒的 @ **不许动**（用�
   );
 }
 
+console.log('\n【12】★★★ 分条时**只有第一条带引用**（用户截图：三条都带了引用框）');
+{
+  const src = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  // 真因：`sendChunk()` **自己又重判了一遍引用**，而 `shouldQuote()` 是
+  // **按"群里热不热闹"重新算**的（有意不看传进来的值）⇒ 每条分条都被判成"该引用"。
+  // 判定其实早就做过了（`quoteThisReply`），调用方也给后面几条传了 `false`。
+  check(
+    /const quote = !!reply;/.test(src),
+    '★★★ `sendChunk` **只认调用方给的引用判定**（不再自己重算）',
+  );
+  check(
+    /sentFirst \? false : quoteThisReply/.test(src),
+    '★ 调用方对后面几条传的确实是 `false`（和上面那条是一对）',
+  );
+  check(
+    !/const quote = this\.shouldQuote\(event, reply\)/.test(src),
+    '★ 那个会重算的写法已经不在了',
+  );
+  check(
+    /const quoteThisReply = lateMs > 0 \? true : this\.shouldQuote\(event, false\)/.test(src),
+    '★ 判定仍然**只做一次**（在 `handle()` 里），迟到回复照旧强制引用',
+  );
+}
+
 console.log('\n【11】★ 新路不受触发冷却影响（和 @ 她一样是明确召唤）');
 {
   const src = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');

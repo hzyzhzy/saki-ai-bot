@@ -24,7 +24,15 @@ import { config, ROOT } from './config.js';
 import { log } from './log.js';
 import { queryServer } from './status.js';
 
-const STATE = join(ROOT, 'state', 'player-sessions.json');
+// ⚠️ 给测试留出口（和 `QQBOT_AFFINITY_FILE` / `QQBOT_QZONE_FILE` 一个套路）。
+//    为什么必须能钉住（2026-09-22 踩了）：提示词里那段 **【在线情况】** 只在
+//    「最后一个人下线距今 ≤ 12 小时」时才输出 —— 见下面 `sessionsText()`。
+//    于是 `test/prompt-snapshot.js` 拿真实 state 跑时，那段**有没有**取决于
+//    "最近 12 小时有没有人在服务器上"⇒ 提示词行数跟着变 ⇒ 快照哨兵**有一半时间是红的**。
+//    指向测试自己的文件之后，套件写一份固定历史，那段就**永远在**。
+const STATE = process.env.QQBOT_SESSIONS_FILE
+  ? join(ROOT, process.env.QQBOT_SESSIONS_FILE)
+  : join(ROOT, 'state', 'player-sessions.json');
 
 /** { since: {玩家名: 时间戳}, history: [{name, from, to, minutes}] } */
 let state = { since: {}, history: [] };

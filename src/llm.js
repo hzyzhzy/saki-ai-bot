@@ -4,7 +4,7 @@ import * as spend from './spend.js';
 // ⚠️ 2026-09-21：人设文案从 `personas/<id>/identity.json` 来（见 src/persona.js）。
 //    这里原来写死「Saki（丰川祥子）」—— 换人设时它不会跟着变，等于换了个名字还在演小祥。
 import * as persona from './persona.js';
-import { ProxyAgent } from 'undici';
+import { Agent, ProxyAgent, setGlobalDispatcher } from 'undici';
 import net from 'node:net';
 
 // ⚠️⚠️ 2026-09-16 深夜：**运行中自动切换网络出口**（用户要求：
@@ -22,6 +22,7 @@ import net from 'node:net';
 const PROXY_URL = process.env.QQBOT_PROXY || 'http://203.0.113.10';
 let egress = 'unknown'; // 'direct' | 'proxy' | 'unknown'
 let proxyAgent = null;
+let directAgent = null; // ⚠️ 选直连时装到全局，把启动期的 env-proxy 顶掉
 let probedAt = 0;
 let proxyOk = false;
 
@@ -64,11 +65,68 @@ function rawFetch(url, opts, mode) {
 }
 
 /**
+ * 把出口**同时**应用到"自己这条链"和**全局**。
+ *
+ * ⚠️⚠️ 2026-09-23 修（用户：「要能自动识别并切换」）。
+ *
+ * 背景：`_run-bot.bat` 在**启动时**探 7890，通就设 `NODE_USE_ENV_PROXY=1` +
+ * `HTTPS_PROXY=…` ⇒ **这个进程的所有 fetch 都走代理**。而**代理软件后来被关了**
+ * （Clash 退出，7890 没人听）⇒ 机器人**一句话都回不出来**，全线 `ECONNREFUSED`，
+ * 直到重启（重启时探到 7890 不通才改成直连）。
+ *
+ * 原来这里只写 `egress = other` —— **只影响 `rawFetch` 自己传的 dispatcher**，
+ * 而 `NODE_USE_ENV_PROXY` 让 Node 的**全局** fetch 走它自己的 EnvHttpProxyAgent，
+ * 我们换自己的 ProxyAgent **管不着它**：
+ *   · 生图 / 搜索 / 余额这些走**普通 fetch** 的模块照样撞死 ✗
+ *   · 连 `rawFetch` 的"直连"分支（`fetch(url, opts)` 不传 dispatcher）
+ *     也会落回那个已经死掉的全局代理 ✗
+ * ⇒ 所以那次"自动切换"其实是**假的**。切换时**必须 `setGlobalDispatcher`**：
+ *   选代理就装 ProxyAgent，选直连就装一个干净的 Agent（把 env-proxy 顶掉）。
+ */
+function applyEgress(mode) {
+  if (mode !== 'proxy' && mode !== 'direct') return;
+  const changed = egress !== mode;
+  egress = mode;
+  try {
+    setGlobalDispatcher(mode === 'proxy' ? (proxyAgent ??= new ProxyAgent(PROXY_URL)) : (directAgent ??= new Agent()));
+  } catch (e) {
+    log.warn(`[网络] 设置全局出口失败（${e.message}）—— 可能仍在用启动时那个`);
+  }
+  if (changed) log.info(`[网络] 出口 → ${mode === 'proxy' ? `代理 ${PROXY_URL}` : '直连'}`);
+}
+
+// ⚠️ **启动时就把出口定下来**，别等第一个请求 —— 否则在它定下来之前，
+//    生图/搜索那些走普通 fetch 的模块会先撞上那个可能已经死掉的启动期全局代理。
+void (async () => {
+  if (egress !== 'unknown') return;
+  applyEgress((await proxyAlive(true)) ? 'proxy' : 'direct');
+})();
+
+// ⚠️ **定期体检当前出口**（用户要求「自动识别并切换」）。
+//    光靠"请求失败才切"意味着**先哑一次**（群里先看到一句"卡了一下"）；
+//    这里每 5 分钟探一下，代理死了就当场切直连。
+//    ⚠️ 只体检"代理死了"这个方向 —— 反过来（直连不通、要走代理）交给
+//       `llmFetch` 的失败路径处理，因为**国内 API 直连本来就该是通的**。
+//    ⚠️ `unref()` 是必须的：不然这个定时器会把 `test/*` 的进程吊着不退出。
+const EGRESS_WATCH_MS = 5 * 60 * 1000;
+const egressWatch = setInterval(async () => {
+  try {
+    if (egress === 'proxy' && !(await proxyAlive(true))) {
+      log.warn('[网络] 代理不通了（代理软件可能被关了）→ 自动切直连');
+      applyEgress('direct');
+    }
+  } catch {
+    /* 体检失败不该影响任何事 */
+  }
+}, EGRESS_WATCH_MS);
+egressWatch.unref?.();
+
+/**
  * 带**自动切换出口**的 fetch（llm.js 里所有模型请求都走它）。
  * ⚠️ 换出口重试**只做一次**（两次都挂就是真挂，交给上层按故障处理）。
  */
 export async function llmFetch(url, opts = {}) {
-  if (egress === 'unknown') egress = (await proxyAlive()) ? 'proxy' : 'direct';
+  if (egress === 'unknown') applyEgress((await proxyAlive()) ? 'proxy' : 'direct');
   const first = egress;
   try {
     return await rawFetch(url, opts, first);
@@ -81,8 +139,8 @@ export async function llmFetch(url, opts = {}) {
         `${other === 'proxy' ? '代理' : '直连'}重试一次（运行中自动切换，2026-09-16）`,
     );
     const res = await rawFetch(url, opts, other);
-    egress = other;
-    log.info(`[网络] 切到${other === 'proxy' ? '代理' : '直连'}，接下来的请求都用它`);
+    // ⚠️ 必须走 `applyEgress`（它会把全局 dispatcher 一起换掉），别只赋 `egress`
+    applyEgress(other);
     return res;
   }
 }

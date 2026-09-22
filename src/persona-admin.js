@@ -199,6 +199,34 @@ export function saveAvatar(id, buf, ext) {
   return { file: name, bytes: buf.length };
 }
 
+/**
+ * 换人设包里的**生图参考图**（立绘 / 全身图，2026-09-22 加）。
+ *
+ * ⚠️ 和头像**是两个文件、两个字段**，别合并：
+ *   · `avatar.png`（`identity.qq.avatar`）→ 会被交给协议端当**真号头像**，是正方形小图；
+ *   · `ref.png`（`identity.image.refs[0]`）→ 只喂给**生图 API** 当人物参考。
+ *   头像往往太小/太糊，当参考图画出来的脸会飘 —— 所以要一张正经立绘。
+ * ⚠️ 文件名不叫 `avatar`，就是为了让 `toDataUrl()` / 白名单两条路不会互相踩到。
+ */
+export function saveRefImage(id, buf, ext) {
+  const dir = packDir(id);
+  if (!existsSync(dir)) throw bad(`没有人设包「${id}」`);
+  const e = String(ext ?? '').toLowerCase();
+  if (!['.png', '.jpg', '.jpeg', '.webp', '.bmp'].includes(e)) throw bad(`参考图格式不支持：${e || '(空)'}`);
+  if (!buf || !buf.length) throw bad('图片是空的');
+  const name = e === '.jpeg' ? 'ref.jpg' : `ref${e}`;
+  writeFileSync(join(dir, name), buf);
+  const cur = readPack(id);
+  // ⚠️ 覆盖时**先删掉旧的其它扩展名**，不然 `identity.image.refs` 指新文件、
+  //    旧文件还躺在包里，下次看目录会以为是两张
+  for (const other of ['ref.png', 'ref.jpg', 'ref.webp', 'ref.jpeg', 'ref.bmp']) {
+    if (other !== name) try { rmSync(join(dir, other), { force: true }); } catch { /* 删不掉就算了 */ }
+  }
+  saveIdentity(id, { ...cur.identity, image: { ...(cur.identity.image || {}), refs: [name] } });
+  log.info(`人设「${id}」的生图参考图已更新：${name}（${(buf.length / 1024).toFixed(1)} KB）`);
+  return { file: name, bytes: buf.length };
+}
+
 /** 写一个包的 identity.json（**先备份**；`id` 字段强制对齐目录名） */
 export function saveIdentity(id, obj) {
   const dir = packDir(id);

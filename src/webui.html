@@ -419,12 +419,12 @@
     <button data-tab="groups">群与触发</button>
     <button data-tab="faces">表情包</button>
     <button data-tab="knowledge">知识库</button>
-    <!-- ⚠️ 2026-09-21：人设**单独一页**（能直接切换核心人设 + 改名字/称呼/口癖/动画库） -->
+    <!-- ⚠️ 2026-09-21：人设<b>单独一页</b>（能直接切换核心人设 + 改名字/称呼/口癖/动画库） -->
     <button data-tab="persona">人设</button>
     <button data-tab="qzone">QQ空间</button>
     <button data-tab="life">日常事件</button>
     <button data-tab="quest">二级剧情</button>
-    <!-- ⚠️ 2026-09-16：按群设定**单独一页**（它管日常事件 + 二级剧情 + 收紧度三样） -->
+    <!-- ⚠️ 2026-09-16：按群设定<b>单独一页</b>（它管日常事件 + 二级剧情 + 收紧度三样） -->
     <button data-tab="groupcfg">按群设定</button>
     <button data-tab="affinity">好感度 / 好友</button>
     <button data-tab="qqlogin">QQ登录</button>
@@ -436,9 +436,9 @@
     <div class="card">
       <h2>身份（主人 / 机器人）</h2>
       <p class="hint">
-        「<b>主人</b>」= 这台机器人**归谁**（原来的叫法是"群主/服主"，用户 2026-09-15 改叫<b>主人</b>）。
-        对他说话是**同级口吻**、不走客服那套；好感度那套也**对他不生效**。<br>
-        「<b>机器人账号</b>」= 它自己那个 QQ —— **登录脚本（一键启动）也读这里**去做快速登录，所以别填错。
+        「<b>主人</b>」= 这台机器人<b>归谁</b>（原来的叫法是"群主/服主"，用户 2026-09-15 改叫<b>主人</b>）。
+        对他说话是<b>同级口吻</b>、不走客服那套；好感度那套也<b>对他不生效</b>。<br>
+        「<b>机器人账号</b>」= 它自己那个 QQ —— <b>登录脚本（一键启动）也读这里</b>去做快速登录，所以别填错。
       </p>
       <div class="row">
         <div style="flex:1">
@@ -486,6 +486,107 @@
         <span class="msg" id="msg-llm"></span>
       </div>
     </div>
+
+    <div class="card">
+      <h2>生图（群里让她「拍个照」）</h2>
+      <p class="hint">
+        配好之后她就能真的发一张自己的照片 —— 群里说「拍个照」，<b>由她自己判断要不要拍</b>。<br>
+        换服务商只改下面几行，不用改代码。
+        <b>ark</b> = 火山方舟 · 豆包 Seedream（0.20 元/张，<b>参考图直接传本地立绘，不用图床</b>）；
+        <b>openai</b> = 任意 OpenAI 风格的生图接口（如硅基流动 Qwen-Image-Edit，0.30 元/张）。<br>
+        ⚠️ 参考图在「人设」页上传（跟着角色走，换人设自动换脸）。
+      </p>
+      <div class="row">
+        <div style="flex:1.2">
+          <label>服务商</label>
+          <select id="ig-provider" onchange="igProviderChanged()">
+            <option value="ark">ark（火山方舟 · Seedream）</option>
+            <option value="openai">openai（硅基流动等兼容接口）</option>
+          </select>
+        </div>
+        <div style="flex:2.4">
+          <label>API 地址（留空 = 用该服务商的默认地址）</label>
+          <input type="text" id="ig-baseURL" placeholder="留空即用默认">
+        </div>
+      </div>
+      <div class="row">
+        <div style="flex:2.4">
+          <label>模型（点「刷新列表」从 API 拉，也可以直接打字）</label>
+          <div style="display:flex;gap:8px">
+            <input type="text" id="ig-model" list="ig-model-list" style="flex:1" placeholder="留空即用默认">
+            <button class="ghost" onclick="igLoadModels()" id="btn-ig-models" style="white-space:nowrap;padding:8px 12px">刷新列表</button>
+          </div>
+          <datalist id="ig-model-list"></datalist>
+        </div>
+        <div style="flex:1">
+          <label>尺寸</label>
+          <input type="text" id="ig-size" list="ig-size-list" placeholder="2K">
+          <datalist id="ig-size-list"></datalist>
+        </div>
+      </div>
+      <p class="hint" id="ig-model-hint" style="margin-top:8px"></p>
+
+      <div class="grp">固定画风提示词 —— ⚠️ 和「每次现算的」是两层，别混</div>
+      <p class="hint" style="margin:0 0 8px">
+        这里只管<b>画风</b>（背景写实 / 人物二次元 / 随手拍感），写一次就一直生效。<br>
+        <b>时间、地点、拍什么</b>是每次拍照现算的：时间地点取<b>她此刻的真实状态</b>，内容另跑一次模型理解。
+      </p>
+      <label>画面里<b>有她</b>时用（自拍 / 别人帮她拍）</label>
+      <textarea id="ig-style-self" rows="4"></textarea>
+      <label style="margin-top:10px">画面里<b>没有她</b>时用（她拍下来的东西：校门、街景、货架…）</label>
+      <textarea id="ig-style-scene" rows="3"></textarea>
+
+      <label>API Key</label>
+      <input type="password" id="ig-apiKey" placeholder="填这家平台的 Key">
+      <div class="row">
+        <div><label>超时（毫秒）</label><input type="number" id="ig-timeoutMs"></div>
+        <div><label>防连拍间隔（毫秒，0 = 不限）</label><input type="number" id="ig-cooldownMs"></div>
+      </div>
+
+      <div class="grp">本地缓存 —— 生成图会自动删掉</div>
+      <p class="hint" style="margin:0 0 8px">
+        发出去的图是<b>上传给协议端的副本</b>，所以删本地<b>不影响群里已经发出的图</b> ——
+        留着只是为了重看和排障，默认留一天。
+      </p>
+      <div class="row">
+        <div style="flex:1.2">
+          <label>保留多少小时后自动删（0 = 不删）</label>
+          <input type="number" id="ig-keepHours" min="0">
+        </div>
+        <div style="flex:1;padding-top:20px">
+          <span class="hint" id="ig-cache-info">…</span>
+        </div>
+        <button class="ghost" onclick="igSweep()" id="btn-ig-sweep" style="white-space:nowrap;padding:8px 12px">立即清理</button>
+      </div>
+      <div class="grp">测试出图 —— ⚠️ 会真的出一张（Seedream 4.0 约 0.2 元/张）</div>
+      <p class="hint" style="margin:0 0 8px">
+        这个输入框 = <b>「假装群友说的那句话」</b>，下面会走**和群里完全相同**的流程
+        （先理解拍什么 → 时间地点取她此刻的真实状态 → 拼画风 → 出图），并把她「理解成了什么」显示出来。
+      </p>
+      <div class="row">
+        <div style="flex:2.4">
+          <label>假装群友说（留空用默认）</label>
+          <input type="text" id="ig-testScene" placeholder="例：拍张你现在的样子 / 能拍一张月之森校门吗">
+        </div>
+        <div style="flex:1">
+          <label>她自己写的标记</label>
+          <select id="ig-testKind">
+            <option value="auto">不写，让理解判断</option>
+            <option value="self">[拍照] 画面里有她</option>
+            <option value="scene">[拍] 她拍的东西</option>
+          </select>
+        </div>
+      </div>
+      <div class="btns">
+        <label style="display:flex;align-items:center;gap:6px;margin:0;font-size:13px">
+          <input type="checkbox" id="ig-enable" style="width:auto"> 启用
+        </label>
+        <button class="act" onclick="saveImagegen()">保存</button>
+        <button class="ghost" onclick="testImagegen()">测试出图</button>
+        <span class="msg" id="msg-ig"></span>
+      </div>
+      <div id="ig-preview" style="margin-top:10px"></div>
+    </div>
   </section>
 
   <!-- 群与触发 -->
@@ -516,7 +617,7 @@
         <div><div class="t">群里需要 @ 才回复</div><div class="d">旧选项，下面选了灵敏度之后以灵敏度为准</div></div>
       </div>
       <div class="btns">
-        <!-- ⚠️ 保存按钮必须放在**这个卡片里**。
+        <!-- ⚠️ 保存按钮必须放在<b>这个卡片里</b>。
              以前它只在下面「回复与分条」那个卡片里，用户在这儿填完群号
              根本找不到保存按钮（真实反馈：「我都不知道哪个按钮是保存群号的」）。 -->
         <button class="act" onclick="saveTrigger()">保存以上设置</button>
@@ -552,7 +653,7 @@
       <p class="hint">
         <b>只对灵敏度 ① 的群生效</b>（② ③ 本来就是安静档，不受这里影响）。<br>
         往左 = 更活跃，往右 = 更安静。<b>改了当场生效，不用重启。</b>
-        <br>⚠️ **按群各设各的**（2026-09-15 晚）：热闹的大群可以调松一点（才接得上话），
+        <br>⚠️ <b>按群各设各的</b>（2026-09-15 晚）：热闹的大群可以调松一点（才接得上话），
         严肃的群可以调紧。<b>没设过的群 = 默认 50</b>。
       </p>
       <div class="kv" style="flex-wrap:wrap;gap:8px;margin:0 0 8px">
@@ -578,7 +679,7 @@
     <div class="card">
       <h2>分群调节（每个群可以不一样）</h2>
       <p class="hint">
-        上面那个是**全局默认**。这里可以给**单个群**单独设一档 ——
+        上面那个是<b>全局默认</b>。这里可以给<b>单个群</b>单独设一档 ——
         比如大群收紧成「只认 @」，熟人小群放开成「什么都能聊」。<br>
         选「跟随全局」就用上面的默认值。
       </p>
@@ -672,12 +773,12 @@
   <section id="tab-knowledge" class="hidden">
     <div class="card">
       <h2>该往哪个库写（别放错）</h2>
-      <p class="hint">知识分成几类，**放错地方会出现「我记录了你」这种副作用**，或者该记住的记不住。对照着写：</p>
+      <p class="hint">知识分成几类，<b>放错地方会出现「我记录了你」这种副作用</b>，或者该记住的记不住。对照着写：</p>
       <table class="tbl">
         <tr><th>内容</th><th>放哪</th></tr>
-        <tr><td>它**自己**是什么、会干什么（比如「你会自己发说说」）</td><td><b>persona.md</b>（人设）</td></tr>
+        <tr><td>它<b>自己</b>是什么、会干什么（比如「你会自己发说说」）</td><td><b>persona.md</b>（人设）</td></tr>
         <tr><td>服务器的事：进服、排障、规则、存档、价格</td><td><b>hzymtr-server.md</b></td></tr>
-        <tr><td>**群友是谁**、什么性格、群里发生过什么（比如「luomosan 上初三，压力大」）</td><td><b>group-memory.md</b>（群资料库）</td></tr>
+        <tr><td><b>群友是谁</b>、什么性格、群里发生过什么（比如「luomosan 上初三，压力大」）</td><td><b>group-memory.md</b>（群资料库）</td></tr>
         <tr><td>二次元作品、乐队、角色</td><td><b>knowledge/anime/&lt;库名&gt;.md</b>（⚠️ 由人设的 <span class="mono">anime.works</span> 决定读哪几个 —— 见「人设」页）</td></tr>
         <tr><td>群里临时教的一句话（「记住：…」）</td><td><b>learned.md</b>（自动维护，这里只读）</td></tr>
       </table>
@@ -716,11 +817,11 @@
     <div class="card">
       <h2>当前人设 <span class="pill" id="p-cur-pill"></span></h2>
       <p class="hint">
-        「人设包」= 一个角色的**一整套**：名字 / 自称 / 别人怎么叫她 / 口癖 / 性格正文 /
+        「人设包」= 一个角色的<b>一整套</b>：名字 / 自称 / 别人怎么叫她 / 口癖 / 性格正文 /
         示例对话 / 引用哪些动画库。一个包 = 一个目录（<span class="mono">personas/&lt;id&gt;/</span>）。
       </p>
       <p class="hint">
-        ⚠️ 切换和保存都**不用重启机器人** —— 人设包是热重载的，存完立刻生效。
+        ⚠️ 切换和保存都<b>不用重启机器人</b> —— 人设包是热重载的，存完立刻生效。
       </p>
       <div id="p-cur" class="kvs"></div>
     </div>
@@ -745,9 +846,9 @@
     <div class="card">
       <h2>新建人设</h2>
       <p class="hint">
-        填 id + 角色名 →「搜集并起草」：联网搜资料，然后**按模板把人设逐字段填满**
-        （每个字段都会给值，填不出来的会留空并**列出来告诉你**）。
-        ⚠️ 结果**先给你看，点了保存才落盘**。
+        填 id + 角色名 →「搜集并起草」：联网搜资料，然后<b>按模板把人设逐字段填满</b>
+        （每个字段都会给值，填不出来的会留空并<b>列出来告诉你</b>）。
+        ⚠️ 结果<b>先给你看，点了保存才落盘</b>。
       </p>
 
       <div class="flds">
@@ -787,7 +888,7 @@
 
       <p class="hint" style="margin-top:10px">
         ⚠️ 不给真人做人设；<span class="mono">persona.md</span> 限 3000 字（它每次请求都进提示词）。<br>
-        「复用」= 只在她的人设里**声明**引用那份库，**绝不动库里的内容**；
+        「复用」= 只在她的人设里<b>声明</b>引用那份库，<b>绝不动库里的内容</b>；
         「新建」= 才把资料写进 <span class="mono">knowledge/anime/&lt;新库名&gt;.md</span>。
       </p>
       <div class="btns"><span class="msg" id="msg-p"></span></div>
@@ -806,9 +907,9 @@
     <div class="card">
       <h2>删除人设</h2>
       <p class="hint">
-        删除是**挪走**（<span class="mono">logs/persona-removed-*</span>，还会留一份 persona.md），
+        删除是<b>挪走</b>（<span class="mono">logs/persona-removed-*</span>，还会留一份 persona.md），
         不是真销毁。<br>
-        而且**正在用的那个删不了** —— 先切到别的再删它。
+        而且<b>正在用的那个删不了</b> —— 先切到别的再删它。
       </p>
       <div class="btns">
         <button class="danger" onclick="personaDelete()">删除「<span id="p-del-name">（上面选中的）</span>」</button>
@@ -818,40 +919,68 @@
     <div class="card">
       <h2>QQ 昵称 / 头像 <span class="pill" id="p-qq-pill"></span></h2>
       <p class="hint">
-        ⚠️ 这两样**跟着人设走**：把昵称 / 头像存进这个人设包，**切换人设时会自动改成它的**
+        ⚠️ 这两样<b>跟着人设走</b>：存进这个人设包，<b>切换人设时会自动改成它的</b>
         （改的是 <b>QQ 上真实的</b>昵称 / 头像，所有群和好友都看得见）。<br>
-        留空 = 切换时**不动**那一项（不是清空）。
+        留空 = 切换时<b>不动</b>那一项（不是清空）。
       </p>
-      <div class="row">
+
+      <div class="flds" style="align-items:flex-start">
         <div style="flex:0 0 auto">
           <label>这个人设的头像</label>
           <img id="p-avatar" src="" alt="（还没设）"
                style="width:96px;height:96px;border-radius:12px;object-fit:cover;background:#1a1a2e;display:block">
           <p class="hint" id="p-avatar-name" style="margin:6px 0 0"></p>
         </div>
-        <div style="flex:1">
+        <div class="fld" style="flex:1;min-width:240px">
           <label>这个人设的 QQ 昵称</label>
           <input id="p-nick" placeholder="（留空 = 切换时不动昵称）">
-          <label style="margin-top:10px">换这个人设的头像（png / jpg / gif / webp，≤8MB）</label>
-          <div class="row">
-            <div style="flex:1"><input type="file" id="p-avatar-file" accept="image/png,image/jpeg,image/gif,image/webp"></div>
-            <div style="flex:0 0 auto"><label>&nbsp;</label><button onclick="qqSaveAvatar()">上传进人设包</button></div>
-          </div>
-          <div class="btns">
-            <button class="act" onclick="qqSaveNick()">把昵称存进人设包</button>
-            <button onclick="qqApplyNow()">立即应用到 QQ</button>
-          </div>
+          <p class="hint" id="p-qq-now" style="margin:6px 0 0"></p>
         </div>
       </div>
-      <p class="hint" id="p-qq-now" style="margin-top:10px"></p>
-      <div class="btns"><span class="msg" id="msg-qqp"></span></div>
+
+      <div class="grp">换头像（png / jpg / gif / webp，≤8MB）</div>
+      <div class="flds">
+        <div class="fld" style="flex:1;min-width:240px">
+          <label>选一张图</label>
+          <input type="file" id="p-avatar-file" accept="image/png,image/jpeg,image/gif,image/webp">
+        </div>
+        <button class="ghost" onclick="qqSaveAvatar()">上传进人设包</button>
+      </div>
+
+      <div class="grp">生图参考图 / 立绘（png / jpg / webp / bmp，≤30MB）</div>
+      <p class="hint" style="margin:0 0 8px">
+        群友说「拍个照」时，她按这张图来画。
+        ⚠️ <b>不填这张，生成的脸每次都不一样</b> —— 所以单要一张，
+        头像那张太小太糊，当参考图会飘。<br>
+        和头像一样存进人设包：<b>换人设自动换脸，代码不用改</b>。
+      </p>
+      <div class="flds" style="align-items:flex-start">
+        <div style="flex:0 0 auto">
+          <label>这个人设的立绘</label>
+          <img id="p-ref" src="" alt="（还没设）"
+               style="width:96px;height:96px;border-radius:12px;object-fit:cover;background:#1a1a2e;display:block">
+          <p class="hint" id="p-ref-name" style="margin:6px 0 0"></p>
+        </div>
+        <div class="fld" style="flex:1;min-width:240px">
+          <label>选一张图</label>
+          <input type="file" id="p-ref-file" accept="image/png,image/jpeg,image/webp,image/bmp">
+          <p class="hint" style="margin:6px 0 0">全身或半身、脸清楚的都行；正脸效果最好</p>
+        </div>
+        <button class="ghost" onclick="qqSaveRef()">上传进人设包</button>
+      </div>
+
+      <div class="btns">
+        <button class="act" onclick="qqSaveNick()">把昵称存进人设包</button>
+        <button onclick="qqApplyNow()">立即应用到 QQ</button>
+        <span class="msg" id="msg-qqp"></span>
+      </div>
     </div>
 
     <div class="card">
       <h2>结构化设置</h2>
       <p class="hint">
-        这些字段是**代码要用的**（判"这句话是不是在叫她""该不该去搜"）—— 换名字时她会跟着变，不用改代码。<br>
-        ⚠️ <b>「主人是谁」不在这里</b>：那是**共用事实**（QQ 号在「模型」页、资料在
+        这些字段是<b>代码要用的</b>（判"这句话是不是在叫她""该不该去搜"）—— 换名字时她会跟着变，不用改代码。<br>
+        ⚠️ <b>「主人是谁」不在这里</b>：那是<b>共用事实</b>（QQ 号在「模型」页、资料在
         <span class="mono">owner.md</span>），换人设改的是「<b>你叫他什么</b>」。
       </p>
       <div id="p-fields"></div>
@@ -864,7 +993,7 @@
     <div class="card">
       <h2>提示词里的整句（prompt.*）</h2>
       <p class="hint">
-        ⚠️⚠️ 这些是**整句替换**的 —— 直接写"这个角色会说的那句话"，**别指望代码帮你拼**。
+        ⚠️⚠️ 这些是<b>整句替换</b>的 —— 直接写"这个角色会说的那句话"，<b>别指望代码帮你拼</b>。
         不同角色的自我介绍结构本来就不一样，拼出来只会是个谁也不像的平均角色。<br>
         ⚠️ <b>留空 = 那一段不出现</b>（代码不会兜底编一句，编出来的不是这个人设说的话）。
       </p>
@@ -879,7 +1008,7 @@
       <h2>人设文档</h2>
       <p class="hint">
         改完保存立即生效（不用重启）。<span class="mono">cast.md</span> / <span class="mono">life-events.md</span> /
-        <span class="mono">quest-ideas.md</span> 是这个角色**专属的数据**（名册、日常事件库、剧情点子），
+        <span class="mono">quest-ideas.md</span> 是这个角色<b>专属的数据</b>（名册、日常事件库、剧情点子），
         它们不进聊天提示词，但剧情和日常事件要用。
       </p>
       <div class="row">
@@ -995,9 +1124,9 @@
     </div>
 
     <div class="card">
-      <h2>节奏 / 参数（**按群**）</h2>
+      <h2>节奏 / 参数（<b>按群</b>）</h2>
       <p class="hint">
-        ⚠️ 2026-09-16 起：日常事件和二级剧情的参数**没有"全局默认"了**，
+        ⚠️ 2026-09-16 起：日常事件和二级剧情的参数<b>没有"全局默认"了</b>，
         <b>完全按群各设各的</b> —— 每天几条、间隔多久、时段、剧情概率…全在
         <b>「按群设定」</b>那一页里，选一个群就设那个群。<br>
         没设过的群用<b>内置起点</b>（每天 3 条、间隔 90 分钟、7:00-24:00）。
@@ -1043,9 +1172,9 @@
     </div>
 
     <div class="card">
-      <h2>参数（**按群**）</h2>
+      <h2>参数（<b>按群</b>）</h2>
       <p class="hint">
-        ⚠️ 2026-09-16 起：二级剧情的参数**没有"全局默认"了**，<b>完全按群各设各的</b> ——
+        ⚠️ 2026-09-16 起：二级剧情的参数<b>没有"全局默认"了</b>，<b>完全按群各设各的</b> ——
         自动开不开、概率、每周几条、每段等多久、段数、好感度增减、
         「群友哪句话能改变剧情」，全在 <b>「按群设定」</b>那一页里选群设置。<br>
         没设过的群用<b>内置起点</b>（自动开=关、概率 0.1、每周 3 条、每段等 30 分钟）。<br>
@@ -1069,7 +1198,7 @@
         ⚠️ 「立即开始剧情」会<b>真的往群里发消息</b>。
       </p>
       <!-- ⚠️ 这个选择器是 2026-09-15 补的：<主人>「我手动开剧情，699开头的群没启动」——
-           原来按钮**根本不传 groupId**，服务端只会退回 groups[0]（配置里第一个 1 档群），
+           原来按钮<b>根本不传 groupId</b>，服务端只会退回 groups[0]（配置里第一个 1 档群），
            所以不管想开在哪个群，它都开在 200000002。 -->
       <div class="kv" style="margin:6px 0">
         <b>发到哪个群</b>
@@ -1159,8 +1288,8 @@
     </div>
   </section>
 
-  <!-- ⚠️ 2026-09-16：**按群设定单独一页**（用户要求）——
-       原来它塞在「二级剧情」页里，可它管的是**日常事件 + 二级剧情 + 收紧度**三样，
+  <!-- ⚠️ 2026-09-16：<b>按群设定单独一页</b>（用户要求）——
+       原来它塞在「二级剧情」页里，可它管的是<b>日常事件 + 二级剧情 + 收紧度</b>三样，
        放在剧情页里既不好找、也容易让人以为只管剧情。 -->
   <section id="tab-groupcfg" class="hidden">
     <div class="card">
@@ -1222,7 +1351,7 @@
     <div class="card">
       <h2>参数</h2>
       <div class="row">
-        <!-- ⚠️ 2026-09-20：好感度**上限已改为无限**（用户要求）→ 门槛的 max 不能还是 100 -->
+        <!-- ⚠️ 2026-09-20：好感度<b>上限已改为无限</b>（用户要求）→ 门槛的 max 不能还是 100 -->
         <div><label>加好友的门槛（好感度）</label><input type="number" id="a-threshold" min="50" max="999999"></div>
         <div><label>排行榜显示几个</label><input type="number" id="a-boardSize" min="1" max="30"></div>
         <div><label>回应判定窗口（分钟）</label><input type="number" id="a-window" min="1" step="5"></div>
@@ -1256,7 +1385,7 @@
     <div class="card">
       <h2>手动测试</h2>
       <p class="hint">
-        ⚠️ 到 90 那条线正常要攒好几天，所以给你一个**立刻能验**的办法。
+        ⚠️ 到 90 那条线正常要攒好几天，所以给你一个<b>立刻能验</b>的办法。
         这两个按钮都会<b>真的发消息</b>（到线通知发到 1 档群、私聊直接发给本人）。
       </p>
       <div class="row">
@@ -1299,9 +1428,9 @@
       </p>
       <div style="text-align:center;padding:12px 0">
         <!--
-          ⚠️⚠️ 2026-09-15：**别加 `image-rendering: pixelated`、也别硬写 280px 拉大**。
+          ⚠️⚠️ 2026-09-15：<b>别加 `image-rendering: pixelated`、也别硬写 280px 拉大</b>。
           NapCat 给的原图只有 147×147，最近邻放大到 280 会把二维码模块拉得
-          宽窄不一 → **手机扫不出来**（用户反馈"从来没扫成功过"的原因之一）。
+          宽窄不一 → <b>手机扫不出来</b>（用户反馈"从来没扫成功过"的原因之一）。
           现在按原始比例铺满卡片、用浏览器的平滑缩放，交给摄像头去分辨。
         -->
         <img id="qq-qr-img" alt="登录二维码"
@@ -1879,6 +2008,25 @@ async function reloadAll() {
   $('llm-temperature').value = c.llm.temperature ?? 0.5;
   $('llm-maxTokens').value = c.llm.maxTokens ?? 800;
   $('llm-timeout').value = c.llm.timeout ?? 60000;
+
+  // 生图
+  const ig = c.imagegen || {};
+  $('ig-enable').checked = !!ig.enable;
+  $('ig-provider').value = ig.provider || 'ark';
+  // ⚠️ 顺序：先把值填进去，再调 igProviderChanged() 更新 placeholder
+  //    （它在"值为空"时会塞预设的默认尺寸，直接覆盖用户存的空值是有意的）
+  $('ig-baseURL').value = ig.baseURL || '';
+  $('ig-model').value = ig.model || '';
+  $('ig-size').value = ig.size || '';
+  // 固定画风那层（界面上可改可存）
+  $('ig-style-self').value = (ig.style && ig.style.self) || '';
+  $('ig-style-scene').value = (ig.style && ig.style.scene) || '';
+  $('ig-apiKey').value = ig.apiKey || '';
+  $('ig-timeoutMs').value = ig.timeoutMs ?? 180000;
+  $('ig-cooldownMs').value = ig.cooldownMs ?? 60000;
+  $('ig-keepHours').value = ig.keepHours ?? 24;
+  igProviderChanged();
+  igCacheInfo();
 
   // 群与触发
   $('trigger-allowGroups').value = (c.trigger.allowGroups || []).join('\n');
@@ -3183,6 +3331,216 @@ async function testLLM() {
   flash(el, r.ok, r.ok ? `连通，${r.ms}ms，返回「${r.reply}」` : `失败：${r.error}`);
 }
 
+// ── 生图 ───────────────────────────────────────────────
+// ⚠️ 只用来填 placeholder（提示"留空会用哪个"）。
+//    留空 = 后端 src/imagegen.js 里那张表说了算 —— **默认值只有一份**，
+//    别在这儿再抄一遍当真实值用，抄两遍迟早不一致。
+const IG_PRESETS = {
+  ark: {
+    base: 'https://ark.cn-beijing.volces.com/api/v3',
+    model: 'doubao-seedream-4-0-250828',
+    // ⚠️ 默认 4K ≈ 1660 万像素（2K 只有 400 万，在 QQ 里显示得跟表情包差不多大）
+    size: '4K',
+    // ⚠️ 5.0 pro / flash 最高只到 2K，后端会自动夹一下
+    sizes: ['1K', '2K', '4K'],
+  },
+  openai: {
+    base: 'https://api.siliconflow.cn/v1',
+    model: 'Qwen/Qwen-Image-Edit-2509',
+    size: '1024x1024',
+    sizes: ['1024x1024', '1024x1536', '1536x1024', '768x1024', '512x512'],
+  },
+};
+
+/** 填一个 <datalist>（去重；空值丢掉） */
+function fillIgList(id, list) {
+  const dl = $(id);
+  if (!dl) return;
+  dl.innerHTML = [...new Set((list || []).filter(Boolean))].map((m) => `<option value="${esc(m)}"></option>`).join('');
+}
+
+function igProviderChanged() {
+  const p = IG_PRESETS[$('ig-provider').value] || IG_PRESETS.ark;
+  $('ig-baseURL').placeholder = p.base + '（留空即用这个）';
+  $('ig-model').placeholder = p.model + '（留空即用这个）';
+  // ⚠️ 两家的尺寸格式不一样（Ark 认 `2K`，OpenAI 系只认 `1024x1024`）——
+  //    只在"当前值还是某个预设的默认值"时才跟着换，别覆盖用户自己填的
+  const sizeEl = $('ig-size');
+  if (!sizeEl.value || Object.values(IG_PRESETS).some((x) => x.size === sizeEl.value)) sizeEl.value = p.size;
+  fillIgList('ig-size-list', p.sizes);
+  // 先用默认模型把列表垫上（还没联网也知道有一个能用），下面那次拉取会补全
+  fillIgList('ig-model-list', [p.model]);
+  igLoadModels({ silent: true });
+}
+
+/**
+ * 拉生图模型列表 —— **内置候选 ∪ 平台 `/models`**。
+ * ⚠️ 内置候选是**兜底**，不是装饰：火山方舟的模型要先去控制台开通才会出现在
+ *    `/models` 里，很多生图平台干脆没实现这个接口。拉不到也得能选。
+ */
+async function igLoadModels(opts = {}) {
+  const hint = $('ig-model-hint');
+  const btn = $('btn-ig-models');
+  if (btn) btn.disabled = true;
+  if (!opts.silent && hint) {
+    hint.textContent = '正在从 API 拉取模型列表…';
+    hint.style.color = '';
+  }
+  try {
+    const r = await api('/api/imagegen/models', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ imagegen: {
+        provider: $('ig-provider').value,
+        baseURL: $('ig-baseURL').value.trim(),
+        apiKey: $('ig-apiKey').value.trim(),
+      }})
+    });
+    if (!r || !r.ok) {
+      if (hint) {
+        hint.textContent = `拉取失败（${(r && r.error) || '接口没响应'}）—— 可以直接在输入框里手打模型名。`;
+        hint.style.color = '#d97706';
+      }
+      return;
+    }
+    fillIgList('ig-model-list', r.models);
+    if (!hint) return;
+    // ⚠️ 平台那边失败**不算整体失败**（内置候选照旧能用），所以话要说清楚，别一律报红
+    if (r.error) {
+      hint.textContent = `平台那边没拉到（${r.error}）—— 先用内置的 ${r.builtin} 个候选，也能直接手打。`;
+      hint.style.color = '#d97706';
+    } else if (r.live) {
+      hint.textContent = `平台有 ${r.live} 个模型（生图的排在最前面），另有内置候选 ${r.builtin} 个 —— 点输入框就能选。`;
+      hint.style.color = '#16a34a';
+    } else {
+      hint.textContent = `内置 ${r.builtin} 个候选（还没填 API Key，所以没去平台拉）—— 点输入框就能选，也能手打。`;
+      hint.style.color = '';
+    }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+/** 显示本地缓存占用（**只统计不删**） */
+async function igCacheInfo() {
+  const el = $('ig-cache-info');
+  if (!el) return;
+  try {
+    const r = await api('/api/imagegen/cache', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ dryRun: true }),
+    });
+    if (!r || !r.ok) return;
+    el.textContent = `本地 ${r.count} 张 / ${(r.bytes / 1048576).toFixed(1)} MB`;
+  } catch { /* 统计失败不该弹错，忽略 */ }
+}
+
+/** 立即清掉过期的（保留时长按上面那个输入框） */
+async function igSweep() {
+  const btn = $('btn-ig-sweep');
+  [[btn, 'disabled']].forEach(([b, k]) => b && (b[k] = true));
+  try {
+    const r = await api('/api/imagegen/cache', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({}),
+    });
+    if (!r || !r.ok) return flash($('msg-ig'), false, '清理失败');
+    if (!r.enabled) flash($('msg-ig'), null, '保留时长是 0（不自动删）—— 什么都没清');
+    else if (r.removed) flash($('msg-ig'), true, `清掉 ${r.removed} 张（${(r.freedBytes / 1048576).toFixed(1)} MB）`);
+    else flash($('msg-ig'), null, `没有过期的（本地还留 ${r.count} 张）`);
+    igCacheInfo();
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+/** 保存生图配置 */
+async function saveImagegen() {
+  const el = $('msg-ig');
+  // ⚠️⚠️ 画风必须**两个一起发**：后端存的时候是整段 `style` 对象替换，
+  //    只发一半会把另一半从 config.yml 里抹掉。
+  // ⚠️ 输入框留空 = **不动那一项**（退回上次读到的值），不是清空 ——
+  //    清空会让提示词退回兜底那一句，画风就废了。
+  const cur = (STATE && STATE.config && STATE.config.imagegen && STATE.config.imagegen.style) || {};
+  const sSelf = $('ig-style-self').value.trim();
+  const sScene = $('ig-style-scene').value.trim();
+  const r = await api('/api/config', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ imagegen: {
+      enable: $('ig-enable').checked,
+      provider: $('ig-provider').value,
+      baseURL: $('ig-baseURL').value.trim(),
+      model: $('ig-model').value.trim(),
+      size: $('ig-size').value.trim(),
+      apiKey: $('ig-apiKey').value.trim(),
+      timeoutMs: Number($('ig-timeoutMs').value),
+      cooldownMs: Number($('ig-cooldownMs').value),
+      keepHours: Math.max(0, Number($('ig-keepHours').value) || 0),
+      style: { self: sSelf || cur.self || '', scene: sScene || cur.scene || '' },
+    }})
+  });
+  flash(el, r.ok, r.ok ? '已保存并生效' : ('保存失败：' + r.error));
+  if (r.ok) reloadAll();
+}
+
+/**
+ * 测试出图 —— ⚠️ **会真的出一张图**（火山方舟 0.20 元/张），按钮上写明了。
+ * 用人设包里那张参考图 + 一个日常自拍场景，出图后**直接在下面预览** ——
+ * 点一下就能判断"像不像她"，这也是唯一有意义的测试。
+ */
+async function testImagegen() {
+  const el = $('msg-ig');
+  const box = $('ig-preview');
+  box.innerHTML = '';
+  flash(el, null, '正在理解 + 出图…（10~40 秒）');
+  const r = await api('/api/imagegen/test', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({
+      // ⚠️ 这个输入框是「假装群友说的那句话」；kind 是她自己写的标记（auto=不写）
+      prompt: $('ig-testScene').value.trim(),
+      kind: $('ig-testKind').value,
+      imagegen: {
+        enable: true,
+        provider: $('ig-provider').value,
+        baseURL: $('ig-baseURL').value.trim(),
+        model: $('ig-model').value.trim(),
+        size: $('ig-size').value.trim(),
+        apiKey: $('ig-apiKey').value.trim(),
+        timeoutMs: Number($('ig-timeoutMs').value),
+      },
+    })
+  });
+  if (!r.ok) {
+    // ⚠️ 两行分开显示（2026-09-22 实测踩到「模型没开通」之后改的）：
+    //    上面那行是**她会说的话**，下面那行是**给你**的下一步 ——
+    //    只给"相机坏了"，用户根本不知道要去控制台开通模型。
+    box.innerHTML = r.hint
+      ? '<div class="hint" style="margin:0;color:#b45309">' +
+        '<b>出图失败。</b>群里她会说：「' + esc(r.error) + '」<br>' + esc(r.hint) + '</div>'
+      : '';
+    return flash(el, false, '出图失败');
+  }
+  flash(el, true, `成功，${Math.round((r.ms || 0) / 1000)} 秒`);
+  const used = r.withSelf === false
+    ? '这条路没有参考图（拍的是景物，她本来就不在画面里）'
+    : r.refNames && r.refNames.length
+      ? '参考图：' + esc(r.refNames.join('、'))
+      : '⚠️ 没有参考图 —— 生成的脸每次都不一样。去「人设」页传一张立绘。';
+  // ⚠️ 把「理解成了什么」也显示出来 —— 调画风/调场景时只有看得见才调得动
+  const p = r.picked || {};
+  const detail =
+    '<div class="hint" style="margin-top:6px;line-height:1.7">' +
+    used +
+    '<br>她此刻：' + esc((r.facts && r.facts.now) || '?') + ' · ' + esc((r.facts && r.facts.where) || '?') +
+    '<br>理解成：' + (r.withSelf ? '<b>画面里有她</b>' : '<b>她拍的东西（没有她）</b>') +
+    '，拍「' + esc(p.what || '') + '」' +
+    (p.place ? '，地点「' + esc(p.place) + '」' : '') +
+    (p.time ? '，时间「' + esc(p.time) + '」' : '') +
+    '<br><span style="color:#6b7280">最终提示词（' + String(r.prompt || '').length + ' 字）：' +
+    esc(r.prompt || '') + '</span></div>';
+  box.innerHTML =
+    '<img src="' + r.dataUrl + '" style="max-width:340px;border-radius:10px;border:1px solid #e5e7eb">' + detail;
+}
+
 // ── 保存：群与触发 ──
 async function saveTrigger() {
   // ⚠️ 这份设置横跨两个卡片（「它能在哪些群说话」+「回复与分条」），
@@ -4128,6 +4486,12 @@ async function qqProfileRefresh() {
   $('p-nick').value = q.nickname ?? '';
   $('p-avatar-name').textContent = q.avatar ? `文件：${q.avatar}` : '（没设头像）';
   $('p-avatar').src = q.avatar ? `/api/persona/avatar?id=${encodeURIComponent(PJ.id)}&t=${Date.now()}` : '';
+  // 生图参考图（立绘）—— 和头像是**两个文件**，见 persona-admin.saveRefImage() 的注释
+  const refs = (PJ.identity.image && Array.isArray(PJ.identity.image.refs)) ? PJ.identity.image.refs : [];
+  $('p-ref-name').textContent = refs[0] ? `文件：${refs[0]}` : '（没设 —— 生成的脸每次都不一样）';
+  $('p-ref').src = refs[0]
+    ? `/api/persona/avatar?kind=ref&id=${encodeURIComponent(PJ.id)}&t=${Date.now()}`
+    : '';
   $('p-qq-pill').textContent = PJ.id;
   // ② QQ 上**现在**是什么 —— 好让你一眼看出"该不该点立即应用"
   const r = await api('/api/qq/profile');
@@ -4178,6 +4542,27 @@ async function qqSaveAvatar() {
     pjShow($('msg-qqp'), true, `✅ 头像已存进人设包${tail}`);
     await personaOpen(PJ.id);
     qqProfileRefresh();
+  } else {
+    pjShow($('msg-qqp'), false, (r && r.error) || '上传失败');
+  }
+}
+
+/** 上传生图参考图（立绘）—— 只存进人设包，**不碰** QQ 头像 */
+async function qqSaveRef() {
+  const f = $('p-ref-file').files[0];
+  if (!f) {
+    pjShow($('msg-qqp'), false, '先选一张立绘图');
+    return;
+  }
+  pjShow($('msg-qqp'), true, '上传中…');
+  const r = await api(
+    `/api/persona/avatar?kind=ref&id=${encodeURIComponent(PJ.id)}&name=${encodeURIComponent(f.name)}`,
+    { method: 'POST', body: f },
+  );
+  if (r && r.ok) {
+    await personaOpen(PJ.id);
+    qqProfileRefresh();
+    pjShow($('msg-qqp'), true, '✅ 立绘已存进人设包 —— 以后这个角色拍照都用它');
   } else {
     pjShow($('msg-qqp'), false, (r && r.error) || '上传失败');
   }

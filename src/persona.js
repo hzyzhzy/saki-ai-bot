@@ -226,6 +226,37 @@ export function qq() {
 }
 
 /**
+ * **生图用的参考图**（`identity.image.refs`，2026-09-22 加）。
+ *
+ * 返回**人设包内**的绝对路径数组 —— 顺序有意义，第一张一般是正脸立绘。
+ * `src/imagegen.js` 会把它们编码成 base64 一起发过去（`image` 字段）。
+ *
+ * ⚠️ 为什么放人设包、不写死在代码里：参考图 = 「这个角色长什么样」，
+ *    该跟着角色走。**换人设 = 自动换脸，代码一个字不动**。
+ * ⚠️ 没配 `image.refs` 时**退回 `qq.avatar`** —— 头像是现成的，
+ *    这样"刚配好生图就能用"，不用用户先去想该传哪张。
+ *    （但头像往往太小，生成的脸会飘；界面上会提示补一张立绘。）
+ * ⚠️ 文件名走**白名单**（和 `persona-admin.avatarFile()` 同一套规矩）：
+ *    这是要读进内存、发到外部 API 的路径，不能让 `../` 有半点机会。
+ */
+export function refImages() {
+  const dir = personaDir();
+  const pick = (rel) => {
+    const safe = String(rel ?? '').replace(/[^\w.-]/g, '');
+    if (!safe || !/\.(png|jpe?g|gif|webp|bmp)$/i.test(safe)) return '';
+    const f = join(dir, safe);
+    return existsSync(f) ? f : '';
+  };
+  const img = load().image;
+  const refs = arr(img && typeof img === 'object' ? img.refs : [])
+    .map(pick)
+    .filter(Boolean);
+  if (refs.length) return refs;
+  const avatar = pick(qq().avatar);
+  return avatar ? [avatar] : [];
+}
+
+/**
  * **她怎么称呼别人**（`identity.address.*`）。
  *
  * ⚠️ 和「别人怎么称呼她」是两回事，后者是顶层那些字段（`selfName` / `nicknames`…）。
