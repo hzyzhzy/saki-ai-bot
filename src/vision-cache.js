@@ -7,6 +7,7 @@
  * 随时可能被清掉。所以要立刻读进内存。
  */
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { config } from './config.js';
 import { log } from './log.js';
 import { describeImage } from './vision.js';
@@ -27,18 +28,64 @@ function cleanCache() {
 }
 
 /**
+ * 把「取图接口给的东西」变成图片字节。
+ *
+ * ⚠️⚠️ 2026-09-23 修 —— **换协议端引入的回归，藏了两周**：
+ *
+ *   `get_image` 返回的 `file` **不保证是本地路径**：
+ *     · **NapCat**：本地文件路径（原来就按这个写的 ⇒ `readFileSync(p)` 能跑）
+ *     · **SnowLuma**（2026-09 换过去的）：**http(s) URL**
+ *       （`https://multimedia.nt.qq.com.cn/…`）
+ *   ⇒ 老代码把 URL 当路径读 ⇒ 实测报：
+ *   ```
+ *   ENOENT: no such file or directory,
+ *   open '…\qq-ai-bot\https:\multimedia.nt.qq.com.c…'
+ *   ```
+ *   ⇒ **识图从来一次都没成功过**，用户报了三次「她看不到图 / 机制还有bug」才挖到这儿。
+ *     （表现很迷惑：她答得出"你能分清吗"这种话——因为那不用看图；但图里的内容她完全不知道。）
+ *
+ * ⚠️ 但那条 `log.debug` 把真相一直藏着的：`logLevel: info` 时**根本看不到** ✗
+ *    （这次是临时开 debug 才一眼看见的。）
+ *
+ * 现在按形态分派：http(s) 下载 / `file://` 转路径 / `base64://` 与 `data:` 解码 / 其余当本地路径。
+ * 两种协议端都能跑。
+ */
+export async function loadImageBytes(p) {
+  const s = String(p ?? '');
+  if (!s) return null;
+  if (/^https?:\/\//i.test(s)) {
+    const r = await fetch(s, { signal: AbortSignal.timeout(20000) });
+    if (!r.ok) throw new Error(`下载图片 HTTP ${r.status}`);
+    return Buffer.from(await r.arrayBuffer());
+  }
+  if (s.startsWith('file://')) return readFileSync(fileURLToPath(s));
+  const b64 = s.startsWith('base64://')
+    ? s.slice('base64://'.length)
+    : /^data:image\/[a-z0-9.+-]+;base64,/i.test(s)
+      ? s.slice(s.indexOf(',') + 1)
+      : '';
+  if (b64) return Buffer.from(b64, 'base64');
+  return readFileSync(s);
+}
+
+/**
  * 取一张图的内容。
- * @param {(action:string, params:object)=>Promise<any>} call
- * @param {string} file NapCat 给的 file 标识
+ * @param {(action:string,params:object)=>Promise<any>} call
+ * @param {string} file 协议端给的 file 标识
  */
 async function fetchImage(call, file) {
   try {
     const r = await call('get_image', { file });
-    const p = r?.data?.file ?? r?.file;
-    if (!p) return null;
-    return readFileSync(p);
+    const p = r?.data?.file ?? r?.file ?? r?.data?.url ?? r?.url;
+    if (!p) {
+      log.warn(`取图：协议端没给 file/url（${file}）`);
+      return null;
+    }
+    return await loadImageBytes(p);
   } catch (e) {
-    log.debug(`取图失败（${file}）：${e.message}`);
+    // ⚠️ 提到 warn：这条曾经是 debug，`logLevel: info` 下完全看不到，
+    //    "她为什么看不到图"就查不出来（2026-09-23 实测）。
+    log.warn(`取图失败（${file}）：${e.message}`);
     return null;
   }
 }

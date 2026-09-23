@@ -1,6 +1,7 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import { readFileSync, writeFileSync, rmSync, statSync, utimesSync } from 'node:fs';
 import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { config, validate, ROOT, DEFAULT_LIFE, DEFAULT_QUEST, paramsFor } from './config.js';
 // ⚠️ 协议端适配层：启动横幅要报它、管理能力也由它决定（换协议端只改 config.yml）
 import * as provider from './provider.js';
@@ -79,6 +80,46 @@ const LOCK_FILE = process.env.QQBOT_LOCK_FILE || join(ROOT, 'state', 'bot.lock')
 const LOCK_STALE_MS = 5 * 60 * 1000;
 const LOCK_BEAT_MS = 30 * 1000;
 
+/**
+ * 问操作系统：**这个 PID 现在这个进程**是什么时候启动的（Unix 毫秒）。
+ *
+ * ⚠️⚠️ 2026-09-23 加（实测踩到：重启时**新实例拒绝启动，机器人起不来**）。
+ *    那次：旧机器人的 PID 被**别的进程复用了**，而旧机器人 10 秒前刚打过心跳
+ *    ⇒「PID 活着 + 心跳新鲜」两条都成立 ⇒ 判成"还有实例在跑" ✗
+ *    根子在于：`process.kill(pid, 0)` 只能说明**那个 PID 有进程**，
+ *    说明不了**那是机器人**。
+ *    ⇒ 所以拿锁里记的 `startedAtMs` 去核对：**这个 PID 此刻的启动时间**和它差太多，
+ *      就说明 PID 被复用了 ⇒ 是残留的锁，照常启动。
+ *
+ * ⚠️ **只在检出锁冲突时才调**（启动路径上一次），那点开销无所谓。
+ * ⚠️ 拿不到就返回 `null` —— 那就退回原来的判据。
+ *    **绝不因为"查不到"就把人挡住**：宁可偶尔多起一个（有别的机制兜），
+ *    也不能让机器人永远起不来。
+ */
+function liveProcStartMs(pid) {
+  if (process.platform !== 'win32') return null;
+  try {
+    const out = execFileSync(
+      'powershell',
+      [
+        '-NoProfile',
+        '-Command',
+        // ⚠️ 必须 `.ToUniversalTime()` —— `.StartTime` 是**本地时间**，
+        //    直接拿 `.Ticks` 当 UTC 换算会**整整差一个时区**（实测差 8 小时，
+        //    于是"和锁里记的对不上"永远成立 ⇒ 会把**真的在跑的实例**误判成残留）。
+        `(Get-Process -Id ${Number(pid)} -ErrorAction SilentlyContinue).StartTime.ToUniversalTime().Ticks`,
+      ],
+      { encoding: 'utf8', timeout: 4000 },
+    ).trim();
+    const ticks = Number(out);
+    if (!Number.isFinite(ticks) || ticks <= 0) return null;
+    // .NET ticks 从 1601-01-01 起算（1 tick = 100ns）→ Unix 毫秒
+    return ticks / 10000 - 62135596800000;
+  } catch {
+    return null; // 查不到（没权限 / PS 不可用）—— 交给上层按原判据走
+  }
+}
+
 function lockHolder() {
   let raw;
   let mtimeMs = 0;
@@ -98,6 +139,23 @@ function lockHolder() {
     if (e.code === 'EPERM') alive = true; // 活着，只是没权限给它发信号
   }
   if (!alive) return null; // ESRCH：那个 PID 早没了 ⇒ 是残留的锁
+
+  // ⚠️⚠️ PID 活着 ≠ 那是机器人（2026-09-23 实测）：
+  //    重启时新实例拒绝启动，查出来是**旧机器人的 PID 被别的进程复用了**，
+  //    而心跳还新鲜（旧机器人 10 秒前刚打过）⇒ 两条判据全成立 ⇒ 误判成"还有实例"。
+  //    ⇒ 用锁里记的启动时间核对：对不上就是复用，判为残留。
+  //    ⚠️ 老锁没有 `startedAtMs`（这天才加的）⇒ 自动退回原判据，不会因此放行错的。
+  const liveMs = liveProcStartMs(pid);
+  const lockMs = Number(raw?.startedAtMs);
+  if (liveMs !== null && Number.isFinite(lockMs) && lockMs > 0 && Math.abs(liveMs - lockMs) > 60000) {
+    log.warn(
+      `锁里的 PID ${pid} 现在这个进程的启动时间（${new Date(liveMs).toLocaleString('sv-SE')}）` +
+        `和锁里记的（${new Date(lockMs).toLocaleString('sv-SE')}）对不上 —— ` +
+        `那是 PID 被复用成了别的进程，不是机器人。这次照常启动。`,
+    );
+    return null;
+  }
+
   if (mtimeMs && Date.now() - mtimeMs > LOCK_STALE_MS) {
     log.warn(
       `锁文件里的 PID ${pid} 现在**有**进程占着，但锁已经 ` +
@@ -128,6 +186,9 @@ try {
       {
         pid: process.pid,
         startedAt: new Date().toLocaleString('sv-SE'),
+        // ⚠️ 2026-09-23 加：**数值型的启动时间**，给 `lockHolder()` 核对 PID 复用用
+        //    （`startedAt` 那串是给人看的，比不了）。
+        startedAtMs: Date.now(),
         argv: process.argv.slice(1).join(' '),
       },
       null,

@@ -69,6 +69,11 @@ writeFileSync(
     '  batch:',
     '    windowMsAtMe: 900',
     '    windowMs: 1200',
+    // ⚠️ 2026-09-23：**单字**碎片那个窗口线上默认是 5 秒，而本套件的时序假设
+    //    是按 2.5 秒写的（`STEP`≈1400ms、断言前等 `QUIET`+余量）。
+    //    这里显式压回 2.5 秒，让断言仍然确定；代码那条分支照旧被覆盖
+    //    （它只是取了个更短的窗口，逻辑一样）。
+    '    burstQuietMs1: 2500',
     '',
   ].join('\n'),
   'utf8',
@@ -300,8 +305,10 @@ console.log('\n【8】代码层：这两处别再被改回去');
     '★ 私聊放进了合并（不再是 `message_type !== \'group\'` 直接放行）',
   );
   check(
-    /isFragment[\s\S]{0,400}?waitMs = quietMs/.test(src),
-    '★ 碎片续窗那段还在（`isFragment` → `waitMs = quietMs`）',
+    // ⚠️ 2026-09-23 改：那段现在是 `fragText.length <= 1 ? Math.max(quietMs, quietMs1) : quietMs`
+    //    再 `if (fragWait > waitMs) waitMs = fragWait`（单字用更长的窗口）。
+    /isFragment[\s\S]{0,700}?waitMs = fragWait/.test(src),
+    '★ 碎片续窗那段还在（`isFragment` → 算出 `fragWait` → 放宽 `waitMs`）',
   );
   check(
     /if \(!capped && isFragment && !atMe && !hasReply && quietMs > waitMs\)/.test(src),
@@ -325,6 +332,88 @@ console.log('\n【8】代码层：这两处别再被改回去');
   check(
     /【他在一个字一个字跟你说话】/.test(src) && /event\._charBurst/.test(src),
     '★ 提示词那段（可以一个字一行回）与 `_charBurst` 标记都还在',
+  );
+}
+
+console.log('\n【★】主动接话的碎片**也必须攒批**（用户实测：连发「那」「肯」「定」，她回了三条）');
+{
+  const { readFileSync } = await import('node:fs');
+  const { join, dirname } = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+  const src = readFileSync(join(root, 'src', 'bot.js'), 'utf8');
+  // 那次日志是决定性的：两条走的是 `voluntary:chat`，而老的
+  // `if (b.enable === false || meta.voluntary)` 把它们**整个绕过了攒批** ⇒
+  // 每条碎片各自触发一次接话。而**恰恰是短碎片最容易被判成主动接话**
+  // （「那」「肯」「定」单看，每一条都"不像在问她"）。
+  check(
+    /meta\.voluntary && !looksFragment/.test(src),
+    '★★★ `voluntary` **不能无条件跳过攒批** —— 只跳过"不是碎片"的',
+  );
+  check(
+    /const looksFragment = fragText\.length <= shortChars && !event\._poke;/.test(src),
+    '★ 碎片判据提到了**分流之前**（现在给两处用）',
+  );
+  check(
+    !/if \(b\.enable === false \|\| meta\.voluntary\) \{/.test(src),
+    '★ 老的"voluntary 一律不合并"那行已经不在了',
+  );
+  check(/const isFragment = looksFragment;/.test(src), '★ 后面那处复用它，不再重算（免得两处判据漂移）');
+}
+
+console.log('\n【★★】生成期间/刚结束攒到的碎片，要**等到他说完**再答（跨生成窗口也能合上）');
+{
+  const { readFileSync } = await import('node:fs');
+  const { join, dirname } = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+  const src = readFileSync(join(root, 'src', 'bot.js'), 'utf8');
+  // 现场（logs/bot- 1095003.log）：01:05:27「睡」→ 01:05:32「了」（**间隔 5 秒**，
+  // 超过 2.5 秒窗口）→ 01:05:46 第一条才回完（**生成 19 秒**）⇒ 三条从没进过同一批。
+  // 所以"这批以碎片结尾就先别处理，等一个静默窗口"是必需的。
+  check(
+    /flushPendingGroup\(bkey, \{ force = false \} = \{\}\)/.test(src),
+    '★ `flushPendingGroup` 支持 `force`（定时器回调用它，避免无限重排）',
+  );
+  check(/const holdMs = Math\.max\(0, Number\(b0\.genHoldMs \?\? 6000\)\)/.test(src),
+    '★ 这个静默窗口默认 **6 秒**（比他手打的间隔长，2.5 秒那种不够）');
+  check(/if \(holdMs > 0 && endsFragment\) \{/.test(src), '★ 只对**碎片**放宽（正常长度的消息照旧立刻处理，不白等）');
+  // ⚠️⚠️ 最要紧的一条：等的时候 `running` 必须是 true，
+  //    否则新来的碎片会走 `scheduleHandle` **另起一批**，等于白等。
+  check(/st\.running = true;/.test(src) && /st\.holdTimer = setTimeout/.test(src),
+    '★★ 等的时候 `running` 保持 true —— 新碎片才会攒进这一批，而不是另起一批');
+  check(/st\.holdTimer\.unref\?\.\(\)/.test(src), '★ 定时器 `unref()`（不然会把 `test/*` 的进程吊住）');
+  check(/st\.pending = false;\s*\n\s*this\.flushPendingGroup\(bkey, \{ force: true \}\)/.test(src),
+    '★ 定时器到点时先清 `pending` 再用 `force` 进来');
+  check(/这一批以碎片/.test(src), '★ 等的时候打一行 info 日志（事后能查出"她为什么慢了两秒"）');
+
+  // ⚠️ 2026-09-23 加（用户问「初华呢 这句话她读到了吗」）：当时只能翻 `recent.json`，
+  //    而那是**已记录的上下文** ⇒ 推不出"到底收到没"。现在每收到一条就记一行。
+  check(
+    /\[收到\] \$\{event\.message_type === 'group'/.test(src),
+    '★★ 每收到一条消息都记一行「[收到] 群/人/摘要」——"她到底看没看到某句"一眼可查',
+  );
+  check(
+    // ⚠️ 窗口从 900 放宽到 1800：2026-09-23 在 `[收到]` 前面插了十几行注释
+    //    （说明"他的 @ 没被识别"那个坑该怎么看），注释也占字符。
+    /scheduleHandle\(event, meta = \{\}\) \{[\s\S]{0,1800}?\[收到\]/.test(src),
+    '★ 而且记在 `scheduleHandle` 的**最前面**（所有消息的必经点，且在攒批之前 —— 合并了也一条一行）',
+  );
+  check(
+    /at=\$\{atSegs\.length\}[\s\S]{0,240}?atMe=\$\{atMe\} self=/.test(src),
+    '★★ `[收到]` 里还记了 **at 段数量 + qq + atMe + selfId** —— 用户报「@ 了她却走 voluntary」时，靠它一眼分辨是协议端丢了 at 段、还是判据/selfId 的锅',
+  );
+
+  // ⚠️ 2026-09-23 第二轮（他连发「你」「睡」「了」「吗」：「你」被拆开、后三个合上了）：
+  //    「你」→「睡」**隔了 ~5 秒**，超过 2.5 秒的碎片窗口 ⇒ 第一个字被单独答掉。
+  //    ⇒ **单字**碎片单独用一个更长的窗口；2~3 字的（「在吗」「好的」）照旧。
+  check(
+    /const quietMs1 = Math\.max\(0, Number\(b\.burstQuietMs1 \?\? 5000\)\)/.test(src),
+    '★ **单字**碎片用更长的窗口（`burstQuietMs1`，默认 5 秒）',
+  );
+  check(
+    /fragText\.length <= 1 \? Math\.max\(quietMs, quietMs1\) : quietMs/.test(src),
+    '★★ 只给**单字**放宽 —— 2~3 字的完整小句（「在吗」「好的」）照旧 2.5 秒，不为它白等',
   );
 }
 

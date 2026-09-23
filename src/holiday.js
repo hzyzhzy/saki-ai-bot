@@ -209,6 +209,19 @@ export function on(now = Date.now()) {
     .filter((h) => h.note)
     .map((h) => `${h.name}：${h.note}`)
     .join('\n');
+  // ⚠️⚠️ 2026-09-23 加：**连休区间**（用户截图：「为什么我记得昨天小祥也是这么说的」）。
+  //
+  //    现场：日本 **9/21 敬老の日 + 9/23 秋分の日**，中间夹着的 **9/22 按「国民の休日」
+  //    也放假**（`holidays.md` 里那行就写着 `09-22..09-23`）⇒ 所以**她 9/22 说放假是对的** ✓
+  //    可她在 9/23 说成了「**就今天啊，秋分之日**」✗ —— 她只判断了"**今天**是不是假日"，
+  //    没人告诉她**这几天是连着的**，于是顺口讲成"只有今天"。群友说"放了三天"才是对的 ✓
+  //
+  //    ⇒ 这里补一句「连休：9/21–9/23 连休 3 天（敬老の日、秋分の日）」。
+  //      它**会自动进提示词**（`life.js:542` 把 `noteText` 拼进 `bits`）⇒ 不用改别的地方 ✓
+  const vacation = streakAround(now);
+  const holidayText = [noteText, vacation.days > 1 ? `连休：${vacation.label}` : '']
+    .filter(Boolean)
+    .join('\n');
   return {
     all,
     names: all.map((h) => h.name),
@@ -217,7 +230,44 @@ export function on(now = Date.now()) {
     local,
     foreign,
     events,
-    noteText,
+    noteText: holidayText,
+    /** ⚠️ 含今天的**连续放假区间**（`days === 0` = 今天不放假） */
+    vacation,
+  };
+}
+
+/**
+ * 含 `now` 的那一段**连续放假日**。
+ *
+ * ⚠️ 为什么逐天扫、而不是去查表里"哪几条规则挨着"：`holidays.md` 里既有区间写法
+ *    （`09-22..09-23`）又有**星期规则**（`09-W3-1` = 9 月第 3 个周一），
+ *    逐天调 `hit()` 最省事、也最不容易算错 ✓
+ * ⚠️ 前后各扫 10 天封顶 —— 日本最长连休（白银周）也就 5 天，够用。
+ */
+function streakAround(now) {
+  const DAY = 24 * 60 * 60 * 1000;
+  const offOn = (t) => list.some((h) => !h.foreign && h.off && hit(h, t));
+  if (!offOn(now)) return { from: 0, to: 0, days: 0, names: [], label: '' };
+  let from = now;
+  for (let i = 0; i < 10 && offOn(from - DAY); i++) from -= DAY;
+  let to = now;
+  for (let i = 0; i < 10 && offOn(to + DAY); i++) to += DAY;
+  const days = Math.round((to - from) / DAY) + 1;
+  const at = (t) => list.filter((h) => !h.foreign && h.off && hit(h, t)).map((h) => h.name);
+  const names = [...new Set([...at(from), ...at(now), ...at(to)])];
+  const md = (t) => {
+    const d = new Date(t);
+    return `${d.getMonth() + 1}/${d.getDate()}`;
+  };
+  return {
+    from,
+    to,
+    days,
+    names,
+    label:
+      days > 1
+        ? `${md(from)}–${md(to)} 连休 ${days} 天（${names.join('、')}）`
+        : `${md(from)}（${names.join('、')}）`,
   };
 }
 

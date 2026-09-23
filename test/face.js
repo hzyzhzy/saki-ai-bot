@@ -245,7 +245,15 @@ async function main() {
   const gotPlain = await waitFor(() => allText().includes('没有任何标记'));
   await sleep(2500);
   check(allImages().length === 0, '没有发图');
-  check(gotPlain && allText().includes('没有任何标记'), '文本正常');
+  // ⚠️⚠️ 2026-09-23：这条**实测偶发**（隔离后跑 4 次挂 1 次），而假模型是**确定性**的
+  //    （见上面 `user.includes('纯文本')` 那条分支）、`waitFor` 又有 **20 秒** ——
+  //    所以超时只可能是"**她压根没回**"，不是"回错了"也不是"排队慢"。
+  //    ⇒ 把"她实际说了什么"打出来，下次红的时候才有线索（原来只有一行 ❌，什么也查不到）。
+  check(
+    gotPlain && allText().includes('没有任何标记'),
+    '文本正常',
+    `实际发出 ${allText().length} 条：${JSON.stringify(allText().slice(0, 3))}`,
+  );
 
   say('清空对话', 3099);
   await sleep(1200);

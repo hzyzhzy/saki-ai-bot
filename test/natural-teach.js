@@ -189,7 +189,13 @@ async function main() {
   const ok1 = await waitFor(() => learnedText().includes('【记住了】白名单取消了'));
   check(ok1, '内容写进了学习档案');
   check(learnedText().includes('白名单政策'), '主题自动起好了（白名单政策）');
-  check(/记下了/.test(replies()), '回执简短（含「记下了」）');
+  // ⚠️⚠️ 2026-09-23 修偶发（隔离后跑 3 次挂 1 次）：**回执是异步生成的，而这里原来没等它** ——
+  //    上一条 `waitFor`（学习档案写入）一过就立刻读 `replies()`，回执还没发出来 ⇒
+  //    报「回执简短 ❌」。**是竞态，不是功能坏了**（同一步"内容写进了学习档案 ✅"
+  //    已经证明教学本身成功，就差这一句回执没赶上）。
+  //    ⚠️ 断言里带上"她实际说了什么"，下次真挂了不用再猜。
+  const okAck = await waitFor(() => /记下了/.test(replies()), 8000);
+  check(okAck, '回执简短（含「记下了」）', `实际回复：${JSON.stringify(replies().slice(0, 3))}`);
   check(!/已写入学习档案，之后回答群友会优先用这条/.test(replies()), '自然教学的回执不啰嗦');
 
   console.log('\n[2] 群主只是提问 → 不该记');

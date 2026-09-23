@@ -115,6 +115,17 @@ context:
     enable: true
     windowMsAtMe: 900
     windowMs: 1200
+    # ── 连发碎片合并（同一个人连着发短消息 → 攒成一句只回一次）
+    burstShortChars: 3
+    burstQuietMs: 2500
+    # ⚠️ **单字**碎片的窗口（毫秒）：单字几乎总是一个词的一部分（你/睡/了/吗），
+    #    值得多等；2~3 字的消息（「在吗」「好的」）常常是完整的一句，照旧只等 burstQuietMs
+    burstQuietMs1: 5000
+    burstGapMs: 2000
+    burstMaxMs: 20000
+    # ⚠️ 生成期间/刚结束攒到的碎片要等多久（毫秒）—— 比 burstQuietMs 长：
+    #    那种处境是"他正打着字、而她在生成"，间隔天然更大（实测能到 5 秒）
+    genHoldMs: 6000
 status:
   enable: true
   host: mc.example.com

@@ -26,6 +26,14 @@ trigger:
   cooldownMs: 0
   maxInputChars: 1000
 
+# ⚠️⚠️ 2026-09-23 加：**把「判断节流」关掉**（实测这条让本套件偶发挂，3 次里挂 1 次）。
+#    套件里几个 `say()` 之间只隔 1~2 秒，而节流默认是 5 秒 —— 有那么一条消息会被
+#    「5s 内刚问过」吞掉 → 她**压根没有回复** → `waitFor(() => allText().includes(…))`
+#    超时 → 报「文本正常 ❌」。**本套件不是在测节流**，不该受它摆布。
+#    ⚠️ 不能填 `0` —— 代码里是 `Number(x) || 5000`，0 是 falsy、会被当成 5000。
+chat:
+  judgeThrottleMs: 1
+
 status:
   enable: false
   host: ""

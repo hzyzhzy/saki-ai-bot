@@ -137,7 +137,8 @@
 
 | 排除 | 为什么 |
 | --- | --- |
-| `config*.yml`（只留 `config.example.yml`） | **里面有 API key / OneBot token** |
+| ~~`config*.yml`~~ **2026-09-23 起不再排除** | 用户要求进版本库（配置改坏了要有退路）。⚠️ 它含 API key / token ⇒ **更不许加 remote**。 |
+| `personas/` **同上，不再排除** | 同理：人设改动要有退路。公开副本走 `tools/make-public.cjs`，它自己排除 personas |
 | `state/`、`logs/`、`library/` | 运行期数据、图片，来回变，进版本库没意义 |
 | `knowledge/` | `owner.md` / `group-memory.md` / `groups/` 有**用户和群友的真实信息** |
 | `manual/`、二维码/凭据临时文件（`.napcat-jwt`、`qrcode.txt`、`*-qrcode.png`） | 二进制 / 一次性的东西 |
