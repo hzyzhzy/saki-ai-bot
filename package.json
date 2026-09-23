@@ -1,6 +1,7 @@
 {
   "name": "qq-ai-bot",
   "version": "1.0.0",
+  "license": "BUSL-1.1",
   "private": true,
   "description": "NapCatQQ + 大模型 的 QQ AI 机器人 (OneBot v11 / WebSocket)",
   "type": "module",
