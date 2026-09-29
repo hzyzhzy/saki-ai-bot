@@ -1,4 +1,4 @@
-﻿; ⚠️ 这个文件必须存成 **UTF-8 带 BOM**，否则 Inno 会把中文当 ANSI 读成乱码。
+; ⚠️ 这个文件必须存成 **UTF-8 带 BOM**，否则 Inno 会把中文当 ANSI 读成乱码。
 ;    改完用这条转一下（PowerShell）：
 ;      $p='installer\saki-bot.iss'; $c=[System.IO.File]::ReadAllText($p); [System.IO.File]::WriteAllText($p,$c,(New-Object System.Text.UTF8Encoding($true)))
 
@@ -99,18 +99,22 @@ begin
     'QQ 协议端',
     '机器人是 OneBot 客户端 —— 换协议端只影响"管理面"，收发都照常',
     '三个协议端各有自己的许可，**都没有**打包进本安装包。区别是安装器能替你做到哪一步：' + #13#10 +
+    '· NapCat —— **默认**：可以从官方 Release **自动下载**，并自动配好端口 3001 + token。' + #13#10 +
+    '  装完只剩"登录"这一步（没人能替你点）。' + #13#10 +
     '· snowluma —— **不下载、也不自动部署**：它的 EULA 第 5.4 条要求事先书面授权，' + #13#10 +
     '  才能"并入第三方安装包"或"通过自动化脚本部署"。所以你得自己装好它，' + #13#10 +
     '  安装器只负责把 config.yml 里那几项写对。' + #13#10 +
-    '· NapCat —— 可以从官方 Release **自动下载**并自动配好（端口 3001 + token）。' + #13#10 +
+    '  💡 **可以先用 NapCat 跑起来，之后随时换过来** —— 改 config.yml 里 provider.name' + #13#10 +
+    '     一行就行，收发完全不用动。实测 SnowLuma 的**登录态更稳定**（不容易被踢下线，' + #13#10 +
+    '     也就少扫码）。' + #13#10 +
     '· LLBot —— 独立应用，本安装包不下载它，但你装好后配置很简单。' + #13#10 + #13#10 +
     '⚠️ 用任何第三方 QQ 协议端都有账号被风控的风险，请自行评估。',
     True, False);
-  PageProvider.Add('snowluma（推荐 —— 但需要你自己先装好它）');
-  PageProvider.Add('NapCat（本安装包可以自动帮你下载并配好）');
+  PageProvider.Add('NapCat（默认 —— 本安装包可以自动帮你下载并配好）');
+  PageProvider.Add('SnowLuma（要你自己先装好它；但登录态更稳，之后随时能换过来）');
   PageProvider.Add('LLBot（独立应用，你自己装）');
   PageProvider.Add('其他通用 OneBot 11 实现（只保证收发）');
-  PageProvider.Values[0] := True; { ⚠️ 默认 = snowluma（用户 2026-09-21 定的） }
+  PageProvider.Values[0] := True; { ⚠️ 默认 = napcat（用户 2026-09-30 改回：安装器能自动把它配好） }
 
   { ── 第 3 页：NapCat 怎么来（**只有选了 NapCat 才出现**，见 ShouldSkipPage）── }
   PageNap := CreateInputOptionPage(PageProvider.ID,
@@ -128,21 +132,24 @@ begin
   PageNap.Values[0] := True;
 end;
 
-{ ⚠️ 2026-09-21 加：用户在向导里选的协议端（索引对应 PageProvider.Add 的顺序）。
-    **兜底返回 snowluma** —— 静默安装时那几页不显示、Values 可能全是假值，那时按默认走。 }
+{ ⚠️ 2026-09-21 加、2026-09-30 改顺序：用户在向导里选的协议端。
+    ⚠️⚠️ 索引**必须**跟上面 `PageProvider.Add` 的顺序一一对应
+        （现在是 0=NapCat 1=SnowLuma 2=LLBot 3=onebot）——
+        顺序一改这里就得跟着改，否则会**选 A 装出 B**。
+    **兜底返回 napcat** —— 静默安装时那几页不显示、Values 可能全是假值，那时按默认走。 }
 function ChosenProvider(): String;
 begin
-  Result := 'snowluma';
+  Result := 'napcat';
   if PageProvider = nil then
     Exit;
   if PageProvider.Values[1] then
-    Result := 'napcat'
+    Result := 'snowluma'
   else if PageProvider.Values[2] then
     Result := 'llonebot'
   else if PageProvider.Values[3] then
     Result := 'onebot'
   else
-    Result := 'snowluma';
+    Result := 'napcat';
 end;
 
 { 选别的协议端时，"NapCat 怎么来"那一页整页跳过 }

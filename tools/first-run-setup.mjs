@@ -84,14 +84,15 @@ const groups = String(answers.groups ?? arg('groups', ''))
  *   ② `安装信息.txt` 里给用户的那套上手步骤 —— NapCat 要抄 token、开反检测，
  *      SnowLuma / LLBot 都不需要那些。
  *
- * ⚠️ 默认 `snowluma`（用户定的）。手动装的人可以 `--provider napcat` 改回去。
+ * ⚠️ 默认 `napcat`（用户 2026-09-30 改回：安装器能自动把它下载并配好）。
+ *    手动装的人可以用 `--provider snowluma` 换成它 —— 实测 SnowLuma 的**登录态更稳定**。
  * ⚠️ 名字写错不至于让机器人挂掉 —— `src/config.js` 会把不认识的名字退回 `onebot`
  *    （原值留在 `provider.nameRaw` 里便于排查）。
  * ⚠️⚠️ **SnowLuma 只写配置，绝不由安装器下载/部署它**：它的 EULA 5.4 明确要求
  *    事先书面授权才能「并入第三方安装包或通过自动化脚本部署」——
  *    所以那套步骤是"你自己装好它"，安装包里不含它。
  */
-const provider = String(answers.provider ?? arg('provider', 'snowluma')).trim() || 'snowluma';
+const provider = String(answers.provider ?? arg('provider', 'napcat')).trim() || 'napcat';
 
 const problems = [];
 if (!botQQ) problems.push('没给机器人 QQ 号（--bot-qq）');
@@ -286,6 +287,11 @@ const guide =
           '         O3 Hook 模式也开着 → 点保存 → **然后重启 NapCat**',
           '       （那一页自己写着「修改后需重启生效」）。',
           '  6. 回来双击「一键启动（QQ+机器人）.bat」',
+          '',
+          '💡 **之后想换成 SnowLuma 也完全可以**（实测它的**登录态更稳定** ——',
+          '   不容易被踢下线，也就少扫码）：把 config.yml 里的 provider.name 从',
+          '   napcat 改成 snowluma 就行，收发完全不用动。它本身要你自己装，',
+          '   步骤见 config.example.yml 顶部那一段。',
         ];
 
 const licenseNote =
