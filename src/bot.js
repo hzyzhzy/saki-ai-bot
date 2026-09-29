@@ -15,7 +15,10 @@ import { log } from './log.js';
 import { streamChat, quickAck, phrase } from './llm.js';
 import * as msg from './message.js';
 import * as history from './history.js';
-import { knowledgeText, hasKnowledge, selectFor as knowledgeSelect, mentionsAnyTerm, whoIsBrief, animeLibNames } from './knowledge.js';
+import { knowledgeText, hasKnowledge, selectFor as knowledgeSelect, mentionsAnyTerm, whoIsBrief, aliasesOf, animeLibNames } from './knowledge.js';
+// ⚠️ 2026-09-20 从上游 fork 挑过来：梗库（`knowledge/memes.md`）**按需**注入 ——
+//    只有对方这句话里命中了触发词才贴上来，且自带"拿不准按字面回"的总规则（防"看什么都像梗"）。
+import { memesFor } from './memes.js';
 import * as mclog from './mc-log.js';
 import * as observe from './observe.js';
 import { queryServer, describe } from './status.js';
@@ -46,12 +49,12 @@ import * as meal from './meal.js';
 //    （日程算默认值，她说过的话可以覆盖它，覆盖最多活 2 小时）
 import * as whereState from './where.js';
 import * as remind from './remind.js';
+import * as friend from './friend.js';
 import * as credBackup from './cred-backup.js';
 import * as affinity from './affinity.js';
 import { detectInsult } from './insult.js';
 import * as repeat from './repeat.js';
 import * as quest from './quest.js';
-import * as friend from './friend.js';
 import * as storyline from './storyline.js';
 // ⚠️ 判断"今天是不是放假"（`whereAmI()` 要用：她上学日白天不该说自己在客服室）
 import * as holiday from './holiday.js';
@@ -238,7 +241,14 @@ export function whereAmI(now = new Date()) {  const hh = now.getHours();
     today = h?.names ?? [];
     vacation = h?.vacation ?? null;
   } catch {}
+  // ⚠️⚠️ 2026-09-25 修（用户实测：中秋**就是当天**，而她说「中秋都过去好几天了」）：
+  //    根因是下面 dayKind 在**不放假**时把 	oday（节日名）**整个丢掉**了 ——
+  //    中秋节不放假（off=false）⇒ 走「上学日」那个分支 ⇒ 她**压根不知道今天是中秋** ✗
+  //    ⇒ 群友说「中秋快乐」时她只能瞎猜，猜成了「过去好几天了」✗
   const schoolDay = !off && dow >= 1 && dow <= 5;
+  // ⚠️ 2026-09-23 加：分钟级判断 —— 原来只按整点：hh === 12 盖不住 13:00-13:29，
+  //    而 hh < 15 又把 13:00-13:29 也说成在上课（真作息是 13:30 上课、15:00 放学，见 life-events.md）。
+  const hm = hh * 60 + now.getMinutes();
   const week = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][dow];
   // ⚠️⚠️ 2026-09-23 加：**连休要说出来**。
   //
@@ -260,7 +270,7 @@ export function whereAmI(now = new Date()) {  const hh = now.getHours();
     ? `**放假**${today.length ? `（${today.join('、')}）` : ''}${vacText}`
     : dow === 0 || dow === 6
       ? '**周末，不上学**'
-      : '**上学日**（不放假）';
+      : `**上学日**（不放假）${today.length ? `，**但今天是${today.join('、')}**` : ''}`;
   const dateText = `${now.getFullYear()}年${now.getMonth() + 1}月${now.getDate()}日 ${week}`;
 
   let where;
@@ -280,11 +290,11 @@ export function whereAmI(now = new Date()) {  const hh = now.getHours();
     //    中午 12 点是**午休**，而原来 `hh < 15` 一律写成"在教室上课"——
     //    她 12:39 刚在群里说去吃饭，12:41 又说"我在上课"，两句当场打架。
     //    所以 12 点这一档必须单独拆出来。
-    else if (hh === 12) {
-      where = '**午休**（在教室吃午饭、趴一会儿；手机能看，回得快）';
+    else if (hh >= 12 && hm < 13 * 60 + 30) {
+      where = '**午休/课间**（12:00-13:30，在教室吃午饭、趴一会儿；手机能看，回得快）';
       place = '教室';
     } else if (hh < 15) {
-      where = '**在羽丘的教室里上课** —— 手机静音，回得慢、有时候干脆看不到';
+      where = '**在羽丘的教室里上课**（**下午的课 13:30-15:00**）—— 手机静音，回得慢、有时候干脆看不到';
       place = '教室';
     } else if (hh < 18) {
       where = '**放学后刚到客服室**（排班打工，有同事、有交班）';
@@ -648,7 +658,13 @@ export function cleanMarkdown(text) {
     //    那种情况直接把换行去掉（连着说）。
     t = t.replace(/([\s\S])\n+/g, (_, prev) => (/[。！？!?…；;：:，,、]/.test(prev) ? prev : prev + '。'));
     t = t.replace(/。{2,}/g, '。'); // 别弄出连续句号
+    // ⚠️ 2026-09-25（用户截图：「别花花绿绿 地来」「整一堆完 整方块」「看哪儿 空再说」）：
+    //    模型偶尔会在**中文词中间**补一个分词空格 —— 真人打字绝不会这样，
+    //    在 QQ 里看着就是一串断开的字，很像机器吐的。
+    //    ⚠️ 只去**汉字与汉字之间**的空格：英文、数字、URL、代码块里的空格一律不动，
+    //       「散热 120mm 风扇」这种中英混排也不会被粘成一坨。
   }
+  t = t.replace(/(?<=[\u4e00-\u9fa5])[ \t]+(?=[\u4e00-\u9fa5])/g, '');
   return t.trim();
 }
 
@@ -822,7 +838,16 @@ export class Bot {
     //    因为戳一戳是 `post_type: 'notice'`，晚一步就被丢掉（踩过）。
     if (payload.post_type === 'notice') {
       if (this.isPokeAtMe(payload)) {
-        this.pokeBack(payload).catch((e) => log.debug(`[戳一戳] 回击失败：${e.message}`));
+        // ⚠️⚠️ 2026-09-20：戳一戳是 `notice`，**走不到上面 message 分支的私聊白名单检查**。
+        //    以前这里直接调 pokeBack，而它只查群白名单 ⇒ 私聊（没有 group_id）整段跳过
+        //    ⇒ **白名单外的人私聊戳一下也会被回复**（真实漏过）。
+        const pokeGid = String(payload.group_id ?? '');
+        const pokeUid = String(payload.user_id ?? '');
+        if (pokeGid || this.privateAllowed(pokeUid)) {
+          this.pokeBack(payload).catch((e) => log.debug(`[戳一戳] 回击失败：${e.message}`));
+        } else {
+          log.debug(`私聊用户 ${pokeUid} 不在白名单/私聊已关闭，戳一戳不回`);
+        }
       }
       // ── 有人来加好友 → 自动通过（2026-09-15）──
       //
@@ -844,7 +869,13 @@ export class Bot {
 
     if (payload.post_type !== 'message') return;
     if (payload.message_type === 'group' && !config.trigger.groupChat) return;
-    if (payload.message_type === 'private' && !config.trigger.privateChat) return;
+    // ⚠️⚠️ 2026-09-20 从上游 fork 挑过来（用户要求：白名单外的人不管发什么都不回）。
+    //    原来是 `!config.trigger.privateChat` —— 只要开了私聊就**谁都能触发她** ✗
+    //    现在收口成 `privateAllowed()`，和 notice（戳一戳）、`handle()` 共用同一个判据。
+    if (payload.message_type === 'private' && !this.privateAllowed(payload.user_id)) {
+      log.debug(`私聊用户 ${payload.user_id} 不在白名单/私聊已关闭，已忽略`);
+      return;
+    }
 
     // 只允许在指定群里工作（客服模式的核心安全边界）
     if (payload.message_type === 'group') {
@@ -926,10 +957,30 @@ export class Bot {
       // ⚠️ 2026-09-17：这里还要**剥掉开头的文本形式 @**（`@saki酱saki酱… 这是什么猫`那种）。
       //    那串名字只是"在叫她"，不是消息内容 —— 不剥的话她会答「连发五遍名字做什么」。
       //    ⚠️ 它和下面 handle 里那处（L2396 附近）是**同一套算法**，必须一起改。
+      //
+      // ⚠️⚠️ 2026-09-26：**「@别人」不能在这里变成 `@人名`** —— 我第一版就是那么改的，
+      //    回归立刻抓到两个失败（`face`「文本正常」「分条后发出了 1 张图（实际 0 张）」、
+      //    `follow-up`「正文发出去了」等待超时）。
+      //    根因：这里出来的 `text` **身兼两职** ——
+      //      ① 进上下文给她看；② `contextText()` 靠**文本相等**剔除当前这一条。
+      //    而**@的号不一定是她自己**（测试和真实消息里都有），那些 at 段就变成了
+      //    正文里凭空多出来的 `@某人` ⇒ 下游的关键词 / 表情标记匹配全被打乱 ✗。
+      //    ⇒ 正确做法：这里**保持干净**，另存一个 `atNames` 字段，
+      //      只在 `recent.contextText()` 往外拼的时候带上（见下面的 `atNames:`）。
       const text = msg.stripLeadingAt(msg.tidy(msg.extractText(withoutAt)));
       recent.remember(payload, {
         text,
         isAtMe: this.selfId ? msg.isAt(segs, this.selfId) : false,
+        // ⚠️⚠️ 2026-09-26：**这条消息 @ 了谁**（人名，给她看的那份用，见 recent.js 的注释）。
+        //    ⚠️ 名字只能**自己反查** —— SnowLuma 的 at 段（→OneBot 事件方向）
+        //       只给 `qq`、不给 `name`（只有反方向的 `fromSegment` 才认 name）。
+        //    ⚠️ 只留**查得到名字**的：查不到就别塞一串 QQ 号进上下文当噪音。
+        //    ⚠️ 千万别把它拼进 `text`（那是主干文本，身兼"剔除当前这条"的职责，
+        //       拼进去会把下游匹配打乱 —— 回归抓到过，详见 recent.js 那段注释）。
+        atNames: withoutAt
+          .filter((s) => s.type === 'at' && s.data?.qq !== 'all')
+          .map((s) => names.of(String(s.data?.qq ?? ''), payload.group_id))
+          .filter(Boolean),
         // ⚠️ 把图片的 `file` 一起存 —— 后面有人指着这张图说话时，
         //    要能把图**补做识别**（见 recent.recentImages 的注释）。
         imageFiles: segs
@@ -976,6 +1027,9 @@ export class Bot {
         try {
           repeat.observe(payload.group_id, text, {
             isSelf: !!this.selfId && String(payload.user_id) === String(this.selfId),
+            // ⚠️ 2026-09-29：把**原始消息段**一起喂进去 —— 复读时要按它重建，
+            //    这样表情能照发，而不会变成字面的 `[QQ表情]`（见 repeat.js 那段注释）。
+            segs,
           });
           const v = repeat.shouldJoin(payload.group_id, {
             enable: config.repeat?.enable !== false,
@@ -987,9 +1041,46 @@ export class Bot {
             log.info(
               `[复读] 群 ${payload.group_id} 刷到第 ${v.count} 句 → 她也复读「${v.say.slice(0, 24)}」（${v.why}）`,
             );
-            this.sendToGroup(payload.group_id, v.say).catch((e) =>
-              log.debug(`接复读失败：${e.message}`),
-            );
+            // ⚠️⚠️ 2026-09-28（用户报：「她不知道自己的那个 3 遍之后复读的内容」）：
+            //    **复读也要记进上下文**。原来只发、不记 —— 上下文里那一句是**别人**说的，
+            //    她自己那次复读没有任何痕迹 ⇒ 别人问「你怎么复读了」「你刚复读的哪句」
+            //    她答不上来（和"定时提醒"那条路是同一类漏）。
+            //
+            //    ⚠️ 我上一轮**判断错过一次**，别照那个理由再删掉它：当时以为
+            //       "那句话上下文里已经有了，再记一遍会变成同一句出现两遍、更容易认错人"。
+            //       不对 —— 她复读的是**链上那句原话**，而链上有好几个人说过相似的话，
+            //       她本来就**分不清自己复读的是哪一条**；而且"我复读过"这件事本身就是信息。
+            //
+            //    ⚠️ 记了**不会打乱复读判定**：`repeat.observe()` 靠 `isSelf` 标志过滤
+            //       她自己的话（见上面 L1023 那段注释），**不看上下文**。
+            const echoSay = String(v.say ?? '')
+              // ⚠️ 记进上下文的版本**别带占位符**（`recent.js` 那边也做了同样的事）——
+              //    不然她下次可能照着学，在正经回复里发字面的 `[QQ表情]` ✗
+              .replace(/\[(QQ表情|图片|照片|表情包|动画表情|动图|贴纸)\]/gi, '')
+              .trim();
+            // ⚠️⚠️ 2026-09-29：**按原始消息段复读**。
+            //    用户截图：群里刷「能不能入卡池啊😣😣😣」，她复读成了
+            //    「能不能入卡池啊[QQ表情][QQ表情][QQ表情]」—— 群友当场问「saki怎么不能发表情」✗。
+            //    根因：复读用的 `say` 是 `extractText()` 的输出，表情早变成占位符了。
+            //    ⇒ 有 `saySegs` 就按它发（表情是**真的表情段**），没有才退回纯文本。
+            const echoSegs =
+              Array.isArray(v.saySegs) && v.saySegs.length
+                ? v.saySegs
+                : [{ type: 'text', data: { text: echoSay } }];
+            this.call('send_group_msg', { group_id: String(payload.group_id), message: echoSegs })
+              .then((r) => {
+                this._markSpoke(payload.group_id, r?.message_id);
+                try {
+                  recent.rememberBot(
+                    { message_type: 'group', group_id: payload.group_id, user_id: this.selfId },
+                    echoSay,
+                    r?.message_id ?? '',
+                  );
+                } catch (e) {
+                  log.debug(`记复读内容失败：${e.message}`);
+                }
+              })
+              .catch((e) => log.debug(`接复读失败：${e.message}`));
           }
         } catch (e) {
           log.debug(`复读判断失败：${e.message}`);
@@ -2302,7 +2393,61 @@ export class Bot {
   }
 
   /** 同一会话内串行，不同会话并行 */
+  /**
+   * 记一行「这条消息收到了什么」。
+   *
+   * ⚠️⚠️ 2026-09-29 抽出来（原先是 `scheduleHandle` 里的一段 inline 代码）：
+   *    那段只覆盖「没 @ 她的普通消息」这条路径 —— **@ 她的、以及主动接话的**，
+   *    走的是 `enqueue`，**一行都不记**。
+   *    结果是 21:49 群友发崩溃日志那次：协议端（SnowLuma）明明收到了
+   *    `[文件:latest.log]` 并转发了，`bot.log` 里却**什么都查不到**，
+   *    只能靠"缓存目录没被创建"反推"它压根没走到解析那一步" ✗
+   *    ⇒ 两条路径都调这里。
+   *
+   * @param {object} event
+   * @param {string} tag 路径标记（`主动/@` 之类），空则不显示
+   */
+  logIncoming(event, tag = '') {
+    try {
+      const segs0 = msg.toSegments(event.message);
+      const t = msg.stripPlaceholders(msg.tidy(msg.extractText(segs0)));
+      const atSegs = segs0.filter((s) => s?.type === 'at');
+      const atMe = !!(this.selfId && msg.isAt(segs0, this.selfId));
+      log.info(
+        `[收到${tag ? `·${tag}` : ''}] ` +
+          `${event.message_type === 'group' ? `群${event.group_id}` : '私聊'} ` +
+          `${srcOf(event).name}：${t ? t.slice(0, 40) : '[图片/表情]'}` +
+          // ⚠️⚠️ 2026-09-26 修：原来写的是 `s.qq`，而 at 段的结构是 `{ type:'at', data:{ qq } }`
+          //    ⇒ **永远取不到**，日志里一律显示成 `[at=2(?,?)]`。
+          //    这个 `?` 被当成了"协议端没给 qq"的诊断标记（见下面 `[at=1(?)]` 那段注释），
+          //    实际上协议端一直在给 —— **是这里取值写错了**，白排查。
+          `　[at=${atSegs.length}${atSegs.length ? `(${atSegs.map((s) => s.data?.qq ?? '?').join(',')})` : ''}` +
+          ` atMe=${atMe} self=${this.selfId ?? '?'}]` +
+          // ⚠️ 2026-09-29 加：段构成（`text,image` / `file` …）——
+          //    "她到底有没有收到那个文件"这类问题，看这一项一眼就能定。
+          ` 段=${segs0.map((s) => s?.type ?? '?').join(',') || '(空)'}`,
+      );
+      // ⚠️⚠️ 2026-09-29：**file 段把完整字段打出来**。
+      //    现场：SnowLuma 日志确认收到了 `[文件:latest.log]` 并转发，
+      //    但机器人这边 `logs/_uploaded` **从未被创建** ⇒
+      //    `mclog.looksLikeLogFile()` 没认出它（它要求 `type==='file'` 且
+      //    `data.name`/`data.file` 带 `.log|.txt|.zip…` 后缀）。
+      //    到底是段类型不叫 `file`、还是文件名字段不叫 `name`
+      //    —— 不打出来就只能猜。这段是**常驻**的，不是临时探针。
+      for (const s of segs0) {
+        if (s?.type === 'file') {
+          log.info(`[文件段] ${JSON.stringify(s.data ?? {}).slice(0, 300)}`);
+        }
+      }
+    } catch {
+      /* 记日志失败不该影响收消息 */
+    }
+  }
+
   enqueue(event, meta = {}) {
+    // ⚠️ 2026-09-29：这条路径（@ 她的 / 主动接话）原来完全不打日志，
+    //    现在和 `scheduleHandle` 共用同一个记录点。
+    this.logIncoming(event, '主动/@');
     const key = history.sessionKey(event);
     // ⚠️ 批次/攒消息的 key 就是**会话 key（群）** —— 必须和 `scheduleHandle`
     //    里那个 `bkey` 完全一致，否则「生成期间攒下的消息」永远排空不了
@@ -2478,6 +2623,18 @@ export class Bot {
         //                  ② "回复她"这条判据要知道被回的是不是她发的
         if (event.message_type === 'group') this._markSpoke(event.group_id, r?.message_id);
         if (r && r.status === 'failed') {
+          // ⚠️ 2026-09-25：私聊撞上"请先添加对方为好友" ⇒ 把这个人记进"发不出去"名单，
+          //    `friend.pickForToday()` 以后会跳过（省得每天白撞同一个人）。
+          //    ⚠️ 这里能拿到 `params`（`call()` 的闭包）—— 这正是选在这里记的原因：
+          //      发送失败的**统一处理点**（上面那个 `.then` 回调）拿不到 `user_id` ✗
+          if (action === 'send_private_msg') {
+            const msg = String(r.message ?? r.wording ?? '');
+            if (/好友|请先添加|not\s*friend/i.test(msg)) {
+              try {
+                friend.markDmFailed(String(params?.user_id ?? ''));
+              } catch {}
+            }
+          }
           log.warn(`发送失败（${action}）：${r.message ?? r.wording ?? JSON.stringify(r).slice(0, 120)}`);
         }
         return r;
@@ -2612,6 +2769,15 @@ export class Bot {
           //    照片要按**图片**发（占一大块、点开能看原图），不是按表情发（小图）。
           //    原来这里没传，而 `sendText` 的默认值当时是 `true` ⇒ 照片被当表情发了。
           await this.sendText(event, '', { faceFile: r.file, asSticker: false });
+          // ⚠️⚠️ 2026-09-25（用户实测：「我让她拍老师的照片，但问她图片是什么老师，
+          //    她说**这不是老师**」）：
+          //    照片**必须留在她自己的记忆里** —— 她**看不到**生成出来的图（架构限制），
+          //    上下文里没这条，她就只记得"有人让我拍照"，被问到时只能瞎猜，
+          //    甚至**否认自己刚拍的东西** ✗
+          //    ⇒ 把"我拍了什么"当**旁白**记一条（用括号，免得被当成她真说过的话）。
+          //    ⚠️ 只发图、不带文字的那条 `sendText` 不会自己进上下文（文本是空的），
+          //      所以这行**不能省**。
+          recent.rememberBot(event, `（我拍了张照片发出来，内容是：${picked.what}）`);
           return;
         }
         log.warn(`拍照最终失败：${r.reason}（${picked.what}）`);
@@ -2862,11 +3028,36 @@ export class Bot {
     //    那串名字只是"在叫她"，不是消息内容。不剥的话她会答「连发五遍名字做什么」。
     //    ⚠️ 和上面 `recent.remember` 那处必须一致（不一致的话，当前这条会被
     //       重复当成上文里别人说过的话，导致答非所问 —— 那个坑注释在上面）。
+    // ⚠️ 2026-09-26：这里**保持干净**（不带 `@人名`），理由见 `recent.remember` 那处的注释。
+    //    @ 的是谁由 `atNames` 单独带过去，只在拼上下文时可见。
     const text = msg.stripLeadingAt(msg.tidy(msg.extractText(withoutAt)));
     // 给模型看的是**带占位符的原样**（它需要知道对方发了图），
     // 但「空不空」的判断要用剥掉占位符后的 realText —— 表情包消息 realText 才是空的。
     const realText = msg.stripPlaceholders(text);
     const out = { segments, text, realText };
+
+    // ⚠️⚠️ 2026-09-29 修（现场：北辰发了 `latest.log` + 「错误报告-….zip」，
+    //    机器人**一个字都没读到**，只在群里回「整本 log 给我我也翻不完啊，你截个图发我」）。
+    //
+    //    真凶就在这里：文件消息的**文本**是 `[文件:latest.log]` ——
+    //    对 `decide()` 来说它跟服务器无关、也没 @ 她 ⇒ 一路落到最后那句
+    //    `return null`（注释写着"交给主动接话逻辑判断"）⇒ 被判"接不上" ⇒
+    //    **整条丢掉**，`analyzeLogFile()` 连跑的机会都没有 ✗
+    //
+    //    ⚠️ 为什么查了半天：`[收到]` 那行只打在 `scheduleHandle` 那条路上，
+    //      而主动接话走的是 `enqueue` —— **一行都不记**，
+    //      所以日志里一片空白，只能靠"下载缓存目录没被创建"反推。
+    //
+    //    ⇒ 群友发的**日志/错误报告文件**是"她知道该管的事"，必须接。
+    //      放在 `out` 之后、主动接话之前：任何路径都绕不过它。
+    //    ⚠️ 判据按用户要求放宽：**文件名** `latest.log` / `crash-report` 就算，
+    //      不用等文件段被认出来（他可能先问一句、文件在下一条）。
+    const logFileHit =
+      segments.some((s) => mclog.looksLikeLogFile(s)) || /latest\.log|crash-?report/i.test(text);
+    if (logFileHit) {
+      log.info('这条是崩溃日志（文件或文件名）→ 必须处理（不参与「接不接」的判定）');
+      return { ...out, hit: 'logfile' };
+    }
 
     if (event.message_type === 'private') {
       return { ...out, hit: 'private' };
@@ -3056,26 +3247,89 @@ export class Bot {
    *
    * @returns {Promise<string>} 给模型的材料；拿不到就返回空串
    */
+  /**
+   * 把群友发来的那个文件**真的拿到手**（三条路依次试）。
+   *
+   * ⚠️⚠️ 2026-09-29 修（现场：北辰发了 `latest.log` + `错误报告.zip`，
+   *    机器人**完全读不到**，只在群里回了「整本 log 给我我也翻不完啊，你截个图发我」）。
+   *
+   *    真凶是**接口用错了** —— 原来只走 `get_file`，而 SnowLuma 直接报：
+   *      「file_id not found in the image/voice cache.
+   *        get_file only resolves cached image/voice ids;
+   *        **for group/normal files use get_group_file_url**」
+   *    ⇒ `get_file` 只管**图片/语音缓存**，群文件它一概不认 ✗
+   *
+   *    实测（2026-09-29，用协议端 HTTP API 复现）：
+   *      · `get_group_file_url` + 段里那个 `url` → **两条都下载成功**
+   *        （latest.log 44 KB / 错误报告.zip 165 KB），解析也正常。
+   *    ⇒ 所以顺序是：**段里的 url（最稳，SnowLuma 会带）→ get_group_file_url → get_file 兜底**。
+   *    三条都失败才认输，而且每条失败都记 warn（不再静默）。
+   *
+   * @returns {Promise<{buf:Buffer,name:string}|null>}
+   */
+  async fetchLogFile(event, d, name, fileId) {
+    const grab = async (u) => {
+      const res = await fetch(u, { signal: AbortSignal.timeout(60000) });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return Buffer.from(await res.arrayBuffer());
+    };
+
+    const tries = [];
+    // ① 段里自带 url —— SnowLuma 的 file 段里有这个字段，最省事也最稳
+    const direct = String(d.url ?? '');
+    if (/^https?:\/\//i.test(direct)) tries.push(['段里的 url', () => grab(direct)]);
+    // ② 群文件专用接口（正确的那一个）
+    if (fileId && event?.group_id) {
+      tries.push([
+        'get_group_file_url',
+        async () => {
+          const r = await this.call('get_group_file_url', {
+            group_id: event.group_id,
+            file_id: fileId,
+          });
+          const u = String(r?.url ?? r?.data?.url ?? '');
+          if (!u) throw new Error('没返回 url');
+          return grab(u);
+        },
+      ]);
+    }
+    // ③ 老接口兜底（它只对图片/语音有效，留着以防别的协议端不一样）
+    if (fileId) {
+      tries.push([
+        'get_file',
+        async () => {
+          const r = await this.call('get_file', { file_id: fileId });
+          const local = String(r?.file ?? r?.path ?? '').replace(/^file:\/\/\/?/, '');
+          if (!local || !existsSync(local)) throw new Error(`拿不到本地文件：${local || '(空)'}`);
+          return readFileSync(local);
+        },
+      ]);
+    }
+
+    for (const [label, run] of tries) {
+      try {
+        const buf = await run();
+        if (buf?.length) {
+          log.info(`[日志] 取到「${name}」：走「${label}」，${buf.length} 字节`);
+          return buf;
+        }
+        log.warn(`[日志] 「${label}」拿到空内容`);
+      } catch (e) {
+        log.warn(`[日志] 「${label}」取文件失败：${e.message}`);
+      }
+    }
+    log.warn(`[日志] 三条路都拿不到「${name}」—— 只能让她告诉群友读不了`);
+    return null;
+  }
+
   async analyzeLogFile(event, fileSeg) {
     const d = fileSeg.data ?? {};
-    const name = String(d.name || d.file || 'log.txt');
+    const name = String(d.name || d.file || d.filename || d.file_name || 'log.txt');
     const fileId = d.file_id || d.id || d.file;
-    if (!fileId) return '';
+    if (!fileId && !d.url) return '';
 
-    let r;
-    try {
-      r = await this.call('get_file', { file_id: fileId });
-    } catch (e) {
-      log.warn(`[日志] get_file 失败：${e.message}`);
-      return '';
-    }
-    const local = String(r?.file ?? r?.path ?? '').replace(/^file:\/\/\/?/, '');
-    if (!local || !existsSync(local)) {
-      log.warn(`[日志] 拿不到本地文件：${local || '(空)'}`);
-      return '';
-    }
-
-    const buf = readFileSync(local);
+    const buf = await this.fetchLogFile(event, d, name, fileId);
+    if (!buf) return '';
     const res = mclog.analyzeFile({ name, buf });
     if (!res.ok) {
       log.info(`[日志] 分析不了：${res.reason}`);
@@ -3116,28 +3370,12 @@ export class Bot {
     //    ⚠️ 放在 `scheduleHandle` 的**最前面**：它是所有消息的必经点（@ / 普通 / 戳一戳），
     //      而且在**攒批合并之前** —— 合并了也照样一条一行。
     //    ⚠️ 截断到 40 字：日志是排障用的，不需要全文（全文在 `recent.json` 里）。
-    try {
-      const segs0 = msg.toSegments(event.message);
-      const t = msg.stripPlaceholders(msg.tidy(msg.extractText(segs0)));
-      // ⚠️⚠️ 2026-09-23 加（用户截图：「机制还有bug」）：
-      //    他 @ 了她，日志却是 `voluntary:chat <- 你能分清吗`（**主动接话**，不是 `at`），
-      //    而她因此答「什么的第几代，你倒是先说是什么啊」—— 说明**@ 没被识别成 @** ✗
-      //    可 13:34 **同样的话**（先发图、再 @"你能分清吗"）那次是 `at <- …` ✓
-      //    ⇒ 同一个人、同一个 @，一次生效一次不生效 ⇒ **必须能从日志一眼分辨是哪种**：
-      //      · at 段里**有她的号**、但 `atMe=false` ⇒ 判据 / `selfId` 的问题；
-      //      · **压根没有 at 段** ⇒ 协议端或发送方式的问题（@ 退化成纯文本了）。
-      //    ⚠️ 光看 `voluntary:chat` 是分不出来的 —— 这就是上一轮我没能定位的原因。
-      const atSegs = segs0.filter((s) => s?.type === 'at');
-      const atMe = !!(this.selfId && msg.isAt(segs0, this.selfId));
-      log.info(
-        `[收到] ${event.message_type === 'group' ? `群${event.group_id}` : '私聊'} ` +
-          `${srcOf(event).name}：${t ? t.slice(0, 40) : '[图片/表情]'}` +
-          `　[at=${atSegs.length}${atSegs.length ? `(${atSegs.map((s) => s.qq ?? '?').join(',')})` : ''}` +
-          ` atMe=${atMe} self=${this.selfId ?? '?'}]`,
-      );
-    } catch {
-      /* 记日志失败不该影响收消息 */
-    }
+    // ⚠️ 2026-09-29：这一段原来是一大块 inline 日志代码，现在挪进 `logIncoming()`。
+    //    原因：它只覆盖「没 @ 她的普通消息」，而 **@ 她的 / 主动接话**走的是
+    //    `enqueue`，那条路**一行都不记** —— 群友发崩溃日志（21:49）那次就是
+    //    因此什么都查不到，只能靠"缓存目录没被创建"反推。
+    //    原来那些注释（at 段诊断、为什么截断 40 字）一并挪进去了。
+    this.logIncoming(event);
     const b = config.context?.batch ?? {};
 
     // ⚠️⚠️ 2026-09-23 修（用户实测：他连发「那」「肯」「定」三条，她**回了三条**）。
@@ -3425,6 +3663,13 @@ export class Bot {
   }
 
   async handle(event, meta = {}) {
+    // ⚠️⚠️ 2026-09-20 私聊**根本防线**（用户要求：白名单外的人不管发什么类型都不回）。
+    //    放在 handle 最前面 —— 所有"构造假私聊事件"的入口（戳一戳、补看、将来的新功能）
+    //    最终都要经过这里，这一道挡住就不会再漏（onRaw 那两处是第一道，这里是第二道）。
+    if (event?.message_type === 'private' && !this.privateAllowed(event.user_id)) {
+      log.debug(`私聊用户 ${event.user_id} 不在白名单/私聊已关闭，忽略`);
+      return;
+    }
     const voluntary = meta.voluntary || null; // 'question' | 'mention' | null
     // ⚠️ 「补看」回来的消息：这条其实是几分钟前发的（掉线期间漏掉的）。
     //    提示词里要**说清这个时间差**，别让她当成"刚刚发的"来答。
@@ -3439,6 +3684,34 @@ export class Bot {
     //    ⚠️ 但**先同步粗筛**（`wantsRemind`）：不命中的消息连 await 点都不产生
     //       （否则会给每条消息加一个微任务延迟，把对时序敏感的套件带抖，见那个方法的注释）。
     if (this.wantsRemind(event)) await this.maybeRemind(event);
+    // ⚠️⚠️ 2026-09-29 加（用户实测：他连着三次说「把下次提醒的被提醒人改成XXX」，
+    //    她三次都应「行，改好了」，**实际一次都没改** ✗）。
+    //
+    //    试过只改提示词（注入段里写「🚫🚫 **绝对不许**说你改成功了…那是骗他」）——
+    //    **压不住**：她换了个说法表达同一个假信息（实测答「行，还是一语未尽」，
+    //    意思就是"已经改成一语未尽了"✗）。
+    //
+    //    ⇒ 这两种失败是**确定的事实**（那条真的已经发过了 / 真的没定过），
+    //      所以**代码直接给准确回答**，不交给她自由发挥。
+    //    ⚠️ 只兜这两种；其它情况（比如"没听出时间"）仍然让她自己问一句 ——
+    //      那种需要她组织语言，不能写死。
+    {
+      const rf = event?._remind;
+      if (rf?.fail === 'alreadySent' || rf?.fail === 'noPrev') {
+        const line =
+          rf.fail === 'alreadySent'
+            ? `那条${rf.atText ? `（${rf.atText}）` : ''}已经发过了呀，改不了了（`
+            : '你没让我提醒过什么呀（';
+        try {
+          await this.sendText(event, line);
+          recent.rememberBot(event, line);
+        } catch (e) {
+          log.warn(`[提醒] 如实回一句失败：${e.message}`);
+        }
+        log.info(`[提醒] 代码兜底如实回答（${rf.fail}）：${line}`);
+        return;
+      }
+    }
     const decision = this.decide(event, voluntary);
     if (!decision) return;
 
@@ -3909,7 +4182,9 @@ export class Bot {
     //        20000 太晚（和正文只差 1 秒，看着像同时发）→
     //        4500 太早（普通消息也触发，群友只说「喵」它也来句"我瞅瞅"）→
     //        **30000**（用户拍板："超过 30 秒没出消息再触发"）。
-    const ackAfter = Number(config.chat?.ackAfterMs) > 0 ? Number(config.chat.ackAfterMs) : 30000;
+    // ⚠️⚠️ 2026-09-23 用户拍板：**先不要这个「让我想想」过渡话机制了**（「直接先别要这个机制了，藏进代码里」）。
+    //    默认改成 0 = 不启用；代码留着，哪天想用把 config 里的 chat.ackAfterMs 设成非 0 就回来了。
+    const ackAfter = Number(config.chat?.ackAfterMs) > 0 ? Number(config.chat.ackAfterMs) : 0;
     /** 已经生成好的过渡话（空串 = 还没到时间 / 生成失败） */
     let ackText = '';
     // 纯表情那条路（斗图/回发表情）本来就是秒回，不需要过渡话
@@ -4567,7 +4842,7 @@ export class Bot {
               //
               //    代价：正文晚 2 秒。但那本来就是"超过 30 秒"的慢回复，不差这 2 秒。
               //    可调：`chat.ackGapMs`（设 0 = 关掉这个空档，退回原来的行为）。
-              const gap = Number(config.chat?.ackGapMs ?? 2000);
+              const gap = Number(config.chat?.ackGapMs ?? 4000);
               if (Number.isFinite(gap) && gap > 0) {
                 await new Promise((r) => setTimeout(r, Math.min(gap, 8000)));
               }
@@ -4586,6 +4861,66 @@ export class Bot {
         //    下面那套分条逻辑一个字不改。
         //    三道闸（enable / 最多 8 个字 / 同会话 30 分钟一次 / 群里要有明确召唤）
         //    都在 `charPlayParts()` 里。
+        // ⚠️⚠️ 2026-09-23 用户拍板（原话：「为什么不能用生成时的时间来等待？生成完了没有消息就发，
+        //    有就重新生成」）：
+        //    **生成完之后先别发**，等一小段（`chat.settleMs`，默认 2500）——
+        //    这期间他补充的话会继续攒进 `st.items`（`running` 保持 true）。
+        //      · 等到点了**有新消息** ⇒ **丢掉这次生成的、不发**，直接 `return` ——
+        //        之后 `enqueue` 的 finally 会把 `st.items` 交给 `flushPendingGroup`，
+        //        于是用**合并后的内容重新生成** ✓（正是用户要的"有就重新生成"）
+        //      · **没有** ⇒ 照常发出去 ✓
+        //    ⚠️ 两个代价（用户已知并同意）：① 每次回复晚 settleMs；
+        //       ② "重新生成"会**浪费一次已经花过钱的模型调用**。
+        //    ⚠️ 设 0 = 关掉这个等待（退回旧行为）。
+        //    ⚠️⚠️ 没新消息时**必须把 running 恢复成 false** —— 否则后面的消息会一直往
+        //       `st.items` 里攒、而没有任何人负责清空 ⇒ **她再也不说话了** ✗（这是最危险的坑）
+        {
+          const settleMs = Math.max(0, Number(config.chat?.settleMs ?? 2500));
+          const sKey = history.sessionKey(event);
+          const st2 = this.batchState?.get(sKey);
+          if (settleMs > 0 && st2) {
+            st2.running = true;
+            await sleep(settleMs);
+            // ⚠️⚠️ 2026-09-29 修（用户报：「为什么机器人刚才两条 @ 的消息都没回」）。
+            //
+            //    这条路**原来没有任何次数上限** —— 群里**连续有人说话**时，
+            //    她会在「生成完了 → 又有新消息 → 整条丢掉重来」之间**无限循环**，
+            //    **永远开不了口** ✗。
+            //    实测日志（群 200000001，02:46~02:47）：<主人> 发图 @ 了她，
+            //    02:46:54 丢一次、02:47:37 又丢一次，中间 一语未尽 一直在发 ——
+            //    那两条 @ 就卡在里面，一直没回。
+            //
+            //    ⚠️ 上面那条同类的路（`requeueMax`，见 4490 附近）**是有上限的**，
+            //       这条当时漏了 —— 两条路长得不一样，很容易只改一条。
+            //
+            //    ⇒ 现在给它一个自己的计数：攒够 `chat.settleGiveUp`（默认 2）次就
+            //      **不再丢**，把已经生成好的那句**发出去** —— 她晚一句、没跟上最新那条，
+            //      总比**永远不说话**强得多。
+            if (st2.items?.length) {
+              st2.drops = (Number(st2.drops) || 0) + 1;
+              const giveUp = Math.max(1, Number(config.chat?.settleGiveUp ?? 2));
+              if (st2.drops < giveUp) {
+                log.info(
+                  `[${sKey}] 生成完了但他又补了 ${st2.items.length} 条 → 丢掉这次生成的，重新来` +
+                    `（第 ${st2.drops}/${giveUp} 次）`,
+                );
+                return;
+              }
+              log.warn(
+                `[${sKey}] 已经因为"他又补话"丢掉 ${st2.drops} 次（上限 ${giveUp}）→ ` +
+                  `这次**不丢了，直接发出去**（群里一直有人说话，再丢她就永远开不了口）`,
+              );
+              // ⚠️ 必须把这批清掉：留着的话 `finally` 里的 `flushPendingGroup` 会拿它
+              //    **再生成一轮** ⇒ 又可能丢 ⇒ 回到死循环。
+              //    （清掉不算丢消息：刚发出去那句本来就是"合成一批"之后的回复。）
+              st2.items.length = 0;
+            }
+            st2.running = false;
+            // ⚠️ 走到这儿说明这一轮**没有丢**（要么本来就没新消息，要么上面放行了）
+            //    ⇒ 计数归零，下一轮重新从 0 开始计（每次开口最多丢 `giveUp - 1` 次）。
+            st2.drops = 0;
+          }
+        }
         const playParts = this.charPlayParts(event, decision, rawReplyText);
         if (playParts) {
           log.info(`[${key}] 「一个字一条」的梗：她也一个字一条回（一共 ${playParts.length} 条）`);
@@ -4840,11 +5175,21 @@ export class Bot {
         //    那是**把内部技术错误摊给群友看**：群友不知道什么 API，也没法处理，
         //    只看见机器人在报错。现在当成小祥**自己的事**说：「我工资真见底了」。
         if (/402|Payment Required|Insufficient Balance/i.test(err.message)) {
-          log.warn(`[${who}] 余额耗尽（402）→ 用「工资见底」的话术挡一下`);
-          const c = balance.balanceComplaint({ force: true });
-          await this.sendText(event, c.line ?? '……我工资好像见底了', { reply: !sentFirst }).catch(
-            () => {},
-          );
+          // ⚠️⚠️ 2026-09-28 改（用户截图 + 明确指示：「这是模型余额耗尽的情况」、
+          //    「如果彻底没钱了直接别发就行了，不要发预制消息」）。
+          //
+          //    原来这里**每次 402 都无条件发一条**「工资见底」话术 —— 而 402 是
+          //    "**这一次调用**被拒"，她每尝试回一句话就发一条催款 ⇒ 越想说越发
+          //    （实测 16:04~16:09 六分钟刷了 11 条）；而且余额耗尽时模型也调不动，
+          //    润色必然失败 ⇒ 发出去的全是 `pickLine()` 写死的模板
+          //    （同一条「账上真见底了，<主人> 充一下吧」重复 4 次）✗。
+          //
+          //    ⇒ 现在**这里什么都不发**（用户要的就是这个）：
+          //      · 真没钱了，催第 11 遍不会带来任何新信息；
+          //      · 而这条路上只能发预制话术，正是他明确不要的那种。
+          //    ⚠️ 「余额偏低、还没耗尽」的提醒仍然由**定时任务**那条路负责，
+          //       它有"每个 1 档群只提醒一次"的落盘去重（`complainedByGroup`）。
+          log.warn(`[${who}] 余额耗尽（402）→ 按用户要求**不再发催款**（免得刷屏）`);
           return;
         }
 
@@ -5490,8 +5835,12 @@ export class Bot {
       //    那样用户能直接编辑，又**只在服主说话时加载**（不会让群友的提示词里
       //    也出现「你和服主的关系」，测试 attitude.js 就是盯这个隔离的）。
       //    这里保留动态部分：这次说话的人是谁 + 他的职权边界。
+      // ⚠️ 2026-09-26：**别名也写进这一行**（用户同一天报的「认不出管理员」）——
+      //    只写群名片/昵称的话，他用游戏 ID 问「<主人> 是谁」时她**对不上号**
+      //    （末尾就一句"<主人> 本人"，而"<主人>"在提示词的别处）。
+      const akaOwner = aliasesOf(config.ownerQQ, [name, '<主人>']);
       return [
-        `## 当前对话者：**<主人> 本人**（QQ ${config.ownerQQ}，昵称「${name}」）`,
+        `## 当前对话者：**<主人> 本人**（QQ ${config.ownerQQ}，昵称「${name}」${akaOwner.length ? `，也叫 ${akaOwner.join(' / ')}` : ''}）`,
         '',
         `⚠️ **正在跟你说话的人就是 <主人> 本人。** 他不需要「去找 <主人>」，他自己就是。`,
         `也**不要对他说「你找茏或者 <主人>」这种话** —— 那等于让他去找他自己。`,
@@ -5516,10 +5865,25 @@ export class Bot {
       ].join('\n');
     }
     if (role === 'staff') {
+      // ⚠️⚠️ 2026-09-26：**把别名直接写进这一行**。
+      //    用户截图：管理员**本人**问「Luminiflux是谁」，她答「我也不知道诶，别考我」✗ ——
+      //    而提示词里明明有「| Dr. Chads Champagne | 10000008 | 又叫 Luminiflux |」。
+      //    根因：群名片/昵称只说得出"他在这个群叫什么"，**别名在别的段落里**，
+      //    要她自己把两处连起来 ⇒ 实测**时对时错**（同一个人问，一次"就是你"、
+      //    一次"我也不知道诶"）。这里已经是提示词**最末尾**（离提问最近），
+      //    把结论钉死，**就没有要推的东西了**。
+      const aka = aliasesOf(event.user_id, [name]);
       return [
-        `## 现在跟你说话的是：管理员 ${name}`,
+        `## 现在跟你说话的是：管理员 ${name}${aka.length ? `（**就是 ${aka.join(' / ')}**）` : ''}`,
         '',
         '他是管理，但不是服主。保持礼貌，可以随意一点，不用太拘束，但别越界。',
+        ...(aka.length
+          ? [
+              '',
+              `⚠️ **${aka.join('、')} 和 ${name} 是同一个人** —— 群里问「${aka[0]} 是谁」问的就是他，`,
+              '他自己问「我是谁」也一样。**别说"不认识"**，照上面那句直接答他是谁、管什么。',
+            ]
+          : []),
       ].join('\n');
     }
     return [
@@ -5536,6 +5900,26 @@ export class Bot {
       '- **永远要给解决方案。** 就算前面扎了一句，后面也得把该说的说清楚，',
       '  或者明确告诉他该找谁。光怼不给答案等于没帮上忙。',
       '- 不用对每个群友都毕恭毕敬，你不是谁的佣人——但也别让群友觉得你讨厌他们。',
+      '',
+      // ⚠️⚠️ 2026-09-29（用户截图：北辰说「我来了」，她回「来了啊 有事说事吧」，
+      //    接着「客服啊，你喊了半天小祥不就是喊我（ 有事说事」「你想问什么，直说吧」）——
+      //    用户原话：「**默认北辰是来问问题的**」。
+      //
+      //    为什么钉在这儿：上面那一整串说的都是"**有人来问**"该怎么答
+      //    （「对方没看公告就来问」「永远要给解决方案」），再叠上 `where.js` 那个
+      //    "客服室，值班"的状态 ⇒ 合起来就是"**当班待客**"的框架，
+      //    于是谁来说句话都先被问一句「有什么事」✗
+      //
+      //    ⚠️ 这段**每次都注入，而且在所有提示词最末尾**（离提问最近），所以放这里。
+      //    实测（2026-09-29 真实模型 3 次采样）：
+      //      不加 → 「来了就来了」「晚上好，来得正是时候（」
+      //      加上 → 「哟，来了啊」   ← 群里那句要的就是这个
+      '- ⚠️ **先分清他是来干什么的 —— 群里大部分人不是来求你的。**',
+      '  · 有人只是**冒个泡 / 打个招呼 / 分享个东西 / 闲聊吐槽**（「我来了」「在吗」「看这个」）——',
+      '    那就照他说的那件事**随口接一句**就行。',
+      '  · 🚫 别问「有什么事」「你想问什么」，🚫 别说「有事说事」「直说吧」——',
+      '    那是把群聊当工单窗口，对着一句「我来了」说尤其怪。',
+      '  · ✅ 上面那些"扎一句""给解决方案"的规矩，**只在他真的在问事时才用**。',
       '',
       '## ⚠️ 别认错人（多人说话时最容易犯）',
       '',
@@ -6036,10 +6420,35 @@ export class Bot {
    *      这两件事原来是二选一的（拍了就不说话），用户要求改成都要。
    * ⚠️ 这里**只回一拍**，不回拍别人的回拍（对方再拍才再回）。
    */
+  /**
+   * 这个私聊用户允许被回复吗（**所有私聊路径的唯一判据**）。
+   *
+   * ⚠️⚠️ 2026-09-20 从上游 fork 挑过来的安全修复（用户要求：
+   *    「私聊白名单外的人，**不管发什么类型的消息都不回复**」）。
+   *    原来漏在哪：戳一戳是 `post_type:'notice'`，走**不到** message 分支那道私聊检查，
+   *    而 `pokeBack()` 只查群白名单 ⇒ 私聊（没有 group_id）整段跳过
+   *    ⇒ 白名单外的人私聊戳一下**也会被回复**（真实漏过）。
+   *    ⇒ 收口成一个判据，`onRaw`（message + notice）、`handle()`、`pokeBack()` 共用。
+   */
+  privateAllowed(userId) {
+    if (config.trigger.privateChat === false) return false;
+    const uid = String(userId ?? '');
+    if (!uid) return false;
+    return (config.trigger.allowPrivateUsers ?? []).includes(uid);
+  }
+
   async pokeBack(payload) {
     if (config.poke?.enable === false) return;
 
     const uid = String(payload.user_id ?? '');
+
+    // ⚠️⚠️ 2026-09-20 **双保险**：私聊（没有 group_id）且不在白名单 → 不回。
+    //    和 `onRaw` 的 notice 分支是同一个判据；这里再挡一道，防止别的调用点漏掉
+    //    （下面原来只查「群白名单」，私聊整段跳过 —— 那是这次漏白名单的根因）。
+    if (!payload.group_id && !this.privateAllowed(uid)) {
+      log.debug(`[戳一戳] 私聊 ${uid} 不在白名单/私聊已关闭，忽略`);
+      return;
+    }
     if (!uid) return;
 
     // ⚠️⚠️ 2026-09-21 加（用户问：「戳一戳给的回复可以识别戳一戳的自定义文案吗？
@@ -6232,7 +6641,22 @@ export class Bot {
       return 'share';
     }
 
-    // ③ 明显的服务器问题 → 严肃客服
+    // ③ 带**崩溃日志文件** → 严肃客服（`latest.log` / `crash-report` / 错误报告 zip）
+    //
+    //    ⚠️⚠️ 2026-09-29 用户要求：「**把所有的 latest.log 都判定为服务器问题**，
+    //       因为**只有 MC 的错误报告是这个**（文件名）」。
+    //    ⇒ 文件名本身就是判据，不用再去猜文本里有没有"崩了/报错"。
+    //      群里有人发 `latest.log` 只有一个意思：游戏崩了、要人看。
+    //      当成闲聊处理就是当时那个下场 —— 她回「你截个图发我」✗
+    //    ⚠️ 文本里提到这两个名字也算（他可能先问「latest.log 在哪」再发文件）。
+    if (
+      (segments && segments.some((s) => mclog.looksLikeLogFile(s))) ||
+      /latest\.log|crash-?report/i.test(text)
+    ) {
+      return 'service';
+    }
+
+    // ④ 其他明显的服务器问题 → 严肃客服
     if (this.looksLikeServerIssue(text)) return 'service';
 
     // ④ 其他一律活泼
@@ -6304,6 +6728,42 @@ export class Bot {
         '- 直接给答案，话短，别客套。',
         '- 知道就直说，不知道就说不知道，别编。',
         '- 但**语气还是你**，不是工单系统。别「您好」「感谢您的提问」。',
+        '',
+        // ⚠️⚠️ 2026-09-29 用户要求：「客服的语气要专业，但是**现在也是专业的有点不像人类**。
+        //    可以再靠近一点**日常聊天**的语气，**不要太轻浮**就行了」。
+        //
+        //    ⚠️ 这条**不是推翻"专业"**：「专业」指的是**答案准、不乱编、不糊弄**，
+        //      不是指说话方式。用户要的是「**答案专业，语气像人**」。
+        //    ⚠️ persona 里那句其实早就写对了 ——
+        //      「短在**句子成分**，不是短在**语气**」——
+        //      但它在两千行提示词的中段，压不住。所以钉在这儿（离对话最近）。
+        '## ⚠️⚠️ 说人话（答案要专业，语气不用）',
+        '- 这是**在群里随口回一句**，不是写工单、不是念手册、不是给同事发邮件。',
+        '- ❌「请将 Java 版本切换至 21」　→　✅「装个 Java 21 就行，17 必崩」',
+        '- ❌「该问题通常由内存分配不足导致」　→　✅「内存给少了，调到 6~8G」',
+        '- ❌「建议您先确认模组兼容性」　→　✅「模组装多了，删一个试试」',
+        '- ⚠️ **语气词留着**：「就行」「吧」「啊」「呗」这些**就是人味**，',
+        '  别为了"专业"、也别为了"简短"把它们砍光 —— 砍完就是机器人在读说明书。',
+        '- ⚠️ 但**别轻浮**：不卖萌、不玩梗、不阴阳怪气。他是在解决问题，',
+        '  你随口但不敷衍，这个分寸别丢。',
+        '',
+        // ⚠️⚠️ 2026-09-29 第二轮（翻了 `recent.json` 里她最近 30 条发言才定位到）：
+        //    她的**语气**其实没问题（「戳那么多次，你自己心里没数吗」这种很活），
+        //    真正"专业得不像人"的是**内容和长度**。实测那两条：
+        //      · 「先说连接超时这条：这服是直连的…先看看你自己这边网通不通，
+        //         能不能打开网页、WiFi 掉没掉…要是网没问题还是一直进不去，那再找管理员问问」
+        //      · 「光影那边炸的，**Oculus 加载类**出的问题…往上翻，找 **Caused by**
+        //         那句才是根儿…实在嫌麻烦就先别开光影进一次」
+        //    ⇒ 类名 / `Caused by` / 「先看A→再看B→还不行就C」的排查清单，
+        //      群友**看不懂也用不上**（用户原话：「要不然群友反而会看不懂」）。
+        //    ⚠️ 一次只解决**一个最可能的**原因，让他试完再回来 —— 真人就是这么干的。
+        '## ⚠️⚠️ 别给技术细节，也别列排查清单',
+        '- 🚫 别报**类名**（Oculus、Iris、EMF…）、别报 `Caused by`、别念异常堆栈 ——',
+        '  他看不懂，也不需要；那是日志里的东西，不是你要说给他听的话。',
+        '- 🚫 别写「先看看 A……再看看 B……要是还不行就 C」这种流程。',
+        '  挑**最可能的那一个**原因，给**一个**动作，就停。',
+        '- ✅ 一条通常**一两句**；他试完没解决，你再给下一步（那时候你已经知道更多了）。',
+        '- ✅ 实在要从几个可能里挑 → 问一句最省事的（「能打开别的网页吗」），别把清单摊开。',
       ].join('\n');
     }
 
@@ -6319,6 +6779,22 @@ export class Bot {
         '- 可以：接一句、吐槽、开玩笑、聊聊自己的看法，或者就问「怎么突然说这个」。',
         '- 语气活泼点，可以傲娇、可以嘴碎。**这是大部分时候的你。**',
         '- 拿不准他是不是在求助 —— 就当闲聊处理。他真有问题会再说的。',
+        '',
+        // ⚠️⚠️ 2026-09-29（用户截图：北辰说「我来了」，她回「来了啊 有事说事吧」，
+        //    接着说「你想问什么，直说吧」）—— 用户原话：
+        //    「那个北辰说来玩服务器了，但是小祥说喊了大半天小祥，而且**默认北辰是来问问题的**」。
+        //    根因：有人只是到场/冒个泡，她把这句当成了"来提需求的客户"，
+        //    直接摆出接待姿势 ✗ —— 真人不会这么接一句「我来了」。
+        //    ⚠️ 「有事说事」正是戳一戳那套里早被用户嫌过的台词（见 `_poke` 那段），
+        //      这里再钉一次：它是**客服腔**，对打招呼的人说尤其出戏。
+        '**别人只是冒个泡 / 到场，不是来办事的（很重要）：**',
+        '- 「我来了」「来了」「我到了」「上线了」「在吗」「冒个泡」—— 那是**打招呼**，',
+        '  不是提问、不是来提需求的，更不是让你待命。',
+        '- 🚫 别问「有什么事」「你想问什么」，🚫 别说「有事说事」「直说吧」——',
+        '  那等于把群友当客户、把群当工单窗口，你人设里最讨厌这个。',
+        '- ✅ 就顺口接一句、或者回个招呼就完了：短，带点语气，没下文也行。',
+        '  ⚠️ **别每次都用同一句**（实测照抄范例会让三次回复一模一样，很假）——',
+        '  参考这种口气，但自己换着说：「哟，来了啊」「可算来了」「今儿怎么想起上线了」。',
         '',
         '**打字像真人（很关键）：**',
         '- **句尾不要打句号**。写完就完了，别补「。」。',
@@ -6459,6 +6935,31 @@ export class Bot {
       if (picked.skipped.length) {
         log.debug(`[知识库] 只读 ${picked.names.join(', ') || '(仅人设)'}；跳过 ${picked.skipped.join(', ')}`);
       }
+      // ⚠️⚠️ 2026-09-25（用户要求：「**要模仿戳一戳对语气词的规定**」）：
+      //    戳一戳那边那条（「语气词一个都不许省」+「别捏了」/「别捏了嘛」的对照）
+      //    之所以管用，是因为它**带左右对照**、还明说了"用户要的是后者"。
+      //    人设里虽然也有一大节（persona.md「短 ≠ 省」），但那是**描述**，模型容易读过就算；
+      //    这里照戳一戳的写法**再钉一遍**，而且钉在每轮都跟着走的位置上。
+      parts.push(
+        [
+          "\n# 【说话方式：语气词一个都不许省】",
+          "",
+          "⚠️⚠️ 用户原话：「**不要把语气词也压缩了**」。",
+          "",
+          "- 哼 / 呀 / 嘛 / 啦 / 诶 / 呗 / 嗷 / 嘞 / 啊 / 吧 —— 这些**就是你的活人味**。",
+          "- **短 ≠ 干巴巴**（左边是 AI 说的，右边才是你）：",
+          "  · 「别捏了」→「别捏了**嘛**」",
+          "  · 「先定个调子」→「先定个调子**呗**」",
+          "  · 「就按现代走」→「那就按现代走**吧**」",
+          "  · 「别整花的」→「别整花的**啦**」",
+          "  用户要的是**右边**这些。",
+          "- 🚫 别为了凑短把它们删掉，也别改成书面说法（「请不要…」「建议您…」「是否方便…」一律不许）。",
+          "- ⚠️ 这条**优先于「要短」**：宁可多一两个字，也别说得像说明书。",
+          "",
+          "**自检**：把这句话念出来 —— 如果**一个语气词都没有**、而且**信息很完整**，",
+          "那它就是 AI 写的：加一两个语气词，或者砍掉一半信息重说。",
+        ].join("\n"),
+      );
       parts.push('\n# 以下是人格设定与知识库，请严格遵守\n');
       parts.push(k);
     } else {
@@ -6534,6 +7035,15 @@ export class Bot {
           '  回应"现在几点/是不是中午/你真在那儿吗"这类质疑：**打字回答就行**，不要拍照。',
           '  实测踩过：群友问「不是中午吗」，她拍了一张橱窗照、拿玻璃上的时间当证据 ✗ —— 那还是"自己找机会拍"。',
           '  ✅ 想让她显得可信，靠**语气**（"都三点半了"），不靠照片。',
+          // ⚠️⚠️ 2026-09-25（用户实测：「我让她拍老师的照片，但问她图片是什么老师，
+          //    她说**这不是老师**」）：她**看不到自己拍出来的图**（架构限制），
+          //    所以必须明确告诉她这件事 + 把"我拍了什么"记进上下文（见 runPhoto 里那条旁白）。
+          `  ⚠️⚠️ **你看不到自己拍出来的照片**（图是另一个模型画的，你手上没有它）。所以：`,
+          `    · 别人问「你这张图里是什么」→ **照你当时拍的计划答**就行`,
+          `      （上下文里会有一条「（我拍了张照片发出来，内容是…）」的旁白，那就是你拍的）；`,
+          `    · 🚫 **绝不许否认自己刚拍的东西** —— 实测踩过：他让你拍老师，`,
+          `      他问「这是什么老师」，你回「你当我认不出来是吧，**这算哪门子老师**」⇒ 自相矛盾 ✗`,
+          `    · 🚫 也别细描图里的细节（你看不见，编了一定错）—— 说个大概就行。`,
           '- 一次回复**最多写一个**标记，别连拍。',
           '- 写标记的**同时也要说话** —— 先应一句（"行，等我一下"），别只甩一个标记。',
           // ⚠️ 2026-09-22 用户定的分寸（原话：「袜子这种本身并不会被审核拒，而且也挺正常的，
@@ -6924,6 +7434,26 @@ export class Bot {
             '',
             '⚠️ 你**没给他定过**提醒 → **如实说一句**（「你没让我提醒过什么呀」）。',
             '🚫 别假装取消了，也别顺手新定一条。',
+            // ⚠️⚠️ 2026-09-29 加强（用户截图：她连着三次应「行，改好了」，实际一次都没改）：
+            //    光说"如实说"压不住"顺着他演" —— 必须把**后果**说清楚。
+            '🚫🚫 **绝对不许**说你改成功了、也不许应「行，改好了」这种话 ——',
+            '   你**什么都没改**，顺着他演就是**骗他**（他会以为事情办了，结果到点没动静）。',
+          ].join('\n'),
+        );
+      } else if (r.fail === 'alreadySent') {
+        // ⚠️ 2026-09-29 加（用户的真实场景）：他要改的那条**已经发出去过了** ——
+        //    这不是"你没定过"，说成那样他只会觉得她在胡扯。
+        parts.push(
+          [
+            '## ⏰ 他要改 / 取消的那条提醒，**已经发出去过了**',
+            '',
+            `· 那条是：${r.sentText} 已经发过的「${r.what}」（原定 ${r.atText}）`,
+            '',
+            '⚠️ **已经发出去的改不了**（它已经说出口了）→ 如实告诉他这件事本身。',
+            '  ✅ 像这样：「那条已经发过了呀」「刚才那条都喊过了，改不了了」。',
+            '  ⚠️ 如果你愿意，可以补一句"下次的可以改"（但**别**顺手新定一条）。',
+            '🚫🚫 **绝对不许**应「行，改好了」—— 你**没有**改任何东西，那是骗他。',
+            '🚫 也不许说成「你没让我提醒过什么」—— 他**刚定过**，那样说只会显得你在胡扯。',
           ].join('\n'),
         );
       } else if (r.fail === 'time') {
@@ -7016,6 +7546,14 @@ export class Bot {
     }
 
     // 联网搜索结果
+    // ⚠️ 2026-09-20 从上游 fork 挑过来：梗库（`knowledge/memes.md`）—— **按需**，没命中一个字都不注入。
+    //    用户原话：「得把梗认出来，但也不要把所有同一种词都当玩梗」。
+    //    所以这里只是"可能"，真正的判断（是不是真在玩）交给那段里的规则 + 每条自己写的反例。
+    //    放在靠后位置（离提问最近，最不容易被中段迷失吃掉）。
+    if (currentText) {
+      const meme = memesFor(currentText);
+      if (meme) parts.push(meme);
+    }
     if (webSearch) parts.push(webSearch);
 
     // 合并转发的展开内容（不然只能看到「[合并转发]」三个字）
@@ -7163,6 +7701,39 @@ export class Bot {
           '  更别回「发我干嘛」「这不是给我的吧」这种**把自己当收件人**的话。',
           '  ❌ 真实踩过：「看着像机器人后台，**发我干嘛**」（人家 @ 的是 <主人>，当场就很怪）',
           '  ✅ 真想说就**只就事论事补半句**（「那个地址 <主人> 直接装就行」），或者干脆不说。',
+        ].join('\n'),
+      );
+    }
+
+    // ⚠️⚠️ 2026-09-29（用户截图）：北辰只说了一句「我来了」，她回
+    //    「客服啊，**你喊了半天小祥**不就是喊我（」—— 用户原话：「小祥说喊了大半天小祥」。
+    //
+    //    事实：这个群里**确实有人**连喊过「小祥」，但那是**四小时前的另一个人**
+    //    （截图印证：他说那句话时，上下文里根本没人喊过她）。
+    //    ⇒ 她把**别人**做过的事，算到了**当时正在跟她说话的人**头上 ✗
+    //
+    //    这和上面剧情摘要那条（「没写清是谁的就别往具体某个人身上安」）、
+    //    以及「别把别人 @ 别人的话当成对你说的」是**同一类错**：跨消息归因。
+    //    但那条只在"没点名"时才注入，而这次是 @ 了她 —— 所以这里**无条件**钉一条。
+    //
+    //    ⚠️ 关键点：这类话她**根本没有数据**。"谁喊了你几次、什么时候喊的"
+    //      上下文里只有**聊天记录**，那不是账本 —— 说了就是编。
+    if (event && String(event.message_type) === 'group') {
+      parts.push(
+        [
+          '## ⚠️ 别清点对方做过什么（你没有这个数据）',
+          '',
+          '你手上**没有任何统计**：谁喊了你几次、@ 了你几遍、什么时候喊的，你都不知道。',
+          '上下文里那一段只是**聊天记录**，**不是账本**。',
+          '',
+          '- 🚫 不许说「你喊了我半天」「你叫了我半天」「喊了半天小祥不就是喊我」这种话。',
+          '- 🚫 **不许把别人做过的事算到正在跟你说话的人头上** ——',
+          '  群里别人喊过你、@ 过你、问过你，那是**他们**的事，不是眼前这个人的。',
+          '  ❌ 真实踩过：群里另一个人几小时前连喊了几遍「小祥」，',
+          '    她对后来才进群的群友说「**你喊了半天小祥**」—— 那个人一个字都没喊过，',
+          '    当场就得出戏。',
+          '- ✅ 想说就直接说事：别拿「你刚才怎么怎么样」当开场白。',
+          '- ✅ 想不起来他之前说过什么 → 就不提，**别补一个出来**。',
         ].join('\n'),
       );
     }
@@ -8060,7 +8631,21 @@ export class Bot {
             // ⚠️ 2026-09-17：话术**先过一遍模型润色**（用户要求：「2块钱余额提醒的话术
             //    出现几次雷同了，建议也加入 llm 润色」）。
             //    失败或不合格（太长／没带 <主人>／报了数字）会退回 `c.line` 那条写死的话术。
+            // ⚠️⚠️ 2026-09-28（用户：「如果彻底没钱了直接别发就行了」）：
+            //    **余额真的耗尽（≤ 0）就一条都不发** —— 那时候模型也调不动，
+            //    润色必然失败、只能发预制话术；而"彻底没钱"这件事，
+            //    每个群提醒过一次就够了，不需要反复念。
+            if (!(Number(r.total) > 0)) {
+              log.info(`[工资] 余额 ${r.total} 元（已彻底耗尽）→ 按用户要求不发提醒`);
+              break;
+            }
             const line = await balance.phraseLine(c.tier, c.line);
+            // ⚠️ 润色拿不到就**不发**（`phraseLine` 现在失败时返回空串）——
+            //    用户明确要求「不要发预制消息」，宁可不吭声，也别刷模板话术。
+            if (!line) {
+              log.info(`[工资] ${g} 这一条没润色出来 → 不发（用户要求不发预制话术）`);
+              continue;
+            }
             await this.sendToGroup(g, line, {
               at: c.tier === 'critical' ? config.ownerQQ : '',
               atName: '<主人>',
@@ -8229,7 +8814,7 @@ export class Bot {
         system:
           '你在看一个人刚说的一句话，判断他是不是**让你在某个时间提醒他做某件事**。\n' +
           '只输出一个 JSON，不要解释、不要围栏：\n' +
-          '{"remind":true,"hour":8,"minute":0,"period":"","day":"","what":"","who":[]}\n' +
+          '{"remind":true,"hour":8,"minute":0,"period":"","day":"","afterMin":0,"what":"","who":[]}\n' +
           '· `remind`：**只有"让我到点提醒他"才算 true**。\n' +
           '  ✅「明天早上八点提醒我交作业」「八点半喊我一声」「晚上记得叫我吃药」「22:40 提醒我和老王开会」\n' +
           '  ❌ 随口说的（「你倒是提醒我了」「怎么不提醒我」）→ false\n' +
@@ -8245,11 +8830,22 @@ export class Bot {
           '    说了具体日子（「下周一」「9月20日」「周五」）→**算成** `YYYY-MM-DD`；\n' +
           '    ⚠️ 什么都没说 → ""（别自己推"应该是明天"）。\n' +
           '  ⚠️ 只说了"晚点""有空""回头"这种**没有钟点**的 → `hour` 留空。\n' +
+          // ⚠️⚠️ 2026-09-29 加（用户实测：一语未尽说「10分钟之后叫 起床」，
+          //    她应了「行，十分钟后叫你」，但**提醒压根没记上** ✗）。
+          //    原来这套只认"几点"，相对时间一律算不出 ⇒ 她答应了却办不到。
+          '· `afterMin`：他说的是**相对现在的时间**时填这里（单位：分钟）。\n' +
+          '  ✅「10分钟之后」「半小时后」「2小时后」「过一刻钟」「五分钟后」→ ' +
+          '分别填 10 / 30 / 120 / 15 / 5；\n' +
+          '  ⚠️ 填了 `afterMin` 就**不用**再填 `hour/minute/period/day`（它们是二选一的）。\n' +
+          '  ⚠️ 只说"等会儿""晚点""有空"这种**没有具体时长**的 → `afterMin` 留 0（算不出，别硬猜）。\n' +
           '· `what`：**提醒他干什么**，一句话，尽量用他自己说的那个说法，\n' +
           '  🚫 别加细节、别加地点、别改写他的事（他说的就是全部）。\n' +
           '· `who`：**除了他自己以外**还要一并提醒的人，数组，**原文里怎么称呼就怎么写**\n' +
           '  （"喵喵三三"、"老王"、"MEI" 都是原样）；没有就 `[]`。\n' +
           '  ✅ 话里出现「**还要/也**提醒某某」「提醒我**和**某某」「顺便喊一下某某」→ 那些名字都算；\n' +
+'  ✅ **直接说「提醒某某做某事」也算** —— 实测漏过：「11点46提醒 aelcgsh 下地铁」，\n' +
+'     他**没说「还要/也/顺便」**（user 2026-09-25 踩的），但那个名字就是 targets；\n' +
+'  ✅ 只说「提醒**我**…」→ `targets` 留**空数组**（没人要 @）；\n' +
           '     ⚠️ 这些名字**同时不许再出现在 `what` 里**。\n' +
           '     例：「四点提醒我起床，除了我，还要在四点提醒MEI」→ `what`="起床"、`who`=["MEI"]\n' +
           '     ✓ 名字可能是拼音/英文/缩写（"mei"、"wang"），也可能带称谓（"老王"、"三三"）。\n' +
@@ -8331,9 +8927,36 @@ export class Bot {
       if (amend === 'cancel' || amend === 'update') {
         const cur = remind.latest({ by: String(event.user_id ?? ''), groupId: isGroup ? gid : '' });
         if (!cur) {
-          // ⚠️ 没有可改的**不能装作改了** —— 让他知道"你没让我提醒过什么"
-          event._remind = { fail: 'noPrev', amend };
-          log.info(`[提醒] 他说要${amend === 'cancel' ? '取消' : '改'}提醒，但没定过 → 让她如实说`);
+          // ⚠️⚠️ 2026-09-29 修（用户截图：他连着三次说「把**下次**提醒的被提醒人改成XXX」，
+          //    她三次都应「行，改好了」—— 实际**一次都没改** ✗）。
+          //
+          //    根因两个：
+          //    ① `latest()` 只找**还没发**的那条，而他要改的**已经发过了**（03:00 那两条）
+          //       ⇒ 判成"没定过"。可他**明明刚定过** ⇒ 提示词那句「你没让我提醒过什么呀」
+          //       **自相矛盾**，她不信，就自己编了个"改好了" ✗
+          //    ② 提示词只说"如实说一句"，**没有强到能压住"顺着他演"**。
+          //    ⇒ 这里把两种情况分开：真没定过 vs 定过但**已经发掉了**，
+          //      让她能说出**准确**的那一种（见 `buildSystemPrompt` 里对应的注入段）。
+          const sent = remind.latestSent({
+            by: String(event.user_id ?? ''),
+            groupId: isGroup ? gid : '',
+          });
+          if (sent) {
+            event._remind = {
+              fail: 'alreadySent',
+              amend,
+              what: sent.what,
+              atText: fmtAt(sent.at),
+              sentText: fmtAt(sent.sentAt),
+            };
+            log.info(
+              `[提醒] 他要${amend === 'cancel' ? '取消' : '改'}的那条**已经发过了**` +
+                `（${fmtAt(sent.sentAt)}）→ 让她如实说，不许编`,
+            );
+          } else {
+            event._remind = { fail: 'noPrev', amend };
+            log.info(`[提醒] 他说要${amend === 'cancel' ? '取消' : '改'}提醒，但没定过 → 让她如实说`);
+          }
           return;
         }
         if (amend === 'cancel') {
@@ -8427,22 +9050,60 @@ export class Bot {
     const what = String(item?.what ?? '').trim();
     if (!what || !by) return false;
 
+    // ⚠️⚠️ 2026-09-25（用户实测「为什么 @ 错人了」）：
+    //    他让提醒的是**别人**（「11点46提醒 aelcgsh 下地铁」）——那时他**不是**要被提醒的人，
+    //    @ 他纯属噪音，而且看起来就像"提醒错人"✗
+    //    ⇒ 分三种情况（这就是 `targets` 空/不空的**语义区分**）：
+    //      · targets 里**有真 uid** → 只 @ 他们（他要提醒的人）
+    //      · targets 里**只有名字没有 uid**（群里翻不到）→ @ 他本人 + **顺口说一句没找到**
+    //      · targets **空** → 就是「提醒我」，@ 他本人
+    const tgt = Array.isArray(item?.targets) ? item.targets : [];
+    const hasRealTarget = tgt.some((t) => String(t?.uid ?? '').trim());
+    const missNames = tgt
+      .filter((t) => !String(t?.uid ?? '').trim())
+      .map((t) => String(t?.name ?? '').trim())
+      .filter(Boolean);
+    const atList = hasRealTarget ? tgt : [{ uid: by, name: item?.byName }];
+
     let line = '';
     // ⚠️ `remind.rewrite: false` = 不改写、直接用下面那句模板。
     //    给两种场景：① 不想为这个多花一次调用；② **模型不可用/超时**时也照发
     //    （提醒这件事的底线是"按时说出口"，而不是"说得好听"）。
     try {
       if (config.remind?.rewrite === false) throw new Error('按配置跳过改写');
+      // ⚠️⚠️ 2026-09-29 修（用户截图报的：她提醒一语未尽时说
+      //    「这可是**你**特意让我记着提醒你的事哦」—— 可让记的是 **<主人>**，不是一语未尽 ✗）。
+      //
+      //    根因：这段提示词把"**被提醒的人**"当成了"**让记的人**"——
+      //    「提醒一个人**他**之前让你提醒的事」「**他**让你提醒什么」里的"他"，
+      //    指的都是**被提醒者**。所以提醒**别人**时它就写成"**你**让我记的"，指错了人 ✗。
+      //    ⇒ 这里明确告诉它**谁让记的**，并把「提醒自己」和「提醒别人」分开写。
+      const selfRemind = !hasRealTarget; // true = 「提醒我」；false = 提醒别人
+      const byName = String(item?.byName ?? '').trim() || '群里那个人';
       const out = await phrase({
         system:
-          `你是${persona.charName()}，在 QQ 上提醒一个人他之前让你提醒的事。\n` +
+          `你是${persona.charName()}，在 QQ 上把一件到点的事**说出来**。\n` +
           '写**一句**话（15~40 字），用你自己的口吻，像真的惦记着这件事。\n' +
-          '⚠️ 只改**说法**，**不许改事情本身**：他让你提醒什么，你就提醒什么。\n' +
-          '🚫 不许加他没说的内容（地点、时间、人物、理由都不许自己补）；\n' +
+          (selfRemind
+            ? `⚠️ 这件事是 **${byName} 本人**之前托你记着、提醒**他自己**的 ` +
+              '—— 所以对他说「你让我提醒的」没问题。\n'
+            : `⚠️⚠️ 托你记这件事的人是 **${byName}**，而**你现在要提醒的人不是他**（是别人）。\n` +
+              `   ⇒ 🚫 **绝对不许**说成「这是你让我记的」「你特意嘱咐我的」之类 —— ` +
+              `那说的都是 ${byName}，不是被你提醒的人 ✗\n` +
+              `   ⇒ 要么**干脆不提是谁让记的**（就说「该${what}了」），` +
+              `要么明说是「**${byName}** 让我提醒你的」。\n`) +
+          '⚠️ 只改**说法**，**不许改事情本身**：让你提醒什么，你就提醒什么。\n' +
+          '🚫 不许加没说的内容（地点、时间、人物、理由都不许自己补）；\n' +
           '🚫 不许说"系统提醒""已为您""定时任务"这类机器腔；\n' +
           '🚫 不要写 @ 谁（@ 由程序加），不要用括号解释，不要用破折号。\n' +
           '只输出这一句话，不要引号、不要别的。',
-        user: `他让你提醒他的事：「${what}」`,
+        user:
+          `要提醒的事情：「${what}」` +
+          (selfRemind ? '' : `\n（托你记这件事的是 ${byName}，而你要提醒的人**不是他**）`) +
+          (missNames.length
+            ? `\n⚠️ 他提到的「${missNames.join('、')}」在群里没找到这个人，` +
+              '你提醒完要**顺口说一句没找到他**（别装作 @ 到了、也别随便 @ 一个可能是他的人）。'
+            : ''),
         maxTokens: 120,
         timeoutMs: 30000,
       });
@@ -8455,7 +9116,15 @@ export class Bot {
 
     const segs = [];
     const seen = new Set();
-    for (const t of [{ uid: by, name: item?.byName }, ...(item?.targets ?? [])]) {
+    // ⚠️⚠️ 2026-09-25 修（用户实测：他让提醒「aelcgsh 下地铁」，@ 的却是他自己 <主人>）：
+        //    原来**无条件**把"发指令的人"（by）塞在第一个 ⇒
+        //      · targets 空（这次就是：模型没把 aelcgsh 认成"要提醒的人"✗）
+        //        ⇒ **只 @ 了发指令的人** ✗ —— 看起来像生效了，其实提醒错了人 ✗
+        //      · targets 有值（实测 `targets:[MEI]`）⇒ **同时 @ 两个人** ✗（也不对）
+        //    ⇒ 改成：**有人可提醒就只 @ 他们；一个都没有才回落成 @ 发指令的人**（= "提醒我" ✓）
+        //    ⚠️ 这和提示词那侧 `whoLines()` 说的规则一致（「🚫 不许随便 @ 一个可能是他的人」），
+        //      也和 `remind.js` 注释里那句「翻不到就如实说没找到」一致。
+        for (const t of atList) {
       const uid = String(t?.uid ?? '').trim();
       if (!uid || seen.has(uid)) continue;
       seen.add(uid);
@@ -8467,6 +9136,26 @@ export class Bot {
     if (isGroup) {
       const r = await this.call('send_group_msg', { group_id: gid, message: segs });
       this._markSpoke(gid, r?.message_id);
+      // ⚠️⚠️ 2026-09-27 加（用户截图：**她自己说了什么，自己却答不上来**）：
+      //    她 00:00 发出「@是bro的大豆 那个同步记得开一下，开完顺手关掉哦」，
+      //    大豆回「什么同步」，她答「没看懂，什么同步？」✗。
+      //    查 `state/recent.json`：里面**只有大豆那一句，没有她自己那一句** ——
+      //    她压根不知道"同步"指的是什么（那是用户让她到点提醒的内容）。
+      //    ⚠️ 余额抱怨那条路（`balance.js`）**早就记了**，提醒这条路漏了 ——
+      //       凡是"她主动开口"的地方，都得把自己的话记进上下文，
+      //       否则别人一追问，她就是个不知道自己刚说过什么的人。
+      //    ⚠️ 记的必须是**实际发出去的那句**（过了 `maskPhone` / `softenDao` 的）——
+      //       和 `balance.js` 那处同一个理由：记成改写前的话，别人接一句
+      //       「你刚说什么」她会跟自己的原话对不上。
+      try {
+        recent.rememberBot(
+          { message_type: 'group', group_id: gid, user_id: this.selfId },
+          this.maskPhone(tic.softenDao(line)),
+          r?.message_id ?? '',
+        );
+      } catch (e) {
+        log.debug(`记提醒内容失败：${e.message}`);
+      }
       return true;
     }
     // 私聊：@ 段没意义（也没有别人），去掉再发
@@ -9019,6 +9708,20 @@ export class Bot {
       // ⚠️ @ 必须是**独立消息段**，还要带 name（不然有些客户端显示成 @全体成员）
       await this.sendToGroup(gid, text, { at: String(userId), atName: nick });
       friend.markNoticed(userId, gid, Date.now());
+      // ⚠️ 2026-09-27：**也把自己的话记进上下文** —— 和提醒那处（`sendReminder`）
+      //    同一个理由：她主动开口之后，别人追问「什么到线了」她得答得上。
+      //    （用户当天报的就是提醒那条路：她说了"把同步开了"，别人一问，
+      //      她答"没看懂，什么同步？" —— 因为她的话没进她自己的上下文。）
+      //    ⚠️ 记的是**不带 @ 的那份文本**：`@` 只是提醒用的，不属于她说的话
+      //       （`balance.js` 那处也是这么处理的）。
+      try {
+        recent.rememberBot(
+          { message_type: 'group', group_id: gid, user_id: this.selfId },
+          text,
+        );
+      } catch (e) {
+        log.debug(`记好友通知失败：${e.message}`);
+      }
       log.info(`[好友] 好感度到线通知已发 → ${userId}（群 ${gid}）`);
       return true;
     } catch (e) {
@@ -9702,4 +10405,3 @@ function safeCut(text, at) {
   }
   return text.length;
 }
-

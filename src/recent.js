@@ -360,6 +360,25 @@ export function remember(event, parsed = {}) {
     //    现在把 `file` 存下来，`handle` 里发现「当前消息在指代前面的东西」时
     //    可以把这几张图**补做识别**（见 `recentImages` + bot.js 里那段）。
     imageFiles: Array.isArray(parsed.imageFiles) ? parsed.imageFiles.slice(0, 4) : [],
+    // ⚠️⚠️ 2026-09-26 加：**这一条 @ 了谁**（人名，不是 QQ 号）。
+    //
+    //    用户截图：有人引用她的话、再 `@她 @一个小阿萨 他说的` ——
+    //    她答「哪个他，就这么一句他说的，名字呢（」✗。
+    //    查 `state/recent.json`，存进去的只有「他说的」：**@ 段被整个丢掉了**，
+    //    她确实无从知道"他"是谁。⚠️ 名字只能自己反查 ——
+    //    SnowLuma 的 at 段（→事件方向）只给 `qq`、**不给 `name`**。
+    //
+    //    ⚠️⚠️ **为什么不直接把 `@名字` 拼进 `text`**（我第一版就是这么干的，
+    //       被回归打了回来）：`text` **身兼两职** ——
+    //         ① 进上下文给她看；② `contextText()` 靠**文本相等**剔除当前这一条。
+    //       而 @ 的号**不一定是她自己**，那些 at 段就会变成正文里凭空多出来的
+    //       `@某人` ⇒ 下游的关键词 / 表情标记匹配全被打乱 ✗。
+    //       （回归实测：`face`「文本正常」「分条后发出了 1 张图（实际 0 张）」、
+    //         `follow-up` 等正文超时。）
+    //    ⇒ 所以**单独存一个字段**，只在 `contextText()` 往外拼的时候才可见。
+    atNames: Array.isArray(parsed.atNames)
+      ? parsed.atNames.map(String).filter(Boolean).slice(0, 3)
+      : [],
   });
 
   // ⚠️ 缓冲区**按条数**留（用户 2026-09-13：「只要是多少条范围内都得看进来」）。
@@ -569,7 +588,18 @@ export function contextText(groupId, excludeText = '', excludeIds = [], opts = {
       /\[(图片|照片|表情包|动画表情|动图|贴纸|gif|sticker|img|image)\]/gi,
       '（发了张图）',
     );
-    lines.push(`${who}${m.name}${id}（${when}）${at}${body}`);
+    // ⚠️ 2026-09-29 加（用户截图：她复读群友那句时把 emoji 变成了字面的
+    //    `[QQ表情][QQ表情][QQ表情]`，群友以为"她不能发表情"✗）：
+    //    `QQ表情` 原来**漏在**上面那条正则外面 ⇒ 上下文里一直是方括号形式
+    //    ⇒ 她既可能**复读出去**（已在 `repeat.js` 那边修掉），也可能**照着学**。
+    //    ⇒ 一起换成人话。
+    body = body.replace(/\[QQ表情\]/gi, '（发了个表情）');
+    // ⚠️ 2026-09-26：**这一条 @ 了谁** —— 和上面的 `[@了你]` 同一个位置、同一个口径。
+    //    没有它的话，「他说的」这种话她根本无从知道在指谁
+    //    （用户截图那次就是这个：`@她 @一个小阿萨 他说的` → 她答「哪个他…名字呢」✗）。
+    const atWho =
+      Array.isArray(m.atNames) && m.atNames.length ? `[@了${m.atNames.join('、')}] ` : '';
+    lines.push(`${who}${m.name}${id}（${when}）${at}${atWho}${body}`);
   }
   if (!lines.length) return '';
   return lines.join('\n');

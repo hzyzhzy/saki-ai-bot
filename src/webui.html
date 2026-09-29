@@ -102,6 +102,12 @@
   nav button:hover{background:var(--accent-soft);color:var(--text)}
   nav button.on{background:var(--accent-soft);color:var(--accent);font-weight:600;
     box-shadow:inset 2px 0 0 var(--accent)}
+  /* 作者信息页的网站图标（2026-09-28 加）—— 用的是**各站官方 favicon**，
+     下载后转成 PNG 放在 `src/webui-assets/`，走 `/assets/<名字>` 路由。
+     ⚠️ 别改回 `.ico`：`serveStatic` 是按扩展名查 MIME 表的，
+        `.ico` 拿不到正确类型（application/octet-stream），`<img>` 可能干脆不显示。 */
+  .siteicon{width:16px;height:16px;vertical-align:-3px;margin-right:5px;
+    border-radius:3px;flex:0 0 auto}
   #problems{grid-column:1/-1}
   section{grid-column:2;min-width:0}
   /* ── 「液态玻璃」（2026-09-17 用户要求模仿 iOS 26 Liquid Glass）──
@@ -396,6 +402,169 @@
      （和上面那组字重规则放一起，都属于"末尾覆盖"，想回退只删这几行。） */
   nav button{font-weight:600;font-size:15.5px}
   nav button.on{font-weight:700}
+    /* ── 侧栏分组（2026-09-25 用户提了两条要求）──
+       ① 「分组名的字体设为页面名字的两倍」：
+          侧栏里的"页面名字"就是 `nav button`（15.5px，见上面那条），两倍 = **31px**。
+       ② 「把不同分组的卡片拆开」：
+          原来整条 `nav` 共用一块玻璃 ⇒ 现在 `nav` 只当**容器**，每个 `.navsec` 各自一块卡片。 */
+    nav{background:none;backdrop-filter:none;-webkit-backdrop-filter:none;padding:0;gap:14px}
+    nav .navsec{
+      display:flex;flex-direction:column;gap:3px;
+      padding:14px 12px 16px;border-radius:18px;
+      background:linear-gradient(135deg,rgba(255,255,255,.21),rgba(255,255,255,.03) 48%,rgba(255,255,255,.11));
+      backdrop-filter:blur(24px) saturate(2.3) brightness(1.06);
+      -webkit-backdrop-filter:blur(24px) saturate(2.3) brightness(1.06);
+      box-shadow:0 6px 20px rgba(20,50,90,.07);
+    }
+    body.dark nav .navsec{
+      background:linear-gradient(135deg,rgba(255,255,255,.07),rgba(255,255,255,.015) 48%,rgba(255,255,255,.04));
+    }
+    nav .navgrp{
+      font-size:31px;line-height:1.15;font-weight:700;letter-spacing:0;
+      color:var(--text);padding:2px 4px 8px;margin:0;user-select:none;
+    }
+    @media (max-width:860px){ nav .navgrp{font-size:22px} }
+
+    /* ── 苹果式连续曲率圆角（超椭圆 / squircle，2026-09-25 用户要求）──
+       用户原话：「把全部的圆角改成苹果的 G7 圆角」⇒ 按【真超椭圆】实现。
+
+       ⚠️ `corner-shape` 只对**已经设了 `border-radius`** 的元素起作用 ——
+          没设圆角的元素完全不受影响，所以用 `*` 覆盖是安全的，也不会误伤
+          圆形（`border-radius:50%` 本身就是圆，超椭圆对它没有意义）。
+       ⚠️ 兼容性：只有 Chrome 139+ / 支持 CSS Borders 4 的浏览器认这一行；
+          **不认的浏览器会直接忽略它**，退回原来的普通圆角 —— 渐进增强，不会坏。
+       ⚠️ 它**只改形状、不改半径**（半径仍由各处自己的 `border-radius` 决定）。
+          要更接近苹果图标，半径可以再按边长 22.37% 调，那是另一件事。 */
+    /* ⚠️⚠️ 两个坑，别删：
+       ① `*` **不匹配伪元素** —— 而 `.card::after` / `nav::after` 那层折射高光
+          用的是 `border-radius: inherit`（形状要跟着父级走）。只写 `*` 的话
+          它拿不到 squircle，圆角就和卡片对不上了 ⇒ 必须把 `::before/::after` 一起写上。
+       ② `border-radius:50%` 的**正圆**不要超椭圆 —— 背景油滴（`.blob`）和
+          标题前那个小圆点（`header h1::before`）本来该是圆的，被 squircle 一改
+          会变成超椭圆 ⇒ 它们显式退回 `round`。 */
+    *, *::before, *::after{ corner-shape: squircle }
+    .blob, header h1::before{ corner-shape: round }
+
+    /* ══════════════════════════════════════════════════════════════
+       圆角半径（2026-09-25 用户反馈：「还太小了，明显小于 iOS 的标准」）
+
+       ⚠️ 为什么**不能**直接用苹果图标那个 22.37%：
+          那个比例是给**正方形图标**算的。我们的卡片内容区约 1090px 宽，
+          22.37% 就是 **244px** —— 那不叫圆角，那是胶囊 ✗
+          ⇒ 图标按"边长比例"，**卡片/面板得按绝对像素**，两套不能混。
+
+       ⚠️ 也不用 `border-radius: %`：百分比是**宽高各算各的**，
+          非正方形的卡片会被拉成**椭圆角** ✗（这正是要 squircle 的反面）。
+
+       ⇒ 所以按元素尺寸分四档，抽成变量，你想整体再调只动这四个数。
+          iOS 的观感来自"半径相对元素够大"，下面这套是按那个观感配的。 */
+    /* ⚠️⚠️ 2026-09-25 第二次改（用户截图：「圆角都不统一了，而且还是小了」）：
+    //    第一版我分了**四档**（卡片 32 / 侧栏 24 / 输入 15 / 按钮 12）—— 错的：
+    //    侧栏卡片和主内容卡片是**并排**的，24 和 32 放一起一眼就看出来不一样 ✗
+    //    ⇒ 现在只留**两档**，而且同一档里**所有元素同一个值**：
+    //        ① 容器类（卡片 / 面板 / 图片框）→ `--r`，全部一样
+    //        ② 控件类（按钮 / 输入框 / 下拉）→ `--r-ctrl`
+    //    同一档内**绝不再分大小** —— 要的就是"看起来是一套"。 */
+    /* ⚠️⚠️⚠️ 2026-09-25 第三次改，**先把这段读完再动**：
+    //
+    //  用户连着三次说"不统一"。查到最后发现**不是漏了哪个类**（「QQ 登录状态」
+    //  那张卡片用的就是 `.card`，和侧栏同一档），而是**几何问题**：
+    //
+    //    · 侧栏卡片宽约 **190px** ⇒ 40px 半径 = 边长的 **21%**（看着很圆）
+    //    · 主卡片  宽约 **1090px** ⇒ 40px 半径 = 边长的 **3.7%**（看着很方）
+    //
+    //  **同一个像素值，放在宽窄差 5 倍的容器上，看起来必然不一样圆。**
+    //  要让两张卡片"视觉比例一致"，主卡片得用 1090×21% ≈ **230px** —— 那是胶囊 ✗
+    //  ⇒ 所以像素级"完全一致的观感"**做不到**，只能把两边的**比例往中间拉**：
+    //      · 主卡片：调大到 64px（3.7% → 5.9%）
+    //      · 侧栏卡片：收小到 28px（21% → 14.7%）
+    //      ⇒ 差从 5.7 倍缩到 2.5 倍（再往前就只能牺牲窄卡片了）。
+    //
+    //  ⚠️ 所以你看到的"仍不完全一样"是**预期的**，不是没改对。
+    //     真要继续逼近，只有两条路：① 主卡片圆角大到夸张；② 侧栏卡片加宽。
+    //     两条我都不建议，但你要是想要，说一声。 */
+    /* ⚠️⚠️⚠️ 2026-09-25 第四次改 —— **这次是对的，别再按比例分了**：
+    //
+    //  上一版我按"宽度比例"给值（主卡片 64 / 侧栏 28），想的是"比例接近就看着协调"。
+    //  **错的** —— 用户看了整页截图还是说"不统一"。原因是：
+    //
+    //    **人眼比的是「绝对半径」，不是「半径/宽度」的比例。**
+    //    主卡片视觉半径 ~36px、侧栏 ~16px，并排一看侧栏那圈明显小；
+    //    更刺眼的是**控件**（下拉框/按钮）只有 14px，跟卡片差 4 倍多。
+    //
+    //  ⇒ 正解：**所有容器用同一个绝对像素值**，控件也贴近它。
+    //     · 全部卡片/面板统一 **36px**（不管它多宽多窄 —— 并排时半径一样大 = 看着就是一套）
+    //     · 控件 **22px**（不到卡片那么夸张，但和 36px 是同一档观感；
+    //       再大按钮就变胶囊了 —— 按钮高约 36px，半径上限就是 18px 左右，
+    //       这里 22px 已经是"接近胶囊"的程度，是刻意的） */
+    :root{
+      --r:36px;       /* 所有卡片 / 面板 / 虚线框 / 出图预览 —— 同一个绝对像素值 */
+      --r-ctrl:22px;  /* 按钮 / 输入框 / 下拉 */
+      /* ⚠️ 2026-09-25 定稿：侧栏曾经单独用过一个更大的 `--r-nav`(48px)，
+         因为它在窄容器里"看着方"。但用户反馈「侧栏的圆角大于其他的了」✗
+         ⇒ 取消这个单独档，**全站卡片统一用 `--r`**（含 nav 自己那圈白线）。
+         别再给它单独加档 —— 要改就改 `--r` 一个数，所有卡片一起动。 */
+    }
+    /* 所有容器一个值 —— 主卡片和侧栏卡片**绝对半径相同**，所以并排看着是一套 */
+    .card,
+    .face,
+    .drop,
+    .gr-row{ border-radius:var(--r) }
+    /* ⚠️⚠️ 2026-09-25 第五次改（用户：「侧栏太方了」）：
+    //    侧栏卡片**单独给更大的半径**。
+    //    原因是它在**窄容器**里：同样 36px，主卡片宽约 1090px（看不见那圈），
+    //    侧栏只宽约 190px —— 眼睛判断"圆不圆"看的是**半径相对卡片短边**，
+    //    所以在窄卡片上必须给更大的绝对值，才和宽卡片"看起来一样圆"。
+    //    ⇒ 48px 在 190px 宽的卡片上是 25%，观感才追得上主卡片那 36px。
+    //    ⚠️ 想再调就改这一个数（`--r-nav`），主卡片的 `--r` 不用动。 */
+    nav .navsec{ border-radius:var(--r) }
+    /* ⚠️⚠️ 2026-09-25 定稿（前面第六、七次我改错了方向，已回退）：
+    //    用户报的是「外面还有一圈不统一的线圈」——
+    //    那圈线是 **`nav` 自己的 `box-shadow`**（原始规则里的
+    //    `inset 0 0 0 2px rgba(255,255,255,.92)` 等五层内阴影 + `border-radius:18px`）。
+    //    它本来是"整条侧栏一块卡片"的外框；拆成四块卡片之后，
+    //    外框还留在 `nav` 上，而它的圆角是 **18px**，卡片是 **48px**
+    //    ⇒ 于是看着"外面套了一圈对不上的线" ✗
+    //
+    //    ⇒ 正解**不是**删掉它（我试过，高光会一起没、线还会变直角），
+    //      而是**让它的圆角跟卡片一致**：两个都是 `--r-nav`，线就贴合了。
+    //    ⚠️ 别再动 `nav` 的 `box-shadow` / `nav::after` —— 那圈白线和折射高光
+    //      都挂在那儿（`--glare` 就在 `nav::after` 上），删了高光就没了。 */
+    nav{ border-radius:var(--r) }
+    /* ⚠️⚠️ 2026-09-25 第六次改（用户截图：「外面还有一圈不统一的线圈」）：
+    //    `.card::after, nav::after` 是**折射高光层**（`inset:0` + `border-radius:inherit`）。
+    //    `.card` 那个没问题（inherit 拿到 36px，和卡片一致）；
+    //    但 **`nav` 已经不是卡片了**（2026-09-25 拆分组时把它的背景/模糊全去掉了，
+    //    只留 `padding:0; gap:14px` 当容器）⇒ `nav::after` 就用 `nav` 自己的
+    //    圆角（L73 那个 **18px**）画了一圈边框 —— 48px 的卡片外面套着 18px 的线，
+    //    看着就是"一圈对不上的线圈" ✗
+    //    ⇒ 直接去掉。侧栏卡片的背景已经在 `.navsec` 自己身上（同一套渐变），
+    //      不需要外面再罩一层。 */
+
+    /* ⚠️ 下面这几条是**内联样式**（写在 HTML/JS 的 style="" 里）——
+       内联优先级高于 CSS 规则，不写 `!important` 就压不住，而它们恰恰是
+       "卡片类圆角不统一"的主因（3 个虚线框 + 出图预览框）。
+       ⚠️ 只挑**容器**，别用 `[style*=border-radius]` 一把抓 —— 那会把
+          小徽章标签（"插曲"/"等下一段"，3px）也拉成 40px，标签就毁了。 */
+    div[style*="border:1px dashed"],
+    img[style*="max-width:340px"]{ border-radius:var(--r) !important }
+    #qq-qr-img{ border-radius:var(--r) !important }
+    /* 头像 / 参考图（96×96 的**正方形**）—— 用苹果图标的边长比例 22.37%。
+       ⚠️ 百分比只在正方形上安全（宽高各算各的，非正方形会变椭圆角）。 */
+    #p-avatar,
+    #p-ref{ border-radius:22.37% !important }
+    /* 控件类：全部统一 */
+    nav button,
+    button.act,
+    button.ghost,
+    .msg,
+    input,
+    select,
+    textarea,
+    .face .ops button{ border-radius:var(--r-ctrl) }
+    /* ⚠️ `.pill` 是**胶囊**（border-radius:20px 且高度很小）—— 不参与放大，
+       否则会从胶囊变成方块。同理 `.blob` / 标题圆点是正圆，见下面那条。 */
+    .pill{ border-radius:999px }
 </style>
 </head>
 <body>
@@ -414,25 +583,47 @@
 <div class="wrap">
   <div id="problems"></div>
 
+  <!-- ⚠️ 2026-09-25 用户要求：「把分组名的字体设为页面名字的两倍，然后把不同分组的卡片拆开」
+       ⇒ ① 每个分组现在是**自己一块卡片**（.navsec），不再是整条侧栏共用一块玻璃；
+         ② 分组名字号 = `nav button`(15.5px) 的**两倍** = 31px（见下面 CSS）。
+       ⚠️ `class="on"` 不许挪（默认页必须是 QQ登录）。 -->
   <nav>
-    <button data-tab="model" class="on">模型</button>
-    <button data-tab="groups">群与触发</button>
-    <button data-tab="faces">表情包</button>
-    <button data-tab="knowledge">知识库</button>
-    <!-- ⚠️ 2026-09-21：人设<b>单独一页</b>（能直接切换核心人设 + 改名字/称呼/口癖/动画库） -->
-    <button data-tab="persona">人设</button>
-    <button data-tab="qzone">QQ空间</button>
-    <button data-tab="life">日常事件</button>
-    <button data-tab="quest">二级剧情</button>
-    <!-- ⚠️ 2026-09-16：按群设定<b>单独一页</b>（它管日常事件 + 二级剧情 + 收紧度三样） -->
-    <button data-tab="groupcfg">按群设定</button>
-    <button data-tab="affinity">好感度 / 好友</button>
-    <button data-tab="qqlogin">QQ登录</button>
+    <div class="navsec">
+      <div class="navgrp">基础</div>
+      <button data-tab="model">模型</button>
+      <button data-tab="groups">群与触发</button>
+    </div>
+    <div class="navsec">
+      <div class="navgrp">内容</div>
+      <!-- ⚠️ 2026-09-21：人设<b>单独一页</b>（能直接切换核心人设 + 改名字/称呼/口癖/动画库） -->
+      <button data-tab="persona">人设</button>
+      <button data-tab="knowledge">知识库</button>
+      <button data-tab="faces">表情包</button>
+    </div>
+    <div class="navsec">
+      <div class="navgrp">功能</div>
+      <button data-tab="qzone">QQ空间</button>
+      <!-- ⚠️ 2026-09-16：按群设定<b>单独一页</b>（它管日常事件 + 二级剧情 + 收紧度三样） -->
+      <button data-tab="groupcfg">按群设定</button>
+      <button data-tab="life">日常事件</button>
+      <button data-tab="quest">二级剧情</button>
+      <button data-tab="affinity">好感度 / 好友</button>
+    </div>
+    <div class="navsec">
+      <div class="navgrp">运行</div>
+      <!-- ⚠️ 默认页是 QQ登录（用户要求：进去先看登录状态）—— 这个 class="on" 不许挪 -->
+      <button data-tab="qqlogin" class="on">QQ登录</button>
       <button data-tab="status">运行状态</button>
+    </div>
+    <!-- ⚠️ 2026-09-28 加：作者信息（用户要求「在侧栏单开一个卡片」） -->
+    <div class="navsec">
+      <div class="navgrp">关于</div>
+      <button data-tab="about">作者信息</button>
+    </div>
   </nav>
 
   <!-- 模型 -->
-  <section id="tab-model">
+  <section id="tab-model" class="hidden">
     <div class="card">
       <h2>身份（主人 / 机器人）</h2>
       <p class="hint">
@@ -1077,6 +1268,12 @@
         <div><div class="t">启用 QQ 空间功能</div><div class="d">关掉之后既不自动发，也发不出去</div></div>
       </div>
       <div class="switch">
+        <input type="checkbox" id="qz-comment">
+        <div><div class="t">回复说说下面的评论</div>
+          <div class="d">有人在她的说说下面评论时，她用你的口吻回一句。<b>只回最近 3 天、每条评论只回一次、每天最多 5 条</b>，不回她自己的评论和已知机器人。
+            ⚠️ 这条路要自己调空间接口（协议端没这个能力），出问题关掉即可，<b>不影响发说说</b>。</div></div>
+      </div>
+      <div class="switch">
         <input type="checkbox" id="qz-auto">
         <div><div class="t">自动判断并发布</div><div class="d">关掉后只能手动点「立刻发送」</div></div>
       </div>
@@ -1084,6 +1281,46 @@
         <button class="act" onclick="saveQzone()">保存设置</button>
         <span class="msg" id="msg-qzone-cfg"></span>
       </div>
+    </div>
+  </section>
+  <!-- 作者信息（2026-09-28 加） -->
+  <section id="tab-about" class="hidden">
+    <div class="card">
+      <h2>作者信息</h2>
+      <p class="hint">
+        <b>项目作者</b>：<主人>_Dev通道　·　<b>贡献</b>：ArcLumine<br>
+        欢迎加群提供建议。
+      </p>
+      <div class="kvs">
+        <div class="kv">
+          <b>QQ 交流群</b>
+          <span><img class="siteicon" src="/assets/site-qq.png" alt="">1062638346
+            <button class="act" style="margin-left:10px;padding:2px 10px;font-size:12px"
+                    onclick="copyGroupNo()">复制群号</button>
+          </span>
+        </div>
+      </div>
+      <div class="btns"><span class="msg" id="about-msg"></span></div>
+    </div>
+
+    <div class="card">
+      <h2>相关链接</h2>
+      <div class="btns">
+        <a class="act" href="https://github.com/<主人>/saki-ai-bot" target="_blank" rel="noopener"
+           style="display:inline-flex;align-items:center;text-decoration:none">
+          <img class="siteicon" src="/assets/site-github.png" alt="">GitHub 项目主页</a>
+        <a class="act" href="https://afdian.com/a/<主人>" target="_blank" rel="noopener"
+           style="display:inline-flex;align-items:center;text-decoration:none">
+          <img class="siteicon" src="/assets/site-afdian.png" alt="">爱发电 · 赞助</a>
+        <a class="act" href="https://space.bilibili.com/30000001?spm_id_from=203.0.113.10" target="_blank" rel="noopener"
+           style="display:inline-flex;align-items:center;text-decoration:none">
+          <img class="siteicon" src="/assets/site-bilibili.png" alt="">B 站主页</a>
+      </div>
+      <p class="hint">
+        <b>GitHub</b>：源码、更新记录、怎么自己部署一套。<br>
+        <b>爱发电</b>：如果她帮你省了事，可以在这儿请她喝杯红茶（那也是她开口说话的钱）。<br>
+        <b>B 站</b>：服务器和存档的视频都在这个号上。
+      </p>
     </div>
   </section>
   <!-- QQ 登录 -->
@@ -1401,7 +1638,7 @@
     </div>
   </section>
 
-  <section id="tab-qqlogin" class="hidden">
+  <section id="tab-qqlogin">
     <div class="card">
       <h2>QQ 登录状态</h2>
       <p class="hint">
@@ -1522,9 +1759,21 @@ let STATE = null;
 //    只有这样才像一整排东西被光标"抬"起来，而不是一个一个单独跳。
 //    所以离光标的距离要参与计算（平方衰减：近的涨得快、远的掉得快）。
 //
-// ⚠️⚠️ 距离必须用 **offsetTop / offsetHeight** 算，**不能用 getBoundingClientRect**：
-//    后者拿到的值是**已经被上一次 transform 缩放过的** → 用它会自我叠加、越抖越大。
-//    offsetTop/offsetHeight 完全不受 transform 影响，所以缓存一次就够了。
+// ⚠️⚠️ 距离怎么算 —— **2026-09-25 改过一次，两条都读一遍再动**：
+//
+//  · 原来（拆卡片之前）用 `offsetTop / offsetHeight`，理由写在当时：
+//    "`getBoundingClientRect` 拿到的值是**已经被上一次 transform 缩放过的**
+//     → 用它会自我叠加、越抖越大；offsetTop 不受 transform 影响，缓存一次就够。"
+//
+//  · 2026-09-25 起改用 `getBoundingClientRect`，**原因是 offsetTop 不再够用**：
+//    分组拆成各自一块卡片（`.navsec`）之后，浏览器把带 `backdrop-filter` 的元素
+//    当包含块 ⇒ **每块卡片内部的 offsetTop 都从 0 重新开始** ⇒ 各组的项位置撞在一起
+//    ⇒ 光标移到一处、三组一起放大（用户报的就是这个）✗
+//
+//  · 那"自我叠加"怎么办？——**已经挡住了**，靠下面两条，别删：
+//    ① `collect()` 第一行**先把所有 transform 清掉**再量 ⇒ 量到的必然是未缩放的位置；
+//    ② `items` 是**缓存**的，只在 `childList` 变（切页签重画）和 `resize` 时重量
+//       ⇒ 不会在 mousemove 里反复重量、也就不会把缩放结果喂回自己。
 (() => {
   const nav = document.querySelector('nav');
   if (!nav) return;
@@ -1540,16 +1789,33 @@ let STATE = null;
   function collect() {
     // 先清掉 transform 再量，免得量到缩放后的位置（虽然 offset* 不受影响，但求稳）
     for (const b of nav.querySelectorAll('button')) b.style.transform = '';
-    items = [...nav.querySelectorAll('button')].map((b) => ({
-      b,
-      cy: b.offsetTop + b.offsetHeight / 2,
-    }));
+    // ⚠️⚠️ 2026-09-25 修（用户报「光标附近字体放大，三组会一起放大」）：
+    //    原来用 `b.offsetTop` 量位置 —— 那是**相对 offsetParent** 的。
+    //    侧栏还是一条 `nav` 的时候所有按钮同一个坐标系，没问题；
+    //    2026-09-25 把分组拆成**各自一块卡片**（`.navsec` 带 `backdrop-filter`，
+    //    浏览器会把这种元素当包含块）⇒ **每组内部的 offsetTop 都从 0 重新开始**
+    //    ⇒ 三组的第一项位置撞在一起 ⇒ 一起放大 ✗
+    //    ⇒ 改用 `getBoundingClientRect()` 算**相对 nav 的绝对中心**，跟 `update()` 里
+    //      那个 `y` 用同一套坐标系，就跟卡片怎么拆无关了。
+    //    ⚠️ 必须先清掉 transform 再量（不然量到的是放大后的位置）—— 上面那行已经清了。
+    const navTop = nav.getBoundingClientRect().top;
+    items = [...nav.querySelectorAll('button')].map((b) => {
+      const r = b.getBoundingClientRect();
+      // ⚠️ `sec` = 这个按钮属于哪块卡片。拆卡片之后**必须**带上它：
+      //    放大范围 `RANGE`(110px) 比卡片间距(14px)大得多，不加限制就会
+      //    跨到隔壁组去 ⇒ 又变成"多组一起放大" ✗
+      return { b, sec: b.closest('.navsec'), cy: r.top - navTop + r.height / 2 };
+    });
   }
 
-  function update(clientY) {
+  function update(clientY, curSec) {
     if (!items.length) collect();
     const y = clientY - nav.getBoundingClientRect().top; // 换算成"相对侧栏"的 y
     for (const it of items) {
+      // ⚠️⚠️ 2026-09-25：**只在鼠标所在的那块卡片里**放大。
+      //    拆卡片之前整条侧栏是一列，`RANGE` 跨组无所谓；现在跨组就等于
+      //    "三组一起放大"（用户报的正是这个）✗
+      if (curSec && it.sec !== curSec) { it.b.style.transform = ''; continue; }
       const d = Math.abs(y - it.cy);
       const t = Math.max(0, 1 - d / RANGE);
       const k = t * t; // 平方衰减：近的涨得快、远的掉得快
@@ -1562,10 +1828,14 @@ let STATE = null;
     for (const it of items) it.b.style.transform = '';
   }
 
-  nav.addEventListener('mousemove', (e) => update(e.clientY), { passive: true });
+  // ⚠️ 把「鼠标在哪块卡片里」一起传进去（closest 对 padding 区里的鼠标也有效）
+  nav.addEventListener('mousemove', (e) => update(e.clientY, e.target.closest && e.target.closest('.navsec')), { passive: true });
   nav.addEventListener('mouseleave', reset, { passive: true });
   // 切页签时按钮会被重画 → 重新量一次
   new MutationObserver(() => collect()).observe(nav, { childList: true });
+  // ⚠️ 2026-09-25 加：窗口缩放 / 字体变化都会让按钮位置变，
+  //    而 `items` 是**缓存**的 ⇒ 不重量就会拿旧坐标去放大（表现为"放大错的那一项"）。
+  addEventListener('resize', () => collect(), { passive: true });
 })();
 
 // ── 背景油滴（2026-09-17 第四版；用户连着纠正了三次）──
@@ -1952,7 +2222,7 @@ document.querySelectorAll('nav button').forEach(b => {
     b.classList.add('on');
     // ⚠️ 这个列表必须跟 nav 里的 data-tab 一一对应 —— 漏了哪个，哪个标签就切不过去
     //    （qzone 就漏过一阵子，面板永远显示不出来）
-    ['model','groups','faces','knowledge','persona','qzone','life','quest','groupcfg','affinity','qqlogin','status'].forEach(t => {
+    ['model','groups','faces','knowledge','persona','qzone','life','quest','groupcfg','affinity','qqlogin','status','about'].forEach(t => {
       const el = $('tab-' + t);
       if (el) el.classList.toggle('hidden', t !== b.dataset.tab);
     });
@@ -1983,6 +2253,18 @@ function showTab(name) {
 
 // ── 读取状态 ──
 async function reloadAll() {
+  // ⚠️⚠️ 2026-09-23 加（用户：「刚进去默认是没显示状态的，我希望一进去就自动显示状态」）：
+  //    标签页的加载钩子**只挂在 nav 按钮的 `onclick` 上** ⇒ 页面刚打开时**没人点击**，
+  //    **默认标签的内容就永远不加载** ✗（「QQ登录」页因此一直显示初始文案，
+  //    得手点一下「刷新状态」才出内容）。
+  //    ⇒ 每次 `reloadAll()`（页面加载、以及点「重新读取」都会走）**补跑一次当前激活标签的钩子**。
+  //    ⚠️ 用 `.click()` 复用那个处理器，而不是把那一长串 `if (tab === …)` 再写一遍 ——
+  //      和 `showTab()` 的注释同一个道理：两处各写一遍，以后改一处必漏一处。
+  //    ⚠️ 放在开头：各 tab 的钩子自己去要自己的数据，不依赖 `STATE`。
+  //    ⚠️ `setTimeout(…,0)`：让 `reloadAll` 的主体先跑完，避免在同一 tick 里重入。
+  setTimeout(() => {
+    try { document.querySelector('nav button.on')?.click(); } catch {}
+  }, 0);
   const r = await api('/api/state');
   if (!r.ok) return;
   STATE = r;
@@ -2043,6 +2325,8 @@ async function reloadAll() {
     $('qz-maxPerDay').value = c.qzone.maxPerDay ?? 3;
     $('qz-cooldownHours').value = Math.round(((c.qzone.cooldownMs ?? 14400000) / 3600000) * 2) / 2;
     $('qz-ugcRight').value = String(c.qzone.ugcRight ?? 1);
+    // ⚠️ 2026-09-28：评论回复的开关 —— 它是**子对象** `qzone.comment`，不是 `qzone` 的直接字段
+    $('qz-comment').checked = c.qzone.comment?.enable !== false;
   }
 
   // 日常事件（一级）
@@ -3937,6 +4221,32 @@ async function setGroupRespond(gid, level, sel) {
   }
 }
 
+// 作者信息页：复制 QQ 交流群号（2026-09-28 加）
+function copyGroupNo() {
+  const no = '1062638346';
+  const el = $('about-msg');
+  const done = (ok, txt) => {
+    if (!el) return;
+    el.textContent = txt;
+    el.style.color = ok ? '#16a34a' : '#dc2626';
+  };
+  // ⚠️ `navigator.clipboard` 只在**安全上下文**（https 或 localhost）里有。
+  //    WebUI 默认是 http://203.0.113.10 ⇒ 属于 localhost，能用 ✓
+  //    但如果哪天用**局域网 IP** 打开，它就没有了 ⇒ 必须给个"手动复制"的兜底提示。
+  try {
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard
+        .writeText(no)
+        .then(() => done(true, `已复制群号：${no}`))
+        .catch(() => done(false, `浏览器不让自动复制，手动记一下：${no}`));
+    } else {
+      done(false, `这个浏览器不支持一键复制，手动记一下：${no}`);
+    }
+  } catch {
+    done(false, `复制失败，手动记一下：${no}`);
+  }
+}
+
 async function renderQzone() {
   try {
     const q = await api('/api/qzone');
@@ -4018,6 +4328,10 @@ async function saveQzone() {
       maxPerDay: Number($('qz-maxPerDay').value),
       cooldownMs: Number($('qz-cooldownHours').value) * 3600000,
       ugcRight: Number($('qz-ugcRight').value),
+      // ⚠️ 2026-09-28：**只传要改的键** —— 后端对 `qzone.comment` 做了**一层深合并**
+      //    （见 src/webui.js 的 saveConfig），所以 days / maxPerDay / intervalMs
+      //    不会被这次保存冲掉。
+      comment: { enable: $('qz-comment').checked },
     }})
   });
   flash(el, r.ok, r.ok ? '已保存并生效' : ('保存失败：' + r.error));

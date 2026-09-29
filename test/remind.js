@@ -105,9 +105,12 @@ console.log('\n【到点发送・群里】');
   ok(one?.action === 'send_group_msg', '走的是群消息');
   ok(String(one?.params?.group_id) === '20002', '发到了**他发消息的那个群**');
   const ats = (one?.params?.message ?? []).filter((s) => s.type === 'at').map((s) => String(s.data.qq));
-  ok(ats.length === 2, `@ 了两段（他 + 另外那个人），实际 ${ats.length} 段`);
-  ok(ats.includes('30003'), '@ 到提要求的人');
+  // ⚠️ 2026-09-25 改：原来这里期望「@ 两段（他 + 另外那个人）」——
+  //    那是**按错的行为写的**。用户实测「提醒 aelcgsh 下地铁，@ 的却是我自己」，
+  //    明确说那就是错人 ⇒ 有人可提醒时**只 @ 那个人**，不 @ 发指令的他。
+  ok(ats.length === 1, `只 @ 该被提醒的那一个人，实际 ${ats.length} 段`);
   ok(ats.includes('30004'), '@ 到"另外那个人"');
+  ok(!ats.includes('30003'), '**不 @ 发指令的人**（他才是要提醒别人的那个）');
   const txt = (one?.params?.message ?? [])
     .filter((s) => s.type === 'text')
     .map((s) => s.data.text)

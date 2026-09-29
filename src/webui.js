@@ -317,6 +317,27 @@ function saveConfig(patch) {
     }
   };
 
+  // ⚠️⚠️ 2026-09-28 加：**子对象要深合并（一层）**。
+  //
+  //    `put()` 是**浅合并**（逐键覆盖），所以像 `qzone.comment` 这种**子对象**，
+  //    前端只改其中一个开关时如果直接传 `comment: { enable: false }`，
+  //    会把 `days` / `maxPerDay` / `intervalMs` **一起冲掉** ✗ ——
+  //    用户会看到"我只关了一个开关，怎么天数也变回默认了"。
+  //    ⇒ 这里先把它和文件里原有的值合起来，前端就**只需要传要改的键**。
+  //    ⚠️ 只做**一层**：够用，而且不会把数组之类的结构意外合坏。
+  //    ⚠️ 必须放在下面那些 `put(...)` **之前** —— `put` 是按 `patch` 里的值覆盖的，
+  //       放后面就白合并了。
+  const SUB_MERGE = { qzone: ['comment'] };
+  for (const [section, subs] of Object.entries(SUB_MERGE)) {
+    for (const sub of subs) {
+      const before = raw[section]?.[sub];
+      const incoming = patch[section]?.[sub];
+      if (incoming && before && typeof before === 'object' && typeof incoming === 'object') {
+        patch[section][sub] = { ...before, ...incoming };
+      }
+    }
+  }
+
   put('llm', patch.llm);
   put('imagegen', patch.imagegen);
   put('onebot', patch.onebot);

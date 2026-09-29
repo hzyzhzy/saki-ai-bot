@@ -403,6 +403,30 @@ async function main() {
   check(sysPrompt.includes('大足特别行政区') || sysPrompt.includes('建设'), '系统提示词包含建设规则');
   check(!chatFor('新人应该怎么安装')?.hasLive, '普通新人问题没有注入实时状态');
 
+  // ⚠️⚠️ 2026-09-26（用户报：「最近机器人一直都不认得服务器的几个管理员了，
+  //    比如 luminflux，lsf，**在群里问的时候会直接说不认识**」）。
+  //
+  //    根因**不在"她忘了"** —— 是 `selectFor()` 的 `needServer` 关键词表里
+  //    **只有「管理员 / 腐竹」这种身份词，没有任何人名或别名**：
+  //    「Luminiflux是谁」「<主人>是谁」「LSF_Official.在b站上的成就怎么样」
+  //    **一个词都不命中** ⇒ 整份 `hzymtr-server.md`（含管理员名录）**压根不进上下文**
+  //    ⇒ 她手里没有名单，只能答"我不认识" ✗。
+  //    ⚠️ `anime.md` 和群资料库**早就加了** `mentionsAnyTerm` 这条判据，**只有服务器库漏了**。
+  //
+  //    这里钉住：**只提人名、不含任何服务器关键词**的消息，也必须把服务器库带进来。
+  console.log('[4b] 只提管理员别名（不含任何服务器关键词）→ 也要带出服务器库');
+  const aliasQ = 'Luminiflux是谁';
+  // ⚠️ 前提断言：这句话本身不能命中关键词表，否则测的就不是"别名"这条新判据了
+  check(
+    !/服务器|整合包|模组|存档|管理员|腐竹|大足|线路|地铁|java/i.test(aliasQ),
+    '（前提）这句话不含任何服务器关键词',
+  );
+  pushGroupMsg(WORK_GROUP, aliasQ, true, 1007, '30007');
+  await waitChat('Luminiflux', '提到管理员别名的模型调用');
+  const aliasSys = chatFor('Luminiflux')?.sys ?? '';
+  check(aliasSys.includes('Luminiflux'), '别名问题把服务器库带进来了（管理员名录里有 Luminiflux）');
+  check(aliasSys.includes('10000008'), '名录里带上了他的 QQ 号（这样才认得出说话的就是本人）');
+
   console.log('[5] 问在线人数 → 应该触发实查并注入结果');
   pushGroupMsg(WORK_GROUP, '现在几个人在线？', true, 1004, '30004');
   // ⚠️ 等**第 5 步的主聊天请求**（不是"含这几个字的任何请求"—— 见 `chatFor` 的注释：

@@ -174,6 +174,20 @@ const SCENES = {
     ev: { message_type: 'group', group_id: G, user_id: MEMBER, message: seg('今天好累啊') },
     text: '今天好累啊',
   },
+  // ⚠️ 2026-09-26 加：**「问某个人是谁」那条路**（`whoIsBrief()` 的"就近摘要"）。
+  //
+  //    为什么：用户报「机器人不认得几个管理员了，在群里问的时候会直接说不认识」。
+  //    查下来信息**确实在提示词里**，但落在 60%~70% 的**中段**，问句在末尾 ⇒ 模型翻不到
+  //    （中段迷失）。修法是让 `whoIsBrief()` 也扫服务器库里的人员名录，
+  //    把被问到的那一行**单独拎到提示词末尾**。
+  //
+  //    ⚠️ 这条路径原来**一个场景都没覆盖** —— 我加完 `whoIsBrief` 的改动后，
+  //       那 10 个场景**全部逐字节一致**（因为它们的文本都没提到人名）。
+  //       「全绿」在这里等于"没测到"，所以必须补这一个场景当哨兵。
+  'group-at-who': {
+    ev: { message_type: 'group', group_id: G, user_id: MEMBER, message: seg('Luminiflux是谁') },
+    text: 'Luminiflux是谁',
+  },
   'private-owner': {
     ev: { message_type: 'private', user_id: OWNER, message: seg('在吗') },
     text: '在吗',
@@ -313,6 +327,30 @@ for (const [name, s] of Object.entries(SCENES)) {
     now['qzone-guide'] = normalize(qz.postGuide());
   } catch (e) {
     console.log(`  ❌ 额外场景 qzone-guide 生成失败：${e.message}`);
+    failures++;
+  }
+}
+
+// ⚠️ 2026-09-26 加：**「账上紧」那一段**（`balance.balanceNote()`）原来**不在任何场景里**。
+//
+//    用户为这条路报过**两次**问题（先"话术雷同" → 再"每回一句话都夹一句催充钱"），
+//    而它**每一轮都注入**（`buildSystemPrompt` 无条件调）、影响面比 `remindSystem` 还大
+//    ⇒ 必须有哨兵盯着，不然下次改坏了还是"全绿"。
+//
+//    ⚠️ 放在**最后**：`setLastForPreview()` 改的是 `balance.js` 的**内部状态**，
+//       放中间会污染后面那些场景生成的提示词。
+{
+  const bal = await import('../src/balance.js');
+  try {
+    // ⚠️ 两个都要覆盖：**0 元和"快见底"是两句不同的话**（用户 2026-09-26 纠正：
+    //    「这个不是快没钱，是完全没钱的状态」）。原来只 mock 了 1.2，测不到 0 那条分支。
+    bal.setLastForPreview(0); // 完全没钱
+    now['balance-note-empty'] = normalize(bal.balanceNote());
+    bal.setLastForPreview(1.2); // 快见底
+    now['balance-note-critical'] = normalize(bal.balanceNote());
+  } catch (e) {
+    // ⚠️ 失败要大声报 —— 少一个场景看起来像全绿
+    console.log(`  ❌ 额外场景 balance-note-* 生成失败：${e.message}`);
     failures++;
   }
 }

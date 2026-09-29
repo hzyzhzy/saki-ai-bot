@@ -394,6 +394,13 @@ async function main() {
   //    这正是 AGENTS.md 里 trap ② 那条（"上一步迟到的请求"）的同一个坑。
   //
   //    修法：**等到调用数不再变**再取样，而不是固定睡 1.5 秒碰运气。
+  // ⚠️⚠️ 2026-09-25 再修一次（上次只把下面的死等从 2500 提到 7000，不够）：
+  //    光"等调用数不再变"会**太早收工** —— 第一轮 300ms 就认定"稳了"，
+  //    可上一轮那次「settle 期间来了新消息 → 丢掉草稿重新生成」**还没开始**：
+  //    `settleMs` 默认 2500，它要 2.5 秒后才冒出来，正好落进下面「清空对话」的
+  //    统计窗口，被算成"清空对话浪费的调用" ⇒ 假红（功能没坏）。
+  //    ⇒ 必须先睡够一个 settleMs，再去做"稳定检测"。
+  await sleep(3200);
   let stable = -1;
   for (let i = 0; i < 20 && stable !== llmCalls.length; i++) {
     stable = llmCalls.length;
@@ -401,7 +408,12 @@ async function main() {
   }
   const callsBefore = llmCalls.length;
   pushGroupMessage('清空对话', 5005);
-  await sleep(2500);
+  // ⚠️ 2026-09-25：**这个死等要覆盖 settleMs**。
+    //    `bot.js` 现在"生成完之后还会再等一小段"（`chat.settleMs` 默认 2500，见那行注释），
+    //    于是她回完一条的总耗时 = 生成 + 2.5 秒 ⇒ 原来只等 2500 就断言，
+    //    会**把下一轮已经开始的调用算进来** ⇒ 这条 check 假红 ✗（不是功能坏）。
+    //    ⇒ 等够「生成 + settle + 余量」。
+    await sleep(7000);
   check(
     sentTexts().includes('清空'),
     '「清空对话」指令被识别并回复',

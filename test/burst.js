@@ -390,14 +390,23 @@ console.log('\n【★★】生成期间/刚结束攒到的碎片，要**等到�
   // ⚠️ 2026-09-23 加（用户问「初华呢 这句话她读到了吗」）：当时只能翻 `recent.json`，
   //    而那是**已记录的上下文** ⇒ 推不出"到底收到没"。现在每收到一条就记一行。
   check(
-    /\[收到\] \$\{event\.message_type === 'group'/.test(src),
+    /\[收到\$\{tag/.test(src),
     '★★ 每收到一条消息都记一行「[收到] 群/人/摘要」——"她到底看没看到某句"一眼可查',
   );
   check(
-    // ⚠️ 窗口从 900 放宽到 1800：2026-09-23 在 `[收到]` 前面插了十几行注释
-    //    （说明"他的 @ 没被识别"那个坑该怎么看），注释也占字符。
-    /scheduleHandle\(event, meta = \{\}\) \{[\s\S]{0,1800}?\[收到\]/.test(src),
-    '★ 而且记在 `scheduleHandle` 的**最前面**（所有消息的必经点，且在攒批之前 —— 合并了也一条一行）',
+    // ⚠️⚠️ 2026-09-29 改（这次断言的**含义变了，而且是变强**）：
+    //    原来断言「记在 `scheduleHandle` 最前面」—— 可那条路径**只覆盖"没 @ 她的消息"**。
+    //    现场：北辰发了 `latest.log` + 错误报告 zip，她一个字都没读到；
+    //    日志里**一片空白**，因为那条消息走的是**主动接话 → `enqueue`**，
+    //    而 `enqueue` 那条路一行都不记 ⇒ 只能靠"下载缓存目录没被创建"反推。
+    //    ⇒ 现在抽成 `logIncoming()`，**两条路都必须调**，缺一条就等于又留一个盲区。
+    /enqueue\(event, meta = \{\}\) \{[\s\S]{0,300}?this\.logIncoming\(event/.test(src) &&
+      /scheduleHandle\(event, meta = \{\}\) \{[\s\S]{0,2600}?this\.logIncoming\(event/.test(src),
+    '★ 而且 **@ 她/主动接话**（`enqueue`）和普通消息（`scheduleHandle`）**两条路都记**，一条都不许漏',
+  );
+  check(
+    /段=\$\{segs0\.map/.test(src),
+    '★★ `[收到]` 里还记了**段构成**（`段=file` / `段=text,image`）—— "她到底有没有收到那个文件"一眼可查',
   );
   check(
     /at=\$\{atSegs\.length\}[\s\S]{0,240}?atMe=\$\{atMe\} self=/.test(src),

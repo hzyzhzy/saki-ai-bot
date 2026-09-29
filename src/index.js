@@ -23,6 +23,7 @@ import { faceTags, faceFiles } from './faces.js';
 import { initCollector } from './collector.js';
 import * as machine from './machine.js';
 import * as sessions from './sessions.js';
+import * as qzoneComment from './qzone-comment.js';
 
 const bot = new Bot();
 let reconnectTimer = null;
@@ -977,6 +978,46 @@ if (config.remind?.enable !== false) {
   log.info(
     `定时提醒：每 ${Math.round(every / 1000)} 秒查一次` +
       `${rst.pending ? `，重启前挂着的还有 ${rst.pending} 条（不会丢）` : ''}`,
+  );
+}
+
+// 💬 **空间评论回复**（2026-09-28 加，用户要求：「回复自己发的说说下面的评论」）。
+//
+// ⚠️ 这条路**自己拼 HTTP 调空间接口**（协议端没有这个能力 —— SnowLuma 的
+//    `get_qzone_msg_list` 只给评论**数量**、也没有发评论的 action）。
+//    风险和"发说说"完全一样（风控 / 接口未公开 / 长期维护），
+//    说明和两个接口的实测结论都在 `src/qzone-comment.js` 顶部。
+//    出问题就把 `qzone.comment.enable` 设成 false —— **不影响发说说**。
+if (config.qzone?.comment?.enable !== false) {
+  const qc = config.qzone?.comment ?? {};
+  const every = Math.max(60000, Number(qc.intervalMs) || 10 * 60 * 1000);
+  let busy = false; // 上一轮还没跑完就跳过（别把请求叠起来）
+  const tick = async () => {
+    if (busy) return;
+    busy = true;
+    try {
+      const r = await qzoneComment.checkOnce({
+        call: (a, p) => bot.call(a, p),
+        // ⚠️ 那份"按名字"的机器人名单只有 bot 实例有（见 src/qzone-comment.js 的 isKnownBot）。
+        //    不传的话，她会去回 `Alone゜独白ぴ` 那种机器人的评论。
+        isBot: (uin, name) => Boolean(name && bot.ignoreBots?.has(name)),
+      });
+      if (r.replied) log.info(`[空间评论] 这一轮回了 ${r.replied} 条`);
+      else if (r.skipped && !/没有要回的/.test(r.skipped)) {
+        log.debug(`[空间评论] 这轮没回：${r.skipped}`);
+      }
+    } catch (e) {
+      // ⚠️ 出错只记日志 —— 这条路**绝不能影响主流程**（收发消息才是主业）
+      log.warn(`[空间评论] 检查出错：${e.message}`);
+    } finally {
+      busy = false;
+    }
+  };
+  setInterval(tick, every).unref();
+  setTimeout(tick, 90 * 1000).unref(); // 开机先等 90 秒，别刚连上就去调空间接口
+  log.info(
+    `空间评论：每 ${Math.round(every / 60000)} 分钟看一次` +
+      `（只回最近 ${qc.days ?? 3} 天、每条评论只回一次、每天最多 ${qc.maxPerDay ?? 5} 条）`,
   );
 }
 

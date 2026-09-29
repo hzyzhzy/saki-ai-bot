@@ -14,13 +14,13 @@ node installer\build-payload.cjs --refresh     # --refresh = 先重跑 tools/mak
 # ② 用 Inno Setup 编译（本机已装：%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe）
 & "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" installer\saki-bot.iss
 
-# 产物：installer\dist\saki-setup-1.0.0.exe（约 50 MB）
+# 产物：installer\dist\saki-setup-1.0.1.exe（约 50 MB）
 ```
 
 静默安装（自测用）：
 
 ```powershell
-installer\dist\saki-setup-1.0.0.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART `
+installer\dist\saki-setup-1.0.1.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART `
   /DIR="$env:TEMP\saki-test" /LOG="$env:TEMP\saki.log"
 ```
 

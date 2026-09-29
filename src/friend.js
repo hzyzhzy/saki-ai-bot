@@ -55,6 +55,10 @@ function load() {
       friends: j?.friends && typeof j.friends === 'object' ? j.friends : {},
       lastDmAt: Number(j?.lastDmAt) || 0,
       lastPickDate: String(j?.lastPickDate ?? ''),
+      // ⚠️⚠️ 这个 load() 是**白名单式重建** `st` —— 往 `st` 里新加字段却忘了写在这里，
+      //   就等于**没加**：`save()` 明明写进了文件，重启后却被这一句丢掉。
+      //   2026-09-25 实测踩到（`dmFailed` 落盘成功、读回来是空的，过滤形同虚设）。
+      dmFailed: j?.dmFailed && typeof j.dmFailed === 'object' ? j.dmFailed : {},
     };
   } catch (e) {
     log.debug(`好友状态读取失败（当作空的）：${e.message}`);
@@ -262,7 +266,7 @@ export function pickForToday(now = Date.now(), rng = Math.random) {
   const minGap = num(cfg().minGapMs, 20 * 60 * 60 * 1000);
   if (st.lastDmAt && now - st.lastDmAt < minGap) return { skip: '距上次私聊太近' };
 
-  const all = friendList().filter((f) => !f.lastDmAt || now - f.lastDmAt > minGap);
+  const all = friendList().filter((f) => (!f.lastDmAt || now - f.lastDmAt > minGap) && !st.dmFailed?.[f.userId]);
   if (!all.length) return { skip: '还没有可发的好友' };
 
   if (!(rng() < num(cfg().dailyChance, 0.35))) {
@@ -317,6 +321,25 @@ export async function composeDm(userId, extra = {}) {
 }
 
 /** 记下"给这个人发过私聊了" */
+/**
+ * 记下「这个人的私聊发不出去」（实测触发：`result=16 请先添加对方为好友`）。
+ *
+ * ⚠️⚠️ 2026-09-25 加（用户实测：主动私聊连续两次撞同一个人，日志里
+ *    `send_private_msg rejected: result=16 err=发送失败，请先添加对方为好友`）。
+ *    根因：`friendList()` 是**本地缓存**的好友列表，而它**不准** ——
+ *    对方可能早把机器人删了、或者只是单向好友（项目自己都列了
+ *    `get_unidirectional_friend_list` 这个 API）。
+ *    ⇒ 撞一次就记下来，`pickForToday()` 挑人时跳过 ⇒ 不用每次白撞。
+ *    ⚠️ 不做"每次发之前查一遍好友列表"：那要一次额外的 API 调用，而且照样可能过期。
+ */
+export function markDmFailed(userId, at = Date.now()) {
+  const u = String(userId ?? '').trim();
+  if (!u) return false;
+  st.dmFailed ??= {};
+  st.dmFailed[u] = at;
+  save();
+  return true;
+}
 export function markDm(userId, at = Date.now()) {
   const id = String(userId ?? '').trim();
   if (!id) return false;

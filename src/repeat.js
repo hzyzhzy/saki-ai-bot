@@ -108,11 +108,24 @@ export function observe(groupId, text, opts = {}) {
   //    **不是**字面的「+1」（2026-09-18 用户纠正：「不是直接发+1，
   //    而是**复述前面几个人正在复述的内容**」）。
   const raw = String(text).trim().slice(0, 200);
+  // ⚠️⚠️ 2026-09-29 加：把**原始消息段**也存下来。
+  //
+  //    用户截图：群里刷「能不能入卡池啊😣😣😣」，她复读成了
+  //    「能不能入卡池啊**[QQ表情][QQ表情][QQ表情]**」—— 群友当场问「saki怎么不能发表情」✗。
+  //
+  //    根因：`text` 是 `extractText()` 的输出 —— **QQ 表情已经变成占位符 `[QQ表情]` 了**，
+  //    拿它复读就会**把占位符当正文发出去** ✗。而这条链的"原话"本该是**表情本身**。
+  //    ⇒ 记下 `segs`，复读时按它重建（有表情就发同样的表情段）。
+  //    ⚠️ 只留**能安全复读**的段：去掉 `at` / `reply`（照着 @ 别人、引用别人的话都很怪），
+  //      只保留 text / face（QQ 表情）/ image（表情包）这几类。
+  const segs = (Array.isArray(opts.segs) ? opts.segs : [])
+    .filter((s) => s && ['text', 'face', 'image', 'mface'].includes(s.type))
+    .slice(0, 8);
   if (prev && prev.text === t) {
-    next = { text: t, raw, count: prev.count + 1, joined: prev.joined, at: Date.now() };
+    next = { text: t, raw, segs, count: prev.count + 1, joined: prev.joined, at: Date.now() };
   } else {
     // 新的一句 / 被打断 → 重新起链。**打断后计数回 1，所以不可能"接着旧链接"**。
-    next = { text: t, raw, count: 1, joined: false, at: Date.now() };
+    next = { text: t, raw, segs, count: 1, joined: false, at: Date.now() };
   }
 
   // 简单限容：超了就丢最早的那批（Map 保序）
@@ -168,7 +181,9 @@ export function joinChance(count, probs) {
 export function shouldJoin(groupId, opts = {}) {
   const count = current(groupId);
   const say = chains.get(key(groupId))?.raw ?? '';
-  const no = (why) => ({ count, chance: 0, join: false, why, say });
+  // ⚠️ 2026-09-29：原始消息段（复读时按它重建，这样**表情能照发**，不会变成 `[QQ表情]`）
+  const saySegs = chains.get(key(groupId))?.segs ?? null;
+  const no = (why) => ({ count, chance: 0, join: false, why, say, saySegs });
   if (opts.enable === false) return no('功能关了');
   if (count < 3) return no(`才第 ${count} 句`);
   if (hasJoined(groupId)) return no('这条链已经接过一次');
@@ -180,7 +195,7 @@ export function shouldJoin(groupId, opts = {}) {
   const chance = joinChance(count, opts.probs);
   // ⚠️ 没有可复述的原话就别发（免得发一条空消息出去）
   if (!say) return no('这条链没有可复述的原话');
-  return { count, chance, join: chance > 0, why: `第 ${count} 句，概率 ${chance}`, say };
+  return { count, chance, join: chance > 0, why: `第 ${count} 句，概率 ${chance}`, say, saySegs };
 }
 
 /**

@@ -221,6 +221,12 @@ const DEFAULTS = {
   trigger: {
     privateChat: true,
     groupChat: true,
+      /**
+       * 可触发私聊应答的 QQ 号白名单（2026-09-20 从上游 fork 挑过来的）。
+       * ⚠️ **空名单 = 不回应任何私聊** —— 故意的：开了私聊之后任何陌生人都能触发她说话
+       *    （烧钱，也容易被当成免费客服）。要谁能私聊就把 QQ 写进来（服主记住写自己）。
+       */
+      allowPrivateUsers: [],
     allowGroups: [],
     debugInjectIds: [],
     /**
@@ -837,6 +843,10 @@ function load() {
   cfg.trigger.allowGroups = (cfg.trigger.allowGroups ?? [])
     .filter((g) => g !== null && g !== undefined && String(g).trim())
     .map((g) => String(g).trim());
+    // ⚠️ 和 allowGroups 一样收法：去空值、统一字符串（配置里写数字也不会漏配）
+    cfg.trigger.allowPrivateUsers = (cfg.trigger.allowPrivateUsers ?? [])
+      .filter((user) => user !== null && user !== undefined && String(user).trim())
+      .map((user) => String(user).trim());
   cfg.trigger.debugInjectIds = (cfg.trigger.debugInjectIds ?? [])
     .filter((g) => g !== null && g !== undefined && String(g).trim())
     .map((g) => String(g).trim());
@@ -952,7 +962,8 @@ function load() {
   //    用户原话：「建议超出20秒时，机器人先随便回复一句你等等之类的话」，
   //    而且「回复的话不要太死板，也可以经过 llm」（那句话交给模型现生成）。
   //    0 = 关掉。单位毫秒。默认 20000（用户说的 20 秒）。
-  cfg.chat.ackAfterMs = Math.max(0, Number(cfg.chat.ackAfterMs ?? 20000));
+  // ⚠️ 2026-09-23：默认 0 = 过渡话机制**不启用**（用户要求先不要它；见 bot.js 那行注释）。
+  cfg.chat.ackAfterMs = Math.max(0, Number(cfg.chat.ackAfterMs ?? 0));
 
   // ⚠️ **「自己接自己」（追补）** —— 和上面的 `chat.followUp`（**对话延续**：
   //    别人又说话了，要不要接着聊）完全是两件事，所以名字必须分开，

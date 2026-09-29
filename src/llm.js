@@ -125,7 +125,40 @@ egressWatch.unref?.();
  * 带**自动切换出口**的 fetch（llm.js 里所有模型请求都走它）。
  * ⚠️ 换出口重试**只做一次**（两次都挂就是真挂，交给上层按故障处理）。
  */
+/**
+ * 清掉 JSON 文本里**孤立的代理项**（半个 emoji）。
+ *
+ * ⚠️⚠️ 2026-09-23 加（实测踩到，**持续复现**）：
+ *    `JSON.stringify` 只在两种情况下输出 `\uXXXX` —— 控制字符，和**孤立代理项**。
+ *    字符串里如果有一个**被切断的 emoji**（高代理后面没跟低代理，或反之），
+ *    stringify 会老老实实输出 `"\ud83d"`。这在 JSON 规范里技术上合法、**语义无效**，
+ *    而严格的解析器（DeepSeek 那边是 Rust 的 `serde_json`）会**直接拒绝**，报：
+ *    ```
+ *    Failed to parse the request body as JSON: messages[0].content:
+ *    unexpected end of hex escape at line 1
+ *    ```
+ *    ⇒ 于是**她的回复整个生成失败**（那条消息直接哑掉）。
+ *
+ *    **来源**：识图返回 405 字描述，而它被 `slice()` 截断 ⇒ 正好切在 emoji 中间。
+ *    但**任何**字符串都可能带（模型输出、群友消息、知识库），所以修在**这里**。
+ *
+ * ⚠️ 为什么在 `llmFetch` 里做、而不是每个调用点：`llm.js` 里有 4 处 `JSON.stringify`，
+ *    在这里过一道闸就不用改 4 个地方（改 4 处必漏一处）。
+ * ⚠️ 输入是**已经 stringify 过的文本**，所以要匹配的是**转义后的** `\uXXXX` 形式。
+ */
+function stripLoneSurrogates(body) {
+  // ① 高代理（D800-DBFF）后面没紧跟低代理 ⇒ 孤立 ⇒ 去掉
+  let s = String(body).replace(/\\u[dD][89abAB][0-9a-fA-F]{2}(?!\\u[dD][c-fC-F][0-9a-fA-F]{2})/g, '');
+  // ② 低代理（DC00-DFFF）前面没紧跟着高代理 ⇒ 孤立 ⇒ 去掉
+  s = s.replace(/(?<!\\u[dD][89abAB][0-9a-fA-F]{2})\\u[dD][c-fC-F][0-9a-fA-F]{2}/g, '');
+  return s;
+}
+
 export async function llmFetch(url, opts = {}) {
+  // ⚠️⚠️ 所有 llm 请求都在这里过一道「孤立代理项」闸 —— 理由见上面那个函数。
+  if (opts && typeof opts.body === 'string') {
+    opts = { ...opts, body: stripLoneSurrogates(opts.body) };
+  }
   if (egress === 'unknown') applyEgress((await proxyAlive()) ? 'proxy' : 'direct');
   const first = egress;
   try {
@@ -219,7 +252,19 @@ export async function* streamChat(messages, outerSignal, opts = {}) {
         max_tokens: maxTokens,
         // ⚠️ 关掉思考链（2026-09-18）：flash 的**思考链计入 completion_tokens**，
         //    压缩故事线时它烧掉 7479/8000，正文只写了 819 字就被截断 → 整次作废。
-        ...(opts.thinking ? { thinking: opts.thinking } : {}),
+        // ⚠️⚠️ 2026-09-23 加（用户实测：她说「行，给你看一眼」却**没发图**）：
+        //    日志：`LLM 输出被 max_tokens(8000) 截断了（其中**思考链吃了 7999 token**）`
+        //    ⇒ 思考链把输出预算吃光 ⇒ **`[拍照]` 标记正好被截掉** ⇒ 她嘴上答应、实际没标记 ⇒ 没有图 ✗
+        //    ⇒ 主聊天**默认给思考链设上限**（`config.llm.thinkingBudget`，默认 3000），把剩下的留给输出。
+        //      辅助请求（说话判断/润色/识图）本来就显式传 `thinking:{type:'disabled'}`，不受影响 ✓
+        //    ⚠️ 实测过这个字段被接受（带 `budget_tokens` 打 API 返回 200，不报 400）。
+        //    ⚠️ 设 0 或负数 = 不限制（退回旧行为）。
+        ...(opts.thinking
+          ? { thinking: opts.thinking }
+          : (() => {
+              const b = Number(config.llm?.thinkingBudget ?? 3000);
+              return Number.isFinite(b) && b > 0 ? { thinking: { type: 'enabled', budget_tokens: b } } : {};
+            })()),
         stream: true,
         // ⚠️ 加了这行，流式响应才会在**最后一块**带 `usage`
         //    （记账要用它，见 spend.js；不加的话只能估算）

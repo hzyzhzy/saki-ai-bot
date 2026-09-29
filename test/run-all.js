@@ -88,6 +88,9 @@ const SUITES = [
   // ⚠️ 2026-09-15 晚加：好友/好感度接线（到线通知只发一次 + 被回应加分 + `/好感度` 出榜）。
   //    它一直在仓库里但**没进过回归名单**（用户要求加进来）。
   'friend',
+  'private-whitelist',
+  'memes',
+  'qzone-comment',
   'follow-up',
   'tic',
   'meal',
@@ -210,6 +213,10 @@ function isolatedStateEnv(name) {
     //    套件必须各写各的，否则会互相串、也会污染真实的 state/recent.json
     QQBOT_RECENT_FILE: p('recent'),
     QQBOT_QZONE_FILE: p('qzone'),
+    // ⚠️ 2026-09-28 加：空间评论回复的状态（`state/qzone-comment.json`）。
+    //    不隔离的话，"已回过的评论"和"今天回了几条"会被测试写脏 ⇒
+    //    真实运行时可能**少回**（以为回过了）或者**超发**。
+    QQBOT_QZONE_COMMENT_FILE: p('qzone-comment'),
     QQBOT_DIGEST_FILE: p('digest'),
     QQBOT_AFFINITY_FILE: p('affinity'),
     QQBOT_OBSERVE_FILE: p('observe'),

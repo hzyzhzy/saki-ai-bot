@@ -310,9 +310,29 @@ export function analyzeFile(file) {
   if (!texts.length) {
     return { ok: false, reason: '压缩包里没找到可读的日志文本' };
   }
-  // 挑最大的那个文本（通常就是 latest.log / crash-report）
-  texts.sort((a, b) => b.text.length - a.text.length);
+  // ⚠️⚠️ 2026-09-29 修（现场：北辰发的那份「错误报告-2026-9-29_21.47.12.zip」
+  //    被解析成 **0 个异常、0 条命中**，等于白读）。
+  //
+  //    原因就是这一行**按大小挑**：「最大的那个文本」在他那个包里是 `debug.log`
+  //    （553 行 DEBUG 级噪音），真正的崩溃证据（crash-report / latest.log）
+  //    **根本轮不到** ✗
+  //
+  //    ⇒ 改成**按文件名优先级**排，同档再比大小。
+  //      `debug.log` 永远排最后 —— 它只会把结论淹掉。
+  const rankOf = (n) => {
+    const s = String(n ?? '').toLowerCase();
+    if (/crash-?report/.test(s)) return 0; // 崩溃报告：最有用
+    if (/latest\.log$/.test(s)) return 1; // 最近这一次的日志
+    if (/debug\.log$/.test(s)) return 9; // DEBUG 噪音：最次
+    if (/\.log$/.test(s)) return 2;
+    if (/\.txt$/.test(s)) return 3;
+    return 5;
+  };
+  texts.sort((a, b) => rankOf(a.name) - rankOf(b.name) || b.text.length - a.text.length);
   const main = texts[0];
+  log.info(
+    `[日志] 包内候选：${texts.map((t) => `${t.name}(档${rankOf(t.name)})`).join('、')} → 选 ${main.name}`,
+  );
   const parsed = parseLog(main.text);
   parsed.fileName = main.name;
 
@@ -347,8 +367,23 @@ export function logBlock(parsed) {
   parts.push(
     '',
     '## 怎么回答',
-    '- **先说结论**：这是什么问题，然后给步骤。别把日志念一遍。',
-    '- 上面「已知问题」匹配到的，**直接照它说**（那是可靠的）。',
+    '',
+    // ⚠️⚠️ 2026-09-29 用户要求（起因：她在群里那条回复）：
+    //    「这种**经典问题直接简短一点**就行了，要不然群友反而会看不懂」。
+    //    事实现场：那次回了 140 字，里面还带着 `class file 65.0` 的版本号，
+    //    以及「要么换 Iris、要么升 Java」两个选择 —— 用户当场说「这样肯定不行」。
+    //    ⇒ 命中「已知问题」= 这是群里答过很多遍的**经典问题**：
+    //      **一句话给唯一答案**，不解释原理、不给备选、不念堆栈。
+    '- ⚠️⚠️ **命中「已知问题」时，一句话就够** —— 那是**经典问题**，别展开：',
+    '  ✅ 就这个长度：「装 Java 21，17 必崩。」「内存调大到 6~8G。」「渲染模组装多了，删一个。」',
+    '  🚫 **别解释原理**（版本号、为什么崩、是哪个模组带崩的），别念异常堆栈。',
+    '  🚫 **别给两个选择**（「要么换模组、要么升 Java」）—— 直接给那个**最省事**的。',
+    '  🚫 别写小标题、别分点列三条以上 —— 群里没人看那么长。',
+    // ⚠️ 2026-09-29 用户要求：「再靠近一点**日常聊天**的语气，不要太轻浮」。
+    //    ⚠️ "一句话"**不等于电报体**：短的是句子成分，不是语气词。
+    '  ⚠️ 但**语气词留着**（「就行」「吧」「啊」）—— 短 ≠ 干巴巴：',
+    '    「装 Java 21，17 必崩。」比「Java 版本不兼容，请安装 21」像人得多。',
+    '- 没命中「已知问题」时：**先说结论**（这是什么问题），再给步骤，别把日志念一遍。',
     '- **匹配不到就别硬编原因**。可以说「这个报错我不太确定，你把 `Caused by` 那几行发出来」，',
     '  或者让他找 Ch1hayaAnonQWQ（技术问题归他）。',
     '- 步骤要能照做：说清楚改哪个文件、哪个选项、改成什么值。',
@@ -358,7 +393,13 @@ export function logBlock(parsed) {
 
 /** 判断一个消息段是不是「日志文件」 */
 export function looksLikeLogFile(seg) {
-  if (seg?.type !== 'file') return false;
-  const n = String(seg.data?.name ?? seg.data?.file ?? '');
+  // ⚠️ 2026-09-29：段类型的大小写/别名都容一手（协议端换过，SnowLuma 给的是小写 file，
+  //    但别的实现可能是 `File`）。
+  if (String(seg?.type ?? '').toLowerCase() !== 'file') return false;
+  // ⚠️ 2026-09-29：**文件名字段也放宽**。原来只认 `name` / `file`，
+  //    而各协议端还见过 `filename` / `file_name` / `fileName` 这几种写法 ——
+  //    认不出名字就等于**默默跳过整个文件**（现场那次就是这么漏的）。
+  const d = seg.data ?? {};
+  const n = String(d.name ?? d.file ?? d.filename ?? d.file_name ?? d.fileName ?? '');
   return /\.(log|txt|zip|gz|crash|json|yml|yaml|toml|md)$/i.test(n);
 }

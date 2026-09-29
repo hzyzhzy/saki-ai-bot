@@ -85,16 +85,43 @@ export function hasMediaPlaceholder(text) {
 }
 
 /** 取出纯文本内容（@ 和图片等会被替换成占位或忽略） */
-export function extractText(segments, { atPlaceholder = '' } = {}) {
+export function extractText(segments, { atPlaceholder = '', atNameOf = null } = {}) {
   const parts = [];
   for (const seg of segments) {
     switch (seg.type) {
       case 'text':
         parts.push(seg.data?.text ?? '');
         break;
-      case 'at':
-        parts.push(atPlaceholder);
+      case 'at': {
+        // ⚠️⚠️ 2026-09-26 加：**@ 段要留下"@的是谁"**。
+        //
+        //    用户截图：有人引用她的话、然后 `@她 @一个小阿萨 他说的` ——
+        //    她答「哪个他，就这么一句他说的，名字呢（」✗。
+        //    查 `state/recent.json` 里存的那条上下文，是这么写的：
+        //      `龘霉菌： [引用#11795864] 他说的`
+        //    —— **两个 @ 段被整个丢掉了**，她确实无从知道"他"是谁。
+        //
+        //    ⚠️ 根因在协议端那侧：SnowLuma 的 `at.toSegment()`（→OneBot 事件方向）
+        //       **只给 `qq`、不给 `name`**（只有反方向的 `fromSegment` 才认 name）
+        //       ⇒ 名字只能由我们**自己拿 QQ 号反查**（`names.js`）。
+        //
+        //    ⚠️ 默认**不启用**，而且**当前没有任何调用方** —— 留着是给将来备用。
+        //       我第一版就是拿它去改"记群上下文"那两处，被回归打回来了：
+        //       `extractText` 的输出是**主干文本**（身兼"`contextText` 按文本相等
+        //       剔除当前这条"的职责），把 `@某人` 拼进去会打乱下游的关键词 /
+        //       表情标记匹配 ✗（实测 `face` / `follow-up` 两个套件立刻红）。
+        //       ⇒ 现在走的是 `recent.js` 的 `atNames` 字段（只在拼上下文时才可见）。
+        //       ⚠️ 以后要用它之前先想清楚：**这个输出会不会被拿去做匹配**。
+        const qq = String(seg.data?.qq ?? '').trim();
+        if (qq === 'all') {
+          parts.push(atPlaceholder || '@全体成员 ');
+          break;
+        }
+        const nm = atNameOf && qq ? String(atNameOf(qq) ?? '').trim() : '';
+        // 有真名就用真名；查不到退回 QQ 号（也比丢掉强 —— 至少看得出"@了个人"）
+        parts.push(nm ? `@${nm} ` : atPlaceholder || (atNameOf && qq ? `@${qq} ` : ''));
         break;
+      }
       case 'image':
         // 区分表情包和截图（字段名各协议端不同 → 统一走 isStickerSeg）。
         // 这个区别对回答方式影响很大 —— 表情包是「在玩笑」，截图是「有问题要问」。
