@@ -191,7 +191,22 @@ const PROVIDERS = {
       //    官方 API 文档写明 **Seedream 5.0 pro / flash 不支持配置这个参数** ——
       //    传了会被拒。而官方教程里 5.0 lite 的例子也**根本不传它**
       //    （不传 = 默认就是单图），所以删掉最稳、且对全系列都成立。
-      response_format: 'url',
+      // ⚠️⚠️ 2026-09-30 修（用户报「刚刚为什么没拍照」→ 日志里连着两次
+      //    「生图失败（server）：生成图落盘失败：The operation was aborted due to timeout」）。
+      //
+      //    真凶就是这一行原来传的 `url`：它返回的是火山 TOS 上的临时地址
+      //    （`ark-content-generation-v2-cn-beijing.tos-cn-beijing.volces.com`），
+      //    而那个域名在用户这台机器上**下不动**：
+      //      · 60 秒上限 → `TimeoutError`
+      //      · 放宽到 180 秒 → **10 秒就 `fetch failed`**（连接层面不通，不是慢）
+      //    ⇒ 图**生成是成功的**（实测 19.4 秒就出图），却卡在"把图下载下来"，
+      //      两次都失败，最后只能回「拍照失败」。
+      //
+      //    改成 `b64_json`：图**跟着响应直接回来**，根本不碰 TOS。
+      //    `pickImage()`（认 `b64_json`）和 `materialize()`（`if (picked.b64)` 直接落盘）
+      //    本来就支持这条路，只是之前没走。
+      //    实测：b64 三次都成功（18.1s / 19.4s / …），生成耗时和 url 模式没差别。
+      response_format: 'b64_json',
       watermark: !!s.watermark,
     }),
   },
@@ -446,7 +461,12 @@ async function materialize(picked, s) {
     fs.writeFileSync(file, Buffer.from(picked.b64, 'base64'));
     return file;
   }
-  const r = await fetch(picked.url, { signal: AbortSignal.timeout(Math.min(s.timeoutMs, 60000)) });
+  // ⚠️ 2026-09-30：这里原来把上限硬砍成 60 秒（`Math.min(s.timeoutMs, 60000)`），
+  //    而 4K 图有好几 MB，网络稍抖就超时（现场就是这么挂的）。
+  //    放宽成跟着 `timeoutMs`（默认 180 秒）。
+  //    ⚠️ 但这只是**兜底路径**（有的服务商只给 url）—— 方舟那边已经改走 b64，
+  //      根本不会走到这儿。
+  const r = await fetch(picked.url, { signal: AbortSignal.timeout(s.timeoutMs) });
   if (!r.ok) throw new Error(`下载生成图 HTTP ${r.status}`);
   const ct = String(r.headers.get('content-type') ?? '');
   const ext = ct.includes('jpeg') ? '.jpg' : ct.includes('webp') ? '.webp' : '.png';

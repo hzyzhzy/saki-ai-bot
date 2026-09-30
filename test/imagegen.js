@@ -325,7 +325,15 @@ console.log('\n【3】火山方舟（ark）的请求形状');
     b.sequential_image_generation === undefined,
     '不传 `sequential_image_generation`（不传 = 默认单图，且 5.0 pro/flash 不认这个参数）',
   );
-  check(b.response_format === 'url', 'response_format=url');
+  // ⚠️⚠️ 2026-09-30 改：原来断言 `'url'`，现在**必须**是 `'b64_json'`。
+  //    原因（见 `src/imagegen.js` 那段注释）：传 `url` 拿到的是火山 TOS 上的临时地址，
+  //    而那个域名在用户这台机器上**下不动**（60 秒超时 / 180 秒直接 fetch failed），
+  //    于是图明明生成成功了，却卡在"下载"这一步，连着两次报「拍照失败」。
+  //    ⇒ 这条断言现在就是**盯这个回归的哨兵**：谁改回 `'url'`，谁就得先看那段注释。
+  check(
+    b.response_format === 'b64_json',
+    '★ response_format=b64_json（图跟响应直接回来，不走 TOS 下载那条连不上的路）',
+  );
 
   // ⚠️ 2026-09-22 加：分辨率档要**按模型夹** —— Seedream 5.0 pro/flash 最高只到 2K，
   //    给它们发 4K 会被平台拒。默认档是 4K（用户要求"发出来像真照片、800 万像素"），

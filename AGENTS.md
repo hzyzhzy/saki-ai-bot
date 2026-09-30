@@ -959,3 +959,51 @@ LLBot 是**独立实现、不注入 QQ 客户端**，客户端特征和 NapCat �
 **⚠️ 凭据备份模块的现状**：`src/cred-backup.js` + `tools/napcat-cred.mjs` 是**NapCat 专用**的。
 现在协议端是 LLBot → `bot.js` 里那段备份**不会执行**（加了 provider 判断）。
 留着是为了"哪天退回 NapCat 还能用"，**不是死代码，别删**。
+
+
+---
+
+## 🚀 发 GitHub Release（2026-09-30 加）
+
+**凭据**：GitHub PAT 存在 **`logs/发布凭据.md`**（用户要求「记下 token，下次就不用我再生成了」）。
+- ⚠️ `logs/` 在 `.gitignore` 里、也在 `make-public.cjs` 的跳过清单里 ⇒ **不进任何仓库**，已验证。
+- ⚠️⚠️ **绝不要把 token 抄进这份 `AGENTS.md`** —— 它会被导出到公开仓库
+  （`qq-ai-bot-public/AGENTS.md` 就是它），写进去等于把凭据公开。这里只写"它在哪"。
+
+**PAT 要求**：fine-grained token，Repository access 选 `<主人>/saki-ai-bot`，
+Repository permissions 里 **`Contents: Read and write`**。
+- ⚠️ 只勾 `Repository advisories` **不够**（2026-09-30 踩过：建 Release 直接
+  `403 Resource not accessible by personal access token`）。Release 和它的附件都算在 `Contents` 底下。
+
+**流程**（这台机器上**没装 `gh` CLI**，所以走 REST API）：
+
+```powershell
+$token = (Get-Content '<项目目录>\qq-ai-bot\logs\发布凭据.md' -Raw).Trim()
+$h  = @{ Authorization = "Bearer $token"; 'User-Agent' = 'dsh-release'; Accept = 'application/vnd.github+json' }
+$px = 'http://203.0.113.10'
+$api = 'https://api.github.com/repos/<主人>/saki-ai-bot'
+
+# ① 建 Release（body 是中文 + markdown ⇒ 必须自己转 UTF8 字节，别直接传字符串）
+$payload = @{ tag_name='v1.0.x'; name='标题'; body=$body; draft=$false; prerelease=$false } | ConvertTo-Json -Compress
+Invoke-RestMethod -Method Post -Uri "$api/releases" -Headers $h -Proxy $px `
+  -ContentType 'application/json; charset=utf-8' -Body ([System.Text.Encoding]::UTF8.GetBytes($payload))
+
+# ② 传附件（走 uploads.github.com）
+Invoke-RestMethod -Method Post -Headers $h -Proxy $px -ContentType 'application/octet-stream' -TimeoutSec 1200 `
+  -Uri "https://uploads.github.com/repos/<主人>/saki-ai-bot/releases/<id>/assets?name=saki-setup-1.0.x.exe" `
+  -InFile '<项目目录>\qq-ai-bot\installer\dist\saki-setup-1.0.x.exe'
+```
+
+**三个坑（都踩过，别再踩）**：
+
+| 坑 | 现象 | 规矩 |
+| --- | --- | --- |
+| hosts 把 `github.com` / `api.github.com` 指向 `203.0.113.10` | 命令行连 GitHub 一律 `ECONNREFUSED`；浏览器却可能能进（走代理时域名由代理解析，绕开 hosts） | **每次 API 调用都显式带 `-Proxy http://203.0.113.10`**；别指望系统代理开关 —— 它经常是 `0`，但 7890 本身是通的（`Test-NetConnection 203.0.113.10 -Port 7890` 一测就知道） |
+| `git push` 能成、API 却 401 | GCM 那份凭据**只给 git 用**，`git credential fill` 取不出来（返回空） | Release 资产**必须**用 PAT —— 跟 push 是两套认证 |
+| 发出去的 exe 里是旧代码 | `build-payload` 的源是**公开副本**，不先重新导出就会打包上一版 | 顺序：改代码 → `make-public.cjs` → `build-payload.cjs`（**别加 `--refresh`**：它自己会再跑一次 make-public，两个前后脚跑会把 README/LICENSE 删掉）→ `ISCC` → 静默装到临时目录验一次 |
+
+**已发布的 tag**：`v1.0.0` → `3695e0e`、`v1.0.1` → `3f9fea3`，各带自己的 `saki-setup-*.exe`。
+
+⚠️ **验证安装包时别留僵尸**：用 `cmd /c node src\index.js` 起的验证进程，
+`Stop-Process` 杀 `cmd.exe` **不会**带走里面的 node —— 必须按 node 的 PID 杀，
+否则它会一直跑着（2026-09-30 就留了两个，还误以为是"端口 3099 被占用"）。
