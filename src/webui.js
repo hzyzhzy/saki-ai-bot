@@ -737,13 +737,16 @@ const routes = {
     const text = String(t.prompt ?? '').trim() || '拍张照片看看，你现在什么样';
     const picked = await photoPlan.plan({ text, said: '', marker, facts });
     const withSelf = picked.withSelf;
+    // ⚠️ 2026-10-02：`refs` 先算 —— 拼提示词时要告诉它这次带没带参考图
+    //    （带了就在提示词里指认参考图里的那个女孩，见 `imagegen.buildPrompt`）。
+    const refs = withSelf ? persona.refImages() : [];
     const prompt = imagegen.buildPrompt({
       what: picked.what,
       withSelf,
       time: picked.time || facts.now,
       place: picked.place || facts.where,
+      hasRef: refs.length > 0,
     });
-    const refs = withSelf ? persona.refImages() : [];
     const r = await imagegen.generate({ prompt, refs, expectRef: withSelf, over: t.imagegen ?? {} });
     if (!r.ok) {
       // ⚠️ 两条信息**分开**给（2026-09-22 实测踩到 `ModelNotOpen` 之后改的）：
@@ -1901,8 +1904,17 @@ const routes = {
       'cast.md': '出场人物名册（谁可以出现在故事里、什么频率）· **角色专属**',
       'life-events.md': '一级日常事件库（她一天里会遇到哪些小事）· **角色专属**',
       'quest-ideas.md': '剧情素材池（二级主线的点子）· **角色专属**',
-      'hzymtr-server.md': '服务器知识库（进服、排障、规则、存档）',
+      // ⚠️ 2026-09-30：服务器库按主题拆成四份（原来是一份 `hzymtr-server.md`）——
+      //    问什么就只带哪一份，不再整包背上（用户要求「太混乱、占字数也多」）。
+      'server-basic.md': '服务器 · 进服与排障（整合包、启动器、报错、链接与指令）',
+      'server-rules.md': '服务器 · 规则与权限（建设审批、OP、白名单、存档）',
+      'server-world.md': '服务器 · 世界设定（线路、车站、行政区、地名、集团）',
+      'server-people.md': '服务器 · 人员名录（谁是管理员、谁是谁、别名）',
       'group-memory.md': '群资料库（群友是谁、什么性格、群里的大事）',
+      // ⚠️ 2026-10-02 加（用户拍板「做1」）：熟人资料独立成一份 ——
+      //    `owner.md` 只对服主注入，别人问 MEI 就答"不知道"；
+      //    这一份**谁问都读**，所以界面里得能直接编辑它。
+      'friends.md': '熟人 / 朋友（服主现实里的朋友、老同学）· ⚠️ **谁问都读，写之前想清楚**',
       'learned.md':
         '学习档案（群里「记住：…」教的短知识，优先级最高）。⚠️ 格式有要求：每条必须是 `## 主题` 开头，' +
         '而且要保留 `<!-- LEARNED:BEGIN -->` / `END` 两行标记 —— 保存时会校验，不合格会拒绝保存',
@@ -1996,7 +2008,17 @@ const routes = {
       } catch {}
       // ⚠️ 动画库的名字是人设声明的，写不进固定表 —— 这里现算一个顺序表。
       const animeNames = files.filter((f) => f.name.startsWith('anime/')).map((f) => f.name);
-      const order = ['persona.md', 'hzymtr-server.md', ...animeNames, 'group-memory.md'];
+      const order = [
+        'persona.md',
+        // ⚠️ 2026-09-30：服务器库拆成四份（原来是一份 hzymtr-server.md），顺序按"最常看的在前"
+        'server-basic.md',
+        'server-rules.md',
+        'server-world.md',
+        'server-people.md',
+        ...animeNames,
+        'friends.md',
+        'group-memory.md',
+      ];
       files.sort((a, b) => {
         // ⚠️ 人设包的排最前（那是"她是谁"、最常改），其次共用库
         const fa = a.from === 'persona' ? 0 : 1;
@@ -2226,7 +2248,14 @@ const routes = {
 
   'GET /api/persona': async (_req, res, url) => {
     try {
-      send(res, 200, { ok: true, ...personaAdmin.readPack(url.searchParams.get('id')) });
+      send(res, 200, {
+        ok: true,
+        ...personaAdmin.readPack(url.searchParams.get('id')),
+        // ⚠️ 2026-09-30 加：把「对主人例外」这个**运行开关**搭这趟车带上。
+        //    它是 `config.yml` 的 `persona.ownerException`（不在 identity.json 里），
+        //    但人设页要显示它的当前状态 —— 为它单开一个 GET 接口不值当。
+        ownerException: config.persona?.ownerException !== false,
+      });
     } catch (e) {
       send(res, e.bad ? 400 : 500, { ok: false, error: e.message });
     }

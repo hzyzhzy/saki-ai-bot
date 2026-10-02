@@ -416,7 +416,13 @@ export function recentImages(groupId, opts = {}) {
     if (now - m.time > maxAge) continue;
     if (m.messageId && exclude.includes(m.messageId)) continue;
     for (const f of m.imageFiles ?? []) {
-      if (f && !out.some((x) => x.file === f)) out.push({ file: f, name: m.name });
+      // ⚠️ 2026-10-02：**把"什么时候发的"一起带出去**（`time`）。
+      //    用户问：「我补充的消息是在图片后几条消息之后的，这样能不能进图片补充？」
+      //    现实是：图只按"最近 N 张"带进上下文，**不记录"哪句话在说哪张图"** ——
+      //    所以他过几条才补一句「这是**昨晚的**照片」时，她只能靠猜是哪张，猜不中就当成现在 ✗
+      //    ⇒ 带上时间，让提示词里能写「<主人> 5 分钟前发的这张图」——
+      //      那句"昨晚的"就对得上号了（详见 `bot.js` 里拼"来源"那两处）。
+      if (f && !out.some((x) => x.file === f)) out.push({ file: f, name: m.name, time: m.time });
     }
     if (out.length >= (opts.limit ?? 2)) break;
   }

@@ -287,8 +287,9 @@ const STYLE_FALLBACK = '真实照片，手机随手拍，没有滤镜也没有�
  * @param {boolean} p.withSelf  画面里有没有她 —— 决定用 `style.self` 还是 `style.scene`
  * @param {string} [p.time]     时间（一样一样按"事实在前、画风在后"排）
  * @param {string} [p.place]    地点
+ * @param {boolean} [p.hasRef]  这次**真的带了参考图**吗（默认跟 `withSelf` 一致）
  */
-export function buildPrompt({ what, withSelf = true, time = '', place = '' } = {}) {
+export function buildPrompt({ what, withSelf = true, time = '', place = '', hasRef = null } = {}) {
   const body = String(what ?? '')
     .trim()
     .replace(/[。.]+$/, ''); // 免得拼出"。。"
@@ -298,7 +299,29 @@ export function buildPrompt({ what, withSelf = true, time = '', place = '' } = {
   // ⚠️ 顺序固定为「画面 → 时间地点 → 画风」：前面是"这次是什么"，后面是"长什么样"。
   //    反过来写模型会把画风当成主体描述的一部分。
   const when = [String(time ?? '').trim(), String(place ?? '').trim()].filter(Boolean).join('，');
-  return [body + '。', when ? `${when}。` : '', pick].filter(Boolean).join('');
+
+  // ⚠️⚠️ 2026-10-02 加（用户报「为什么她刚发的照片是黑发」）：
+  //    **必须在提示词里显式指认参考图** —— 只说"是你本人"没用，
+  //    模型根本没见过"你"，那句话对它等于没说，它会**自己画一个人**。
+  //
+  //    现场：参考图 `personas/saki/ref.webp` 是**浅蓝紫色双马尾、金瞳**，
+  //    而 02:37 生成的那张自拍是**一头黑色散发** ✗ —— 画风、构图、手机感都对，
+  //    唯独**身份完全没带上**（用户一眼就看出来了）。
+  //
+  //    豆包 Seedream（以及这类图生图接口）的用法就是这样：`image` 字段只负责"给图"，
+  //    **提示词里得说「参考图里的那个女孩」它才知道要照谁画**（多图还要分图1图2）。
+  //
+  //    ⚠️ 措辞按 Seedream 的官方用法：**用「图1」指代参考图**（多图时就是图1/图2）。
+  //    ⚠️ 只写"保持一致"、不点名参考图也弱 —— 所以这里明确指**图1**，
+  //      并且把最容易跑偏的两样（发色、发型）单独点出来；
+  //      ⚠️ 不写死具体颜色（参考图是什么就照什么），换人设不用改代码。
+  //    ⚠️ 长度有硬约束：官方建议中文提示词 <300 字，`test/imagegen.js` 钉着这条
+  //      （第一版我写了 68 字，直接把提示词顶到 339 ⇒ 被套件抓住）。
+  const anchor =
+    withSelf && hasRef !== false
+      ? '画面里的人是参考图1里的女孩，发色发型五官保持一致。'
+      : '';
+  return [body + '。', anchor, when ? `${when}。` : '', pick].filter(Boolean).join('');
 }
 
 // ── 缓存清理 ──────────────────────────────────────────

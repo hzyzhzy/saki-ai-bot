@@ -197,6 +197,15 @@ export async function preSearch(text, context = '', opts = {}) {
   // ⚠️ 明显的内部话题直接跳过，连模型都不用调（省一次调用）
   if (looksInternal(t)) return { searched: false, why: '内部话题（规则判定）' };
 
+  // ⚠️ 2026-10-03 加（方案⑤的一部分）：**问的是"群里的人"** ⇒ 内部话题，网上没有答案。
+  //    这类问题（「mmmawa 是谁」「大豆是谁」）答案在群资料/人员名录里，
+  //    上网只会搜到同名的陌生人，白花 3~15 秒还可能把她带偏。
+  //    ⚠️ 判据由调用方给（它手上有 `names.mentioned` + 群号）。
+  if (typeof opts.knownPerson === 'function' && opts.knownPerson(t)) {
+    log.debug('预搜索：问的是群里的人，不搜');
+    return { searched: false, why: '问的是群里的人（内部话题）' };
+  }
+
   // ⚠️⚠️ 「关于小祥自己 / 她跟别人的关系」的问题**一律不搜**（2026-09-12 加）。
   //
   //    真实踩过：<主人> 问「你和她（户山香澄）说过话吗」，

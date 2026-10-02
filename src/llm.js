@@ -186,9 +186,15 @@ const llmCfg = () => config.llm;
  * 调用 OpenAI 兼容接口，流式产出文本增量。
  * @param {{role:string, content:string}[]} messages
  * @param {AbortSignal} [outerSignal]
- * @param {{maxTokens?:number, timeoutMs?:number, thinking?:object}} [opts]
+ * @param {{maxTokens?:number, timeoutMs?:number, thinking?:object, report?:object}} [opts]
  *        按次覆盖参数：解题模式要更大的上限；`thinking:{type:'disabled'}`
  *        用来**关掉思考链**（压缩故事线就靠它 —— 见 2026-09-18 那条注释）
+ *        ⚠️ `report`：**调用方传一个空对象进来**，这次生成要是被截断，
+ *        这里会往里写 `report.truncated`（`'length'` = 被 max_tokens 截断；
+ *        `'reasoning-only'` = 思考链把上限吃光、正文一个字都没出）。
+ *        用它判断"要不要关掉思考重试一次"（解题模式那段，2026-10-02 加）。
+ *        ⚠️ 为什么按调用传对象、而不是用模块级全局：预搜索 / 说话判断 / 归属核对
+ *        会**并发**调这个函数，全局变量会被别的那次冲掉。
  * @returns {AsyncGenerator<string>}
  */
 export async function* streamChat(messages, outerSignal, opts = {}) {
@@ -345,6 +351,9 @@ export async function* streamChat(messages, outerSignal, opts = {}) {
       //    真实踩过三次（vision / extract / 教学回执），都是同一个原因：
       //    **推理模型的思考链把 max_tokens 吃光了**，正文一个字都写不出来。
       if (sawReasoning) {
+        // ⚠️⚠️ 2026-10-02：**这个分支也是一种"被截断"** ——
+        //    正文一个字都没有，全被思考链吃了。解题模式要靠这个信号决定重试。
+        if (opts.report) opts.report.truncated = opts.report.truncated || 'reasoning-only';
         log.warn(
           `LLM 只产出了思考链、没有正文 —— 很可能是 max_tokens(${llmCfg().maxTokens}) 被思考吃光了。` +
             `可以把 max_tokens 调大，或者对这类任务设 thinking:{type:'disabled'}`,
@@ -365,6 +374,7 @@ export async function* streamChat(messages, outerSignal, opts = {}) {
     //    而真正的线索（`finish_reason=length`）**一个字都没记**，白查半天。
     //    注意：下面 `sawAny` 那条只在"正文**完全为空**"时报警，救不了这种情况。
     if (finishReason === 'length') {
+      if (opts.report) opts.report.truncated = 'length';
       const rt = usage?.completion_tokens_details?.reasoning_tokens;
       log.warn(
         `LLM 输出被 max_tokens(${maxTokens}) 截断了` +

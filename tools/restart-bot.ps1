@@ -43,7 +43,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot   # 本脚本在 tools\ 下，根目录是上一层
 Set-Location $root
-$logPath = Join-Path $root 'logs\bot.log'
+$logPath = Join-Path $root ("logs\bot-{0}.log" -f (Get-Date -Format 'yyyy-MM-dd'))
 
 function Get-LastLoginAt {
   if (-not (Test-Path $logPath)) { return $null }

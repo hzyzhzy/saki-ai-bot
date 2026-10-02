@@ -6,13 +6,15 @@
  */
 import os from 'node:os';
 import { statfsSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { config } from './config.js';
 import { log } from './log.js';
 import * as persona from './persona.js';
 
 const CACHE_MS = 30000;
 let cache = { at: 0, data: null };
+let collecting = false;
 
 // ── 网络可达性（2026-09-12 加）──────────────────────────────
 //
@@ -82,14 +84,29 @@ export function networkStatus() {
   return netCache.data;
 }
 
-/** 跑一条 PowerShell，失败返回空串 */
-function ps(cmd, timeout = 12000) {
+/**
+ * 跑一条 PowerShell，失败返回空串。
+ *
+ * ⚠️⚠️ 2026-10-03：**必须是异步的**（原来是 `execFileSync`）。
+ *
+ * 现场（分段计时抓出来的，日志原文）：
+ *   `[拼提示词分段] 总=3688 慢段：第8段前=3679ms「# 【你手边这台电脑·实时状态】」`
+ * 也就是**拼一次提示词有 3.7 秒全花在这一段**——因为它同步跑了 3 条 PowerShell
+ * （CPU 占用 / 电池 / 显卡），而**每启动一个 PowerShell 进程就要 0.5~1.5 秒**。
+ * 缓存只有 30 秒，聊天间隔通常比这长 ⇒ **几乎每条消息都白等 3~4 秒**。
+ *
+ * ⇒ 改成和网络探测同一套：**后台异步采集 + 拼提示词只读缓存**（见 `startMachineProbe`）。
+ * ⚠️ 别改回同步 —— 这是"她每次开口都要付"的固定开销，代价最大的那一类。
+ */
+const pExecFile = promisify(execFile);
+async function ps(cmd, timeout = 12000) {
   try {
-    return execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', cmd], {
-      encoding: 'utf8',
+    const { stdout } = await pExecFile('powershell', ['-NoProfile', '-NonInteractive', '-Command', cmd], {
       timeout,
       windowsHide: true,
-    }).trim();
+      encoding: 'utf8',
+    });
+    return String(stdout ?? '').trim();
   } catch (e) {
     log.debug(`PowerShell 查询失败：${e.message}`);
     return '';
@@ -99,8 +116,8 @@ function ps(cmd, timeout = 12000) {
 const gb = (n) => Number((n / 1024 ** 3).toFixed(1));
 
 /** 电池信息（台式机没有，返回 null） */
-function battery() {
-  const out = ps(
+async function battery() {
+  const out = await ps(
     'Get-CimInstance Win32_Battery | Select-Object -First 1 EstimatedChargeRemaining,BatteryStatus | ConvertTo-Json -Compress',
   );
   if (!out) return null;
@@ -117,9 +134,9 @@ function battery() {
   }
 }
 
-/** CPU 使用率（要跑 WMI，比较慢，所以缓存里） */
-function cpuLoad() {
-  const out = ps('(Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average');
+/** CPU 使用率（要跑 WMI，比较慢，所以后台采集 + 缓存） */
+async function cpuLoad() {
+  const out = await ps('(Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average');
   const n = Number(out);
   return Number.isFinite(n) ? n : null;
 }
@@ -128,8 +145,8 @@ function cpuLoad() {
  * 独立显卡名。注意：装了向日葵之类的远程软件会多出来一个虚拟显示器，
  * 所以要过滤掉那些假显卡，优先报真显卡。
  */
-function gpu() {
-  const out = ps('Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name');
+async function gpu() {
+  const out = await ps('Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name');
   if (!out) return null;
   const lines = out
     .split(/\r?\n/)
@@ -151,32 +168,65 @@ function disk() {
 }
 
 /**
- * 采集当前电脑状态。带 30 秒缓存，免得每次都跑 PowerShell。
+ * 采集电脑状态（**异步**，只在后台跑，绝不在拼提示词的路径上）。
+ *
+ * ⚠️ 2026-10-03：三条 PowerShell **并发**跑（`Promise.all`）—— 原来串行同步，
+ *    现在是并发异步 ⇒ 最慢的那条决定总耗时（约 1 秒），而且不阻塞任何回复。
+ */
+async function collect() {
+  if (collecting) return;
+  collecting = true;
+  try {
+    const total = os.totalmem();
+    const free = os.freemem();
+    const [load, bat, g] = await Promise.all([cpuLoad(), battery(), gpu()]);
+    cache = {
+      at: Date.now(),
+      data: {
+        at: Date.now(),
+        hostname: os.hostname(),
+        platform: `${os.platform()} ${os.release()}`,
+        cpuModel: (os.cpus()[0]?.model ?? '').replace(/\s+/g, ' ').trim(),
+        cpuCores: os.cpus().length,
+        cpuLoad: load,
+        memTotal: gb(total),
+        memUsed: gb(total - free),
+        memFree: gb(free),
+        memPercent: Math.round(((total - free) / total) * 100),
+        uptimeHours: Number((os.uptime() / 3600).toFixed(1)),
+        disk: disk(),
+        battery: bat,
+        gpu: g,
+      },
+    };
+  } catch (e) {
+    log.debug(`采集电脑状态失败：${e.message}`);
+  } finally {
+    collecting = false;
+  }
+}
+
+/**
+ * 后台定时刷新电脑状态（启动时先采一次，之后每 `CACHE_MS` 一次）。
+ * ⚠️ 由 `index.js` 调用 —— 和 `startNetworkProbe()` 并列。
+ */
+export function startMachineProbe() {
+  collect().catch(() => {});
+  const t = setInterval(() => collect().catch(() => {}), CACHE_MS);
+  t.unref?.();
+  return t;
+}
+
+/**
+ * 读当前电脑状态 —— ⚠️⚠️ **只读缓存，绝不现采**（2026-10-03 改）。
+ *
+ * 原来它内部同步跑 3 条 PowerShell ⇒ 拼一次提示词要 3~4 秒（分段计时实测 3679 ms）。
+ * 现在还没采到时返回 `null`，由调用方跳过这一段（`machineText()` 会返回空串）。
+ * @param {boolean} [force] 传 true 只是**催一下后台**采集，仍然立即返回（不阻塞）
  */
 export function snapshot(force = false) {
-  const now = Date.now();
-  if (!force && cache.data && now - cache.at < CACHE_MS) return cache.data;
-
-  const total = os.totalmem();
-  const free = os.freemem();
-  const data = {
-    at: now,
-    hostname: os.hostname(),
-    platform: `${os.platform()} ${os.release()}`,
-    cpuModel: (os.cpus()[0]?.model ?? '').replace(/\s+/g, ' ').trim(),
-    cpuCores: os.cpus().length,
-    cpuLoad: cpuLoad(),
-    memTotal: gb(total),
-    memUsed: gb(total - free),
-    memFree: gb(free),
-    memPercent: Math.round(((total - free) / total) * 100),
-    uptimeHours: Number((os.uptime() / 3600).toFixed(1)),
-    disk: disk(),
-    battery: battery(),
-    gpu: gpu(),
-  };
-  cache = { at: now, data };
-  return data;
+  if (force) collect().catch(() => {});
+  return cache.data;
 }
 
 export function clearCache() {
@@ -199,6 +249,9 @@ export function batteryMood(b) {
 export function machineText() {
   if (config.machine?.enable === false) return '';
   const m = snapshot();
+  // ⚠️ 2026-10-03：**还没采到就整段跳过**（后台正在采，通常启动后 1 秒内就有）。
+  //    绝不能在这里现采 —— 那 3~4 秒是"每次开口都要付"的，正是这次要修的东西。
+  if (!m) return '';
   const name = config.machine?.name || '我这台电脑';
 
   const lines = [
@@ -274,6 +327,7 @@ export function machineText() {
 
 /** 给管理界面看的 */
 export function machineStatus() {
-  const m = snapshot(true);
+  // ⚠️ 2026-10-03：现采改成"催一下后台 + 立刻返回现有缓存"（原来同步跑 3 条 PowerShell）
+  const m = snapshot(true) ?? {};
   return { ...m, text: machineText() };
 }

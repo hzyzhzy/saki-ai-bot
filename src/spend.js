@@ -1229,7 +1229,44 @@ export function spendStatus() {
     thisMonth: monthStats(),
     todaySalary: salaryOf(dayStats()),
     monthSalary: salaryOf(monthStats()),
+    allTime: allTimeStats(),
     peakNow: isPeak(),
     file: FILE,
   };
+}
+
+/**
+ * **从有记录以来的总计**（2026-10-03 加，给「入职联动」用）。
+ *
+ * 用户要求：「可以和问工资一样被问到时加一点感想，还可以和工资联动」——
+ * 她 2026-09-10 入职，那"这段时间一共花掉多少 = 她挣了多少"就是个有底气的数字。
+ *
+ * ⚠️⚠️ **不能简单累加 `state.days`** —— 起始账（`spend-baseline.json`）那部分
+ *    是由 `monthStats()` 按天摊进去的 ⇒ 这里**逐月调 `monthStats` 再累加**，
+ *    保证和"月度工资单"是同一个口径（口径只允许有一处实现，别在这儿重算）。
+ * ⚠️ 账本是从 **2026-09-13** 开始记的（比入职晚 3 天），所以 `from` 可能是 09-13 ——
+ *    调用方**别把它当"入职日期"**用（入职日是写死在人设里的 09-10）。
+ */
+export function allTimeStats() {
+  const months = new Set([
+    ...Object.keys(state.days ?? {}).map((k) => String(k).slice(0, 7)),
+    ...Object.keys(baseline ?? {}),
+  ]);
+  const acc = { from: '', to: '', days: 0, calls: 0, cost: 0, months: 0, salary: 0 };
+  for (const m of [...months].sort()) {
+    let s;
+    try {
+      s = monthStats(m);
+    } catch {
+      continue;
+    }
+    acc.calls += Number(s.calls) || 0;
+    acc.cost += Number(s.cost) || 0;
+    acc.days += Number(s.days) || 0;
+    acc.months++;
+    if (!acc.from) acc.from = m;
+    acc.to = m;
+  }
+  acc.salary = acc.cost * SALARY_MULTIPLIER;
+  return acc;
 }

@@ -107,6 +107,12 @@ const SUITES = [
   // ⚠️ 2026-09-16 加：戳一戳交给模型回（不再随机挑那四句写死的；进上下文、进记忆；
   //    戳=明确召唤；防刷屏冷却与文字兜底都还在）
   'poke',
+  // ⚠️ 2026-09-30 加：黑祥（sakiko-dark）的**包级暖色开关**（`identity.style.warm`）——
+  //    黑祥那边要求"表情包 / 白祥 / 口癖 / 好感度 / 温柔 / 戳一戳回拍"全关，
+  //    而 **saki 那边一个字都不许少**（用户原话：「黑祥人设千万不要影响到
+  //    原来小祥的所有行为，包括表情包，戳一戳」）。⇒ 同一个套件里两个包各跑一遍。
+  //    ⚠️ 它会**自己覆盖** `QQBOT_PERSONA_DIR`（先黑祥后 saki），别改成读当前配置。
+  'dark-persona',
   // ⚠️ 2026-09-16 加：喊妈妈（第一次拒绝；还喊就认了并切白祥模式；按群、落盘、能退出；
   //    别误伤「我妈/你妈的/妈呀」）
   'mama',
@@ -197,6 +203,19 @@ function isolatedStateEnv(name) {
   const safe = String(name).replace(/[^\w.-]/g, '_');
   const p = (what) => `logs/__run-${safe}-${what}.json`;
   return {
+    // ⚠️⚠️ 2026-09-30 加：**人设包也钉住**（钉在 `personas/saki`）。
+    //
+    //    为什么：`saki` 和 `sakiko-dark` 的行为**故意不一样**（黑祥关了暖色、
+    //    表情包、白祥模式、回拍 —— 见 `identity.style.warm`），而套件读的是
+    //    **用户当前 config.yml 里那个人设包**。
+    //    ⇒ 他为了给人演示一切到 `sakiko-dark`，回归就会**整片红**
+    //      （poke / face / mama / tone / affinity / prompt-snapshot 全是拿 saki 当基准写的），
+    //      而红的原因和代码一点关系都没有。
+    //    ⇒ 哨兵不能取决于用户当前切哪个包 —— 和上面【在线情况】【知识库】同一个道理。
+    //    ⚠️ 要测黑祥的套件（`dark-persona`）会**自己覆盖**这一条。
+    //    ⚠️ 这里是**函数**（`config.js` 的 `personaDir()`），不是 import 时就固化的常量，
+    //      所以由 run-all 传 env 就有效（不像 `QQBOT_KNOWLEDGE_DIR` 那个坑）。
+    QQBOT_PERSONA_DIR: join(ROOT, 'personas', 'saki'),
     // ⚠️ 故意**不动 `QQBOT_CONFIG`** —— 指向一个不存在的文件会让 config.js 拿不到配置。
     //    哪个套件要自己的配置就自己设（它们本来就会设）。
     QQBOT_SPEND_FILE: p('spend'),
@@ -362,9 +381,27 @@ async function pool(items, jobs, worker) {
   return results;
 }
 
-console.log(`\n并行跑回归（${jobs} 个并行，共 ${SUITES.length} 套）…\n`);
+// ⚠️ 2026-09-30 加：**可以只跑指定的几个套件**。
+//
+//    为什么：出了红的时候，全量跑一轮要好几分钟（而且并行本身会引入超时噪音），
+//    排查时我只需要反复重跑那两三个。以前只能全跑，白等。
+//
+//    用法（名字**子串匹配**，可以写几个）：
+//      node test/run-all.js e2e cs          # 只跑名字里含 e2e / cs 的
+//      node test/run-all.js --jobs 1 e2e    # 串行只跑 e2e（排查超时类最好用）
+//    ⚠️ 不带参数 = 全跑（和以前完全一样）；纯数字参数是 `--jobs` 的值，别当成套件名。
+const picked = args.filter((a) => !a.startsWith('--') && !/^\d+$/.test(a));
+const SUITES_RUN = picked.length ? SUITES.filter((s) => picked.some((p) => s.includes(p))) : SUITES;
+if (picked.length && !SUITES_RUN.length) {
+  console.log(`\n⚠️ 没有套件名匹配 ${picked.join(' / ')} —— 可用的是：${SUITES.join(', ')}\n`);
+  process.exit(1);
+}
+
+console.log(
+  `\n并行跑回归（${jobs} 个并行，共 ${SUITES_RUN.length} 套${picked.length ? `，只跑 ${picked.join(' / ')}` : ''}）…\n`,
+);
 const t0 = Date.now();
-const results = await pool(SUITES, jobs, runSuite);
+const results = await pool(SUITES_RUN, jobs, runSuite);
 const total = Math.round((Date.now() - t0) / 100) / 10;
 
 // 落盘每套的完整输出（失败时方便查）

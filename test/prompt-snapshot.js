@@ -238,6 +238,33 @@ const SCENES = {
 //       本来就不该当人设的哨兵（和上面归一化 `# 【在线情况】` 整段是同一个理由）。
 const SESS_FILE = 'logs/__snapshot-sessions.json';
 process.env.QQBOT_SESSIONS_FILE = SESS_FILE;
+
+// ⚠️⚠️ 2026-09-23 加、**2026-09-30 修**：把知识库也钉住。
+//
+//    为什么需要：这个套件读的是**真实的 `knowledge/`** —— `run-all.js` 的隔离只管
+//    `state/*.json`（它自己那句注释就写着「knowledge/ 一直是共用的真实目录」）。
+//    于是**群主在群里教一句、或更正一条**，提示词就变 ⇒ 快照无缘无故变红。
+//    实测（00:0x）：只有 `group-voluntary` 一个场景变了，多出一段
+//    「# 【最高优先级】群主后来补充/更正的知识」—— 它恰好选中了那段。
+//
+//    ⇒ 首次运行时把**当前的知识库复制一份固定的**（放 `logs/`，不进版本库），
+//      之后一直用它 —— 和上面【玩家在线记录】是同一个道理：
+//      **哨兵不能取决于会变的东西**。
+//
+//    ⚠️⚠️ **2026-09-30 的位置修正（这段原来放晚了，等于没生效）**：
+//       `src/config.js` 里 `KNOWLEDGE_DIR` 是 `export const`（**import 那一刻**就求值），
+//       而这段原来排在 `await import('../src/config.js')` **之后** ⇒
+//       env 设晚了一步、常量早就固化成真实 `knowledge/` 了 ⇒ 隔离形同虚设。
+//       实测：<主人> 16:10 在群里教学录入一条「服务器新增屏幕广告」，
+//       16:18 回归里 `group-at-server` 立刻红（多出那 6 行）。
+//       ⇒ 必须排在**任何 `config.js` 的 import 之前**（`ROOT`/`join` 上面已经准备好了）。
+const KDIR = 'logs/__snapshot-knowledge';
+const kAbs = join(ROOT, KDIR);
+if (!existsSync(kAbs)) {
+  mkdirSync(kAbs, { recursive: true });
+  cpSync(join(ROOT, 'knowledge'), kAbs, { recursive: true });
+}
+process.env.QQBOT_KNOWLEDGE_DIR = KDIR;
 mkdirSync(join(ROOT, 'logs'), { recursive: true });
 writeFileSync(
   join(ROOT, SESS_FILE),
@@ -263,24 +290,8 @@ writeFileSync(
 const { config: cfg } = await import('../src/config.js');
 cfg.imagegen = { ...(cfg.imagegen ?? {}), enable: true, apiKey: 'sk-snapshot-fake' };
 
-// ⚠️⚠️ 2026-09-23 加：**把知识库也钉住**（第三次遇到同一类问题了）。
-//
-//    为什么：这个套件读的是**真实的 `knowledge/`** —— `run-all.js` 的隔离只管
-//    `state/*.json`（它自己那句注释就写着「knowledge/ 一直是共用的真实目录」）。
-//    于是**群主在群里教一句、或更正一条**，提示词就变 ⇒ 快照无缘无故变红。
-//    实测（00:0x）：只有 `group-voluntary` 一个场景变了，多出一段
-//    「# 【最高优先级】群主后来补充/更正的知识」—— 它恰好选中了那段。
-//
-//    ⇒ 首次运行时把**当前的知识库复制一份固定的**（放 `logs/`，不进版本库），
-//      之后一直用它 —— 和上面【玩家在线记录】是同一个道理：
-//      **哨兵不能取决于会变的东西**。
-const KDIR = 'logs/__snapshot-knowledge';
-const kAbs = join(ROOT, KDIR);
-if (!existsSync(kAbs)) {
-  mkdirSync(kAbs, { recursive: true });
-  cpSync(join(ROOT, 'knowledge'), kAbs, { recursive: true });
-}
-process.env.QQBOT_KNOWLEDGE_DIR = KDIR;
+// ⚠️ 2026-09-30：**知识库钉住那段搬到前面去了**（`QQBOT_SESSIONS_FILE` 那行下面）——
+//    它必须在**第一次 `import('../src/config.js')` 之前**执行，原因见那儿的注释。
 
 const { Bot } = await import('../src/bot.js');
 

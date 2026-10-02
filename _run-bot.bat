@@ -58,29 +58,24 @@ rem ⚠️ 这两行**留着**：走代理时必须用它排除本机（不然�
 set "NO_PROXY=203.0.113.10,localhost,::1"
 set "no_proxy=203.0.113.10,localhost,::1"
 
-rem ── ⚠️⚠️ 2026-09-20 加：**保留历史日志** ──────────────────────────
-rem    为什么：用户报「这句 @ 没回复」时，那段对话发生在**上一次重启之前**，
-rem    而原来第 61 行是 `> logs\bot.log` = **直接覆盖** → 证据被清掉，只能靠猜 ✗
-rem    （真实踩到，所以这条必须补上。）
-rem    做法：启动前把旧的 bot.log 改名成 `bot-<时分秒>.log`，**只留最近 10 份**。
-rem    ⚠️ 时间戳只取 %TIME% 并去掉冒号和点（纯数字，免得不合法的文件名/编码问题）；
-rem       `%DATE%` 带中文（"周日"），在 bat 里容易踩编码坑，所以不用它。
-rem    ⚠️ 同一秒内重启才会撞名，而重启间隔至少几分钟 → 实际不会撞。
-set "STAMP=%TIME::=%"
-set "STAMP=%STAMP:.=%"
-if exist "logs\bot.log" move /y "logs\bot.log" "logs\bot-%STAMP%.log" >nul 2>&1
-rem 只留最近 10 份：`dir /o-d` 按修改时间倒序，skip=10 跳过最新的十个，剩下的删掉
-rem ⚠️⚠️ 2026-09-20 修：原来这里写的是
-rem      `for /f "skip=10 delims=" %%f in ('dir /b /o-d "logs\bot-*.log" 2^>nul') do …`
-rem    实测**每次启动都在窗口里报错**（用户截图）：
-rem      `'dir /b /o-d "logs\bot-*.log" 2>nul' is not recognized as an internal or external command`
-rem    —— `for /f` 的单引号子命令里 `2^>nul` 的脱字符会被吃掉一层，
-rem       cmd 于是把整串当成了「一条命令的名字」。
-rem    改成 AGENTS 里那个老办法：**先写临时文件再读**
-rem    （⚠️ 不准再改回 `for /f` 包重定向 —— 这个坑在 .bat 里踩过不止一次）。
-set "OLDLOG=%TEMP%\_qqbot_oldlogs.txt"
-dir /b /o-d "logs\bot-*.log" > "%OLDLOG%" 2>nul
-for /f "skip=10 delims=" %%f in (%OLDLOG%) do del "logs\%%f" >nul 2>&1
-del "%OLDLOG%" >nul 2>&1
+rem ── ⚠️⚠️ 2026-10-03 定稿：**按天日志由 Node 自己写**（`src/log.js`）──────────
+rem    这一处前后试过两版，都失败，别再走回头路：
+rem    ① 2026-09-20：启动前把 bot.log 改名成 bot-<时分秒>.log、留 10 份 ——
+rem       但**看门狗启动时会先 `Remove-Item logs\bot.log`**（见 watchdog.ps1）⇒
+rem       等这里想改名，文件早没了 ⇒ 看门狗拉起来的重启**日志全丢** ✗
+rem    ② 2026-10-02：bat 里用 PowerShell 取日期 + `>> logs\bot-<日期>.log` ——
+rem       实测**在隐藏窗口/非交互启动下取不到日期**（写进了 `bot-unknown.log`）✗
+rem       而机器人平时几乎都是看门狗这样拉起来的 ⇒ 等于没改。
+rem    ⇒ 结论：**日期交给 Node**（`new Date()` 永远可靠），日志由 `src/log.js`
+rem      按天追加写 `logs\bot-YYYY-MM-DD.log`。
+rem    ⚠️ 那这里为什么还要重定向？—— 保留一条**最原始的通道**：
+rem      Node 还没跑起来就失败（语法错、缺依赖、端口占用…）时，只有这条能留下证据。
+rem    ⚠️⚠️ 2026-10-03：**这条通道要写到 OneDrive 外面**（`%TEMP%`）。
+rem      原来写 `logs\bot-console.log`（在 OneDrive 里）⇒ 每次 console.log 都是一次
+rem      **同步写 + 云同步**，而 `buildSystemPrompt` 里有 14 处日志
+rem      ⇒ 实测「拼提示词 5565 ms」（纯字符串拼接不该几秒）。
+rem      排障时想看它：`%TEMP%\saki-bot-console.log`（本地盘，快）。
+if not exist "logs" mkdir "logs"
+forfiles /p "logs" /m "bot-????-??-??.log" /d -7 /c "cmd /c del @path" >nul 2>&1
 
-node src\index.js > "logs\bot.log" 2>&1
+node src\index.js > "%TEMP%\saki-bot-console.log" 2>&1

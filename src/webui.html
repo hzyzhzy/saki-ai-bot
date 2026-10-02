@@ -1096,6 +1096,24 @@
     </div>
 
     <div class="card">
+      <h2>对主人的例外 <span class="pill" id="p-exc-pill">读取中…</span></h2>
+      <p class="hint">
+        有些时间线的人设对他有<b>唯一例外</b> —— 比如
+        <span class="mono">sakiko-dark</span>（Crychic 刚解散那版）的「别人挨刺、他不挨」。<br>
+        ⚠️ <b>演示给群友看的时候关掉它</b>，那个角色就对谁都一视同仁了。<br>
+        ⚠️ 只对<b>声明了</b> <span class="mono">prompt.ownerExceptionOn / Off</span> 的人设生效 ——
+        别的包开关了也没有变化。<b>改完立刻生效（热重载，不用重启）。</b>
+      </p>
+      <div class="flds">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+          <input type="checkbox" id="p-exc" onchange="personaSetOwnerException()">
+          <span>他保留例外（关掉 = 演示模式：对他也一样冷、一样带刺）</span>
+        </label>
+      </div>
+      <div class="btns"><span class="msg" id="msg-exc"></span></div>
+    </div>
+
+    <div class="card">
       <h2>删除人设</h2>
       <p class="hint">
         删除是<b>挪走</b>（<span class="mono">logs/persona-removed-*</span>，还会留一份 persona.md），
@@ -4898,6 +4916,44 @@ async function qqApplyNow() {
   qqProfileRefresh();
 }
 
+/** 「对主人例外」开关的显示（值由 GET /api/persona 搭车带来） */
+function paintOwnerException(on) {
+  const cb = $('p-exc');
+  const pill = $('p-exc-pill');
+  if (!cb) return;
+  cb.checked = !!on;
+  if (pill) pill.textContent = on ? '例外生效（对他）' : '演示模式（对谁都一样）';
+}
+
+/**
+ * 切换「对主人例外」。
+ *
+ * ⚠️ 它存在 `config.yml` 的 `persona.ownerException`（**不在** identity.json 里，
+ *    因为那是"这次怎么跑"而不是"她是谁"），所以走一般的配置保存。
+ *    `saveConfig()` 尾部自带 `reloadConfig()` ⇒ **改完立刻生效，不用重启**。
+ * ⚠️ `saveConfig` 是按**逐键覆盖**写的，所以这里只传 ownerException，
+ *    不会碰到 `persona.id`（切人设的那个值）。
+ */
+async function personaSetOwnerException() {
+  const on = !!$('p-exc').checked;
+  const msg = $('msg-exc');
+  if (msg) msg.textContent = '保存中…';
+  const r = await api('/api/config', {
+    method: 'POST',
+    body: JSON.stringify({ persona: { ownerException: on } }),
+  });
+  if (r && r.ok) {
+    paintOwnerException(on);
+    if (msg) {
+      msg.textContent = on
+        ? '✅ 已保存：他还保留例外（已生效）'
+        : '✅ 已保存：演示模式 —— 现在对他也一样冷、一样带刺（已生效）';
+    }
+  } else if (msg) {
+    msg.textContent = '❌ ' + ((r && r.error) || '保存失败');
+  }
+}
+
 function personaPickChange() {
   const id = $('p-pick').value;
   const p = PJ.packs.find((x) => x.id === id);
@@ -4921,6 +4977,10 @@ async function personaOpen(id) {
   }
   PJ.id = r.id;
   PJ.identity = r.identity || {};
+  // ⚠️ 2026-09-30：顺手同步「对主人例外」那个开关的显示
+  //    （它不在 identity 里，是 config.yml 的 persona.ownerException，
+  //     后端在 GET /api/persona 的返回里搭车带过来了）
+  paintOwnerException(r.ownerException);
   personaRenderFields();
   personaRenderPrompts();
   const sel = $('p-doc');

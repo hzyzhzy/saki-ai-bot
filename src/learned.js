@@ -8,11 +8,12 @@
  *     而是在提示词里声明「learned.md 优先级更高」来实现覆盖
  *   - 每次改动都在「修改记录」里留一行 + 保存被覆盖的旧内容，教错了能回滚
  */
-import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { ROOT, KNOWLEDGE_DIR } from './config.js';
 import { log } from './log.js';
 import { backupKnowledge } from './backup.js';
+import { phrase } from './llm.js';
 
 const FILE = join(KNOWLEDGE_DIR, 'learned.md');
 const BEGIN = '<!-- LEARNED:BEGIN -->';
@@ -147,13 +148,93 @@ export function learnedText(text = '') {
 }
 
 /**
+ * 教学该进哪一份知识库 —— **让模型分**。
+ *
+ * ⚠️ 2026-09-30 用户要求：「**以后学习到的知识也直接通过模型自动分到不同资料库**」。
+ *
+ * ⚠️ 为什么用模型而不是关键词表：教学进来的是**自然语言**
+ *    （「东心乡盖楼要谁批」「开了 voxy 会怎么样」），关键词分不准；
+ *    而且每加一条新教学就要维护一次规则表，久了没人维护。
+ *
+ * ⚠️⚠️ **失败一律回落 `other`**（= 写进 `learned.md`）——
+ *    宁可位置不理想，也**绝不能因为分类失败把这条知识丢掉**。
+ */
+const TARGETS = {
+  'server-basic': 'server-basic.md',
+  'server-rules': 'server-rules.md',
+  'server-world': 'server-world.md',
+  'server-people': 'server-people.md',
+  other: 'learned.md',
+};
+const CLASSIFY_SYS = `你在给一个 Minecraft 服务器 QQ 机器人的知识库分类。
+把这条知识分到唯一一类，只输出 JSON：{"cat":"..."}
+
+- "server-basic"：服务器本身的事（怎么进服、整合包、启动器、模组、版本、配置要求、报错与排障、群内指令、链接、机器人自己能做什么）
+- "server-rules"：规则与权限（玩法规则、建设申请与审批、OP、白名单、存档、踢人封禁）
+- "server-world"：世界设定（铁路/地铁/高铁线路、车站、行政区划、地名与别名、集团与公司、建设归属、工程改造）
+- "server-people"：人的信息（谁是管理员、谁是谁、身份、别名、QQ 名与游戏 ID 的对应）
+- "other"：不属于上面任何一类（机器人自己的行为规则、功能设计、临时通知、说不清的）`;
+
+async function classify(topic, fact) {
+  try {
+    const raw = await phrase({
+      system: CLASSIFY_SYS,
+      user: `主题：${topic}\n内容：${fact}`,
+      maxTokens: 80,
+    });
+    const m = /server-basic|server-rules|server-world|server-people|other/.exec(String(raw));
+    return m ? m[0] : 'other';
+  } catch (e) {
+    log.warn(`教学分类失败（回落 learned.md）：${e.message}`);
+    return 'other';
+  }
+}
+
+/**
+ * 往**任意一份知识库**里写一条（文件里已有同名 `## 主题` 就覆盖它）。
+ *
+ * ⚠️ 那几份是**散文式知识库**（不像 `learned.md` 有 BEGIN/END 条目结构），
+ *    所以这里按 `## ` 切条、按标题替换；找不到同名标题就追加到文件末尾。
+ * ⚠️ 覆盖时只替换"这一条到下一个 `## ` 之前"，其余内容一个字不动。
+ */
+function upsertIntoFile(fileName, title, body) {
+  const file = join(KNOWLEDGE_DIR, fileName);
+  let text = '';
+  try {
+    text = readFileSync(file, 'utf8');
+  } catch {
+    text = `# ${fileName}\n`;
+  }
+  const block = `## ${title}\n\n${body}`;
+  const esc = title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`^##\\s*${esc}\\s*$`, 'm');
+  const m = re.exec(text);
+  if (!m) {
+    backupKnowledge(file);
+    writeFileSync(file, text.replace(/\s*$/, '') + '\n\n' + block + '\n', 'utf8');
+    return { replaced: false };
+  }
+  const start = m.index;
+  const rest = text.slice(start + m[0].length);
+  const nextRel = rest.search(/^##\s/m);
+  const end = nextRel === -1 ? text.length : start + m[0].length + nextRel;
+  backupKnowledge(file);
+  writeFileSync(
+    file,
+    text.slice(0, start) + block + '\n\n' + text.slice(end).replace(/^\s+/, ''),
+    'utf8',
+  );
+  return { replaced: true };
+}
+
+/**
  * 新增或覆盖一个主题。
  * @param {string} topic 主题名（同名的会被覆盖）
  * @param {string} fact 内容
  * @param {{by?:string, byName?:string, where?:string}} meta 来源信息
  * @returns {{ok:boolean, replaced:boolean, error?:string, topic:string}}
  */
-export function learn(topic, fact, meta = {}) {
+export async function learn(topic, fact, meta = {}) {
   const t = String(topic ?? '').trim();
   const f = String(fact ?? '').trim();
 
@@ -172,15 +253,38 @@ export function learn(topic, fact, meta = {}) {
 
   // 同名主题覆盖；否则追加
   const idx = entries.findIndex((e) => e.title === t);
-  const replaced = idx !== -1;
-  const oldBody = replaced ? entries[idx].body : '';
+  const replacedOld = idx !== -1;
+  const oldBody = replacedOld ? entries[idx].body : '';
 
   const stamped = `${f}\n\n> 由 ${meta.byName ?? meta.by ?? '未知'} 于 ${now()} 通过 ${
     meta.where ?? '群聊'
   } 教学录入。`;
-  const entry = { title: t, body: stamped };
 
-  if (replaced) entries[idx] = entry;
+  // ⚠️⚠️ 2026-09-30：**先让模型判断这条该进哪一份**（用户要求
+  //    「以后学习到的知识也直接通过模型自动分到不同资料库」）。
+  //    分到专题库就直接写那边；说不清 / 分类失败 → 走老路径写进 learned.md。
+  const cat = await classify(t, f);
+  const target = TARGETS[cat] ?? TARGETS.other;
+  const logLine = `- ${now()} **${replacedOld ? '覆盖' : '新增'}**「${t}」 by ${
+    meta.byName ?? meta.by ?? '?'
+  } → ${target}${oldBody ? `\n  - 被覆盖的旧内容：${oldBody.split('\n')[0].slice(0, 120)}` : ''}`;
+
+  if (target !== 'learned.md') {
+    try {
+      const r = upsertIntoFile(target, t, stamped);
+      insertChangeLog(logLine);
+      log.info(
+        `教学「${t}」→ ${target}（${r.replaced ? '覆盖' : '新增'}，${f.length} 字，分类 ${cat}）`,
+      );
+      return { ok: true, replaced: r.replaced, topic: t, file: target, cat };
+    } catch (e) {
+      // ⚠️ 写专题库失败**不能把知识丢了** —— 往下走老路径，写进 learned.md
+      log.error(`写入 ${target} 失败: ${e.message}（回落 learned.md）`);
+    }
+  }
+
+  const entry = { title: t, body: stamped };
+  if (replacedOld) entries[idx] = entry;
   else entries.push(entry);
 
   // 重建文件
@@ -188,28 +292,48 @@ export function learn(topic, fact, meta = {}) {
   out += renderEntries(entries);
   out += text.slice(text.indexOf(END));
 
-  // 记一笔修改记录（插在「修改记录」标题后面，最新的在最上面）
-  const logLine = `- ${now()} **${replaced ? '覆盖' : '新增'}**「${t}」 by ${
-    meta.byName ?? meta.by ?? '?'
-  }${oldBody ? `\n  - 被覆盖的旧内容：${oldBody.split('\n')[0].slice(0, 120)}` : ''}`;
-  out = insertChangeLog(out, logLine);
+  insertChangeLog(logLine);
 
   try {
     write(out);
-    log.info(`learned.md ${replaced ? '覆盖' : '新增'}主题「${t}」（${f.length} 字）`);
-    return { ok: true, replaced, topic: t };
+    log.info(`learned.md ${replacedOld ? '覆盖' : '新增'}主题「${t}」（${f.length} 字）`);
+    return { ok: true, replaced: replacedOld, topic: t, file: 'learned.md', cat };
   } catch (e) {
     log.error(`写入 learned.md 失败: ${e.message}`);
     return { ok: false, error: e.message, topic: t };
   }
 }
 
-function insertChangeLog(text, line) {
-  const marker = '## 修改记录';
-  const i = text.indexOf(marker);
-  if (i === -1) return text + '\n' + line + '\n';
-  const after = i + marker.length;
-  return text.slice(0, after) + '\n\n' + line + text.slice(after);
+/**
+ * 记一笔变更日志。
+ *
+ * ⚠️⚠️ 2026-09-30 改（用户说「学到的资料库太混乱，而且占字数也多」）：
+ *    这段日志原来**写在 `learned.md` 里**（一个 `## 修改记录` 条目，最新在最上面）——
+ *    而 `learned.md` 是**要进聊天提示词**的 ⇒ 一条流水账天天涨
+ *    （实测已经 **6310 字，占整份的一半**），可它对回答**一点用都没有**
+ *    （里面只有"谁在什么时候教了哪条"）。
+ *    ⇒ 改成写 `logs/learned-changelog.md`（logs 不进知识库、也不进版本库）。
+ *    ⚠️ 回滚能力不受影响：被覆盖的旧内容仍然存在 `knowledge/_backup/`。
+ */
+const LOG_FILE = 'logs/learned-changelog.md';
+function insertChangeLog(line) {
+  try {
+    const f = join(ROOT, LOG_FILE);
+    const old = existsSync(f)
+      ? readFileSync(f, 'utf8')
+      : '# learned.md 变更日志\n\n> 机器自动维护，**不进聊天提示词**。最新的在最上面。\n';
+    const marker = '> 机器自动维护，**不进聊天提示词**。最新的在最上面。';
+    const i = old.indexOf(marker);
+    const out =
+      i === -1
+        ? old + '\n' + line + '\n'
+        : old.slice(0, i + marker.length) + '\n\n' + line + old.slice(i + marker.length);
+    mkdirSync(join(ROOT, 'logs'), { recursive: true });
+    writeFileSync(f, out, 'utf8');
+  } catch (e) {
+    // ⚠️ 日志写失败**绝不能影响教学本身**
+    log.warn(`写变更日志失败（不影响这次教学）：${e.message}`);
+  }
 }
 
 function now() {
@@ -278,7 +402,7 @@ export function validateFile(text) {
   let out = text.slice(0, text.indexOf(BEGIN) + BEGIN.length);
   out += renderEntries(entries);
   out += text.slice(text.indexOf(END));
-  out = insertChangeLog(out, `- ${now()} **删除**「${t}」`);
+  insertChangeLog(`- ${now()} **删除**「${t}」`);
   write(out);
   log.info(`learned.md 删除主题「${t}」`);
   return { ok: true, topic: t, removed: removed.body };

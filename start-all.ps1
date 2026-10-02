@@ -18,7 +18,10 @@ $ErrorActionPreference = 'Continue'
 #    也可以用环境变量 NAPCAT_DIR 覆盖。
 $NapCatDir = if ($env:NAPCAT_DIR) { $env:NAPCAT_DIR } else { Join-Path (Split-Path -Parent $PSScriptRoot) 'napcat\NapCat.Shell' }
 $BotDir    = Split-Path -Parent $MyInvocation.MyCommand.Path
-$LogFile   = Join-Path $BotDir 'logs\bot.log'
+# ⚠️ 2026-10-02：日志改成**按天一个文件**（`logs\bot-YYYY-MM-DD.log`，由 `_run-bot.bat`
+#    追加写入）—— 与 `watchdog.ps1`、`tools\restart-bot.ps1` 保持一致，
+#    否则这里会一直等一个**再也不会更新**的旧 `logs\bot.log`（表现是"启动完 30 秒还没连上"）。
+$LogFile   = Join-Path $BotDir ("logs\bot-{0}.log" -f (Get-Date -Format 'yyyy-MM-dd'))
 $UiUrl     = 'http://203.0.113.10'
 
 # 要快速登录的 QQ 号。留空则从 config.yml 里读 botQQ，读不到就问/扫码。

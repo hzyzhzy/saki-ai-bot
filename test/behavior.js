@@ -101,10 +101,13 @@ async function logicTests() {
     const r = bot.shouldJoinChat(ev('小祥今天在吗'));
     if (r) { mentioned++; if (r.mode !== 'mention') check(false, `模式应为 mention，实际 ${r.mode}`); }
   }
-  // 概率 0.4，40 次期望 16 次，标准差 ≈ 3.1。
-  // ⚠️ 原来写 `> 10` —— 而「正好 10 次」的概率约 9%，会随机挂（实测 1/4 次失败）。
-  //    放宽到 ±2σ（约 10~22 之外才算异常），别让概率测试变成随机器。
-  check(mentioned > 6 && mentioned < 28, `提到小祥大概四成会接（实测 ${mentioned}/40，期望约 16）`);
+  // ⚠️⚠️ 2026-10-03 改（用户要求：「**尽量减少抽签式的回消息**，
+  //    **所有接与不接都应该有理由**」）：
+  //    掷骰子已经**全部去掉** —— 「提到小祥」不再按 40% 概率决定，
+  //    而是**一律放行、交给说话判断**（`shouldJoinChatAsync()` 的 judge）决定接不接。
+  //    ⇒ 这里要断言的是"每次都放行到判断那一步"，不再是"四成会接"。
+  //    （旧断言是 10~22 的 ±2σ 区间，那是给概率留的余量。）
+  check(mentioned === 40, `★★ 提到小祥一律放行给判断（实测 ${mentioned}/40，不掷骰）`);
 
   console.log('\n[A3] 冷却生效');
   // ⚠️⚠️ 2026-09-16 修正（这条以前是**靠碰运气过的**）：
@@ -341,7 +344,9 @@ async function logicTests() {
     const r = bot.shouldJoinChat(evSegs(STICKER), { stickerIsNew: true });
     if (r) stickerHits++;
   }
-  check(stickerHits >= 10 && stickerHits <= 30, `新表情会接梗（实测 ${stickerHits}/40，概率 0.5）`);
+  // ⚠️⚠️ 2026-10-03 改（同上：掷骰全部去掉）——「没见过的新表情」也是一律放行给判断，
+  //    不再按 50% 概率决定。（"见过的表情不单独回"那条**照旧**，见下一段。）
+  check(stickerHits === 40, `★★ 新表情一律放行给判断（实测 ${stickerHits}/40，不掷骰）`);
 
   // 见过的表情（stickerIsNew=false）→ 一条都不该回
   let seenHits = 0;

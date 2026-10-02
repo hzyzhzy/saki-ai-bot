@@ -43,11 +43,17 @@ const realCfg = readFileSync(join(ROOT, 'config.yml'), 'utf8');
  *    传绝对路径会被拼成 `ROOT\C:\...` 直接报「找不到配置文件」（我第一版就踩了）。
  */
 function makeConfig(name, relFile, extra = '') {
+  // ⚠️⚠️ 2026-10-03 修（套件整个挂掉：`config.yml 格式错误: duplicated mapping key`）：
+  //    `config.yml` 是 **CRLF**，而这两条正则原来写的是 `\nprovider:\n` ——
+  //    `provider:` 和换行之间夹着一个 `\r` ⇒ **一条都匹配不上** ⇒ 原来那份 provider 段
+  //    留在文件里、上面又注入一份 ⇒ **两个 `provider:`** ⇒ YAML 直接报重复键 ✗
+  //    （之所以以前没炸：那时 `provider:` 段的位置/写法不一样，正则碰巧绕过去了。）
+  //    ⇒ 一律写成 `\r?\n`，LF / CRLF 两种配置都能清干净。
   const base = realCfg
-    .replace(/\n# ── QQ 协议端[\s\S]*?(?=\nlogLevel:)/, '')
-    .replace(/\nprovider:\n(?:[ \t]+.*\n)*/, '\n');
+    .replace(/\r?\n# ── QQ 协议端[\s\S]*?(?=\r?\nlogLevel:)/, '')
+    .replace(/\r?\nprovider:\r?\n(?:[ \t]+.*\r?\n)*/, '\n');
   const injected = `\nprovider:\n  name: ${name}\n${extra}`;
-  writeFileSync(join(ROOT, relFile), base.replace(/\nlogLevel: info/, `${injected}logLevel: info`), 'utf8');
+  writeFileSync(join(ROOT, relFile), base.replace(/\r?\nlogLevel: info/, `${injected}logLevel: info`), 'utf8');
   return relFile;
 }
 

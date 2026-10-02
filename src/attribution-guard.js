@@ -46,7 +46,12 @@ const PROMPT = `【归属核对】你在检查一条**即将发到 QQ 群里**�
   （例：A 说要请假，你回「B 你要请假？」，就是在认错人）
 - **把事安错人**：A 分享了一件事，你却在回 B
 - **对着错的角色说话**：把服主当普通群友、把群友当服主
-- **编造身份**：给人安了图里/上下文里没有的身份（「你就是名单上那个」）
+- **编造身份**：给人安了**哪儿都没有的**身份（「你就是名单上那个」）
+  ⚠️⚠️ **但「她手上的人名资料」里写了的身份不算编造** —— 那是一份真实名单，
+  它**本来就不会出现在群聊记录里**。所以：**只因为"聊天记录里没提过"就判编造，是误判。**
+  （真实踩过：草稿正确答出「Luminiflux 就是 Dr. Chads Champagne」，核对把它改成了
+  「Luminiflux 我真不认识，没见过这个名」✗ —— 用户当场问「怎么这次直接不认得了」。
+  同类还有 09-15 那次：被改成了「我去搜搜」。）
 
 ⚠️ **特别注意**：如果草稿里出现了某个人的名字，**核实那个名字是不是当前说话的人**。
 名字对不上就是这个错。
@@ -81,7 +86,7 @@ const PROMPT = `【归属核对】你在检查一条**即将发到 QQ 群里**�
  * @param {{name:string, text:string}} p.current 当前说话的人和内容
  * @returns {Promise<{ok:boolean, why:string, fixed:string, ms:number, checked:boolean}>}
  */
-export async function checkAttribution({ draft, context = '', current = { name: '', text: '' } }) {
+export async function checkAttribution({ draft, context = '', current = { name: '', text: '' }, facts = '' }) {
   const t0 = Date.now();
   const pass = { ok: true, why: '', fixed: '', ms: 0, checked: false };
 
@@ -91,10 +96,22 @@ export async function checkAttribution({ draft, context = '', current = { name: 
   if (config.attribution?.enable === false) return pass;
 
   // ③ 短回复跳过：十几个字的接梗几乎不涉及"把事安到谁头上"
-  const minChars = Math.max(0, Number(config.attribution?.minChars) ?? 12);
+  //
+  // ⚠️⚠️ 2026-10-02 修：**这条闸原来根本没生效过** —— 写的是
+  //    `Number(config.attribution?.minChars) ?? 12`，而配置里没这一项时
+  //    `Number(undefined)` 是 **NaN**，`NaN ?? 12` **还是 NaN**（`??` 只兜 null/undefined）
+  //    ⇒ `d.length < NaN` 恒为 false ⇒ **每条回复都去核对**，
+  //    白白多等 2~8 秒（日志里那一大片 `[归属核对] 出错（归属核对超时），放行` 就有它一份）。
+  //    ⇒ 改成 `|| 12`（NaN 是 falsy，能正确兜底）。
+  const minChars = Math.max(0, Number(config.attribution?.minChars) || 12);
   if (d.length < minChars) return { ...pass, ms: Date.now() - t0 };
 
-  const timeoutMs = Math.max(2000, Number(config.attribution?.timeoutMs) || 8000);
+  // ⚠️⚠️ 2026-10-02：**超时 8000 → 3000**。
+  //    理由：超时的处理本来就是"放行"（日志原话 `出错（归属核对超时），放行`）——
+  //    等满 8 秒什么也没换来，只是把回复**硬生生推迟 8 秒**。
+  //    这是"保险"不是"主流程"，该给它一个短上限：3 秒内给不出判断就当没有这道闸。
+  //    可调：`config.attribution.timeoutMs`。
+  const timeoutMs = Math.max(1000, Number(config.attribution?.timeoutMs) || 3000);
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(new Error('归属核对超时')), timeoutMs);
 
@@ -105,6 +122,12 @@ export async function checkAttribution({ draft, context = '', current = { name: 
     '# 现在要回的是这个人',
     `${current.name || '（未知）'}：${current.text || '（空）'}`,
     '',
+    // ⚠️⚠️ 2026-09-30 加：**把知识库里的人名资料一起给它看**。
+    //    核对原来只能看聊天记录 ⇒ 草稿里正确答出的身份（来自知识库）
+    //    在聊天记录里找不到 ⇒ 被判"编造" ⇒ 改成"我不认识"。
+    ...(String(facts ?? '').trim()
+      ? ['# 她手上的人名 / 身份资料（**有出处的，不算编造**）', String(facts).trim(), '']
+      : []),
     '# 你写好的回复草稿',
     d,
     '',

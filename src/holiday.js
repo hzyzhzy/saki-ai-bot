@@ -71,6 +71,15 @@ function nthWeekday(year, month, nth, dow) {
 export function parseDate(spec) {
   const s = String(spec ?? '').trim();
   let m;
+  // ⚠️ 2026-10-02 加：**农历区间**（`L01-01..L01-06` = 春节假期）。
+  //    必须放在单个农历 `LMM-DD` **前面**判，否则会被它先匹配掉。
+  if ((m = /^L(\d{1,2})-(\d{1,2})\.\.L(\d{1,2})-(\d{1,2})$/.exec(s))) {
+    return {
+      kind: 'lunarRange',
+      from: [Number(m[1]), Number(m[2])],
+      to: [Number(m[3]), Number(m[4])],
+    };
+  }
   if ((m = /^L(\d{1,2})-(\d{1,2})$/.exec(s))) {
     return { kind: 'lunar', month: Number(m[1]), day: Number(m[2]) };
   }
@@ -187,6 +196,19 @@ function hit(h, now) {
     const l = lunarMD(d);
     // ⚠️ 闰月直接跳过 —— 闰六月初一不是六月初一
     return !!l && !l.leap && l.month === r.month && l.day === r.day;
+  }
+  // ⚠️ 2026-10-02 加（用户要「中国的长假区间」）：**农历区间**（`L01-01..L01-06` = 春节假期）。
+  //    为什么非要农历不可：春节/中秋/端午的**公历日期每年都不一样**，
+  //    写死公历区间明年就废了；农历区间是**最长效**的写法。
+  //    ⚠️ 只按"月+日"比大小，**不支持跨年**（春节/中秋都在同一个农历年内 ✓）。
+  //    ⚠️ 闰月整段跳过：闰月的月日不能算进正月的假期。
+  if (r.kind === 'lunarRange') {
+    const l = lunarMD(d);
+    if (!l || l.leap) return false;
+    const key = l.month * 100 + l.day;
+    const from = r.from[0] * 100 + r.from[1];
+    const to = r.to[0] * 100 + r.to[1];
+    return key >= from && key <= to;
   }
   return false;
 }

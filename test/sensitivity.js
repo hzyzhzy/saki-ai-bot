@@ -314,7 +314,15 @@ async function main() {
     let replied = false;
     for (let i = 0; i < 5 && !replied; i++) {
       await env.send(`今天天气不错啊大家觉得呢${i}`);
-      replied = await env.waitReply(6000);
+      // ⚠️ 2026-10-03：等待放宽到 10 秒 —— 去掉掷骰之后，**每条无关闲聊都要真问一次
+      //    speak-judge**（以前多数靠概率直接跳过、压根不调用），链路变长了。
+      replied = await env.waitReply(10000);
+    }
+    if (!replied) {
+      // ⚠️ 和 [2b] 一样：不接的时候必须能看见机器人自己的日志，
+      //    否则只能猜是冷却、判断、还是通道问题。
+      console.log('    [调试] 没接，机器人日志尾部：');
+      for (const l of env.log.slice(-10)) console.log('      ' + l);
     }
     check(replied, '无关闲聊也会接（灵敏度 1 的特征）');
   });

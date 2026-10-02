@@ -748,6 +748,34 @@ export function __clear(groupId) {
   clear(groupId);
 }
 
+/**
+ * ⚠️ 2026-10-03 加（`/清除剧情` 用）：删掉**某一条剧情**写下的全部条目。
+ *
+ * 故事线条目带 `questId`（见 `note()`）——开始 / 每一段 / 结局 / 插曲都是同一条剧情的，
+ * 「清除上一条剧情」就该按它精确删，**不能**用上面的 `clear()`（那是一整个群全清，
+ * 会把一级事件、群友的建议、别的剧情全带走）。
+ *
+ * ⚠️ 只认 `questId` 相等的条目，别的**一条都不动**。
+ *
+ * @param {string} questId
+ * @param {string} [groupId] 给了就只在这一个群里找；不给＝所有群
+ * @returns {number} 删掉几条
+ */
+export function removeQuest(questId, groupId = undefined) {
+  const id = String(questId ?? '');
+  if (!id) return 0;
+  const pools =
+    groupId === undefined ? [...buckets.values()] : [bucketOf(groupId)].filter(Boolean);
+  let n = 0;
+  for (const b of pools) {
+    const before = b.entries.length;
+    b.entries = b.entries.filter((e) => e.questId !== id);
+    n += before - b.entries.length;
+  }
+  if (n) save();
+  return n;
+}
+
 /** 配置热重载后调一下（重读阈值等） */
 export function reload() {
   load();

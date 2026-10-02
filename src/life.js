@@ -45,7 +45,18 @@ import * as persona from './persona.js';
 // ⚠️ 2026-09-21：事件库是**角色专属**的（换个角色"今天遇到什么事"完全不同），
 //    所以跟着人设包走（`personas/<id>/life-events.md`）。
 //    `personaDataFile()` = 人设包优先、共用 `knowledge/` 回落。
-const FILE = personaDataFile('life-events.md');
+//
+// ⚠️⚠️ 2026-09-30 修：这里原来是 `const FILE = personaDataFile(...)` ——
+//    **模块加载那一刻**就把路径钉死了。后果（实测踩到）：
+//      · 用户在界面上**热切换人设包**，FILE 还指着旧包的路径；
+//      · 包里缺这份文件时它会回落到 `knowledge/life-events.md`，
+//        之后**再把文件补进包里也不会生效**（一直报
+//        「日常事件库读不到（ENOENT …knowledge\life-events.md）」，
+//        而文件其实已经躺在 `personas/<id>/` 里了）。
+//    ⇒ 改成**每次读盘时现算**（`personaDataFile` 自己就是现算的）。
+function file() {
+  return personaDataFile('life-events.md');
+}
 
 const STATE_FILE = process.env.QQBOT_LIFE_FILE
   ? join(ROOT, process.env.QQBOT_LIFE_FILE)
@@ -112,7 +123,8 @@ export function parse(text) {
 /** 读盘（知识库热重载后由 `reload()` 调） */
 export function reload() {
   try {
-    slots = parse(readFileSync(FILE, 'utf8'));
+    // ⚠️ 现算路径（见上面 `file()` 那段）：换人设包 / 刚补进包里的文件都要能读到
+    slots = parse(readFileSync(file(), 'utf8'));
     loadedAt = Date.now();
     log.debug(
       `日常事件库：${slots.length} 个时段 / ${slots.reduce((n, s) => n + s.templates.length, 0)} 条事件`,
@@ -547,9 +559,50 @@ export async function compose(planObj, extra = {}) {
     log.debug(`节日上下文失败：${e.message}`);
   }
 
+  // ⚠️⚠️ 2026-10-01（用户原话：「随机事件现在还是太单调了，而且『谁也没喊谁』这句话经常出现。
+  //    随机事件应该**完全随机由模型生成**，而不是由模板限定太多」）
+  //
+  //    查下来单调有两个原因，都在"模板限定太死"：
+  //      ① 下面那句 `今天发生的事：${tpl.text}` 是**逐字剧本** —— 模型只能照它铺开，
+  //         于是每天同一类事翻来覆去（「谁也没喊谁」就是照着
+  //         「两个人谁都没先开口」这类模板长出来的句式）；
+  //      ② 模板就那么几十条，一个月里同一条要撞好几次。
+  //    ⇒ 三件事一起做：
+  //      ① 模板**降级成"方向"**，明说具体那一下完全由她定、可以换成同一类的别的小事；
+  //      ② 把**最近发过的几条**摆出来，要求"别重复同类事、也别用同样的句式"；
+  //      ③ 再随一个**随机方向**（地点 / 细节 / 落点），逼出多样性。
+  const noRepeat = [];
+  try {
+    const b = bucketOf(gkOf(planObj?.groupId ?? ''), false);
+    for (const r of (b?.recent ?? []).slice(-5)) {
+      const ev = String(r.event ?? '').trim();
+      const said = String(r.text ?? '').trim();
+      if (ev || said) {
+        noRepeat.push(`· ${ev}${said ? `（她当时说的是：「${said.slice(0, 40)}」）` : ''}`);
+      }
+    }
+  } catch (e) {
+    log.debug(`取最近事件失败：${e.message}`);
+  }
+  const ROLL = {
+    在哪: ['教室里', '走廊上', '回家路上', '便利店里', '楼梯间', '天台上', '自己房间里', '校门口', '电车上', '窗边'],
+    一个细节: ['一个声音', '一束光', '一股味道', '别人的一句话', '手机屏幕', '手上的东西', '天气', '时间'],
+    落点: ['有点烦', '无所谓', '想扎人', '累', '不想说话', '突然停了一下'],
+  };
+  const roll = Object.entries(ROLL)
+    .map(([k, arr]) => `${k}：${arr[Math.floor(Math.random() * arr.length)]}`)
+    .join('；');
+
   const lines = [
     todayLine ? `今天是：${todayLine}` : '',
-    `今天发生的事：${tpl.text}`,
+    `今天发生的事（**只是个方向，不是逐字剧本**）：${tpl.text}`,
+    '⚠️⚠️ 上面那句**别原样复述** —— 具体那一下到底怎么样（在哪儿、旁边有没有人、你心里怎么想）',
+    '   **完全由你自己定**，也可以换成同一类的别的小事。',
+    '   ⚠️ **每次都写出不一样的那一下** —— 别像在填模板，也别用「谁也没…」这种套话开头。',
+    `🎲 这次随机到的方向（用一两个就行，不必全用）：${roll}`,
+    noRepeat.length
+      ? `⚠️ 最近已经发过这些（**别再写同一类事、也别用同样的句式**）：\n${noRepeat.join('\n')}`
+      : '',
     // ⚠️ 2026-09-15：**别把这个时段提示当句子开头用**。
     //    实测它会把模型带成「下午房东来催房租，回了句知道了」这种
     //    —— 以时间开头、而且**把主语省掉了**（读起来像房东回的话）。
@@ -577,9 +630,9 @@ export async function compose(planObj, extra = {}) {
     '   · 群友说「不相干」「这跟刚才聊的没关系」只是在说**话题跳了** ——',
     '     可以「嗯」一声、可以嘴硬（「谁说一定要有关系」）、也可以不理，**但别认成"我编的"**；',
     '   · 被追问细节就照实说（不知道的部分就说不知道），**别改口**。',
-    '⚠️ **别自己往上加职业 / 场景的细节**：她的打工地点就是**客服室**（接单、回消息、排班），' +
-      '不是后厨、食堂那类地方 —— 所以**别写围裙、餐盘、粉笔灰、讲台**这些。' +
-      '事件里没提到的东西就别补；实在要写环境，就写客服室里的桌子、屏幕、排班表。',
+    '⚠️ **但别自己发明身份 / 场所**：你是什么身份、平时在哪儿，**以你的人设设定为准** ——' +
+      '别凭空加围裙、餐盘、粉笔灰、讲台这种跟你设定不符的东西。' +
+      '（**细节可以自由补**：地点、声音、天气、心里那一下都行；能改的只是细节，身份和场所的类别不能改。）',
     extra.extraHint ? `\n${extra.extraHint}` : '',
   ].filter(Boolean);
 
@@ -588,7 +641,25 @@ export async function compose(planObj, extra = {}) {
     user: lines.join('\n'),
     maxTokens: 260,
     timeoutMs: 25000,
-  });
+  }).then(tidyLifeText);
+}
+
+/**
+ * ⚠️ 2026-10-03 加（用户截图问「为什么这两句连一起了」）：
+ *
+ *   现场那条一级事件的文本是：
+ *     `……那个新来的，已经在群里把话往我这儿引了 我还在门口站着呢，她先来敲门了……`
+ *   注意「引了」和「我还在」之间**只有一个空格，没有标点** —— 读起来是病句。
+ *
+ *   提示词里明明写着「标点只用：。 ， ？ ！ …… ~」，但模型偶尔还是会漏一个。
+ *   ⇒ 代码兜底：**汉字 + 空格 + 汉字 ⇒ 补一个「。」**
+ *     （中文聊天里这个位置出现空格本来就不是正常用法；
+ *       ⚠️ 只认**空格/全角空格**，不碰换行 —— 她真分了行就别动它。）
+ */
+function tidyLifeText(t) {
+  const s = String(t ?? '').trim();
+  if (!s) return s;
+  return s.replace(/([\u4e00-\u9fa5])[ \u3000]+([\u4e00-\u9fa5])/g, '$1。$2');
 }
 
 /**

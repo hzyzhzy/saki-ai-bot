@@ -107,12 +107,16 @@ async function startOne(extra = {}) {
 console.log('\n【1】★★ 阶段数：≤10、最佳 3、其余指数下降');
 {
   const ws = quest.stageWeights();
-  check(ws.length === 10, '一共 10 档（1..10 段）');
+  // ⚠️ 2026-10-03 改：用户要求「**不要 1 段的了**」⇒ 分布从 **2 段**起（9 档）。
+  //    1 段那不叫一条线，就是一条日常事件。
+  check(ws.length === 9, '一共 9 档（2..10 段）');
   const byN = Object.fromEntries(ws.map((x) => [x.n, x.w]));
+  check(byN[1] === undefined, '★ 不再有 1 段（用户 2026-10-03：「不要 1 段的了」）');
   check(byN[3] === Math.max(...ws.map((x) => x.w)), '★ 3 段的权重最高');
   let mono = true;
   for (let n = 3; n < 10; n++) if (!(byN[n] > byN[n + 1])) mono = false;
-  for (let n = 3; n > 1; n--) if (!(byN[n] > byN[n - 1])) mono = false;
+  // ⚠️ 往下只到 2 段（1 段已经不存在了）
+  for (let n = 3; n > 2; n--) if (!(byN[n] > byN[n - 1])) mono = false;
   check(mono, '★ 离 3 越远权重越小（指数下降，两边都单调）');
   check(byN[10] < byN[3] / 100, `10 段几乎不可能（权重比 ${(byN[10] / byN[3]).toFixed(4)}）`);
 
@@ -296,6 +300,25 @@ console.log('\n【8】★★ >3 段后"该收了"的压力逐级加重（但不�
   replies = [J({ event: 'e', text: 't', done: false, ending: null })];
   await quest.advance(q, { ask, replies: [] });
   check(/已经 4 段|该收了|收尾/.test(prompts[0].user), '★ 第 4 段的提示词里带上了收尾压力');
+}
+
+console.log('\n【8b】★★ 剧情文本的断句兜底（用户：「这个结局…两句又合到一起了」）');
+{
+  // 用户截图里那条结局的原文：整段 50 字，全是逗号，**一个句末标点都没有**
+  const messy =
+    '那杯水最后倒了，重新接了一杯热的敲了门，她果然没睡我把水放下，说我六点就得走，你现在想说就说，我听着';
+  const fixed = quest.ensureSentenceEnds(messy);
+  check((fixed.match(/。/g) || []).length >= 2, '★ 整段全是逗号 → 补出句末标点（分条才断得开）');
+  check(!/，，|。。|，。/.test(fixed), '不产生连续标点');
+  check(
+    quest.ensureSentenceEnds('她点了点头。然后走了。') === '她点了点头。然后走了。',
+    '本来就有句号的 → 一个字都不改',
+  );
+  check(/。/.test(quest.ensureSentenceEnds('她还在门口站着呢 她先来敲门了')), '汉字+空格+汉字 → 补句号');
+  // 真的能分条才算修好 —— 光有句号不算
+  const { splitChatText } = await import('../src/bot.js');
+  check(splitChatText(messy).length === 1, '（对照）没修过的原文分不出条');
+  check(splitChatText(fixed).length >= 2, '★ 修过之后分条函数真的断成两条以上');
 }
 
 console.log('\n【9】★ 硬上限：到 maxStages 必须收，收不明就当坏结局');
@@ -1279,6 +1302,116 @@ console.log('        （<主人> 2026-09-15 晚：「机器人已经答应了的
   const doneQuest = quest.current(G);
   quest.finish(doneQuest, 'good');
   check(quest.noteInterlude(doneQuest, { text: '这句也不该被记下来' }) === false, '★ 已经结束的剧情不再收插曲');
+}
+
+console.log('\n【22】★★ `/清除剧情`：只清最后那一条（连它的故事线一起），更早的一律不动');
+{
+  // ── 场景 A：两条都已结束 → 先清"上一条已结束的" ──────────────────
+  reset();
+  const G = '888000111';
+  // 先放一条一级事件（**不属于任何剧情**）—— purge 必须一个字都不碰它
+  storyline.note({ tier: 1, text: '一级事件：她在便利店被人缠着问路', groupId: G });
+
+  replies = [J({ premise: '第一条的事', event: 'e1', text: '第一段。' })];
+  const r1 = await quest.begin({ ask, groupId: G });
+  quest.finish(r1.quest, 'good', 'llm');
+  replies = [J({ premise: '第二条的事', event: 'e2', text: '第二段。' })];
+  const r2 = await quest.begin({ ask, groupId: G });
+  quest.finish(r2.quest, 'good', 'llm');
+
+  const q1n = storyline.forQuest(r1.quest.id, G).length;
+  const q2n = storyline.forQuest(r2.quest.id, G).length;
+  check(q1n > 0 && q2n > 0, '前置：两条剧情都在故事线里留了条目');
+
+  const p = quest.purge(G);
+  check(p.ok === true && p.running === false, '★ 没有在跑的 → 清掉「上一条已经结束的」');
+  check(storyline.forQuest(r2.quest.id, G).length === 0, '★★ 它的故事线条目删干净了（不然她还会提这件事）');
+  check(p.storyRemoved === q2n, `回执里报的删除条数对得上（${p.storyRemoved} / ${q2n}）`);
+  check(storyline.forQuest(r1.quest.id, G).length === q1n, '★★ 更早那条剧情**一条都没动**');
+  check(
+    storyline.recent(50, G).some((e) => String(e.text).includes('便利店')),
+    '★★ 一级事件（不属于剧情）也**没被误删**',
+  );
+
+  const p2 = quest.purge(G);
+  check(p2.ok === true && p2.running === false, '再清一次 → 轮到第一条');
+  check(storyline.forQuest(r1.quest.id, G).length === 0, '第一条也清掉了');
+  const p3 = quest.purge(G);
+  check(p3.ok === false, '★ 没有剧情可清了 → 明确说"没得清"', p3.reason);
+
+  // ── 场景 B：正在跑 → 中止 + 同样删掉它写过的条目 ────────────────
+  reset();
+  const G2 = '888000222';
+  replies = [J({ premise: '正在跑的那条', event: 'e', text: '开场。' })];
+  const r3 = await quest.begin({ ask, groupId: G2 });
+  check(storyline.forQuest(r3.quest.id, G2).length > 0, '前置：正在跑的这条已经写进故事线');
+  const pb = quest.purge(G2);
+  check(pb.ok === true && pb.running === true, '★ 正在跑的 → 中止它');
+  check(storyline.forQuest(r3.quest.id, G2).length === 0, '★★ 中止也把它写过的条目删掉');
+  check(quest.current(G2) === null, 'current 清空了');
+  check(quest.purge(G2).ok === false, '★ 清完之后这个群没剧情了');
+
+  // ── 场景 C：别的群不受影响 ──────────────────────────────────────
+  reset();
+  replies = [J({ premise: '甲群的事', event: 'e', text: '甲的。' })];
+  const ra = await quest.begin({ ask, groupId: '888000333' });
+  replies = [J({ premise: '乙群的事', event: 'e', text: '乙的。' })];
+  const rb = await quest.begin({ ask, groupId: '888000444' });
+  quest.purge('888000333');
+  check(storyline.forQuest(ra.quest.id, '888000333').length === 0, '清的是点名那个群');
+  check(storyline.forQuest(rb.quest.id, '888000444').length > 0, '★★ 别的群的剧情一点没动');
+}
+
+console.log('\n【24】★★ `/剧情` 在剧情进行中 = 剧情控制（带方向 / 留空直接推进）');
+{
+  // ① 管理员给的方向真的进了提示词，并且写明"当意图、别当台词"
+  reset();
+  const r = await startOne();
+  prompts = [];
+  replies = [J({ event: 'e', text: '她说了句什么。', done: false, ending: null })];
+  await quest.advance(r.quest, { ask, hint: '让初华把话说开' });
+  check(/让初华把话说开/.test(prompts[0].user), '★ 管理员给的方向进了推进提示词');
+  check(
+    /管理员/.test(prompts[0].user) && /原样写成她的台词/.test(prompts[0].user),
+    '★ 而且写明"这是他的意图，不是她要说的话"',
+  );
+
+  // ② 命令分支：剧情在跑 → 交给 questControl，**不再当"开新的一条"**
+  reset();
+  const { Bot } = await import('../src/bot.js');
+  const b = new Bot();
+  b.speakerRole = () => 'owner';
+  const calls = [];
+  b.questControl = (event, gid, hint) => {
+    calls.push({ gid, hint });
+    return true;
+  };
+  const rg = await startOne({ groupId: '200000001' });
+  check(!!rg.quest, '前置：这个群有一条在跑');
+  const seg = (t) => [{ type: 'text', data: { text: t } }];
+  const evt = { message_type: 'group', group_id: '200000001', user_id: '10000001' };
+  check(b.tryQuestStart(evt, seg('/剧情 让她去当面问清楚')) === true, '命令被处理了');
+  check(
+    calls.length === 1 && calls[0].gid === '200000001' && calls[0].hint === '让她去当面问清楚',
+    '★★ 在跑的时候 → 走 questControl，话原样带过去',
+  );
+  check(quest.current('200000001')?.premise === rg.quest.premise, '★ 没有另开一条（原来那条还在）');
+  b.tryQuestStart(evt, seg('/剧情'));
+  check(calls.length === 2 && calls[1].hint === '', '★★ 留空 → 也是控制（直接推进），不是开新的');
+
+  // ③ 没有剧情在跑 + 留空 → 仍然是**用法提示**（不能变成"推进"）
+  reset();
+  const b2 = new Bot();
+  b2.speakerRole = () => 'owner';
+  const sent = [];
+  b2.sendToGroup = async (g, t) => {
+    sent.push(t);
+  };
+  b2.questControl = () => {
+    throw new Error('没有剧情时不该走 questControl');
+  };
+  check(b2.tryQuestStart(evt, seg('/剧情')) === true, '命令被处理了');
+  check(sent.some((t) => /用法/.test(String(t))), '★ 没剧情 + 留空 → 回用法提示');
 }
 
 try {

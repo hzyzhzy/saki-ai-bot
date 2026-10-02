@@ -62,6 +62,16 @@ const llmServer = createServer((req, res) => {
     //    （bing/百度/DDG，12~15 秒）→ 【2】的 `waitFor` 被拖过超时 →
     //    「最高优先级」那 3 项偶发失败。
     //    （同一个坑在 `e2e.js` / `cs.js` 都踩过，这里也补齐。）
+    // ⚠️ 2026-09-30 加：**教学分类请求**（`learned.js` 会拿这条知识去问模型
+    //    "该进哪一份知识库"）。这里**固定回 `other`** —— 也就是"分不出来"，
+    //    于是走老路径写进 `learned.md`。这样本套件下面那些断言（读 learned.md 的）
+    //    才是确定的；否则模型分类一变、断言就跟着飘。
+    //    ⚠️ 必须排在其它分支前面（它也是非流式 JSON，别被后面的 SSE 分支吃掉）。
+    if (sys.includes('知识库分类')) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: '{"cat":"other"}' } }] }));
+      return;
+    }
     if (sys.includes('这句话要不要上网查')) {
       calls.presearch = (calls.presearch ?? 0) + 1;
       res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
@@ -295,7 +305,11 @@ async function main() {
   await noop();
   const after2 = readFileSync(LEARNED, 'utf8');
   check(after2.includes('需要申请'), '新内容写进去了');
-  check(/修改记录[\s\S]*覆盖/.test(after2), '修改记录里标明了这是一次「覆盖」');
+  // ⚠️ 2026-09-30：变更日志从 learned.md **搬到 `logs/learned-changelog.md`** 了 ——
+  //    它是"谁在什么时候教了哪条"的流水账，实测涨到 6310 字（占整份一半），
+  //    却对回答一点用都没有，而 learned.md 是要进聊天提示词的。
+  const changelog = readFileSync(join(ROOT, 'logs', 'learned-changelog.md'), 'utf8');
+  check(/覆盖/.test(changelog), '变更日志里标明了这是一次「覆盖」');
 
   console.log('\n[5] 「你学到了什么」');
   sent.length = 0;

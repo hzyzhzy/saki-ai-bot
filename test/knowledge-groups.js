@@ -199,19 +199,22 @@ console.log('\n【7】★★ "连不上"的说法必须能把**服务器库**带
   //    → 服务器库压根没进提示词 → 她只能凭通用知识瞎答（那次就冒出了自造的「回滚点」）。
   //    所以这里既验判据、也真跑一遍 `selectFor`（往临时知识库里放一份服务器库）。
   writeFileSync(
-    join(ROOT, TMP, 'hzymtr-server.md'),
+    join(ROOT, TMP, 'server-basic.md'),
     ['# 服务器库（测试用）', '', '连接超时的话：**不需要加速器**，先查自己网络，再问管理员。', ''].join('\n'),
     'utf8',
   );
   K.reloadKnowledge();
-  const hit = (q) => K.selectFor(q, {}).names.includes('hzymtr-server.md');
+  // ⚠️ 2026-09-30：服务器库按主题拆成了 `server-basic/rules/world/people` 四份
+  //    （`hzymtr-server.md` 不再存在）⇒ 判据改成"命中了**任意一份**服务器库"。
+  //    这样以后再加/改分片名，这条断言也不用跟着动。
+  const hit = (q) => K.selectFor(q, {}).names.some((n) => n.startsWith('server-'));
   check(hit('怎么连接超时了，难道要加速器？') === true, '★★ 「怎么连接超时了，难道要加速器？」→ 带服务器库');
   check(hit('卡在登录界面进不去') === true, '★ 「卡在登录界面」→ 带服务器库');
   check(hit('要开加速器吗') === true, '★ 「要开加速器吗」→ 带服务器库（正是要纠正的那类问题）');
   check(hit('服务器进不去') === true, '★ 老判据（服务器/进不去）没被改坏');
   check(hit('今天午饭吃什么') === false, '★ 无关闲聊**不会**白白带上（省提示词）');
   // 内容层面：那三步顺序必须写清楚（用户定的：不用加速器 → 查自己网络 → 再问管理员）
-  const srv = readFileSync(join(ROOT, 'knowledge', 'hzymtr-server.md'), 'utf8');
+  const srv = readFileSync(join(ROOT, 'knowledge', 'server-basic.md'), 'utf8');
   check(/不需要加速器/.test(srv), '★★ 资料里写明了「不需要加速器」（这服直连）');
   check(/先查[^\n]{0,8}网络/.test(srv), '★★ 而且写明"先查自己网络"');
   check(/再问管理员/.test(srv), '★ 最后一步是"一直进不去再问管理员"');

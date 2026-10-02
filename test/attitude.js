@@ -144,7 +144,20 @@ async function waitFor(fn, timeout = 20000) {
 //    取最后一个的话断言「标明对方是管理员」就会失败（真实踩过）。
 
 const isPresearch = (p) => /这句话要不要上网查|该搜什么/.test(p.sys);
-const probeOf = (kw) => [...probes].reverse().find((p) => !isPresearch(p) && p.user.includes(kw));
+// ⚠️⚠️ 2026-10-02 修（用户让查「标明对方是管理员」为什么一直挂）：
+//    **必须只认"主聊天请求"**。原来只要 `user` 里含关键词就收进来，于是会取到
+//    **归属核对**（`checkAttribution`）那一条 —— 它的 user 里带着**整段群聊记录**
+//    （当然含那个关键词），而 sys 是核对提示词、**没有身份段** ⇒ 断言必挂 ✗
+//    实测：撤掉当天所有代码改动后它照样挂，就是这条一直红。
+//    ✅ 判据用主聊天**独有**的那句身份段：`attitudeFor()` 是**无条件**注入的
+//      （`bot.js` 里 `if (event) parts.push('\n' + this.attitudeFor(...))`），
+//      而预搜索 / 说话判断 / 归属核对三条都没有它。
+//    ⚠️ 这就是本项目 AGENTS 里那条教训：「`waitFor` 的条件必须指向**我要的那一条请求**」
+//      —— 用绝对阈值或模糊包含都会取到上一步迟到的请求。
+const probeOf = (kw) =>
+  [...probes].reverse().find(
+    (p) => !isPresearch(p) && p.sys.includes('现在跟你说话的是') && p.user.includes(kw),
+  );
 
 let bot = null;
 

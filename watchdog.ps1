@@ -274,11 +274,18 @@ function Start-NapCat {
 
 function Start-Bot {
   Say '启动机器人…'
-  Remove-Item (Join-Path $BotDir 'logs\bot.log') -Force -ErrorAction SilentlyContinue
+  # ⚠️⚠️ 2026-10-02 删掉这里原来的 `Remove-Item logs\bot.log`（用户要求「日志按天留存」）：
+  #    它**把上一次的日志直接删掉**，而且删在 `_run-bot.bat` 之前 ⇒
+  #    bat 里那段"改名保留旧日志"的逻辑发现文件不存在、什么也保不住 ⇒
+  #    **凡是看门狗拉起来的重启，上一次的日志就没了**。
+  #    真实后果：用户报「刚才我发的消息没回」，我翻日志只看得到启动信息，
+  #    重启前那段对话凭空消失 —— 而 10-02 这一晚机器人几乎全是看门狗拉起来的 ✗
+  #    现在日志走 `logs\bot-YYYY-MM-DD.log`（bat 里按天**追加**），这里不要再动它。
   Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', '_run-bot.bat' -WorkingDirectory $BotDir -WindowStyle Hidden
+  # ⚠️ 文件名必须和 `_run-bot.bat` 里写的那份**完全一致**，否则这里永远等不到「已连接」。
+  $log = Join-Path $BotDir ("logs\bot-{0}.log" -f (Get-Date -Format 'yyyy-MM-dd'))
   for ($i = 0; $i -lt 30; $i++) {
     Start-Sleep -Seconds 1
-    $log = Join-Path $BotDir 'logs\bot.log'
     # ⚠️⚠️ 2026-09-21 修：这里原来只认 `已连接到 NapCat`，而协议端换成 SnowLuma 之后
     #    机器人的日志是 `已连接到协议端（snowluma），等待消息…` ⇒ **永远匹配不上** →
     #    每次启动都白等满 30 秒、然后报「机器人未在 30 秒内连上」
@@ -289,7 +296,7 @@ function Start-Bot {
       return $true
     }
   }
-  Say '⚠️ 机器人未在 30 秒内连上，看 logs\bot.log'
+  Say "⚠️ 机器人未在 30 秒内连上，看 $log"
   return $false
 }
 

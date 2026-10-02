@@ -274,8 +274,14 @@ console.log('\n【8】★ 认得出他用的动作文案（用户 2026-09-21 问
   // ⚠️ 光在入口读到还不够：**"合并成一批"的两处**也要带上，
   //    不然他先打字、再戳一下（并成一批）时文案就又丢了。
   const src = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
-  const spots = [...src.matchAll(/_poke: true, \.\.\.\(/g)].length;
-  check(spots === 2, '★ 两处合并都带上了文案（`scheduleHandle` + 生成期间重来那条）', `${spots} 处`);
+  // ⚠️ 2026-09-30：这里原来数的是 `_poke: true, ...(` 那种**单行写法** ——
+  //    加了 `_pokeRetort` 之后那两处变成多行对象，正则立刻匹配不到
+  //    （套件报"0 处"，看着像代码坏了，其实只是格式变了）。
+  //    ⇒ 改成盯**字段**、不盯写法：两处合并必须同时带上"动作文案"和"攒够次数"。
+  const textSpots = [...src.matchAll(/_pokeText: (?:event|pokeItem)\._pokeText/g)].length;
+  const retortSpots = [...src.matchAll(/_pokeRetort: true, _pokeTimes: \w+\._pokeTimes/g)].length;
+  check(textSpots === 2, '★ 两处合并都带上了动作文案（`scheduleHandle` + 生成期间重来那条）', `${textSpots} 处`);
+  check(retortSpots === 2, '★ 两处合并也都带上了"攒够次数"标记（`_pokeRetort`）', `${retortSpots} 处`);
 }
 
 console.log('\n【9】★ 按协议端决定要不要"拍回去"（用户 2026-09-21 要求）');
@@ -287,6 +293,10 @@ console.log('\n【9】★ 按协议端决定要不要"拍回去"（用户 2026-0
   const keepProvider = config.provider.name;
   const keepTry = config.poke.tryPacket;
   const keepPer = config.poke.countPerBack;
+  // ⚠️ 2026-09-30：`backMode` 默认已经是 `'text'`（攒够次数 → 用**反击语气**回一句，不发包）。
+  //    ⇒【9】【10】这两节验的是**老的"拍回去"那套**，必须显式切回 `'packet'`；
+  //      新默认的行为在【11】里验。
+  const keepBack = config.poke.backMode;
   // ⚠️⚠️ 这条是"按协议端默认"能成立的前提，也是我踩过的坑的守门断言：
   //    `config.js` 原来把 tryPacket 归一化成 `=== true`，于是"没配置"和
   //    "显式关掉"分不开 → snowluma 下也永远不发包
@@ -297,6 +307,9 @@ console.log('\n【9】★ 按协议端决定要不要"拍回去"（用户 2026-0
     JSON.stringify(config.poke.tryPacket),
   );
   try {
+    // ⚠️ 2026-09-30：**这一节（连同【10】）验的是老的"拍回去"那套**
+    //    （默认已经改成 `backMode: 'text'`，见【11】）。
+    config.poke.backMode = 'packet';
     // ⚠️ 这一节只验"能不能发"，所以把次数设成 1（每戳必拍）；
     //    真正的"每 3 次一次"在【10】里验。
     config.poke.countPerBack = 1;
@@ -370,6 +383,7 @@ console.log('\n【9】★ 按协议端决定要不要"拍回去"（用户 2026-0
     if (keepTry === undefined) delete config.poke.tryPacket;
     else config.poke.tryPacket = keepTry;
     config.poke.countPerBack = keepPer;
+    config.poke.backMode = keepBack;
   }
 }
 
@@ -380,9 +394,12 @@ console.log('\n【10】★ 拍回去是「每戳 3 次一次」（用户 2026-09
   const keepProvider = config.provider.name;
   const keepTry = config.poke.tryPacket;
   const keepPer = config.poke.countPerBack;
+  const keepBack = config.poke.backMode;
   try {
     config.provider.name = 'snowluma';
     delete config.poke.tryPacket;
+    // ⚠️ 同上：【10】验的是老行为（拍回去），要显式切 packet
+    config.poke.backMode = 'packet';
     config.poke.countPerBack = 3;
     const { b, routed } = freshBot();
     const calls = [];
@@ -411,12 +428,57 @@ console.log('\n【10】★ 拍回去是「每戳 3 次一次」（用户 2026-09
     if (keepTry === undefined) delete config.poke.tryPacket;
     else config.poke.tryPacket = keepTry;
     config.poke.countPerBack = keepPer;
+    config.poke.backMode = keepBack;
+  }
+}
+
+console.log('\n【11】★ 默认：攒够次数 → 换成"反击语气"（不再拍回去）');
+{
+  // ⚠️⚠️ 2026-09-30 加（用户原话：「**戳三次以上可以把回戳机制换成刚才的反击语气机制**」）。
+  //    这一节盯三件事：
+  //      ① 攒够次数**不发 `send_poke`**（回戳机制已经被换掉了）
+  //      ② 那一次把 `_pokeRetort` 交给模型 —— 提示词才会换成"反击语气"那版
+  //      ③ **冷却必须给它让路**：他连戳三下就在几秒内，第 2、3 下必然落在
+  //         30 秒冷却里；要是被挡掉，反击提示词**永远没机会注入**，
+  //         这功能就等于没做（实现时确认过这条链，所以这里专门盯它）。
+  const keepProvider = config.provider.name;
+  const keepPer = config.poke.countPerBack;
+  const keepBack = config.poke.backMode;
+  try {
+    config.provider.name = 'snowluma';
+    config.poke.countPerBack = 3;
+    config.poke.backMode = 'text';
+    const { b, routed } = freshBot();
+    const calls = [];
+    b.call = async (a, p) => {
+      calls.push({ a, p });
+      return {};
+    };
+    const uid = '40081'; // 没被别的断言碰过的号
+    await b.pokeBack(notice(uid, SELF, GID));
+    await b.pokeBack(notice(uid, SELF, GID));
+    await b.pokeBack(notice(uid, SELF, GID));
+    check(calls.length === 0, '★ 攒够 3 次也**不发包**（回戳机制换成了文字反击）');
+    check(
+      routed.length === 2,
+      '★★ 中间那次被冷却挡掉、但**攒够那一次必须放行**（否则反击提示词没机会注入）',
+      `${routed.length} 次进模型`,
+    );
+    check(
+      routed[0]?.event?._pokeRetort !== true && routed[1]?.event?._pokeRetort === true,
+      '★★ 只有攒够那一次带 `_pokeRetort`（提示词换成反击语气那版）',
+    );
+    check(routed[1]?.event?._pokeTimes === 3, '★ 并带上次数（提示词要说得出"戳了你 3 次"）');
+  } finally {
+    config.provider.name = keepProvider;
+    config.poke.countPerBack = keepPer;
+    config.poke.backMode = keepBack;
   }
 }
 
 console.log(
   failures === 0
-    ? '\n结果: 全部通过 ✅（戳一戳：认得动作文案、照样回话、每 3 次回拍一次、防刷屏和兜底都在）\n'
+    ? '\n结果: 全部通过 ✅（戳一戳：认得动作文案、照样回话、攒够 3 次换成反击语气、防刷屏和兜底都在）\n'
     : `\n结果: ${failures} 项失败 ❌\n`,
 );
 process.exit(failures === 0 ? 0 : 1);

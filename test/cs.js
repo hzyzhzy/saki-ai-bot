@@ -399,7 +399,27 @@ async function main() {
   check(sysPrompt.length > 3000, `系统提示词很长，说明知识库已注入（${sysPrompt.length} 字）`);
   check(sysPrompt.includes('客服小祥'), '系统提示词包含人设「客服小祥」');
   check(sysPrompt.includes('Java 21'), '系统提示词包含知识库内容（Java 21）');
-  check(sysPrompt.includes('video player'), '系统提示词包含 Mac 排障知识（video player）');
+  // ⚠️⚠️ 2026-09-30：服务器库按主题拆成四份（`server-basic/rules/world/people`）。
+  //    这条原来断言 `sysPrompt.includes('video player')` —— 它依赖"抓到的正是问整合包
+  //    那次请求"，而提示词变长之后 `chatFor()` 会抓到**别的**请求（同一个坑见上面
+  //    `probeFor` 那段注释），于是**稳定假红**。改成**离线直接验挑选结果**：
+  //    问整合包 → 必须挑中 `server-basic.md`，而那份里就写着 Mac 那三个要禁的模组。
+  {
+    const K = await import('../src/knowledge.js');
+    const { readFileSync } = await import('node:fs');
+    const picked = K.selectFor('新人应该怎么安装这个整合包？', {}).names;
+    check(
+      // ⚠️ 2026-10-01：`selectFor()` 现在返回的是**带 .md 的完整文件名**
+      //    （之前少扩展名那个 bug 修了）⇒ 断言跟着改，否则"实际 server-basic.md"却判失败。
+      picked.some((n) => n.startsWith('server-basic')),
+      `★ 问整合包 → 挑中 server-basic.md（实际 ${picked.join(' / ') || '无'}）`,
+    );
+    check(
+      /video player/.test(readFileSync(join(ROOT, 'knowledge', 'server-basic.md'), 'utf8')),
+      '★ 那份里写着 Mac 排障（video player）',
+    );
+    check(picked.length <= 2, `★ 最多带两份（实际 ${picked.length}）—— 拆分就是为了别再整包背`);
+  }
   check(sysPrompt.includes('大足特别行政区') || sysPrompt.includes('建设'), '系统提示词包含建设规则');
   check(!chatFor('新人应该怎么安装')?.hasLive, '普通新人问题没有注入实时状态');
 
