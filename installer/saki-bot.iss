@@ -1,6 +1,9 @@
 ﻿; ⚠️ 这个文件必须存成 **UTF-8 带 BOM**，否则 Inno 会把中文当 ANSI 读成乱码。
 ;    改完用这条转一下（PowerShell）：
 ;      $p='installer\saki-bot.iss'; $c=[System.IO.File]::ReadAllText($p); [System.IO.File]::WriteAllText($p,$c,(New-Object System.Text.UTF8Encoding($true)))
+; ⚠️⚠️ 2026-10-03 实测（打 1.0.2 时踩的）：**用编辑器 / AI 工具改这个文件，BOM 会被吃掉**
+;    —— 改完前 3 字节会从 `EF BB BF` 变成 `; ` 开头。所以**每次改完都要补回来再编译**，
+;    并验一下：[System.IO.File]::ReadAllBytes($p)[0..2] 拼成十六进制要等于 `EF BB BF`。
 
 #define AppName "客服小祥"
 #define AppVer "1.0.2"
