@@ -1,9 +1,9 @@
-; ⚠️ 这个文件必须存成 **UTF-8 带 BOM**，否则 Inno 会把中文当 ANSI 读成乱码。
+﻿; ⚠️ 这个文件必须存成 **UTF-8 带 BOM**，否则 Inno 会把中文当 ANSI 读成乱码。
 ;    改完用这条转一下（PowerShell）：
 ;      $p='installer\saki-bot.iss'; $c=[System.IO.File]::ReadAllText($p); [System.IO.File]::WriteAllText($p,$c,(New-Object System.Text.UTF8Encoding($true)))
 
 #define AppName "客服小祥"
-#define AppVer "1.0.1"
+#define AppVer "1.0.2"
 #define AppPub "hzyzhzy"
 #define AppURL "https://github.com/hzyzhzy/saki-ai-bot"
 

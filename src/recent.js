@@ -98,9 +98,15 @@ export function reload() {
     const next = new Map();
     for (const [k, list] of Object.entries(j?.groups ?? {})) {
       if (!Array.isArray(list)) continue;
+      // ⚠️ 2026-10-03：**按桶判上限**。私聊（`dm:`）那份比群宽（默认 72 小时 vs 12 小时），
+      //    这里原来一律用群那份 ⇒ **重启一次就把"前天"的私聊裁掉了**，
+      //    而这个功能的意义恰恰是"前一天说的话她得记得" ✗
+      const maxAge = /^dm:/.test(String(k))
+        ? bufferMaxAge({ message_type: 'private' })
+        : bufferMaxAge();
       const keep = list
         .filter((x) => x && typeof x.text === 'string')
-        // ⚠️ 只恢复 12 小时以内的 —— 再多就成"假长期记忆"了（那该由群记忆负责）
+        // ⚠️ 只恢复这段窗口以内的 —— 再多就成"假长期记忆"了（那该由群记忆负责）
         .filter((x) => now - (Number(x.time) || 0) < maxAge)
         .slice(-BUFFER_MAX);
       if (keep.length) next.set(String(k), keep);
@@ -267,12 +273,28 @@ const MAX_MSG_CHARS = 200;
 const BUFFER_MAX = 300;
 
 /**
+ * 上下文存哪个桶：群 → 群号；私聊 → `dm:<QQ号>`。
+ * ⚠️ 两种**各存各的** —— 私聊的上下文绝不能让群里看到（跟 dm 记忆同一条规矩）。
+ */
+export function contextKey(event) {
+  if (event?.message_type === 'private') return `dm:${String(event.user_id ?? '')}`;
+  return String(event?.group_id ?? '');
+}
+
+/**
  * 缓冲区的时间上限 —— 只是兜底，别让它当窗口用。
  * ⚠️ 原来这里直接用 `config.context.maxAgeMs`（默认 30 分钟），
  *    那才是把「足球门」删掉的元凶。现在取一个**很宽**的值（默认 12 小时），
  *    真正决定"看多少"的是条数。
+ * ⚠️⚠️ 2026-10-03：**私聊再放宽到 72 小时** —— 用户报的场景是「前一天说睡了、
+ *    第二天问睡了多久」，12 小时会把"昨晚"整个删掉，那这个功能就白做了。
  */
-function bufferMaxAge() {
+function bufferMaxAge(event = null) {
+  if (event?.message_type === 'private') {
+    const dm = Number(config.context?.dm?.bufferMaxAgeMs);
+    if (Number.isFinite(dm) && dm > 0) return dm;
+    return 72 * 60 * 60 * 1000;
+  }
   const wide = Number(config.context?.bufferMaxAgeMs);
   if (Number.isFinite(wide) && wide > 0) return wide;
   return 12 * 60 * 60 * 1000;
@@ -285,12 +307,19 @@ function bufferMaxAge() {
  */
 export function remember(event, parsed = {}) {
   if (!config.context?.enable) return;
-  if (event.message_type !== 'group') return;
+  // ⚠️⚠️ 2026-10-03 **放开私聊**（用户原话：「前一天和她说睡觉了，后一天问她睡了多久，
+  //    也不能计算出来」）。
+  //    根因有两层：① 这里一句 `!== 'group' return` 把私聊整个挡在缓冲区外面，
+  //    而 `recentContextFor()` 那边也直接返回空 ⇒ **私聊压根没有上下文**，
+  //    她连"他昨天说过什么"都不知道；② 就算有，时间标注也不够用（见 `humanWhen`）。
+  //    ⇒ 现在私聊也记，存在 `dm:<QQ号>` 这个 key 下（和群各存各的，绝不会串）。
   // ⚠️ 这里原来还有一道 `limit <= 0` 的闸门 —— `limit` 是**给模型的窗口条数**，
   //    不是缓冲区大小。用它当"要不要记"的开关是错位的（窗口调小就不记上文了）。
   //    缓冲区只受 `context.enable` 控制。
+  const mt = event?.message_type;
+  if (mt !== 'group' && mt !== 'private') return;
 
-  const key = String(event.group_id);
+  const key = contextKey(event);
   const list = store.get(key) ?? [];
 
   let text = String(parsed.text ?? '').slice(0, MAX_MSG_CHARS);
@@ -384,7 +413,7 @@ export function remember(event, parsed = {}) {
   // ⚠️ 缓冲区**按条数**留（用户 2026-09-13：「只要是多少条范围内都得看进来」）。
   //    时间上限只做很宽兜底 —— 原来这里是 `config.context.maxAgeMs`（默认 30 分钟），
   //    那条「足球门」就是被它删掉的。
-  const maxAge = bufferMaxAge();
+  const maxAge = bufferMaxAge(event);
   const now = Date.now();
   const trimmed = list.filter((m) => now - m.time < maxAge).slice(-BUFFER_MAX);
   store.set(key, trimmed);
@@ -480,12 +509,15 @@ export function fillReplyInfo(groupId, messageId, info) {
 
 export function rememberBot(event, text, messageId = '') {
   if (!config.context?.enable) return;
-  if (event.message_type !== 'group') return;
+  // ⚠️ 2026-10-03：同 `remember()` —— **私聊也要记她自己说的话**
+  //    （不然她说过的"早点睡吧"、答应过的事，第二天自己都不记得）
+  const mt = event?.message_type;
+  if (mt !== 'group' && mt !== 'private') return;
   // ⚠️ 这里原来还有一道 `limit <= 0` 的闸门 —— 那个 `limit` 是**给模型的窗口**，
   //    不是缓冲区大小。用它当"要不要记"的开关是错位的（窗口设小一点就不记了）。
   //    缓冲区该不该记，只看 context.enable。
 
-  const key = String(event.group_id);
+  const key = contextKey(event);
   const list = store.get(key) ?? [];
 
   const body = String(text ?? '').replace(/\s+/g, ' ').trim().slice(0, MAX_MSG_CHARS);
@@ -510,10 +542,46 @@ export function rememberBot(event, text, messageId = '') {
   });
 
   // 同上：按条数留，时间只做宽兜底
-  const maxAge = bufferMaxAge();
+  const maxAge = bufferMaxAge(event);
   const now = Date.now();
   store.set(key, list.filter((m) => now - m.time < maxAge).slice(-BUFFER_MAX));
   scheduleSave();
+}
+
+/**
+ * 一条消息"是什么时候的" —— 给人（模型）看的写法。
+ *
+ * ⚠️⚠️ 2026-10-03 改。用户原话：「机器人**不知道上下文具体的对应时间**，
+ *    会把**半小时之前的事当成刚发生的**」+「前一天和她说睡觉了，后一天问她睡了多久，
+ *    也不能计算出来」。
+ *
+ *    老写法只有两档：`N秒前` / `N分钟前` ⇒
+ *      · 8 小时前那条会写成「**480分钟前**」—— 读起来跟「5 分钟前」没区别；
+ *      · **没有绝对时间**可对照 ⇒ 跨天的时间差（昨晚 23:40 → 今早 8:00）根本算不出来 ✗
+ *
+ *    ⇒ 现在给**绝对时间 + 人话相对时间**：`昨天 23:40（8 小时前）`。
+ *      跨天的还会带「昨天 / 前天 / N 天前」。
+ */
+function humanWhen(t, now = Date.now()) {
+  const d = new Date(t);
+  const hhmm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  const dayStart = (x) => {
+    const y = new Date(x);
+    y.setHours(0, 0, 0, 0);
+    return y.getTime();
+  };
+  const days = Math.round((dayStart(now) - dayStart(t)) / 86400000);
+  const dayTag = days <= 0 ? '' : days === 1 ? '昨天 ' : days === 2 ? '前天 ' : `${days} 天前 `;
+  const ago = Math.max(0, now - t);
+  const rel =
+    ago < 60000
+      ? '刚刚'
+      : ago < 3600000
+        ? `${Math.round(ago / 60000)} 分钟前`
+        : ago < 86400000
+          ? `${Math.round(ago / 3600000)} 小时前`
+          : `${Math.round(ago / 86400000)} 天前`;
+  return `${dayTag}${hhmm}（${rel}）`;
 }
 
 /**
@@ -542,9 +610,15 @@ export function contextText(groupId, excludeText = '', excludeIds = [], opts = {
 
   // ⚠️ **按条数**取窗口（用户要求）。原来直接把整个 buffer 都塞进去，
   //    而 buffer 是被时间裁的 —— 等于窗口由时间决定。
+  // ⚠️ 2026-10-03：**私聊用自己的默认条数**（更宽，默认 40）——
+  //    私聊一天可能就说十几句，"最后 15 条"挡不住「昨天那句」。
+  const isDm = /^dm:/.test(String(groupId ?? ''));
   const want = Number.isFinite(Number(opts.limit))
     ? Math.max(1, Number(opts.limit))
-    : Math.max(1, Number(config.context?.maxMessages ?? 15));
+    : Math.max(
+        1,
+        Number(isDm ? (config.context?.dm?.maxMessages ?? 40) : (config.context?.maxMessages ?? 15)),
+      );
   const list = stored.slice(-want);
 
   const now = Date.now();
@@ -559,8 +633,9 @@ export function contextText(groupId, excludeText = '', excludeIds = [], opts = {
       continue;
     }
     if (excludeText && m.text === excludeText.slice(0, MAX_MSG_CHARS)) continue;
-    const ago = Math.round((now - m.time) / 1000);
-    const when = ago < 60 ? `${ago}秒前` : `${Math.round(ago / 60)}分钟前`;
+    // ⚠️ 2026-10-03：改成**绝对时间 + 人话相对时间**（`昨天 23:40（8 小时前）`）——
+    //    老写法只有「N分钟前」，几小时前那条会被读成"刚发生"（见 `humanWhen` 的注释）。
+    const when = humanWhen(m.time, now);
     // 自己发的要**显式标出来**，否则模型分不清哪句是自己说的
     const who = m.self ? '【你自己说的】' : '';
     const at = m.atMe ? '[@了你] ' : '';
@@ -608,7 +683,19 @@ export function contextText(groupId, excludeText = '', excludeIds = [], opts = {
     lines.push(`${who}${m.name}${id}（${when}）${at}${atWho}${body}`);
   }
   if (!lines.length) return '';
-  return lines.join('\n');
+  // ⚠️⚠️ 2026-10-03 加（用户：「会把**半小时之前的事当成刚发生的**」）：
+  //    跨度大的时候，光靠每条后面的括号还不够 —— 模型会把整段当成"刚刚的对话"。
+  //    这里在**最前面**明确说一句：这些不是刚说的，按括号里的时间理解。
+  const times = list.map((m) => Number(m.time) || 0).filter(Boolean);
+  const oldest = times.length ? Math.min(...times) : now;
+  const spanMs = now - oldest;
+  const head =
+    spanMs >= 3600000
+      ? `（⚠️ 下面这些**不是刚刚发生的**：最早一条在 ${humanWhen(oldest, now)}，` +
+        `离现在 **${Math.round(spanMs / 3600000)} 小时**。**按每条括号里的时间理解**，` +
+        '别把它们当成刚说的事；他问"多久 / 多长时间"时，直接用括号里那个相对时间回答。）\n'
+      : '';
+  return head + lines.join('\n');
 }
 
 /**

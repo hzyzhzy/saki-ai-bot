@@ -626,6 +626,21 @@ function load() {
   cfg.context.enable = cfg.context.enable !== false;
   cfg.context.maxMessages = Math.max(0, Number(cfg.context.maxMessages) || 0);
   cfg.context.maxAgeMs = Math.max(60000, Number(cfg.context.maxAgeMs) || 1800000);
+
+  // ── 私聊的上下文窗口（2026-10-03 加）──────────────────────────────
+  // 用户报：「前一天和她说睡觉了，后一天问她睡了多久，也不能计算出来」——
+  // 根因之一是**私聊原来压根没有上下文**（`recent` 只存群）。
+  // 现在私聊也存（桶是 `dm:<QQ号>`），窗口给得比群宽：
+  //   · 私聊一天可能就说十几句 ⇒ 条数要更宽（默认 40）
+  //   · "昨晚那句"必须在 ⇒ 时间上限默认 **72 小时**（群那份是 12 小时）
+  //   · 一天的话比一屏群聊长 ⇒ 字数上限默认 3000（群那份 1200）
+  cfg.context.dm = cfg.context.dm ?? {};
+  cfg.context.dm.maxMessages = Math.max(1, Number(cfg.context.dm.maxMessages) || 40);
+  cfg.context.dm.bufferMaxAgeMs = Math.max(
+    3600000,
+    Number(cfg.context.dm.bufferMaxAgeMs) || 72 * 60 * 60 * 1000,
+  );
+  cfg.context.dm.maxChars = Math.max(500, Number(cfg.context.dm.maxChars) || 3000);
   cfg.context.maxChars = Math.max(200, Number(cfg.context.maxChars) || 1200);
   cfg.context.forwardTtlMs = Math.max(60000, Number(cfg.context.forwardTtlMs) || 600000);
   // 连发消息合并（同一个人短时间内发好几条 → 合成一次回复）
@@ -748,6 +763,25 @@ function load() {
   cfg.observe.threshold = Math.max(20, Number(cfg.observe.threshold) || 200);
   // 多久检查一次（毫秒）
   cfg.observe.checkIntervalMs = Math.max(60000, Number(cfg.observe.checkIntervalMs) || 600000);
+
+  // ── 「他的资料」自动更新（2026-10-03 用户要求，实现见 src/owner-update.js）──
+  //    场景：他在私聊里聊到自己的生活变化（「我毕业了」），`owner.md` 里那条要跟着改。
+  //    ⚠️ **只在私聊、只对他本人**；群里不收（群里别人也在看）。
+  //    ⚠️ 默认**开着** —— 这是用户点名要的功能，不该让他再去配置里找开关。
+  cfg.ownerUpdate = cfg.ownerUpdate ?? {};
+  cfg.ownerUpdate.enable = cfg.ownerUpdate.enable !== false;
+  // 攒够几条他的私聊消息就核对一次
+  cfg.ownerUpdate.minMessages = Math.max(1, Number(cfg.ownerUpdate.minMessages) || 6);
+  // 或者隔了这么久（哪怕没攒够）也核对一次
+  cfg.ownerUpdate.minIntervalMs = Math.max(
+    60000,
+    Number(cfg.ownerUpdate.minIntervalMs) || 30 * 60 * 1000,
+  );
+  // 定时器多久问一次「该核对了吗」
+  cfg.ownerUpdate.checkIntervalMs = Math.max(
+    60000,
+    Number(cfg.ownerUpdate.checkIntervalMs) || 300000,
+  );
 
   cfg.context.batch = cfg.context.batch ?? {};
   cfg.context.batch.enable = cfg.context.batch.enable !== false;

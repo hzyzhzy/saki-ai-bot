@@ -9,6 +9,8 @@ import { log } from './log.js';
 import { Bot } from './bot.js';
 import { startWebUI } from './webui.js';
 import * as observe from './observe.js';
+// ⚠️ 「他的资料」自动更新（2026-10-03 用户要求）：他私聊里聊到生活变化 → 自动改 owner.md
+import * as ownerUpdate from './owner-update.js';
 import * as life from './life.js';
 import * as storyline from './storyline.js';
 import * as quest from './quest.js';
@@ -463,6 +465,27 @@ if (config.observe?.enable !== false) {
     }).catch((e) => log.debug(`[观察] 出错：${e.message}`));
   }, every).unref();
   log.info(`群友观察：每 ${Math.round(every / 60000)} 分钟检查一次，攒够 ${config.observe.threshold} 条消息就总结`);
+}
+
+// ── 「他的资料」自动更新（2026-10-03 用户要求）──
+// 用户原话：「我和她聊到**我的生活有什么变化**时，**我的资料库里面的对应的信息应该要自动更新**，
+//   比如**毕业了**」+「**不用分区，直接修改**」「我可以去检查来修正错误」「**完全后台**」。
+// ⚠️ 这里只管"定期问一句该不该核对"，判断和写入都在 `ownerUpdate.maybeUpdate()` 里。
+//    频率很低（默认 5 分钟问一次，攒够 6 条他私聊的话才真跑）—— 所以这个定时器很轻。
+if (config.ownerUpdate?.enable !== false) {
+  const every = config.ownerUpdate?.checkIntervalMs ?? 300000;
+  setInterval(() => {
+    ownerUpdate
+      .maybeUpdate()
+      .then((r) => {
+        if (r.ok && r.changed) log.info(`[资料] 这次自动改了 ${r.changed} 处`);
+      })
+      .catch((e) => log.debug(`[资料] 检查出错：${e.message}`));
+  }, every).unref();
+  log.info(
+    `他的资料自动更新：每 ${Math.round(every / 60000)} 分钟问一次，` +
+      `他私聊攒够 ${config.ownerUpdate.minMessages} 条就核对一遍 owner.md（改前自动备份）`,
+  );
 }
 
 // ── 群记忆的「按时间压缩」（2026-09-14 用户要求）──

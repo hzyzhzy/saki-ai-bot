@@ -21,6 +21,8 @@ import { knowledgeText, hasKnowledge, selectFor as knowledgeSelect, mentionsAnyT
 import { memesFor } from './memes.js';
 import * as mclog from './mc-log.js';
 import * as observe from './observe.js';
+// ⚠️ 「他的资料」自动更新（2026-10-03 用户要求）：他私聊里聊到生活变化 → 自动改 owner.md
+import * as ownerUpdate from './owner-update.js';
 import { queryServer, describe } from './status.js';
 import { learn, forget, listEntries } from './learned.js';
 import { detectKnowledge } from './extract.js';
@@ -1117,6 +1119,9 @@ export class Bot {
       digest.note(payload, { text });
       // 再喂给「暗中观察」：攒够一批就在后台总结群友性格和群里大事
       observe.note(payload, text);
+      // ⚠️ 再喂给「他的资料自动更新」（2026-10-03 用户要求）：**只收私聊 + 只对他本人**，
+      //    函数内部自己判断，这里不用管。攒够几条后台核对一遍 `owner.md`。
+      ownerUpdate.note(payload, text);
 
       // ── 复读机：群里刷同一句话时，她也**跟着复读那句原话**（2026-09-17 用户要求）──
       //
@@ -3430,17 +3435,27 @@ export class Bot {
 
   /**
    * 组装「最近群里在聊什么」，给模型当背景。
-   * 只对群聊有效；私聊没有上下文（本来就只有两个人说话）。
+   *
+   * ⚠️⚠️ 2026-10-03 **私聊也有上下文了**（用户报：「前一天和她说睡觉了，
+   *    后一天问她睡了多久，也不能计算出来」）。
+   *    原来这里写着「只对群聊有效；私聊没有上下文（本来就只有两个人说话）」——
+   *    可"只有两个人说话"恰恰**更需要记得住**：他昨天说过什么、她答应过什么。
+   *    现在私聊走 `dm:<QQ号>` 这个桶（和群各存各的，绝不会串）。
    */
   recentContextFor(event, currentText) {
-    if (event.message_type !== 'group') return '';
+    const mt = event.message_type;
+    if (mt !== 'group' && mt !== 'private') return '';
     // ⚠️ 把 message_id 一起传进去 —— 靠它把「当前这条」从上下文里剔除。
     //    只靠文本比对不稳（@ 剥离 / tidy / 连发合并都会让两边微妙不等），
     //    结果当前这句话又出现在上下文里，被模型当成别人说的（真实踩过）。
     const ids = event.message_id !== undefined ? [String(event.message_id)] : [];
-    let text = recent.contextText(event.group_id, currentText, ids);
+    let text = recent.contextText(recent.contextKey(event), currentText, ids);
     if (!text) return '';
-    const max = config.context?.maxChars ?? 1200;
+    // ⚠️ 私聊给更宽的上限：他要的是"昨天那句"，1200 字装不下一天的话
+    const max =
+      mt === 'private'
+        ? Number(config.context?.dm?.maxChars) || 3000
+        : Number(config.context?.maxChars ?? 1200);
     if (text.length > max) {
       // 超长就保留最近的（取尾部）
       text = '…（更早的略）\n' + text.slice(-max);

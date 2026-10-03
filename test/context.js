@@ -174,5 +174,48 @@ console.log('\n【7】★ 落盘：重启不丢上下文（2026-09-17 用户要�
   check(/牛肉丼/.test(recent.contextText(G)), '★★ reload 之后又回来了（这就是"重启不丢"）');
 }
 
+console.log('\n【私聊上下文 + 时间可读性】2026-10-03 加（用户报的两个问题）');
+{
+  // ① 私聊原来**压根没有上下文**（`remember` 一句 `!== 'group' return` 挡掉了）
+  const ME = '10000001';
+  const dmEv = (text) => ({
+    message_type: 'private',
+    user_id: ME,
+    message_id: `m-${text}-${Math.random()}`,
+    message: [],
+  });
+  recent.clear(`dm:${ME}`);
+  check(
+    recent.contextText(`dm:${ME}`) === '',
+    '前置：这个私聊的桶是空的（私聊走 `dm:<QQ号>`，和群各存各的）',
+  );
+  recent.remember(dmEv('我睡了'), { text: '我睡了' });
+  const dmText = recent.contextText(`dm:${ME}`);
+  check(dmText.includes('我睡了'), '★★ 私聊的消息**进上下文了**（原来一个字都不留）');
+  check(!/我睡了/.test(recent.contextText(G)), '★★ 群里那边**看不到**私聊内容（两个桶各存各的）');
+
+  // ② 时间标注要"能读"：绝对时间 + 人话相对时间（老写法只有「N分钟前」）
+  const now = Date.now();
+  const store = recent.__storeForTest();
+  store.set(`dm:${ME}`, [
+    { name: '<主人>', userId: ME, text: '我睡了', atMe: false, time: now - 8 * 3600 * 1000 },
+    { name: '<主人>', userId: ME, text: '早', atMe: false, time: now - 60 * 1000 },
+  ]);
+  const t2 = recent.contextText(`dm:${ME}`);
+  check(
+    /\d{2}:\d{2}（8 小时前）/.test(t2),
+    '★★ 8 小时前那条标成「HH:MM（8 小时前）」（不再是「480分钟前」）',
+  );
+  check(/（刚刚）|（\d+ 分钟前）/.test(t2), '★ 1 分钟前那条标成「刚刚 / N 分钟前」');
+  check(/不是刚刚发生的/.test(t2), '★★ 跨度 ≥1 小时 → 明说"这些不是刚刚发生的，按括号里的时间理解"');
+  // ③ 跨度小的时候不许加这句（别每次都啰嗦）
+  store.set(`dm:${ME}`, [
+    { name: '<主人>', userId: ME, text: '在吗', atMe: false, time: now - 5000 },
+    { name: '<主人>', userId: ME, text: '在', atMe: false, time: now - 1000 },
+  ]);
+  check(!/不是刚刚发生的/.test(recent.contextText(`dm:${ME}`)), '★ 全是刚刚的话 → 不加那句');
+  recent.clear(`dm:${ME}`);
+}
+
 console.log(`\n结果: ${failures === 0 ? '全部通过 ✅' : `${failures} 项失败 ❌`}\n`);
 process.exit(failures === 0 ? 0 : 1);
