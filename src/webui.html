@@ -641,6 +641,24 @@
           <input type="text" id="id-botQQ" placeholder="例如 10000002">
         </div>
       </div>
+      <!-- ⚠️ 2026-10-05 加（用户要求：「群友下的项目不知道怎么改，最好在 webui 上加一个修改入口」）：
+           把「她怎么称呼主人」搬到这一页 —— 原来是藏在「人设」页的称呼区里，
+           还要懂 owner / ownerFormal / ownerRule 三个字段，刚拿到项目的人根本找不到。 -->
+      <div class="row">
+        <div style="flex:1">
+          <label>主人叫什么（她平时怎么叫他）</label>
+          <input type="text" id="id-ownerName" placeholder="例如 <主人>" onfocus="loadOwnerName()">
+        </div>
+        <div style="flex:1">
+          <label>正式称呼（可选，问正事时才用）</label>
+          <input type="text" id="id-ownerFormal" placeholder="例如 服主" onfocus="loadOwnerName()">
+        </div>
+      </div>
+      <p class="hint">
+        ⚠️ 这两个是「<b>她怎么叫他</b>」，<b>每个角色各存一份</b>（改的是当前这个人设包）；<br>
+        「主人 QQ」是<b>身份</b>，所有角色共用；他是什么样的人 / 有什么经历在
+        <b>「知识库」页的 owner.md</b> 里。
+      </p>
       <div class="btns">
         <button class="act" onclick="saveIdentity()">保存</button>
         <span class="msg" id="msg-id"></span>
@@ -3647,8 +3665,59 @@ async function saveIdentity() {
     method: 'POST', headers: {'Content-Type':'application/json'},
     body: JSON.stringify({ ownerQQ, botQQ }),
   });
-  flash(el, r.ok, r.ok ? '已保存并生效' : ('保存失败：' + r.error));
-  if (r.ok) reloadAll();
+  if (!r.ok) return flash(el, false, '保存失败：' + r.error);
+
+  // ⚠️⚠️ 2026-10-05 加（用户要求：「群友下的项目不知道怎么改，最好在 webui 上加一个修改入口」）：
+  //    **顺手把她对主人的称呼也改了** —— 那两个框就在上面。
+  //    原来是藏在「人设」页的称呼区里（还要懂 owner / ownerFormal / ownerRule 三个字段），
+  //    刚拿到项目的人根本找不到。
+  //    ⚠️ 只在她**填了**的时候改；留空 = 不动人设（免得手滑把称呼清掉）。
+  //    ⚠️ 写的是**当前这个人设包**的 identity.json（"称呼"是每个角色各存一份的）。
+  const ownerName = String($('id-ownerName')?.value ?? '').trim();
+  const ownerFormal = String($('id-ownerFormal')?.value ?? '').trim();
+  let nameMsg = '';
+  if (ownerName || ownerFormal) {
+    try {
+      // ⚠️ `GET /api/persona` **必须带 id**（不带会 400），而 `/api/state` 里**没有** persona 段
+      //    ⇒ 当前角色从 `/api/persona/list` 的 `current` 取（那个接口就是给人设页用的）。
+      const lst = await api('/api/persona/list');
+      const curId = lst?.current ?? '';
+      const cur = await api(`/api/persona?id=${encodeURIComponent(curId)}`);
+      const it = JSON.parse(JSON.stringify(cur?.identity ?? {}));
+      it.address = { ...(it.address ?? {}) };
+      if (ownerName) it.address.owner = ownerName;
+      if (ownerFormal) it.address.ownerFormal = ownerFormal;
+      const r2 = await api('/api/persona', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: curId || it.id, identity: it }),
+      });
+      nameMsg = r2?.ok ? '；她对他的称呼也改了' : `；称呼**没**改成（${r2?.error ?? '不知道为啥'}）`;
+    } catch (e) {
+      nameMsg = `；称呼**没**改成（${e.message}）`;
+    }
+  }
+  flash(el, true, `已保存并生效${nameMsg}`);
+  reloadAll();
+}
+
+/**
+ * ⚠️ 2026-10-05 加：把当前人设里「她怎么称呼主人」读出来填进那两个框。
+ * ⚠️ 挂在那两个框的 `onfocus` 上（点进去才读）—— 不用改 `loadConfig` 的加载顺序，
+ *    而且读不到就留空（留空 = 保存时不碰人设）。
+ */
+async function loadOwnerName() {
+  try {
+    // ⚠️ 同样要带 id（见上面 `saveIdentity` 里那条注释）；`current` 来自 persona/list
+    const lst = await api('/api/persona/list');
+    const curId = lst?.current ?? '';
+    const p = await api(`/api/persona?id=${encodeURIComponent(curId)}`);
+    const a = (p && p.identity && p.identity.address) || {};
+    const n = $('id-ownerName');
+    const f = $('id-ownerFormal');
+    if (n && !n.value) n.value = a.owner ?? '';
+    if (f && !f.value) f.value = a.ownerFormal ?? '';
+  } catch {}
 }
 
 async function saveModel() {  const el = $('msg-llm');
