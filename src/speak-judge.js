@@ -177,6 +177,15 @@ export async function judgeSpeak(event, opts = {}) {
   //    所以**宁可多回一句，也不能整体哑掉**。
   const fallback = { speak: true, why: '判断失败（默认照常说）', length: 'short', ms: 0 };
 
+  // ⚠️⚠️ 2026-10-06 加（用户：「**还是没回**」）：这条是**同类机器人**回的，
+  //    而且**她自己刚跟它说过话**（是她挑起的）⇒ **直接说**，不劳模型判。
+  //    实测踩过：judge 判「不说（对面是黑祥，不搭话，5921ms）」——
+  //    那是前面"别陪着同类刷"那套引导教出来的，**把她自己开的头也掐了** ✗
+  if (opts.peerJustReplied) {
+    log.info('[说话判断] 同类在回她、而且是她先开的口 → 直接说（不判）');
+    return { speak: true, why: '同类回的、她挑起的对话', length: 'short', ms: Date.now() - t0 };
+  }
+
   if (config.speakJudge?.enable === false) {
     // 关掉判断时退回「说话」（保持旧行为，别让功能一关就全哑）
     return { speak: true, why: 'judge 已关闭', length: 'short', ms: 0 };

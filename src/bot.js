@@ -2119,6 +2119,21 @@ export class Bot {
         //    「这很明显就是在和机器人交流，但没 @ 的后面那一句就不回了」）。
         //    带上它，judge 会按「对话继续」而不是「要不要插话」来判断。
         inDialogue: join.inDialogue === true,
+        // ⚠️⚠️ 2026-10-06 加（用户：「还是没回」）：**同类回的、而且是她先开的口** ⇒
+        //    让 judge 直接放行（见 speak-judge.js 里那段）。实测 judge 会判
+        //    「不说（对面是黑祥，不搭话）」，把她自己挑起的对话也掐掉。
+        ...(peersFor(String(event.group_id ?? '')).map(String).includes(String(event.user_id)) &&
+        (() => {
+          try {
+            const g = String(event.group_id ?? '');
+            const at = Math.max(recent.lastSelfAt(g), this._lastSelfSayAt?.get(g) ?? 0);
+            return at > 0 && Date.now() - at < 120000;
+          } catch {
+            return false;
+          }
+        })()
+          ? { peerJustReplied: true }
+          : {}),
         // ⚠️⚠️ **4 号：把"你自己的状态"交给判断**（2026-09-15 用户要求）。
         //    这一段是「你上一次开口是多久前（原话）、这一段对方说了几句、你说了几句」。
         //    ⚠️ 它的意义：**密度这件事从"时间闸"变成"判断"**——
@@ -12079,6 +12094,16 @@ export class Bot {
    */
   async sendToGroup(groupId, text, opts = {}) {
     if (!text) return null;
+    // ⚠️⚠️ 2026-10-06 加（用户：「**还是没回**」查到底的那一处）：
+    //    **这里也是"她说话了"的出口** —— 管理界面手动触发的同类搭话、
+    //    剧情播报、日常事件都走 `sendToGroup`，**不走 `sendChatLike`**。
+    //    不记的话：她刚 @ 完同类、同类回话时会被判成"她没说过话"⇒ 不接 ✗
+    //    （实测：`/api/peer-chat/now` 就走这条 —— 日志里明明"手动触发同类搭话"了，
+    //      紧接着却判「她 2 分钟内也没说过话」。）
+    try {
+      this._lastSelfSayAt ??= new Map();
+      this._lastSelfSayAt.set(String(groupId), Date.now());
+    } catch {}
     const message = [];
     const at = String(opts.at ?? '').trim();
     if (at) {
