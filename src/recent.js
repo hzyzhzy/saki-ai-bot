@@ -661,6 +661,8 @@ export function contextText(groupId, excludeText = '', excludeIds = [], opts = {
   // ⚠️ 2026-10-05：这次上下文里出现的「同款机器人」（见下面 `who` 那段）——
   //    收集起来在最前面统一解释一句。
   const botHits = [];
+  // ⚠️ 2026-10-06：`peers` 池里那些"一起的号"（见下面 `isPeer`）—— 单独收集，单独解释
+  const peerHits = [];
   for (const m of list) {
     // ⚠️ 跳过「当前这条」。**优先按 message_id 排除** —— 文本比对太脆弱：
     //    @机器人的剥离方式、tidy 的空格处理、连发消息合并，
@@ -686,12 +688,21 @@ export function contextText(groupId, excludeText = '', excludeIds = [], opts = {
     //    ⇒ 名单里的号（`config.teach.bots`，调用方通过 `opts.isBot` 传进来）
     //      一律打上显眼标记，并在最前面统一解释清楚（见下面的 `head`）。
     const isBot = !m.self && m.userId && typeof opts.isBot === 'function' && opts.isBot(m.userId);
+    // ⚠️⚠️ 2026-10-06 加（用户：「**要根据池里的QQ号昵称判断是群友还是一起的什么角色**」）：
+    //    `peers`（按群配的同类池 —— 比如黑祥那个号）**以前没被标**，于是它在上下文里
+    //    被当成**群友** ⇒ 她不知道那是"一起的另一个号"（实测：把人称说成了「他」）。
+    //    ⇒ 单独标一类，而且**带昵称**：池里换了号、改了名，按当前昵称呈现就对了。
+    const isPeer =
+      !m.self && m.userId && typeof opts.isPeer === 'function' && opts.isPeer(m.userId);
     if (isBot) botHits.push(String(m.name || m.userId));
+    if (isPeer) peerHits.push(String(m.name || m.userId));
     const who = m.self
       ? '【你自己说的】'
-      : isBot
-        ? '【⚠️ 另一个在模仿你的家伙，不是你】'
-        : '';
+      : isPeer
+        ? `【⚠️ 「${m.name || m.userId}」是**跟你一起的那个同款号**，不是你、也不是群友】`
+        : isBot
+          ? '【⚠️ 另一个在模仿你的家伙，不是你】'
+          : '';
     const at = m.atMe ? '[@了你] ' : '';
     // ⚠️ 带上 QQ 号。用户反馈「多人高密度发言时还是认错人」——
     //    只给昵称的话，一堆人同时说话时很容易把事对错人。
@@ -749,6 +760,17 @@ export function contextText(groupId, excludeText = '', excludeIds = [], opts = {
         `离现在 **${Math.round(spanMs / 3600000)} 小时**。**按每条括号里的时间理解**，` +
         '别把它们当成刚说的事；他问"多久 / 多长时间"时，直接用括号里那个相对时间回答。）\n'
       : '';
+  // ⚠️⚠️ 2026-10-06 加（用户：「要根据池里的QQ号昵称判断是群友还是一起的什么角色」）：
+  //    `peers` 池里那些号（比如「黑祥」）和 `teach.bots`（别的机器人）是**两回事**，
+  //    分开说 —— 池里的那个是"跟你一起演的那条线"，不是模仿者。
+  const peerNote = peerHits.length
+    ? '⚠️ 下面提到的 —— **' +
+      `${[...new Set(peerHits)].join('、')}** 是**跟你一起的那个同款号**（同类池里配的），` +
+      '**不是你、也不是群友**：\n' +
+      '  · 它演的剧情是**它自己那条线**；你自己的线在另一处，**别把两条当成一条**；\n' +
+      '  · 谁先开口哪条线就归谁（代码里已经这么做了：后开口的一边会让位）；\n' +
+      '  · 🚫 别把它说的当成你自己说的，也别把它当成普通群友去招呼。\n'
+    : '';
   // ⚠️ 2026-10-05：这次上下文里有「同款机器人」→ 最前面统一交代一遍。
   //    只靠行内那个标记不够显眼 —— 模型很容易顺着它的"我"继续说下去
   //    （用户看到的就是这个：对面说「顶我的班」，她答「顶我的班」）。
@@ -764,7 +786,7 @@ export function contextText(groupId, excludeText = '', excludeIds = [], opts = {
       '  · 🚫 **别陪着它一句一句来回刷** —— 搭一两句、没话了就停；\n' +
       '    真人有话要说的时候，你自然会接（不用靠一直跟它聊来显得热闹）。\n'
     : '';
-  return botNote + head + lines.join('\n');
+  return peerNote + botNote + head + lines.join('\n');
 }
 
 /**

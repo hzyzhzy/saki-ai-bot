@@ -1023,8 +1023,20 @@ export class Bot {
     //       用户要求「这个排行榜消息不要融进聊天上文」，
     //       其实**命令本身也不该进** —— 她下次说话会看到「/好感度」
     //       这种不是人话的东西，很容易被带跑（她会试着"回答"它）。
+    // ⚠️⚠️ 2026-10-06 加（用户：「**问题是在黑祥接到了 saki 发的 /剧情 指令**」）：
+    //    **命令只认真人发的。**
+    //    实测两边的坑：① saki 在群里说「/剧情又是什么」，**黑祥把它当命令执行了**；
+    //    ② <主人> 发一条 `/清除剧情`，**两个 bot 都会执行**（各清各的）。
+    //    ⇒ 同类池里的号（`peers`）和已知机器人（`teach.bots`）**一律不认它们的命令**。
+    //    ⚠️ 这一道必须放在**所有命令之前** —— 三个命令各自判断容易漏，
+    //      以后再加命令（`/好感度` 那一批）也自动被挡住。
+    const cmdSenderIsBot =
+      this.isPeerBot(String(payload.group_id ?? ''), String(payload.user_id ?? '')) ||
+      (config.teach?.bots ?? []).map(String).includes(String(payload.user_id ?? ''));
+
     if (
       payload.message_type === 'group' &&
+      !cmdSenderIsBot &&
       this.tryAffinityBoard(payload, msg.toSegments(payload.message))
     ) {
       return;
@@ -1034,6 +1046,7 @@ export class Bot {
     //    和上面 `/好感度` 同一个位置、同样的理由（命令不进聊天上文、不被"要不要接话"挡住）。
     if (
       payload.message_type === 'group' &&
+      !cmdSenderIsBot &&
       this.tryQuestStart(payload, msg.toSegments(payload.message))
     ) {
       return;
@@ -1042,6 +1055,7 @@ export class Bot {
     // ⚠️ `/清除剧情` —— 只中止这个群**正在跑的那一条**（故事线历史保留）。
     if (
       payload.message_type === 'group' &&
+      !cmdSenderIsBot &&
       this.tryQuestReset(payload, msg.toSegments(payload.message))
     ) {
       return;
@@ -1053,9 +1067,14 @@ export class Bot {
     //      也不能被"要不要接话"那套判定挡住（她是**必须**回这条的）。
     if (
       payload.message_type === 'group' &&
+      !cmdSenderIsBot &&
       this.tryForgetMemory(payload, msg.toSegments(payload.message))
     ) {
       return;
+    }
+    // ⚠️ 机器人发的命令被挡掉时留一条日志 —— 不然"它怎么没反应"要查半天
+    if (cmdSenderIsBot && String(msg.extractText(msg.toSegments(payload.message))).includes('/')) {
+      log.info(`[命令] ${payload.user_id} 是同类/已知机器人 → 它带的 / 命令一律不执行`);
     }
 
     // 收集群友发的表情包（用图还在缓存里的时机），并统计热度。
@@ -3481,6 +3500,47 @@ export class Bot {
       const gid0 = String(event.group_id ?? '');
       const sender0 = String(event.user_id ?? '');
       const peers0 = new Set(peersFor(gid0));
+      // ⚠️⚠️ 2026-10-06 加（用户：「**还是不算同一个剧情**」→ 拍板「谁先开口谁主导」）：
+      //    **同款机器人在群里演剧情**时记一笔（判据见 `quest.looksLikePeerPlot`）。
+      //    两个 bot 是两个独立进程、各自的剧情状态，**唯一的共享通道就是群消息** ——
+      //    所以"同一条剧情"只能靠一边主导、另一边让位：
+      //    我这条线比它晚开口 ⇒ `quest.due()` 会让位、不再往后推（免得两边各演各的、
+      //    看着像对话其实串台）。
+      // ⚠️⚠️ 2026-10-06 加（用户：「**这个剧情套话也不要接**」）：
+      //    **同类池里的号说话，默认不接。**
+      //    实测：saki 在剧情里说了句「行，就按这个来，等我一下（」，黑祥看见就当群聊接了
+      //    （回「谁等你了，你忙你的」）—— 两边互相接剧情台词，群里看着就全乱了。
+      //    ⚠️ 例外：它**明确找她**（@ 她 / 叫她的名字）时照常回 —— 那是在跟她说话。
+      //    ⚠️ 她自己主动戳同类（`peer-chat`）不受影响：那是**她发起**的。
+      if (peers0.has(sender0)) {
+        let peerAtMe = false;
+        let peerCallMe = '';
+        try {
+          const segs0 = msg.toSegments(event.message);
+          peerAtMe = this.selfId ? msg.isAt(segs0, this.selfId) : false;
+          if (!peerAtMe) peerCallMe = this.calledByName(msg.extractText(segs0));
+        } catch {}
+        if (!peerAtMe && !peerCallMe) {
+          log.info(
+            `[同类] ${sender0} 说的话不接（没 @ 她、也没叫她）—— 免得两边互相接剧情台词` +
+              `${voluntary ? `（voluntary=${voluntary}）` : ''}`,
+          );
+          return null;
+        }
+      }
+      if (peers0.has(sender0)) {
+        try {
+          const ptxt = msg.extractText(msg.toSegments(event.message));
+          if (quest.notePeerPlot(gid0, { uid: sender0, text: ptxt })) {
+            log.info(
+              `[剧情] 看到同类在演剧情（${sender0}）→ 记一笔；` +
+                `本群剧情主导权：${quest.leadership(gid0)}`,
+            );
+          }
+        } catch (e) {
+          log.debug(`[剧情] 记同类剧情失败：${e.message}`);
+        }
+      }
       this.botChainClosed ??= new Map();
       const closedAt = Number(this.botChainClosed.get(gid0) ?? 0);
       //    ⚠️ 2026-10-05 用户拍板：冷却**1 分钟**就够（原稿是 10 分钟，他实测后说"1 分钟就够了"）
@@ -3860,6 +3920,10 @@ export class Bot {
       //    「另一个在模仿你的家伙，不是你」的标记（见 recent.js 那段注释）。
       //    用户报的正是这个：小豆接了 saki bot 之后，她把它的话当成了自己说的。
       isBot: (uid) => (config.teach?.bots ?? []).map(String).includes(String(uid)),
+      // ⚠️ 2026-10-06 加（用户：「**要根据池里的QQ号昵称判断是群友还是一起的什么角色**」）：
+      //    同类池里那些号（比如黑祥）在上下文里**以前被当成群友** —— 它们在 peers 池里、
+      //    却不在 teach.bots 里。这里单独喂一类，recent.js 会按**昵称**标出来。
+      isPeer: (uid) => peersFor(String(event.group_id ?? '')).map(String).includes(String(uid)),
     });
     if (!text) return '';
     // ⚠️ 私聊给更宽的上限：他要的是"昨天那句"，1200 字装不下一天的话
@@ -6154,6 +6218,10 @@ export class Bot {
               limit: 20,
               // ⚠️ 2026-10-05：同上 —— 名册里的机器人要标出来（见 recent.js）
               isBot: (uid) => (config.teach?.bots ?? []).map(String).includes(String(uid)),
+              // ⚠️ 2026-10-06 加（用户：「**要根据池里的QQ号昵称判断是群友还是一起的什么角色**」）：
+              //    同类池里那些号（比如黑祥）在上下文里**以前被当成群友** —— 它们在 peers 池里、
+              //    却不在 teach.bots 里。这里单独喂一类，recent.js 会按**昵称**标出来。
+              isPeer: (uid) => peersFor(String(event.group_id ?? '')).map(String).includes(String(uid)),
             }),
           ]
             .filter(Boolean)

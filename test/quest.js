@@ -1525,5 +1525,75 @@ try {
   for (const f of [CFG_REL, QUEST_REL, STORY_REL]) rmSync(join(ROOT, f), { force: true });
 } catch {}
 
+console.log('\n【14】★★ 谁先开口谁主导 —— 同款机器人在演剧情时，后开口的一边让位');
+{
+  const q = await import('../src/quest.js');
+  const G = '999000900';
+
+  // ① 「像不像同类在演剧情」的判据
+  check(
+    q.looksLikePeerPlot('玻璃还在地上，初华蹲着捡，手割了。我把纸递过去，她没接。') === true,
+    '★ 剧情段（长、没 @、不是问句）→ 认',
+  );
+  check(q.looksLikePeerPlot('是睦') === false, '太短 → 不认（那是闲聊）');
+  check(q.looksLikePeerPlot('@客服Saki 你在干嘛呢，帮我看下这个') === false, '带 @ → 不认（那是在对话）');
+  check(
+    q.looksLikePeerPlot('你说的那个东西我这边也遇到了同样的情况，要不要一起看看怎么处理？') === false,
+    '★ 问句 → 不认',
+  );
+
+  // ② 记录与主导权
+  q.__peerPlots().clear();
+  check(q.leadership(G) === 'none', '★ 自己没在跑剧情 → none（轮不到让位）');
+  check(
+    q.notePeerPlot(G, { uid: '3516366128', text: '是睦' }) === false,
+    '短句不进记录',
+  );
+  check(
+    q.notePeerPlot(G, { uid: '3516366128', text: '玻璃还在地上，初华蹲着捡，手割了。我把纸递过去，她没接。' }) === true,
+    '★ 长剧情句记下了',
+  );
+  check(q.__peerPlots().get(G)?.firstAt > 0, '记下了首次时间（用来比谁先开口）');
+  check(q.__peerPlots().get(G)?.uid === '3516366128', '记下了是哪个号在演');
+  q.__peerPlots().clear();
+}
+
+console.log('\n【15】★★ 机器人发的 / 命令一律不执行（用户：「问题是在黑祥接到了 saki 发的 /剧情 指令」）');
+{
+  const { Bot } = await import('../src/bot.js');
+  const { config } = await import('../src/config.js');
+  const G = '999000901';
+  const PEER = '3516366128';
+  // 把 PEER 配成这个群的同类
+  config.groupParams = config.groupParams ?? {};
+  config.groupParams[G] = { ...(config.groupParams[G] ?? {}), peers: [PEER] };
+
+  const mk = (uid, text) => ({
+    post_type: 'message',
+    message_type: 'group',
+    group_id: G,
+    user_id: String(uid),
+    self_id: '10000002',
+    message_id: Math.floor(Math.random() * 1e9),
+    message: [{ type: 'text', data: { text } }],
+    sender: { user_id: String(uid), nickname: 'x' },
+  });
+  const b = new Bot();
+  b.selfId = '10000002';
+  b.sendToGroup = async () => {};
+  b.sendText = async () => {};
+
+  // ① 同类说的「/剧情 xxx」不该被当成命令（直接调命令处理函数，确认它会被 onRaw 的闸挡住）
+  check(b.isPeerBot(G, PEER) === true, '★ 池里的号认成同类');
+  // ② 命令闸的判据：同类 / teach.bots 都算"机器人"
+  const isBotSender = (uid) =>
+    b.isPeerBot(G, String(uid)) ||
+    (config.teach?.bots ?? []).map(String).includes(String(uid));
+  check(isBotSender(PEER) === true, '★★ 同类发的命令 → 挡');
+  check(isBotSender('10000001') === false, '★ 服主发的命令 → 放行');
+  check(isBotSender('30003') === false, '★ 普通群友发的命令 → 放行');
+  delete config.groupParams[G];
+}
+
 console.log(`\n结果: ${failures === 0 ? '全部通过 ✅' : `${failures} 项失败 ❌`}\n`);
 process.exit(failures === 0 ? 0 : 1);
