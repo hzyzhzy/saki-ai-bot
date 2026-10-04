@@ -3527,7 +3527,11 @@ export class Bot {
         //    ⚠️ 时限 2 分钟：够一个来回，又不会把"它自己演剧情"也放进来。
         let iTalkedRecently = false;
         try {
-          const mineAt = recent.lastSelfAt(String(event.group_id ?? ''));
+          const gNow = String(event.group_id ?? '');
+          const mineAt = Math.max(
+            recent.lastSelfAt(gNow),
+            this._lastSelfSayAt?.get(gNow) ?? 0,
+          );
           iTalkedRecently = mineAt > 0 && Date.now() - mineAt < 120000;
         } catch {}
         if (!peerAtMe && !peerCallMe && !iTalkedRecently) {
@@ -11156,6 +11160,14 @@ export class Bot {
   }
 
   async sendChatLike(groupId, text, opts = {}) {
+    // ⚠️⚠️ 2026-10-06 加（用户：「**还是没接**」）：**她所有发言的唯一出口就是这里**
+    //    （注释里就是这么写的），所以"我刚刚说过话"记在这儿最可靠 ——
+    //    不能只靠 `recent`：实测**管理界面手动触发的同类搭话**那条没进 `recent`，
+    //    于是 `lastSelfAt` 看不到她刚开过口，她 @ 了黑祥、黑祥回了，她还是不理 ✗
+    try {
+      this._lastSelfSayAt ??= new Map();
+      this._lastSelfSayAt.set(String(groupId), Date.now());
+    } catch {}
     // ⚠️⚠️ 2026-09-18：任何路径说出去的话，先把号码打掉（见上面 maskPhone 的注释）。
     //    放在**这里**是因为它是她所有发言的**唯一出口**（主聊天 / 剧情 / 日常事件都走它）。
     const masked = this.maskPhone(text);
