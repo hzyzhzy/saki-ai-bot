@@ -32,6 +32,8 @@ import * as storyline from './storyline.js';
 // ⚠️ 2026-09-21：剧情提示词里的名字从 `identity` 来（原来写死「祥子」「客服小祥」）——
 //    换人设后剧情那段还在说旧名字，等于"人换了、剧本没换"。
 import * as persona from './persona.js';
+// ⚠️ 2026-10-04：套话句式（「谁也没喊谁」）的二次改写 —— 见 `src/rewrite.js` 顶部
+import { naturalize } from './rewrite.js';
 
 const STATE_FILE = process.env.QQBOT_QUEST_FILE
   ? join(ROOT, process.env.QQBOT_QUEST_FILE)
@@ -1393,7 +1395,10 @@ export async function begin(p = {}) {
     log.warn(`[剧情] 模型没给出可解析的开场（原文前 80 字：${String(raw).slice(0, 80)}）`);
     return { ok: false, reason: '模型没给出可解析的开场' };
   }
-  const text = jText;
+  // ⚠️⚠️ 2026-10-04 用户要求（「在剧情和事件里 saki 转述的话里，有大量的『我们谁也没XX』，
+  //    要转换一下」）⇒ **生成后再过一次模型改写**，把这句套话换掉。
+  //    ⚠️ **命中才花调用**；失败/长度异常一律退回 `jText` 原文（见 `src/rewrite.js`）。
+  const text = await naturalize(jText, { where: '二级剧情·开场' });
   const event = String(j?.event ?? '').trim() || text;
   // ⚠️⚠️ 2026-10-03 修（用户报：「手动开一条的立即开始剧情**不会用我填的剧情开始**，
   //    而是随机生成的」）：
@@ -1659,10 +1664,14 @@ export async function advance(quest, p = {}) {
   //    而 raw 就是那段 JSON ⇒ **整段 `{"event": …` 会当成台词发到群里**（用户已经因为
   //    这个截过一次图）。JSON 形态的 raw 一律当失败，宁可这一段不发。
   const rawIsJson = /^\s*[{[]/.test(String(raw ?? ''));
-  const text = ensureSentenceEnds(
+  const rawText = ensureSentenceEnds(
     chatLine(j?.text) || (rawIsJson ? '' : chatLine(raw).slice(0, 200)),
   );
-  if (!text) return { ok: false, reason: '模型没给出内容，保持原状' };
+  if (!rawText) return { ok: false, reason: '模型没给出内容，保持原状' };
+  // ⚠️⚠️ 2026-10-04 用户要求（「…saki 转述的话里，有大量的『我们谁也没XX』，要转换一下」）：
+  //    这一段是她**讲给群友听**的话（用户口中的"转述"）⇒ 生成后再过一次模型改写。
+  //    ⚠️ **命中才花调用**；失败/长度异常一律退回 `rawText` 原文（见 `src/rewrite.js`）。
+  const text = await naturalize(rawText, { where: '二级剧情' });
   const event = String(j?.event ?? '').trim() || text;
   // ⚠️ `forceEnd` 时**以我们指定的结局为准**，不看模型回了什么 ——
   //    模拟面板就是要"确定能看到坏结局"，不能靠模型配合。

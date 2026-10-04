@@ -40,7 +40,7 @@ writeFileSync(
     'botQQ: "88800002"',
     'logLevel: info',
     'llm:',
-    '  baseURL: http://203.0.113.10:1/v1',
+    '  baseURL: http://127.0.0.1:1/v1',
     '  apiKey: test',
     '  model: test',
     '',

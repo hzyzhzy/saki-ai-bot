@@ -78,7 +78,7 @@ let __explicit = {};
 const DEFAULTS = {
   onebot: {
     mode: 'forward',
-    url: 'ws://203.0.113.10',
+    url: 'ws://127.0.0.1:3001',
     accessToken: '',
     reconnectInterval: 3000,
   },
@@ -262,7 +262,7 @@ const DEFAULTS = {
   /** NapCat 自己的管理接口（看 QQ 登录状态、出二维码） */
   napcat: {
     enable: true,
-    webuiHost: '203.0.113.10',
+    webuiHost: '127.0.0.1',
     webuiPort: 6099,
     /** 留空则自动从 napcat/NapCat.Shell/config/webui.json 读 */
     webuiToken: '',
@@ -507,7 +507,7 @@ const DEFAULTS = {
   },
   webui: {
     enable: true,
-    host: '203.0.113.10',
+    host: '127.0.0.1',
     port: 3099,
   },
   logLevel: 'info',
@@ -567,7 +567,7 @@ function load() {
   //
   // 优先级：**命令行参数 > 环境变量 > config.yml**（越临时的越优先）。
   // 两种写法都行：
-  //   node src/index.js --onebot-url ws://203.0.113.10 --onebot-token abc --bot-qq 123456
+  //   node src/index.js --onebot-url ws://127.0.0.1:3001 --onebot-token abc --bot-qq 123456
   //   QQBOT_ONEBOT_URL=… QQBOT_ONEBOT_TOKEN=… QQBOT_BOT_QQ=… node src/index.js
   //
   // ⚠️ **只覆盖这三项** —— 别把它扩成"通用配置通道"：那样 config.yml 会失去意义，
@@ -1357,7 +1357,7 @@ function load() {
   cfg.attitude.denyBeingBot = cfg.attitude.denyBeingBot !== false;
 
   cfg.webui.enable = cfg.webui.enable !== false;
-  cfg.webui.host = String(cfg.webui.host ?? '203.0.113.10');
+  cfg.webui.host = String(cfg.webui.host ?? '127.0.0.1');
   cfg.webui.port = Math.max(1, Number(cfg.webui.port) || 3099);
 
   return cfg;

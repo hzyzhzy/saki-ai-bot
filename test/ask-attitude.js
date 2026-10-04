@@ -23,7 +23,7 @@ const MEMBER = { id: '30003', role: 'member', name: '某群友' };
 writeFileSync(
   join(ROOT, 'config.attitude-probe.yml'),
   readFileSync(join(ROOT, 'config.yml'), 'utf8')
-    .replace(/url:\s*ws:\/\/127\.0\.0\.1:\d+/, `url: ws://203.0.113.10:${PORT}`)
+    .replace(/url:\s*ws:\/\/127\.0\.0\.1:\d+/, `url: ws://127.0.0.1:${PORT}`)
     .replace(/accessToken:\s*"[^"]*"/, `accessToken: "${TOKEN}"`),
   'utf8',
 );
@@ -32,7 +32,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const replies = [];
 let sock = null;
 
-const wss = new WebSocketServer({ port: PORT, host: '203.0.113.10' });
+const wss = new WebSocketServer({ port: PORT, host: '127.0.0.1' });
 wss.on('connection', (ws, req) => {
   if ((req.headers.authorization ?? '') !== `Bearer ${TOKEN}`) return ws.close(1008);
   sock = ws;
@@ -104,15 +104,15 @@ async function ask(who, text) {
 let bot = null;
 
 async function main() {
-  console.log(`探针 ws://203.0.113.10:${PORT}\n`);
+  console.log(`探针 ws://127.0.0.1:${PORT}\n`);
   bot = spawn(process.execPath, [join(ROOT, 'src', 'index.js')], {
     cwd: ROOT,
     env: {
       ...process.env,
       QQBOT_CONFIG: 'config.attitude-probe.yml',
-      // ⚠️ 排除本机代理：假模型/假 NapCat 都跑在 203.0.113.10，
+      // ⚠️ 排除本机代理：假模型/假 NapCat 都跑在 127.0.0.1，
       //    如果 shell 里设了 NODE_USE_ENV_PROXY，不加这个假模型请求会走代理而失败
-      NO_PROXY: '203.0.113.10,localhost,::1',
+      NO_PROXY: '127.0.0.1,localhost,::1',
     },
     stdio: ['ignore', 'ignore', 'ignore'],
   });

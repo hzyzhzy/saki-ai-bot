@@ -262,7 +262,7 @@ export async function postComment({ cookies, selfUin, hostUin, tid, content }) {
   // ⚠️⚠️ 还有**一份按"名字"的**机器人名单 —— `state/ignore-bots.json`，
   //    由 bot 实例持有（`bot.js` 的 `this.ignoreBots`，见那里 `isIgnoredBotEvent`）。
   //    **它才是 `Alone゜独白ぴ（helps菜单）` 那种的真实来源**：
-  //    实测 `config.teach.bots` 里只有 `2854196310`（Q群管家）和 `188125827`（小豆），
+  //    实测 `config.teach.bots` 里只有 `2854196310`（Q群管家）和 `10000010`（小豆），
   //    **没有** `10000009` —— 只查 config 的话，重启后她会去回那个机器人的评论 ✗。
   //    ⚠️ 这里**不去读**那个文件（那是别的模块的内部状态）—— 由调用方给个回调判断。
   if (typeof extra === 'function') {

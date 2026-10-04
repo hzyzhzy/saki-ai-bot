@@ -170,20 +170,20 @@ git revert <sha>              # 整次提交退回去（留记录，比 reset �
 ## 🌐 这机器上 **GitHub 必须走代理**（2026-09-17 实测）
 
 - `hosts` 里 `github.com` / `api.github.com` / `raw.githubusercontent.com` / `github.io`
-  等一大串指向了 `203.0.113.10` —— **用户说这大概率是代理软件（Clash）自己写进去的**，
+  等一大串指向了 `127.0.0.1` —— **用户说这大概率是代理软件（Clash）自己写进去的**，
   所以**代理非正常退出时，那些条目和系统代理会留下** →
   表现就是「代理明明关了/挂了，GitHub 反而还是连不上」。
   遇到这种情况：**先看系统代理和 hosts，而不是怀疑 GitHub 或 git**。
-- Clash 在跑时（`203.0.113.10` 在听）这样推：
+- Clash 在跑时（`127.0.0.1:7890` 在听）这样推：
 
 ```powershell
 cd '<项目目录>\qq-ai-bot-public'
-git -c http.proxy=http://203.0.113.10 -c https.proxy=http://203.0.113.10 push -u origin main
+git -c http.proxy=http://127.0.0.1:7890 -c https.proxy=http://127.0.0.1:7890 push -u origin main
 ```
 
 - ⚠️ **不要写进 `git config --global`** —— 代理一关，之后所有 git 操作都会卡死。
   用 `-c` 一次性传（或者只写进这一个仓库的 local config）。
-- 查 GitHub API 也一样：`Invoke-RestMethod ... -Proxy http://203.0.113.10`。
+- 查 GitHub API 也一样：`Invoke-RestMethod ... -Proxy http://127.0.0.1:7890`。
 - ⚠️ 我这边 `git push` 报 **exit code 1 但其实是成功** —— PowerShell 会把 git 写到
   stderr 的进度行当成错误记录。**看 `main -> main` 那行**，别只看退出码。
 - 公开副本远端：`https://github.com/<主人>/saki-ai-bot`（**只有公开副本能推**；
@@ -550,7 +550,7 @@ $c = [System.IO.File]::ReadAllText($p) -replace "`r`n","`n" -replace "`n","`r`n"
 ```
 
 **5. `timeout /t N` 在标准输入被重定向的环境下会报错**（「Input redirection is not supported」）。
-用 `ping -n N -w 1000 203.0.113.10 >nul` 代替。
+用 `ping -n N -w 1000 127.0.0.1 >nul` 代替。
 
 **6. `chcp 65001` 之后，命令行里的 `>` 重定向和硬编码的中文路径可能出问题。**
 `_run-bot.bat` 里用的是相对路径 `logs\bot.log`，够用。
@@ -603,7 +603,7 @@ node src/index.js
 [..] INF 连接成功
 [..] INF 已连接到协议端，等待消息…
 [..] INF 已登录 QQ: 10000002
-[..] INF  管理界面: http://203.0.113.10
+[..] INF  管理界面: http://127.0.0.1:3099
 ```
 
 ---
@@ -925,7 +925,7 @@ node test/ask-attitude.js
 | 日志说「已登录,无法重复登录」但其实收不到消息 | ⚠️ **卡死态**（登录态被作废，QQ 核心还攥着旧会话）。跑 `node tools/napcat-state.mjs` 看是不是 `stale` —— 是就重启 NapCat；`stale:nocred` 则只能扫码 |
 | 扫码页显示「二维码已过期，请刷新」 | 正常（刚重启完就是这样）。3099 点「显示二维码」会刷一张新的 |
 | 用户说「QQ 又连不上」 | 用户自己开了 QQ，那个实例没有 NapCat（NapCat 只在启动时注入） |
-| 浏览器打不开 3099 | 换 `203.0.113.10` / `localhost` / `[::1]` 试（已做双栈）；还不行看有没有代理软件劫持回环 |
+| 浏览器打不开 3099 | 换 `127.0.0.1` / `localhost` / `[::1]` 试（已做双栈）；还不行看有没有代理软件劫持回环 |
 | 表情图纸空白 | 图片文件丢了，看启动警告 |
 | 测试脚本 `ECONNREFUSED 3001` | 机器人占着连接，先停它 |
 | 看门狗窗口反复刷 `Cannot validate argument on parameter 'ArgumentList'` + 「等了 90 秒 NapCat 仍未监听 3001」 | **空数组传给了 `Start-Process -ArgumentList`**：`@()` 会抛异常，命令直接中断 → NapCat **压根没被启动**（2026-09-17 修的 `watchdog.ps1`；同一次还修了它读 `config.yml` **不认单引号** `botQQ: '10000002'` 的 bug）。⚠️ 这个坑 `start-all.ps1` 09-15 就修过，watchdog 那份漏了 —— **两个脚本都要看** |
@@ -995,7 +995,7 @@ Repository permissions 里 **`Contents: Read and write`**。
 ```powershell
 $token = (Get-Content '<项目目录>\qq-ai-bot\logs\发布凭据.md' -Raw).Trim()
 $h  = @{ Authorization = "Bearer $token"; 'User-Agent' = 'dsh-release'; Accept = 'application/vnd.github+json' }
-$px = 'http://203.0.113.10'
+$px = 'http://127.0.0.1:7890'
 $api = 'https://api.github.com/repos/<主人>/saki-ai-bot'
 
 # ① 建 Release（body 是中文 + markdown ⇒ 必须自己转 UTF8 字节，别直接传字符串）
@@ -1013,7 +1013,7 @@ Invoke-RestMethod -Method Post -Headers $h -Proxy $px -ContentType 'application/
 
 | 坑 | 现象 | 规矩 |
 | --- | --- | --- |
-| hosts 把 `github.com` / `api.github.com` 指向 `203.0.113.10` | 命令行连 GitHub 一律 `ECONNREFUSED`；浏览器却可能能进（走代理时域名由代理解析，绕开 hosts） | **每次 API 调用都显式带 `-Proxy http://203.0.113.10`**；别指望系统代理开关 —— 它经常是 `0`，但 7890 本身是通的（`Test-NetConnection 203.0.113.10 -Port 7890` 一测就知道） |
+| hosts 把 `github.com` / `api.github.com` 指向 `127.0.0.1` | 命令行连 GitHub 一律 `ECONNREFUSED`；浏览器却可能能进（走代理时域名由代理解析，绕开 hosts） | **每次 API 调用都显式带 `-Proxy http://127.0.0.1:7890`**；别指望系统代理开关 —— 它经常是 `0`，但 7890 本身是通的（`Test-NetConnection 127.0.0.1 -Port 7890` 一测就知道） |
 | `git push` 能成、API 却 401 | GCM 那份凭据**只给 git 用**，`git credential fill` 取不出来（返回空） | Release 资产**必须**用 PAT —— 跟 push 是两套认证 |
 | 发出去的 exe 里是旧代码 | `build-payload` 的源是**公开副本**，不先重新导出就会打包上一版 | 顺序：改代码 → `make-public.cjs` → `build-payload.cjs`（**别加 `--refresh`**：它自己会再跑一次 make-public，两个前后脚跑会把 README/LICENSE 删掉）→ `ISCC` → 静默装到临时目录验一次 |
 

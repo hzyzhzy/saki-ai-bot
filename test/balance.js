@@ -25,7 +25,7 @@ const T_FILE = 'state/_test-balance.json';
 const WS_PORT = 39831;
 const TOKEN = 'test-token-balance';
 process.env.QQBOT_BALANCE_FILE = T_FILE;
-process.env.NO_PROXY = '203.0.113.10,localhost,::1';
+process.env.NO_PROXY = '127.0.0.1,localhost,::1';
 process.env.no_proxy = process.env.NO_PROXY;
 
 let failures = 0;
@@ -140,7 +140,7 @@ console.log('\n【4】dry 预览不能把档位标记成"已抱怨"');
 
 console.log('\n【5】★ 「见底」档发出的消息里要有 @ 段');
 {
-  const wss = new WebSocketServer({ port: WS_PORT, host: '203.0.113.10' });
+  const wss = new WebSocketServer({ port: WS_PORT, host: '127.0.0.1' });
   await new Promise((r) => wss.once('listening', r));
 
   const got = [];
@@ -176,7 +176,7 @@ console.log('\n【5】★ 「见底」档发出的消息里要有 @ 段');
   });
 
   const bot = new Bot();
-  const sock = new WebSocket(`ws://203.0.113.10:${WS_PORT}`, {
+  const sock = new WebSocket(`ws://127.0.0.1:${WS_PORT}`, {
     headers: { Authorization: `Bearer ${TOKEN}` },
   });
   // 用真的 `attach()`，别自己塞 `bot.ws` —— 回执要有人处理（`pending` 表）
@@ -267,9 +267,9 @@ console.log('\n【7】★★ 余额提醒**按群各记一次**（修 <主人> �
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ balance_infos: [{ currency: 'CNY', total_balance: '10.00' }] }));
   });
-  await new Promise((r) => srv.listen(0, '203.0.113.10', r));
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
   const oldBase = cfg.llm.baseURL;
-  cfg.llm.baseURL = `http://203.0.113.10:${srv.address().port}/v1`;
+  cfg.llm.baseURL = `http://127.0.0.1:${srv.address().port}/v1`;
   const fetched = await balance.fetchBalance();
   check(fetched.ok === true && fetched.total === 10, '★ 假余额接口通了（模拟"充值到 10 元"）', fetched.error ?? '');
   const a3 = balance.balanceComplaint({ total: 1, groupId: A });

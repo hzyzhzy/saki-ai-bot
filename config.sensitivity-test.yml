@@ -1,12 +1,12 @@
-# 由管理界面 http://203.0.113.10 维护。
+# 由管理界面 http://127.0.0.1:3099 维护。
 # 详细注释和说明见 README.md。
 onebot:
   mode: forward
-  url: ws://203.0.113.10
+  url: ws://127.0.0.1:40201
   accessToken: "sens-token"
   reconnectInterval: 3000
 llm:
-  baseURL: http://203.0.113.10/v1
+  baseURL: http://127.0.0.1:40202/v1
   apiKey: "sk-test-fake"
   model: deepseek-chat
   temperature: 0.5
@@ -118,7 +118,7 @@ chunking:
   firstFlushChars: 90
 webui:
   enable: true
-  host: 203.0.113.10
+  host: 127.0.0.1
   port: 3099
 ownerQQ: "10000001"
 logLevel: info

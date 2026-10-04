@@ -6,7 +6,7 @@
 ;    并验一下：[System.IO.File]::ReadAllBytes($p)[0..2] 拼成十六进制要等于 `EF BB BF`。
 
 #define AppName "客服小祥"
-#define AppVer "1.0.2"
+#define AppVer "1.0.3"
 #define AppPub "hzyzhzy"
 #define AppURL "https://github.com/hzyzhzy/saki-ai-bot"
 

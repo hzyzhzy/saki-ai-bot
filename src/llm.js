@@ -10,7 +10,7 @@ import net from 'node:net';
 // ⚠️⚠️ 2026-09-16 深夜：**运行中自动切换网络出口**（用户要求：
 //    「要能自动切换网络，比如关掉代理」）。
 //
-//    背景：那晚机器人整晚不能聊天 —— `_run-bot.bat` 写死走本地代理 203.0.113.10，
+//    背景：那晚机器人整晚不能聊天 —— `_run-bot.bat` 写死走本地代理 127.0.0.1:7890，
 //    而代理软件关着 → 每个模型请求 ECONNREFUSED。
 //    bat 那边已经能在**启动时**自动选（探端口）；这里再补**运行中**的：
 //      · 先用当前出口发请求
@@ -19,7 +19,7 @@ import net from 'node:net';
 //      · 记住这次哪种通了，之后的请求优先用它
 //
 //    ⚠️ 只在**网络类**错误时切换；402/401/风控这些业务错误原样抛（那是另一套处理）。
-const PROXY_URL = process.env.QQBOT_PROXY || 'http://203.0.113.10';
+const PROXY_URL = process.env.QQBOT_PROXY || 'http://127.0.0.1:7890';
 let egress = 'unknown'; // 'direct' | 'proxy' | 'unknown'
 let proxyAgent = null;
 let directAgent = null; // ⚠️ 选直连时装到全局，把启动期的 env-proxy 顶掉

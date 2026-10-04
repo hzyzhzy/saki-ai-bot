@@ -52,7 +52,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const CFG_REL = 'logs/__test-punct.yml';
 writeFileSync(
   join(ROOT, CFG_REL),
-  ['llm:', '  baseURL: http://203.0.113.10:1/v1', '  apiKey: "sk-test"', '  model: test-model', ''].join('\n'),
+  ['llm:', '  baseURL: http://127.0.0.1:1/v1', '  apiKey: "sk-test"', '  model: test-model', ''].join('\n'),
   'utf8',
 );
 process.env.QQBOT_CONFIG = CFG_REL;
@@ -182,7 +182,7 @@ const llmServer = createServer((req, res) => {
   });
 });
 
-const wss = new WebSocketServer({ port: WS_PORT, host: '203.0.113.10' });
+const wss = new WebSocketServer({ port: WS_PORT, host: '127.0.0.1' });
 wss.on('connection', (ws, req) => {
   if ((req.headers.authorization ?? '') !== `Bearer ${TOKEN}`) return ws.close(1008);
   sock = ws;
@@ -222,11 +222,11 @@ writeFileSync(
   [
     'onebot:',
     '  mode: forward',
-    `  url: ws://203.0.113.10:${WS_PORT}`,
+    `  url: ws://127.0.0.1:${WS_PORT}`,
     `  accessToken: "${TOKEN}"`,
     '  reconnectInterval: 300',
     'llm:',
-    `  baseURL: http://203.0.113.10:${LLM_PORT}/v1`,
+    `  baseURL: http://127.0.0.1:${LLM_PORT}/v1`,
     '  apiKey: "sk-test-fake"',
     '  model: test-model',
     '  maxTokens: 200',
@@ -272,7 +272,7 @@ async function waitFor(fn, timeout = 15000, label = '条件') {
 }
 
 async function main() {
-  await new Promise((r) => llmServer.listen(LLM_PORT, '203.0.113.10', r));
+  await new Promise((r) => llmServer.listen(LLM_PORT, '127.0.0.1', r));
   await new Promise((r) => (wss._server.listening ? r() : wss.once('listening', r)));
 
   proc = spawn(process.execPath, [join(ROOT, 'src', 'index.js')], {
@@ -281,8 +281,8 @@ async function main() {
       ...process.env,
       QQBOT_CONFIG: botCfg,
       ...(process.env.QQBOT_TRACE_DASH ? { QQBOT_TRACE_DASH: '1' } : {}),
-      NO_PROXY: '203.0.113.10,localhost,::1',
-      no_proxy: '203.0.113.10,localhost,::1',
+      NO_PROXY: '127.0.0.1,localhost,::1',
+      no_proxy: '127.0.0.1,localhost,::1',
     },
     stdio: process.env.QQBOT_TRACE_DASH ? ['ignore', 'inherit', 'inherit'] : ['ignore', 'ignore', 'ignore'],
   });

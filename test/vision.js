@@ -57,8 +57,12 @@ console.log('\n【1】★★★ 补识图的判据**不许再依赖指代词表*
 console.log('\n【2】★★ 先捡缓存、再补识别（零成本那条路必须在前面）');
 {
   const iCache = bot.indexOf('cachedDescriptions(cands.map');
-  const iReal = bot.indexOf('describeImagesByFile(');
-  check(iCache > 0 && iReal > 0 && iCache < iReal, '★ 捡缓存（不要钱）在真的识图（要钱）之前');
+  // ⚠️ 2026-10-04 改：`describeImagesByFile(` 的**全文首次出现**已经不在这段里了 ——
+  //    「引用里的图也要识别」那段（位置更靠前）也用它 ⇒ 原来取首次出现就会拿错位置、
+  //    这条断言假红。改成**从缓存那行往后找第一次出现**，这才是它真正要盯的：
+  //    **这一段里**先捡缓存（不要钱）、再真识别（要钱）。
+  const iReal = bot.indexOf('describeImagesByFile(', iCache);
+  check(iCache > 0 && iReal > iCache, '★ 捡缓存（不要钱）在真的识图（要钱）之前');
   check(
     /if \(!vision\) \{\s*\n\s*const cached = visionCache\.cachedDescriptions/.test(bot),
     '★ 而且已经有 `vision` 了就不再重复捡/识别',
@@ -133,8 +137,8 @@ console.log('\n【6】★★★ 取图必须能吃不一定是"本地路径"的�
     r.writeHead(200, { 'Content-Type': 'image/png' });
     r.end(PNG);
   });
-  await new Promise((res) => srv.listen(0, '203.0.113.10', res));
-  const url = `http://203.0.113.10:${srv.address().port}/x.png`;
+  await new Promise((res) => srv.listen(0, '127.0.0.1', res));
+  const url = `http://127.0.0.1:${srv.address().port}/x.png`;
   const gotUrl = await vcMod.loadImageBytes(url);
   check(
     Buffer.isBuffer(gotUrl) && gotUrl.equals(PNG),

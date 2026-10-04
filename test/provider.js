@@ -25,7 +25,7 @@ import { dirname, join } from 'node:path';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const PORT = 39703;
-const BASE = `http://203.0.113.10:${PORT}`;
+const BASE = `http://127.0.0.1:${PORT}`;
 const PROBE = join(ROOT, 'logs', '__provider-probe.mjs');
 
 let failures = 0;
@@ -174,13 +174,13 @@ async function main() {
     const cfg = makeConfig(
       'llonebot',
       'config.provider-custom-test.yml',
-      "  dir: logs\n  launcher: __provider-probe.mjs\n  manageUrl: http://203.0.113.10\n",
+      "  dir: logs\n  launcher: __provider-probe.mjs\n  manageUrl: http://127.0.0.1:3080\n",
     );
     const p = probe(cfg);
     check(/logs[\\/]__provider-probe\.mjs$/.test(p.launcher), 'launcher 相对 dir 解析成绝对路径', p.launcher);
     check(p.launcherExists === true, '★ 文件真存在 → can("launch") 才算支持', String(p.launcherExists));
     check(p.canLaunch === true, 'can("launch") 随文件存在与否变化');
-    check(p.manageUrl === 'http://203.0.113.10', 'manageUrl 用配置里的', p.manageUrl);
+    check(p.manageUrl === 'http://127.0.0.1:3080', 'manageUrl 用配置里的', p.manageUrl);
     drop(cfg);
   }
 
@@ -190,7 +190,7 @@ async function main() {
     // 管理界面换端口 + OneBot 指向死端口（绝不碰真 NapCat 的唯一连接）
     const txt = readFileSync(cfg, 'utf8')
       .replace(/port:\s*3099/, `port: ${PORT}`)
-      .replace(/url:\s*ws:\/\/127\.0\.0\.1:\d+/, 'url: ws://203.0.113.10');
+      .replace(/url:\s*ws:\/\/127\.0\.0\.1:\d+/, 'url: ws://127.0.0.1:39997');
     writeFileSync(cfg, txt, 'utf8');
 
     const proc = spawn(process.execPath, ['src/index.js'], {

@@ -42,7 +42,7 @@ writeFileSync(
   join(ROOT, CFG),
   readFileSync(join(ROOT, 'config.test.yml'), 'utf8').replace(
     /url: ws:\/\/127\.0\.0\.1:\d+/,
-    `url: ws://203.0.113.10:${DEAD_PORT}`,
+    `url: ws://127.0.0.1:${DEAD_PORT}`,
   ),
   'utf8',
 );
@@ -63,7 +63,7 @@ function startBot() {
       QQBOT_RECENT_FILE: 'logs/__singleton-recent.json',
       QQBOT_AFFINITY_FILE: 'logs/__singleton-affinity.json',
       QQBOT_NAMES_FILE: 'logs/__singleton-names.json',
-      NO_PROXY: '203.0.113.10,localhost,::1',
+      NO_PROXY: '127.0.0.1,localhost,::1',
     },
     // ⚠️ 必须 pipe：下面要断言它输出里那句「已经有本机器人在跑了」
     stdio: ['ignore', 'pipe', 'pipe'],

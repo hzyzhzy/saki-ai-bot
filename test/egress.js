@@ -18,7 +18,7 @@
  * ⇒ 修法：切换时**必须 `setGlobalDispatcher`**（选直连就装一个干净的 `Agent` 顶掉 env-proxy）。
  *
  * ⚠️ 真机验证（当时手工跑的，这里没法自动化）：把环境设成
- *    `NODE_USE_ENV_PROXY=1` + `HTTPS_PROXY=http://203.0.113.10`（7890 没人听），
+ *    `NODE_USE_ENV_PROXY=1` + `HTTPS_PROXY=http://127.0.0.1:7890`（7890 没人听），
  *    再 `import` 本模块 ⇒ 启动那句探测会把出口定成直连，
  *    之后 **`llmFetch` 和普通 `fetch` 都能拿到 401**（＝请求真的到得了上游）。
  *

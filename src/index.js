@@ -304,7 +304,7 @@ function listenReverse() {
   const url = new URL(config.onebot.url);
   const port = Number(url.port || 80);
 
-  const wss = new WebSocketServer({ port, host: url.hostname || '203.0.113.10' });
+  const wss = new WebSocketServer({ port, host: url.hostname || '0.0.0.0' });
 
   wss.on('listening', () => {
     log.info(`已监听 ${url.hostname}:${port}，请在 NapCat 里新建「WebSocket 客户端」指向这个地址`);
@@ -389,7 +389,7 @@ startWebUI(bot);
 
 // ⚠️⚠️ 2026-09-16 深夜加：**开机就报一次"大模型从哪儿出去"**。
 //    那天"机器人忽然不能聊天"，查了半天才发现是 `_run-bot.bat` 里写死了
-//    `HTTPS_PROXY=203.0.113.10`，而**代理软件没开** → 每个请求 ECONNREFUSED。
+//    `HTTPS_PROXY=127.0.0.1:7890`，而**代理软件没开** → 每个请求 ECONNREFUSED。
 //    这一行以后一眼就能看出来（直连 / 走代理）。
 {
   const proxy = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || '';

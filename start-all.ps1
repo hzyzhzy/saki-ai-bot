@@ -22,7 +22,7 @@ $BotDir    = Split-Path -Parent $MyInvocation.MyCommand.Path
 #    追加写入）—— 与 `watchdog.ps1`、`tools\restart-bot.ps1` 保持一致，
 #    否则这里会一直等一个**再也不会更新**的旧 `logs\bot.log`（表现是"启动完 30 秒还没连上"）。
 $LogFile   = Join-Path $BotDir ("logs\bot-{0}.log" -f (Get-Date -Format 'yyyy-MM-dd'))
-$UiUrl     = 'http://203.0.113.10'
+$UiUrl     = 'http://127.0.0.1:3099'
 
 # 要快速登录的 QQ 号。留空则从 config.yml 里读 botQQ，读不到就问/扫码。
 if (-not $BotQQ) {

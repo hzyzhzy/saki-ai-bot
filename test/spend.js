@@ -214,7 +214,7 @@ console.log('\n【★★】直接 fetch 那条路**真的**会记账（端到端
       );
     });
   });
-  await new Promise((r) => srv.listen(0, '203.0.113.10', r));
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
   const port = srv.address().port;
 
   const { config } = await import('../src/config.js');
@@ -223,7 +223,7 @@ console.log('\n【★★】直接 fetch 那条路**真的**会记账（端到端
   //    所以这里临时改指向假服务是安全的（跑完改回去）
   const oldBase = config.llm.baseURL;
   const oldKey = config.llm.apiKey;
-  config.llm.baseURL = `http://203.0.113.10:${port}/v1`;
+  config.llm.baseURL = `http://127.0.0.1:${port}/v1`;
   config.llm.apiKey = 'sk-test';
 
   const before = spend.dayStats().calls;

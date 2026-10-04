@@ -1,7 +1,7 @@
 /**
  * 本地图形化管理界面。
  *
- * 只监听 203.0.113.10，不做登录（本机使用）。可以：
+ * 只监听 127.0.0.1，不做登录（本机使用）。可以：
  *   - 改模型 / API Key / baseURL，并当场测试连通性
  *   - 改机器人能在哪些群说话、谁能教它、要不要 @
  *   - 管理表情包（上传图片、写标签和适用场合、删除）
@@ -414,7 +414,7 @@ function saveConfig(patch) {
 
   writeFileSync(
     CONFIG_FILE,
-    '# 由管理界面 http://203.0.113.10:' +
+    '# 由管理界面 http://127.0.0.1:' +
       config.webui.port +
       ' 维护。\n# 详细注释和说明见 README.md。\n' +
       yaml.dump(out, { lineWidth: 200, noRefs: true, quotingType: '"' }),
@@ -1090,7 +1090,7 @@ const routes = {
   // ⚠️ 不改任何状态：只是问 NapCat 要一下转写结果。
   'GET /api/qq/ptt-text': async (req, res) => {
     try {
-      const u = new URL(req.url, 'http://203.0.113.10');
+      const u = new URL(req.url, 'http://127.0.0.1');
       const id = String(u.searchParams.get('messageId') ?? '').trim();
       if (!id) return send(res, 200, { ok: false, error: '缺少 messageId' });
       const r = await bot.call('fetch_ptt_text', { message_id: /^\d+$/.test(id) ? Number(id) : id });
@@ -1190,7 +1190,7 @@ const routes = {
   // ── 开机自启（2026-09-17 加）──
   // ⚠️ 这两个接口会**动系统设置**（注册表启动项），而且是我这边起 powershell 去改。
   //    参数一律走环境变量传，不拼命令行 —— 见 src/autostart.js 顶部那段注释。
-  //    界面只监听 203.0.113.10、不做登录，信任级别和「重启 NapCat」那些按钮一样，
+  //    界面只监听 127.0.0.1、不做登录，信任级别和「重启 NapCat」那些按钮一样，
   //    所以这里不再加额外鉴权。
   'GET /api/autostart': async (_req, res) => send(res, 200, autostart.status()),
 
@@ -1760,6 +1760,39 @@ const routes = {
       });
       log.info(`管理界面手动发了一条私聊 → ${uid}`);
       send(res, 200, { ok: true, text });
+    } catch (e) {
+      send(res, 200, { ok: false, error: e.message });
+    }
+  },
+
+  // 让她**在群里说一句**（2026-10-05 加）。
+  //
+  // ⚠️ 为什么需要它：群里那条「读一下这个」（<主人> 引用一个日志文件）她当时没读出来，
+  //    要**补发**一条 —— 而现成的 `/api/life/send-now` 会把它当成**今天的日常事件**
+  //    记进 `life.json` + 故事线（她的记忆里就凭空多出一件"她真经历过的事"）✗
+  //    ⇒ 这个接口**只发话、不记账**。
+  // ⚠️ 走 `sendChatLike`（不是裸 `send_group_msg`）—— 那是她所有发言的唯一出口，
+  //    打码 / 口癖抑制 /「倒」降频 / 分条那一整套都在里面，绕过去就不是她的说话了。
+  'POST /api/say': async (req, res) => {
+    if (!bot?.selfId) return send(res, 200, { ok: false, error: 'QQ 没在线' });
+    let b = {};
+    try {
+      b = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+    } catch {}
+    const gid = String(b.groupId ?? '').trim();
+    const text = String(b.text ?? '').trim();
+    if (!gid) return send(res, 200, { ok: false, error: '要填群号' });
+    if (!text) return send(res, 200, { ok: false, error: '要填要说的话' });
+    try {
+      const sent = await bot.sendChatLike(gid, text, { kind: 'manual' });
+      const ok = Array.isArray(sent) && sent.length > 0;
+      log.info(`管理界面手动让她在群 ${gid} 说了一句（${ok ? `发出 ${sent.length} 条` : '一条都没出去'}）`);
+      send(res, 200, {
+        ok,
+        sent: sent ?? [],
+        text,
+        error: ok ? undefined : '一条都没发出去（去查协议端是不是假在线：tools/napcat-state.mjs）',
+      });
     } catch (e) {
       send(res, 200, { ok: false, error: e.message });
     }
@@ -2605,8 +2638,8 @@ export function startWebUI(botInstance = null) {
       log.error(`管理界面端口 ${config.webui.port} 被占用，换一个端口或关掉占用的程序`);
     } else if (e.code === 'EADDRNOTAVAIL' && config.webui.host === '::') {
       // 有些环境没有 IPv6，退回只监听 IPv4
-      log.warn('没有可用的 IPv6，退回只监听 203.0.113.10');
-      config.webui.host = '203.0.113.10';
+      log.warn('没有可用的 IPv6，退回只监听 127.0.0.1');
+      config.webui.host = '127.0.0.1';
       startWebUI();
     } else {
       log.error(`管理界面启动失败: ${e.message}`);
@@ -2614,12 +2647,12 @@ export function startWebUI(botInstance = null) {
   });
 
   // host 用 "::" 时 Node 默认同时接受 IPv4 和 IPv6（双栈），
-  // 这样浏览器无论是走 203.0.113.10 还是 localhost→::1 都能打开。
-  const host = config.webui.host === '203.0.113.10' ? '::' : config.webui.host;
+  // 这样浏览器无论是走 127.0.0.1 还是 localhost→::1 都能打开。
+  const host = config.webui.host === '127.0.0.1' ? '::' : config.webui.host;
 
   server.listen({ port: config.webui.port, host, ipv6Only: false }, () => {
     log.info('═══════════════════════════════════════');
-    log.info(` 管理界面: http://203.0.113.10:${config.webui.port}`);
+    log.info(` 管理界面: http://127.0.0.1:${config.webui.port}`);
     log.info('═══════════════════════════════════════');
   });
 

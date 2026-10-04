@@ -4249,7 +4249,7 @@ function copyGroupNo() {
     el.style.color = ok ? '#16a34a' : '#dc2626';
   };
   // ⚠️ `navigator.clipboard` 只在**安全上下文**（https 或 localhost）里有。
-  //    WebUI 默认是 http://203.0.113.10 ⇒ 属于 localhost，能用 ✓
+  //    WebUI 默认是 http://127.0.0.1:3099 ⇒ 属于 localhost，能用 ✓
   //    但如果哪天用**局域网 IP** 打开，它就没有了 ⇒ 必须给个"手动复制"的兜底提示。
   try {
     if (navigator.clipboard?.writeText) {

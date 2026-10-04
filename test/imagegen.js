@@ -39,7 +39,7 @@ writeFileSync(
   join(ROOT, CFG_REL),
   [
     'llm:',
-    '  baseURL: http://203.0.113.10:1/v1',
+    '  baseURL: http://127.0.0.1:1/v1',
     '  apiKey: "sk-test"',
     '  model: test-model',
     'imagegen:',
@@ -141,10 +141,10 @@ const server = createServer((req, res) => {
       return res.end('这不是 JSON');
     }
     served += 1;
-    done(200, { data: [{ url: `http://203.0.113.10:${server.address().port}/img.png` }] });
+    done(200, { data: [{ url: `http://127.0.0.1:${server.address().port}/img.png` }] });
   });
 });
-await new Promise((r) => server.listen(0, '203.0.113.10', r));
+await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const PORT = server.address().port;
 
 const config = (await import('../src/config.js')).config;
@@ -157,7 +157,7 @@ function useFake(over = {}) {
   Object.assign(config.imagegen, {
     enable: true,
     provider: 'ark',
-    baseURL: `http://203.0.113.10:${PORT}`,
+    baseURL: `http://127.0.0.1:${PORT}`,
     apiKey: 'sk-test-image',
     model: 'test-image-model',
     size: '1024x1024',
@@ -240,7 +240,19 @@ console.log('\n【2b】★ 提示词**两层**：现算的（画面/时间/地�
   const self = imagegen.buildPrompt({ what: '站在便利店门口自拍', withSelf: true, time: '晚上', place: '便利店门口' });
   const sceneOnly = imagegen.buildPrompt({ what: '一所学校的白色大门，雨后地面反光', withSelf: false });
   check(self.startsWith('站在便利店门口自拍。'), '画面排在最前面', self.slice(0, 16));
-  check(/晚上，便利店门口。/.test(self), '★ 时间地点接在画面后面（这两样是**现算的**一层）');
+  // ⚠️⚠️ 2026-10-03 改（用户报：她拍的照片「**很像中国**」）：
+  //    地点统一带上「日本·东京」这一层（她住东京，见 persona「她现在住哪」）——
+  //    原来只传「便利店门口」这种没有城市层级的地点，生图模型就按中文提示词默认出中国街道 ✗
+  check(
+    /晚上，日本·东京，便利店门口。/.test(self),
+    '★★ 时间地点接在画面后面，而且**地点带上了"日本·东京"**（不然生图出中国街道）',
+  );
+  // 已经写了东京/日本就不重复加前缀
+  const dup = imagegen.buildPrompt({ what: 'x', withSelf: false, place: '东京的便利店门口' });
+  check(
+    !/日本·东京，东京/.test(dup) && /东京的便利店门口/.test(dup),
+    '★ `place` 里已经写了东京/日本 → 不重复加前缀',
+  );
   check(!/。。/.test(self) && !/。，/.test(self), '标点不会拼坏');
   check(imagegen.buildPrompt({ what: '', withSelf: true }) === '', '没有画面 → 空串（不许拿空提示词去烧钱）');
 

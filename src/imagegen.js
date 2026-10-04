@@ -298,7 +298,20 @@ export function buildPrompt({ what, withSelf = true, time = '', place = '', hasR
   const pick = String((withSelf ? style.self : style.scene) ?? '').trim() || STYLE_FALLBACK;
   // ⚠️ 顺序固定为「画面 → 时间地点 → 画风」：前面是"这次是什么"，后面是"长什么样"。
   //    反过来写模型会把画风当成主体描述的一部分。
-  const when = [String(time ?? '').trim(), String(place ?? '').trim()].filter(Boolean).join('，');
+  //
+  // ⚠️⚠️ 2026-10-03 加（用户报：她拍的照片「**很像中国**」，群里还因此吵起来）：
+  //    **她住东京**（硬设定，见 persona「她现在住哪」），可这里原来只传
+  //    「便利店 / 家 / 街上」这种**没有城市层级**的地点 ⇒ 生图模型按中文提示词
+  //    默认出**中国街道**（中国小区、中文招牌、电动车）✗
+  //    ⇒ 地点统一带上「**日本·东京**」这一层。她永远在东京，不需要配置。
+  //    （`place` 里已经写了东京/日本就不重复加。）
+  const placeText = String(place ?? '').trim();
+  const placeFull = placeText
+    ? /东京|日本/.test(placeText)
+      ? placeText
+      : `日本·东京，${placeText}`
+    : '日本·东京';
+  const when = [String(time ?? '').trim(), placeFull].filter(Boolean).join('，');
 
   // ⚠️⚠️ 2026-10-02 加（用户报「为什么她刚发的照片是黑发」）：
   //    **必须在提示词里显式指认参考图** —— 只说"是你本人"没用，

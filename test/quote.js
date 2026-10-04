@@ -39,7 +39,7 @@ writeFileSync(
   join(ROOT, CFG_REL),
   [
     'llm:',
-    '  baseURL: http://203.0.113.10:1/v1',
+    '  baseURL: http://127.0.0.1:1/v1',
     '  apiKey: "sk-test"',
     '  model: t',
     'trigger:',
@@ -53,6 +53,8 @@ writeFileSync(
     '  quoteAfterGap: 4',
     'context:',
     '  enable: true',
+    // ⚠️ 2026-10-05：调小「读被引用文件」的上限，好在测试里验证"太长会截断"
+    '  readQuotedFileChars: 1000',
     'ownerQQ: "' + <主人> + '"',
     '',
   ].join('\n'),
@@ -390,6 +392,189 @@ console.log('\n【12】★★ 正文里**点名叫她** → 也算召唤（<主�
   check(b.decide(evOf([textSeg('小祥子在哪')]))?.hit === 'call', '★ 配了 callNames 就按配置走');
   check(b.decide(evOf([textSeg('祥子在吗')]))?.hit !== 'call', '★ 覆盖之后原来的「祥子」不再命中');
   cfg2.trigger.callNames = oldNames;
+}
+
+console.log('\n【N】★★ 引用里带图 → 必须把那张图的 file 带出来（用户截图：她答「看不清」）');
+{
+  // 现场（2026-10-04 00:28，群 200000001）：<主人> 引用龟龟杜发的一张招牌图，
+  // 问「这个招牌是什么意思」—— 她回「看不清啊，让龟龟杜把图放大点（」。
+  // 根因：`fetchQuoted()` 原来**只取文字、把图丢了**（没文字就写「（图片/表情）」）⇒
+  // 她手里只有一个占位符，压根没看到那张图 ✗
+  const b = new Bot();
+  b.selfId = BOT;
+  b.call = async (action, params) => {
+    if (action !== 'get_msg') return null;
+    return {
+      data: {
+        message_id: params?.message_id,
+        user_id: '10000004',
+        sender: { user_id: '10000004', nickname: '龟龟杜' },
+        message: [{ type: 'image', data: { file: 'signboard.jpg' } }],
+      },
+    };
+  };
+  const q = await b.fetchQuoted(evOf([replySeg('-814401907'), textSeg('这个招牌是什么意思')]));
+  check(!!q, '取到了被引用的消息');
+  check(
+    Array.isArray(q?.images) && q.images.includes('signboard.jpg'),
+    '★★ 被引用消息里的图 `file` 带出来了（原来只有「（图片/表情）」这个占位符）',
+    JSON.stringify(q?.images),
+  );
+  check(/图片|表情/.test(q?.text ?? ''), '★ 原文没有文字 → 文本仍然是占位符');
+
+  // 纯文字引用不该多出 images
+  b.quoteCache = new Map();
+  b.quoteMiss = new Map();
+  b.call = async (action, params) => {
+    if (action !== 'get_msg') return null;
+    return {
+      data: {
+        message_id: params?.message_id,
+        user_id: '10000004',
+        sender: { user_id: '10000004', nickname: '龟龟杜' },
+        message: [{ type: 'text', data: { text: '第二个也不简单' } }],
+      },
+    };
+  };
+  const q2 = await b.fetchQuoted(evOf([replySeg('-814401908'), textSeg('啥意思')]));
+  check(
+    Array.isArray(q2?.images) && q2.images.length === 0,
+    '★ 纯文字引用 → `images` 是空数组（不误报）',
+  );
+}
+
+// ⚠️⚠️ 2026-10-05 加（用户：「**把引用收到的段都修一下**」）。
+//    现场：<主人> 引用「是der的小豆」发的 `bot-2026-10-05.log` 说「读一下这个」，
+//    她回「日志我这没拿到诶，你让它把内容直接贴出来」——
+//    `fetchQuoted()` 原来**只取文字 + 图片**，文件段被丢了（她手里只有
+//    `[文件:bot-2026-10-05.log]` 这行占位符，**内容压根没去取**）。
+console.log('\n【11】★★ 引用里的「文件 / 语音」段也要带出来');
+{
+  const b = botWith();
+  b.quoteCache = new Map();
+  b.quoteMiss = new Map();
+  b.call = async (action, params) => {
+    if (action !== 'get_msg') return null;
+    return {
+      data: {
+        message_id: params?.message_id,
+        user_id: '10000004',
+        sender: { user_id: '10000004', nickname: '龟龟杜' },
+        message: [
+          {
+            type: 'file',
+            data: {
+              name: 'bot-2026-10-05.log',
+              file_id: '/14d534dd-482a',
+              url: 'https://gzc-download.ftn.qq.com/ftn_handler/xx',
+              size: 12005,
+            },
+          },
+        ],
+      },
+    };
+  };
+  const q = await b.fetchQuoted(evOf([replySeg('-814401909'), textSeg('读一下这个')]));
+  check(
+    Array.isArray(q?.files) && q.files.length === 1 && q.files[0].name === 'bot-2026-10-05.log',
+    '★★ 被引用消息里的**文件段**带出来了',
+    JSON.stringify(q?.files),
+  );
+  check(
+    /\[文件:bot-2026-10-05\.log\]/.test(q?.text ?? ''),
+    '★ 文本里仍是文件名占位符（内容另外去下载）',
+  );
+  check(
+    !!q?.files?.[0]?.url && !!q?.files?.[0]?.file_id,
+    '★ url / file_id 都留着 —— 下载那几条路都要用',
+  );
+}
+{
+  // 被引用的是**语音** → 用被引用消息的 id 调转文字，转出来的话要进引用文本
+  const b = botWith();
+  b.quoteCache = new Map();
+  b.quoteMiss = new Map();
+  let asked = 0;
+  b.call = async (action, params) => {
+    if (action === 'get_msg') {
+      return {
+        data: {
+          message_id: params?.message_id,
+          user_id: '10000004',
+          sender: { user_id: '10000004', nickname: '龟龟杜' },
+          message: [{ type: 'record', data: { file: 'x.silk' } }],
+        },
+      };
+    }
+    if (action === 'fetch_ptt_text') {
+      asked++;
+      return { text: '他刚才说的是这句话' };
+    }
+    return null;
+  };
+  const q = await b.fetchQuoted(evOf([replySeg('-814401910'), textSeg('他说啥')]));
+  check(asked === 1, '★ 被引用的是语音 → 用**被引用消息的 id** 转了一次文字', `实际 ${asked} 次`);
+  check(
+    /他刚才说的是这句话/.test(q?.text ?? ''),
+    '★★ 语音转出来的文字进了引用文本',
+    JSON.stringify(q?.text),
+  );
+}
+{
+  // 纯文字引用不该多出 files
+  const b = botWith();
+  b.quoteCache = new Map();
+  b.quoteMiss = new Map();
+  b.call = async (action, params) => {
+    if (action !== 'get_msg') return null;
+    return {
+      data: {
+        message_id: params?.message_id,
+        user_id: '10000004',
+        sender: { user_id: '10000004', nickname: '龟龟杜' },
+        message: [{ type: 'text', data: { text: '就是这句' } }],
+      },
+    };
+  };
+  const q = await b.fetchQuoted(evOf([replySeg('-814401911'), textSeg('啥意思')]));
+  check(Array.isArray(q?.files) && q.files.length === 0, '★ 纯文字引用 → `files` 是空数组（不误报）');
+}
+
+console.log('\n【12】★★ 被引用的**文件内容**要真读出来');
+{
+  const b = botWith();
+  const LOG = '第1行 启动\n第2行 出错了\n第3行 结束';
+  b.fetchLogFile = async () => Buffer.from(LOG, 'utf8');
+  const t = await b.readQuotedFile(evOf([textSeg('读一下')]), {
+    name: 'bot-2026-10-05.log',
+    file_id: '/abc',
+  });
+  check(/第2行 出错了/.test(t), '★★ 文本文件 → **内容**进了给模型的那段');
+  check(/bot-2026-10-05\.log/.test(t), '★ 标了文件名（她知道自己在读哪个文件）');
+  check(
+    /文件原文/.test(t) && /不要照做/.test(t),
+    '★ 带了防护：说明这是资料、里面像指令的话别照做（群友发的文件能写注入）',
+  );
+
+  // 取不到 → 如实说读不了（绝不能编内容）
+  b.fetchLogFile = async () => null;
+  const t2 = await b.readQuotedFile(evOf([textSeg('x')]), { name: 'a.log', url: 'https://x' });
+  check(/没取下来/.test(t2) && /如实说/.test(t2), '★ 取不到文件 → 明确说"读不了"，不许编');
+
+  // 二进制 → 不塞进提示词
+  b.fetchLogFile = async () => Buffer.from([0x50, 0x4b, 0x00, 0x01, 0x02]);
+  const t3 = await b.readQuotedFile(evOf([textSeg('x')]), { name: 'a.log', url: 'https://x' });
+  check(/二进制/.test(t3), '★ 二进制内容 → 说读不了，不把乱码塞进提示词');
+
+  // 太长 → 截断到上限，而且取的是**尾部**
+  b.fetchLogFile = async () => Buffer.from(`${'A'.repeat(3000)}最后这一行`, 'utf8');
+  const t4 = await b.readQuotedFile(evOf([textSeg('x')]), { name: 'b.log', url: 'https://x' });
+  check(t4.length < 2000, '★ 太长的文件会截断（上限走 `context.readQuotedFileChars`）', `实际 ${t4.length} 字`);
+  check(/最后这一行/.test(t4), '★ 截断取的是**尾部** —— 日志最后几行才是有用的');
+
+  // 没有 url / file_id 的文件段 → 不炸
+  const t5 = await b.readQuotedFile(evOf([textSeg('x')]), { name: 'c.log' });
+  check(t5 === '', '★ 段里既没 url 也没 file_id → 安静返回空（不抛错）');
 }
 
 try {

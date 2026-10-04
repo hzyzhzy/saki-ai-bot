@@ -139,8 +139,19 @@ const PROMPT = `【说话判断】你是一个 QQ 群里**假装成真人群友*
 {
   "speak": true 或 false,
   "why": "一句话（10 字内）",
-  "length": "short" 或 "long"
+  "length": "short" 或 "long",
+  "know": true 或 false
 }
+
+⚠️⚠️ **know = "这件事我说得上话吗"**（2026-10-04 加）：
+  · 这句话问的事情、或者他们在聊的东西，**我手里有依据**（服务器的事、公告里的、
+    我自己经历过/知道的）→ true
+  · **我没依据、只能靠猜或者上网现查** → false
+    （例：一个新游戏的发售日期、别人圈子里的事、我没见过的梗、
+      "真发售了吗"这种我压根不知道答案的问题）
+  ⚠️ 这一项**跟 speak 独立**：可以是 speak: true 但 know: false
+    （比如他 @ 我，我该回，但那个问题我确实不懂 —— 那我就**说"我不清楚"**）。
+  ⚠️ **拿不准就填 false** —— 代码层会用它挡掉"没人问我、我又不懂"的插话。
 
 length 说明：**默认 short**（一句话，15 字以内）。
 只有「要解释步骤 / 要讲清楚一件事」才用 long（但也就两三句）。`;
@@ -343,6 +354,10 @@ export async function judgeSpeak(event, opts = {}) {
       speak: j.speak === true,
       why: String(j.why ?? '').slice(0, 20),
       length: j.length === 'long' ? 'long' : 'short',
+      // ⚠️ 2026-10-04 加：`know` = "这件事我说得上话吗"。
+      //    ⚠️ 只有模型**明确说 false** 才算"不懂"（`undefined` 当"没给"处理，
+      //       代码层那道闸只认 `=== false`）—— 免得模型漏给字段就误杀一整类发言。
+      know: j.know === true ? true : j.know === false ? false : undefined,
       ms: Date.now() - t0,
     };
     // ⚠️ 2026-09-15 用户要求（「把『判为不说』的理由提到 info 级」）：

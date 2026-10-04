@@ -149,7 +149,7 @@ const received = []; // 机器人发回来的 API 调用
 let botSocket = null;
 let connected = false;
 
-const wss = new WebSocketServer({ port: WS_PORT, host: '203.0.113.10' });
+const wss = new WebSocketServer({ port: WS_PORT, host: '127.0.0.1' });
 
 wss.on('connection', (ws, req) => {
   const auth = req.headers.authorization ?? '';
@@ -257,10 +257,10 @@ const sentTexts = () =>
 let bot = null;
 
 async function main() {
-  await new Promise((r) => llmServer.listen(LLM_PORT, '203.0.113.10', r));
+  await new Promise((r) => llmServer.listen(LLM_PORT, '127.0.0.1', r));
   await new Promise((r) => (wss._server.listening ? r() : wss.once('listening', r)));
-  console.log(`\n假模型服务: http://203.0.113.10:${LLM_PORT}/v1`);
-  console.log(`假 NapCat : ws://203.0.113.10:${WS_PORT}\n`);
+  console.log(`\n假模型服务: http://127.0.0.1:${LLM_PORT}/v1`);
+  console.log(`假 NapCat : ws://127.0.0.1:${WS_PORT}\n`);
 
   console.log('[1] 启动机器人子进程');
   // stdio 交给父进程用的管道，这里设为 ignore 以免和测试输出互相干扰
@@ -269,9 +269,9 @@ async function main() {
     env: {
       ...process.env,
       QQBOT_CONFIG: 'config.test.yml',
-      // ⚠️ 排除本机代理：假模型/假 NapCat 都跑在 203.0.113.10，
+      // ⚠️ 排除本机代理：假模型/假 NapCat 都跑在 127.0.0.1，
       //    如果 shell 里设了 NODE_USE_ENV_PROXY，不加这个假模型请求会走代理而失败
-      NO_PROXY: '203.0.113.10,localhost,::1',
+      NO_PROXY: '127.0.0.1,localhost,::1',
     },
     stdio: ['ignore', 'ignore', 'ignore'],
   });

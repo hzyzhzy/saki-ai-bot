@@ -41,6 +41,8 @@ import * as storyline from './storyline.js';
 import * as holiday from './holiday.js';
 import { personaText, castBlock, personaDataFile } from './knowledge.js';
 import * as persona from './persona.js';
+// ⚠️ 2026-10-04：套话句式（「谁也没喊谁」）的二次改写 —— 见 `src/rewrite.js` 顶部
+import { naturalize } from './rewrite.js';
 
 // ⚠️ 2026-09-21：事件库是**角色专属**的（换个角色"今天遇到什么事"完全不同），
 //    所以跟着人设包走（`personas/<id>/life-events.md`）。
@@ -636,12 +638,20 @@ export async function compose(planObj, extra = {}) {
     extra.extraHint ? `\n${extra.extraHint}` : '',
   ].filter(Boolean);
 
-  return phrase({
+  const raw = await phrase({
     system: extra.system ?? buildSystem(),
     user: lines.join('\n'),
     maxTokens: 260,
     timeoutMs: 25000,
-  }).then(tidyLifeText);
+  });
+  const tidied = tidyLifeText(raw);
+  // ⚠️⚠️ 2026-10-04 用户要求（「在剧情和事件里 saki 转述的话里，有大量的『我们谁也没XX』，
+  //    要转换一下」）⇒**生成后再过一次模型改写**，把那句套话换掉。
+  //    ⚠️ 为什么提示词拦不住：上面那句只说了「别用『谁也没…』这种套话**开头**」，
+  //      而实测冒出来的全在**句中/句末**（「…远远看见立希在马路对面，我们谁也没喊谁。」）
+  //      —— 规则压根没覆盖到。详见 `src/rewrite.js` 顶部。
+  //    ⚠️ 只有命中才花这一次调用；失败/长度异常一律退回上面这句原文。
+  return naturalize(tidied, { where: '一级事件' });
 }
 
 /**

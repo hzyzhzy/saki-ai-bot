@@ -58,14 +58,14 @@ const server = createServer((req, res) => {
     res.end(JSON.stringify({ choices: [{ message: { content: nextReply } }], usage: { prompt_tokens: 10, completion_tokens: 10 } }));
   });
 });
-await new Promise((r) => server.listen(0, '203.0.113.10', r));
+await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const PORT = server.address().port;
 
 writeFileSync(
   join(ROOT, CFG_REL),
   [
     'llm:',
-    `  baseURL: http://203.0.113.10:${PORT}/v1`,
+    `  baseURL: http://127.0.0.1:${PORT}/v1`,
     '  apiKey: "sk-test"',
     '  model: t',
     'trigger:',

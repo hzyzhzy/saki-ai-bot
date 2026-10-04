@@ -19,7 +19,7 @@ import { dirname, join } from 'node:path';
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const PORT = 39701;
 const CFG = join(ROOT, 'config.webui-test.yml');
-const BASE = `http://203.0.113.10:${PORT}`;
+const BASE = `http://127.0.0.1:${PORT}`;
 // ⚠️ 剧情 / 故事线的**隔离文件**：[9] 那条测试会真的清空它们（见 main() 开头那段说明）。
 //    用相对路径，因为要作为 `QQBOT_*_FILE` 传给被起的机器人（它 cwd = ROOT）。
 const QUEST_TMP = 'logs/__webui-quest.json';
@@ -38,7 +38,7 @@ writeFileSync(
   CFG,
   realCfg
     .replace(/port:\s*3099/, `port: ${PORT}`)
-    .replace(/url:\s*ws:\/\/127\.0\.0\.1:\d+/, 'url: ws://203.0.113.10'),
+    .replace(/url:\s*ws:\/\/127\.0\.0\.1:\d+/, 'url: ws://127.0.0.1:39999'),
   'utf8',
 );
 
@@ -124,9 +124,9 @@ async function main() {
       // ⚠️ 上面说的隔离：指向 logs/ 下的临时文件，绝不碰真实 state/
       QQBOT_QUEST_FILE: QUEST_TMP,
       QQBOT_STORYLINE_FILE: STORY_TMP,
-      // ⚠️ 排除本机代理：假模型/假 NapCat 都跑在 203.0.113.10，
+      // ⚠️ 排除本机代理：假模型/假 NapCat 都跑在 127.0.0.1，
       //    如果 shell 里设了 NODE_USE_ENV_PROXY，不加这个假模型请求会走代理而失败
-      NO_PROXY: '203.0.113.10,localhost,::1',
+      NO_PROXY: '127.0.0.1,localhost,::1',
     },
     stdio: ['ignore', 'ignore', 'ignore'],
   });

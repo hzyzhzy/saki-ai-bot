@@ -44,7 +44,7 @@ const OUTSIDER = '999999999'; // 不在白名单里
 const cfgFor = (allowList) =>
   [
     'llm:',
-    '  baseURL: http://203.0.113.10:1/v1',
+    '  baseURL: http://127.0.0.1:1/v1',
     '  apiKey: "sk-test"',
     '  model: t',
     'trigger:',
