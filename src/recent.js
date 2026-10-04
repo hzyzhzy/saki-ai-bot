@@ -632,6 +632,22 @@ export function speakers(groupId, n = 8) {
  *
  * @returns {number} 毫秒时间戳；没有记录时返回 0
  */
+/**
+ * **我自己**上次在这个群说话是什么时候（毫秒时间戳；没有返回 0）。
+ *
+ * ⚠️ 2026-10-06 加（用户：「**为什么 saki 没有主动接上这句话**」）：
+ *    用来区分两种"同类说话"——
+ *      · 她**刚跟它说过话**（她 @ 了它 / 它回她）⇒ 那是她自己挑起的对话，**要接**；
+ *      · 她**没说话、它自己在那儿演剧情** ⇒ **不接**（接了就变成两边互相接剧情台词）。
+ */
+export function lastSelfAt(groupId) {
+  const list = store.get(String(groupId)) ?? [];
+  for (let i = list.length - 1; i >= 0; i--) {
+    if (list[i].self) return Number(list[i].time) || 0;
+  }
+  return 0;
+}
+
 export function lastAt(groupId) {
   const list = store.get(String(groupId)) ?? [];
   const last = list[list.length - 1];

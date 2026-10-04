@@ -3520,9 +3520,19 @@ export class Bot {
           peerAtMe = this.selfId ? msg.isAt(segs0, this.selfId) : false;
           if (!peerAtMe) peerCallMe = this.calledByName(msg.extractText(segs0));
         } catch {}
-        if (!peerAtMe && !peerCallMe) {
+        // ⚠️⚠️ 2026-10-06 补（用户：「**为什么 saki 没有主动接上这句话**」）：
+        //    **她刚跟它说过话**（她自己 @ 了它、或它正回她）⇒ 那是**她挑起的对话，要接**。
+        //    否则上一版"同类说话一律不接"会把她自己开的头也掐掉（截图那次就是这样：
+        //    她 @ 了黑祥、黑祥回了「轮不到你替她传话」，她却一声不吭）。
+        //    ⚠️ 时限 2 分钟：够一个来回，又不会把"它自己演剧情"也放进来。
+        let iTalkedRecently = false;
+        try {
+          const mineAt = recent.lastSelfAt(String(event.group_id ?? ''));
+          iTalkedRecently = mineAt > 0 && Date.now() - mineAt < 120000;
+        } catch {}
+        if (!peerAtMe && !peerCallMe && !iTalkedRecently) {
           log.info(
-            `[同类] ${sender0} 说的话不接（没 @ 她、也没叫她）—— 免得两边互相接剧情台词` +
+            `[同类] ${sender0} 说的话不接（没 @ 她、没叫她，而且她 2 分钟内也没说过话）` +
               `${voluntary ? `（voluntary=${voluntary}）` : ''}`,
           );
           return null;
