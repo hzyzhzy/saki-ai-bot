@@ -222,6 +222,19 @@ export async function tick(bot, now = Date.now()) {
     if (Math.random() < pokeChance) {
       try {
         await bot.call('send_poke', { user_id: peer, group_id: gid });
+        // ⚠️⚠️ 2026-10-05 修（用户截图：**她自己不知道自己在戳**）：
+        //    `send_poke` 是**裸调用**，不像 `sendChatLike` 会自己写上下文 ⇒
+        //    群里显示「saki 戳了戳 大肥鱼」，而她上下文里**没有这条** ⇒
+        //    对方说「还戳上瘾了呀」，她回「还赖我呀，明明是你手闲」——**她不知道那是自己干的** ✗
+        //    ⇒ 把这次动作当**旁白**记一条（跟 `bot.js` 里"拍照"那处同一个道理）。
+        try {
+          recent.rememberBot(
+            { message_type: 'group', group_id: gid },
+            `（我戳了「${names.of(peer, gid) || peer}」一下）`,
+          );
+        } catch (e) {
+          log.debug(`[同类] 记"我戳了他"失败（不影响发送）：${e.message}`);
+        }
         note(gid, peer, now);
         log.info(`[同类] 群里冷场 → 她戳了「${names.of(peer, gid) || peer}」一下`);
         return { ok: true, gid, peer, poke: true };

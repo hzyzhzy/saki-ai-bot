@@ -7435,6 +7435,21 @@ export class Bot {
   async sendPokeBack(uid, gid) {
     try {
       await this.call('send_poke', gid ? { user_id: uid, group_id: gid } : { user_id: uid });
+      // ⚠️⚠️ 2026-10-05 加（用户截图：**她自己不知道自己在戳**）：
+      //    `send_poke` 是**裸调用** —— 不像 `sendChatLike` 那样会自己写上下文 ⇒
+      //    群里显示「她戳了对方」，而她自己的上下文里**没有这条** ⇒
+      //    对方下一句（「还戳上瘾了呀」）在她眼里成了**无中生有**，
+      //    她回「还赖我呀，明明是你手闲」✗
+      //    ⇒ 跟"拍照"那处（`（我拍了张照片发出来，内容是…）`）同一个道理：
+      //      **动作也要当旁白记一条**（用括号，免得被当成她真说过的话）。
+      try {
+        recent.rememberBot(
+          { message_type: gid ? 'group' : 'private', group_id: gid, user_id: uid },
+          `（我戳了「${names.of(uid, gid) || uid}」一下）`,
+        );
+      } catch (e) {
+        log.debug(`[戳一戳] 记上下文失败（不影响发送）：${e.message}`);
+      }
       log.info(`[戳一戳] ${uid} 拍了我，拍回去了${gid ? `（群 ${gid}）` : '（私聊）'}`);
       return true;
     } catch (e) {

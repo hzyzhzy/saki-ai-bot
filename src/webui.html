@@ -3352,7 +3352,7 @@ async function fillGroupParams() {
     <div style="border:1px dashed var(--line);border-radius:8px;padding:8px;margin-bottom:8px">
       <b>二级剧情</b>
       <div class="kv" style="flex-wrap:wrap;gap:8px;margin-top:6px">
-        <label title="关掉之后，这个群发 /剧情 和 /清除剧情 都会被无视（同一个群里跑两个机器人时用这个避免冲突）">收 /剧情 命令 ${onoff('gp-quest-commands', Q.commands !== false)}</label>
+        <label title="⚠️ 关掉 = **屏蔽**这个群的 /剧情 和 /清除剧情（同一个群里跑两个机器人时，用它避免两边抢）。默认开着"><b>接收 /剧情 命令</b> ${onoff('gp-quest-commands', Q.commands !== false)}</label>
         <label>这个群自动开剧情 ${onoff('gp-quest-enable', Q.enable === true)}</label>
         <label title="一级事件攒到点时，掷骰子自动开一条剧情的概率">概率 <input type="number" id="gp-quest-chance" min="0" max="1" step="0.01" style="width:70px" value="${val(Q.chance)}"></label>
         <label title="每 7 天最多几条">每周上限 <input type="number" id="gp-quest-max" min="1" max="20" style="width:70px" value="${val(Q.maxPerWeek)}"></label>
