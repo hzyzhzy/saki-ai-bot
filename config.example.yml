@@ -207,6 +207,17 @@ faces:
   # ⚠️ 这是**代码层硬闸** —— 提示词里就算写了频率，模型也偏爱发表情，所以必须兜一道。
   sendEvery: 6
 chat:
+  # ⚠️ 她跟**同类机器人**（同款 bot 的另一个号）互刷到什么程度算"聊够了"。
+  #    2026-10-06 起**不替她决定停**：够久了只在提示词里提醒她"该结束了"，
+  #    说什么、要不要收由她自己在那一轮判断；她自己说出收场话之后才进下面那个冷却。
+  botChainWindow: 14
+  botChainMin: 10
+  botChainMinSpanMs: 180000
+  # 硬闸兜底：万一她一直不收场，刷到这个量就由代码直接收尾
+  botChainHardMin: 24
+  botChainHardSpanMs: 600000
+  # 她自己说了收场话之后，这段时间内不接同类的话（真人的消息不受影响）
+  botChainCooldownMs: 60000
   # 生成回复期间，**同一个人**又发消息 → 最多"丢掉草稿重来"几次（2026-09-21 加）。
   #   他 @ 她一下、紧接着又补一句，原来是**回两条**（各带一个引用框，像没在听人说话）；
   #   现在改成"他还在说 → 丢掉这一版、带着新消息重新生成" → 群里只出一条。
@@ -241,6 +252,12 @@ chat:
     requireQuestionMark: true
     minChars: 5
   mention:
+    # ⚠️ 2026-10-06：**你跑的是哪个角色，这里就写哪个**。
+    #    「白祥」是客服小祥（本模板这套 saki 人设）、「黑祥」是 sakiko-dark 那个号。
+    #    ⚠️ 两个都写 = 群里喊另一个号的绰号时这边也会应答（两边会打架）。
+    #    另外：人设包里也有各自的别名表（`personas/<id>/identity.json` 的
+    #    selfNames / callNames / nicknames / matchNames），改完**要重启**才生效
+    #    （「重载配置」按钮不带人设，见 `src/webui.js` 的 `/api/reload`）。
     enable: true
     names:
       - 小祥
@@ -465,6 +482,23 @@ balance:
   checkIntervalMs: 1800000
   low: 5
   critical: 2
+  # ⚠️ 余额接口按服务商分好几种，**默认 auto 会挨个试** —— 群友换成中转站不用改这里：
+  #   auto           → 依次试 deepseek / newapi / openai-billing，谁通用谁
+  #   deepseek       → 官方 /user/balance
+  #   newapi         → /api/user/self（new-api / one-api 面板，quota÷500000 = 美元）
+  #   openai-billing → /dashboard/billing/*（很多中转站照着兼容）
+  #   custom         → 自己填 url + path + divide
+  provider: auto
+  # 留空 = 沿用上面 llm.baseURL / llm.apiKey（多数情况不用填）
+  # ⚠️ newapi 那个接口要的是**面板里的访问令牌**，不是 sk- 开头的调用 key
+  url: ''
+  token: ''
+  # 仅 custom 用：从返回 JSON 里取数值的路径（如 data.quota）+ 除数
+  path: ''
+  divide: 1
+  # 币种默认按接口返回（deepseek 一般 CNY、中转站多半 USD）
+  # ⚠️ 换中转站后 low / critical 那两个阈值是按**元**定的 ⇒ 币种变了要自己调
+  currency: ''
 monthlyReport:
   enable: true
   hour: 21

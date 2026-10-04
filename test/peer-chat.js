@@ -104,13 +104,13 @@ console.log('\n【3】挑号：池里多个号时不该连着挑同一个');
   check(pc.pickPeer(G, [], () => 0) === '', '★ 池是空的 → 返回空（调用方会跳过）');
 }
 
-console.log('\n【4】★★ 只剩两个机器人在互相说话 → 该停就停（用户：要不然会一直发下去）');
+console.log('\n【4】★★ 只剩两个机器人互刷 → 在**提示词里**告诉她"该结束了"，由她自己判断');
 {
   const recent = await import('../src/recent.js');
   const { Bot } = await import('../src/bot.js');
   const b = new Bot();
   const t0 = Date.now();
-  const put = (arr) =>
+  const put = (arr, gapMs = 1000) =>
     recent.__storeForTest().set(
       G,
       arr.map((x, i) => ({
@@ -118,49 +118,73 @@ console.log('\n【4】★★ 只剩两个机器人在互相说话 → 该停就�
         userId: x.u,
         self: x.self === true,
         text: 'x',
-        time: t0 - (arr.length - i) * 1000,
+        time: t0 - (arr.length - i) * gapMs,
       })),
     );
+  // 造 n 条"她"或"同类"的发言
+  const mine = (n) => Array.from({ length: n }, () => ({ n: 'Saki', u: '__self__', self: true }));
+  const peer = (n) => Array.from({ length: n }, () => ({ n: '大肥鱼', u: '1001' }));
 
-  put([
-    { n: 'Saki', u: '__self__', self: true },
-    { n: '大肥鱼', u: '1001' },
-    { n: 'Saki', u: '__self__', self: true },
-    { n: '大肥鱼', u: '1001' },
-  ]);
-  check(b.botOnlyChain(G) === true, '★★ 两个机器人一来一回 4 条 → 判"该停"');
+  // ⚠️⚠️ 2026-10-06 改：**4 条不再命中**。用户把它定死了：
+  //   「也不是一定要满多少条，最好是机器人自己说了想停下来再停」「就是发出足够多条
+  //    在提示词里说该结束了，机器人自己判定自己该说的话说完了没有，自己决定结束」
+  //   ⇒ 条数只用来决定"**什么时候提醒她该收场**"，停不停由她自己在那一轮里判断。
+  put([...mine(2), ...peer(2)]);
+  check(b.botOnlyChain(G) === false, '★ 才两个来回（4 条）→ 还不到提醒她收场的时候');
+
+  put([...mine(5), ...peer(5)]);
+  check(b.botOnlyChain(G) === true, '★★ 五个来回（10 条）→ 命中（该在提示词里提醒她了）');
+
+  put([...mine(3), ...peer(3)], 40000);
+  check(b.botOnlyChain(G) === true, '★ 条数不够但跨了 4 分钟 → 也命中');
 
   put([
     { n: 'Saki', u: '__self__', self: true },
     { n: '大肥鱼', u: '1001' },
     { n: '<主人>', u: '10000001' },
-    { n: 'Saki', u: '__self__', self: true },
+    ...mine(4),
+    ...peer(4),
   ]);
-  check(b.botOnlyChain(G) === false, '★★ 真人插过一句 → 立刻恢复（有人来就继续）');
+  check(b.botOnlyChain(G) === false, '★★ 窗口里有真人 → 立刻为假（有人来就继续）');
 
-  put([
-    { n: 'Saki', u: '__self__', self: true },
-    { n: 'Saki', u: '__self__', self: true },
-    { n: 'Saki', u: '__self__', self: true },
-    { n: 'Saki', u: '__self__', self: true },
-  ]);
+  put(mine(12));
   check(b.botOnlyChain(G) === false, '★ 只有她自己连发 → 不算"互相聊"（那是自言自语）');
 
-  put([
-    { n: 'Saki', u: '__self__', self: true },
-    { n: '大肥鱼', u: '1001' },
-  ]);
-  check(b.botOnlyChain(G) === false, '★ 才一个来回 → 还没到停的时候');
+  // 硬闸：刷到离谱才由**代码**直接收尾兜底
+  put([...mine(12), ...peer(12)]);
+  check(b.botChainHard(G) === true, '★★ 刷到 24 条 → 硬闸（不等她自己收了，代码收尾）');
+  put([...mine(5), ...peer(5)]);
+  check(b.botChainHard(G) === false, '★ 10 条只在软阈值里，还没到硬闸');
 
-  put([
-    { n: 'Saki', u: '__self__', self: true },
-    { n: '大肥鱼', u: '1001' },
-    { n: '路人', u: '999999' },
-    { n: '大肥鱼', u: '1001' },
-  ]);
-  check(b.botOnlyChain(G) === false, '★ 池外的人说话 → 当真人，不拦');
+  // ★ 软命中时必须**真的把那句"该结束了"注入提示词**
+  put([...mine(5), ...peer(5)]);
+  const evG = { message_type: 'group', group_id: G, user_id: '1001' };
+  const sys = b.buildSystemPrompt('', evG, null, '');
+  check(sys.includes('只有你们两个机器人在说话'), '★★ 提示词注入了"只剩你们两个"那一段');
+  check(/想说的话说完了没有/.test(sys), '★★ 而且是让她**自己判断**说完了没有');
+  check(/收场/.test(sys), '★ 给了"收场"这个动作（不是让代码替她说）');
+
+  put(mine(1));
+  const sys2 = b.buildSystemPrompt('', evG, null, '');
+  check(!sys2.includes('只有你们两个机器人在说话'), '★ 没互刷时一个字都不加（不影响日常语气）');
 
   recent.clear(G);
+}
+
+console.log('\n【5】★ 认她自己说的"收场话"（决定权在她，代码只负责跟上）');
+{
+  const { Bot } = await import('../src/bot.js');
+  const b = new Bot();
+  for (const t of ['行，不跟你贫了', '我忙去了', '先这样吧', '到此为止', '不聊了，拜拜', '那我先走了']) {
+    check(b.isFarewell(t) === true, `认：${t}`);
+  }
+  // ⚠️ 误认 = 她被动进冷却（之后同类说话她不理）⇒ 这两条护栏比"认得出"更重要
+  check(b.isFarewell('他走了') === false, '★ 不认「他走了」（正则锚在"我"上，别误伤）');
+  check(b.isFarewell('这个多少钱') === false, '不认：这句只是普通提问');
+  check(
+    b.isFarewell('我跟你说啊，昨天那个客人从早上一直站到晚上，走的时候还回头跟我拜拜了一下，我当时都没反应过来') === false,
+    '★ 长段落不算收场（≤40 字那条护栏；「不聊了」「拜拜」都在里面，但那是长段落）',
+  );
 }
 
 try {

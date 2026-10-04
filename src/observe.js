@@ -37,8 +37,8 @@
  * | 性格不断细化 | 压缩提示词里**硬性要求**；代码再加一道**条数不许减少**的校验（减少了就拒绝写入） |
  * | 好感度不能修改 | 好感度**根本不在这里** —— 它在 `src/affinity.js` + `state/affinity.json`，这个模块**一个字都不碰**（连提示词里都不提它） |
  */
-import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, rmSync } from 'node:fs';
+import { join, dirname, basename } from 'node:path';
 import { config, ROOT, KNOWLEDGE_DIR } from './config.js';
 import { log } from './log.js';
 import { reloadKnowledge, groupFileName } from './knowledge.js';
@@ -705,23 +705,38 @@ function writeUndo(list) {
   }
 }
 
-/** 记一份「改之前长什么样」。⚠️ 只在 patchFile 成功之后调用 */
-function pushUndo({ file, gid, before, after }) {
+/** 记一份「改之前长什么样」。⚠️ 只在写成功之后调用 */
+function pushUndo({ file, gid, before, after, kind = 'observe', title = '', entries }) {
   const list = readUndo();
   list.push({
     at: Date.now(),
+    // ⚠️ 2026-10-06 加（用户：「把撤回扩展到教学」）：**两类快照的还原方式不一样** ——
+    //    · `observe`（群记忆）→ 写的是**自动观察区**，还原时只换标记区之间
+    //    · `teach`（教学）→ 写的是 `server-basic.md` 那种**散文式全局知识库**，
+    //      没有标记区 ⇒ 必须**整文件写回**（见 `restoreFile`）
+    //    所以每条快照都得记下自己是哪一类，否则撤回时会用错还原方式、把文件写坏。
+    kind: String(kind ?? 'observe'),
+    // 教学的主题名 —— 撤回后要能告诉她"撤的是哪一条"（观察快照没这个，空串）
+    title: String(title ?? ''),
     file: String(file ?? ''),
     gid: String(gid ?? ''),
-    before: String(before ?? ''),
+    // ⚠️ `before` 允许是 `null`：表示**这个文件当时还不存在**（教学第一次给某个群
+    //    建库就会这样）。撤回时要把文件**删掉**，而不是写回一份骨架 ——
+    //    不然会凭空多出一个之前没有的文件。
+    before: before === null ? null : String(before ?? ''),
     after: String(after ?? ''),
     // ⚠️ 只用来告诉她"撤了几条" ⇒ 必须算**新增**的条数（`after - before`），
     //    不是 `after` 里总共有几条 —— 第一版算的是总数，测试里报成 3（实际新增 2）。
     //    改写的那些（差值 0）就报"那次记的内容删了"，不硬凑数字。
-    entries: Math.max(
-      0,
-      (String(after ?? '').match(/^- /gm) ?? []).length -
-        (String(before ?? '').match(/^- /gm) ?? []).length,
-    ),
+    // ⚠️ 教学快照自己传 `entries`（它按 `## 标题` 组织，数不出 `- ` 行）。
+    entries:
+      entries !== undefined
+        ? Math.max(0, Number(entries) || 0)
+        : Math.max(
+            0,
+            (String(after ?? '').match(/^- /gm) ?? []).length -
+              (String(before ?? '').match(/^- /gm) ?? []).length,
+          ),
   });
   writeUndo(list);
 }
@@ -733,10 +748,68 @@ export function undoCount(groupId = '') {
 }
 
 /**
- * 撤回**这个群最近一次**自动观察写入。
+ * 把**整份文件**写回去 —— 撤回教学用（2026-10-06 加）。
+ *
+ * ⚠️⚠️ 为什么**不能复用 `patchFile`**：那个函数只认**自动观察区**
+ *    （`<!-- AUTO-OBSERVE:BEGIN -->`），文件里没有那对标记时它会**自己包一个**
+ *    再写进去 ⇒ `server-basic.md` 那种散文式知识库会被套上一层标记区，
+ *    内容也会被挪位。教学写的恰恰就是那几份 ⇒ 必须走这条**整文件还原**。
+ *
+ * @returns {boolean} 写成功没有
+ */
+function restoreFile(file, content) {
+  try {
+    backupKnowledge(file);
+  } catch (e) {
+    log.debug(`[观察] 还原前备份失败（继续写）：${e.message}`);
+  }
+  try {
+    mkdirSync(dirname(file), { recursive: true });
+    const tmp = `${file}.tmp`;
+    writeFileSync(tmp, String(content ?? ''), 'utf8');
+    renameSync(tmp, file);
+    return true;
+  } catch (e) {
+    log.warn(`[观察] 还原 ${basename(file)} 失败：${e.message}`);
+    return false;
+  }
+}
+
+/**
+ * 记一份「**教学**之前长什么样」—— 让「撤回」也能撤掉**教给她的知识**。
+ *
+ * ⚠️ 2026-10-06 加（用户原话：「把撤回扩展到教学」）。
+ *    以前只有**自动观察**（群记忆）能撤：教学写的是 `server-basic.md` /
+ *    `server-rules.md` / `server-world.md` / `server-people.md` 那几份**全局知识库**
+ *    （`learned.js` 的 `upsertIntoFile`），**压根没有退路** ——
+ *    教错一条只能去界面上手改，`/撤回` 还会回一句"没有什么可撤的诶"。
+ *
+ * ⚠️ 调用点在 `learned.js` 的 `learn()` —— **写成功之后**才记（写失败就不该能撤）。
+ * ⚠️ `gid` 记的是**教学发生的那次群聊**：教学写进的是全局库，但"撤回最近一次"
+ *    是按群聊会话算的，不然 A 群撤回会把 B 群刚教的东西抹掉。
+ *
+ * @param {{file:string, gid:string, before:string|null, after:string, title?:string, added?:boolean}} p
+ *   `before` = 写之前的**整份文件内容**；传 `null` 表示"这个文件当时还不存在"。
+ */
+export function pushTeachUndo({ file, gid, before, after, title = '', added = false }) {
+  pushUndo({
+    file,
+    gid,
+    before,
+    after,
+    kind: 'teach',
+    title,
+    // 教学一次只动**一条**（新增 1 条 / 覆盖 0 条），不像观察那样一写好几行
+    entries: added ? 1 : 0,
+  });
+}
+
+/**
+ * 撤回**这个群最近一次**写入 —— 群记忆（自动观察）和教学**共用同一条队列**，
+ * 所以"撤回"永远撤的是**最近发生的那一次**，不管它是哪种。
  *
  * @param {string} groupId 群号（'dm:<QQ>' 也认 —— 私聊记忆同一个机制）
- * @returns {{ok:boolean, reason?:string, at?:number, removed?:number, preview?:string[]}}
+ * @returns {{ok:boolean, kind?:string, title?:string, reason?:string, at?:number, removed?:number, preview?:string[]}}
  */
 export function undoLast(groupId = '') {
   const gid = String(groupId ?? '');
@@ -744,8 +817,27 @@ export function undoLast(groupId = '') {
   for (let i = list.length - 1; i >= 0; i--) {
     const s = list[i];
     if (gid && String(s.gid) !== gid) continue;
-    // 把那个文件的自动观察区**写回改动前的内容**
-    if (!patchFile(s.before, s.file)) {
+    const kind = String(s.kind ?? 'observe');
+    // ⚠️ 两类快照**还原方式不同**（见 `restoreFile` 上面那段）：
+    //    · 'teach' → 整文件写回；`before === null` = 文件本来不存在 → 删掉它
+    //    · 'observe' → 只换自动观察区之间（老行为，没动）
+    let restored;
+    if (kind === 'teach') {
+      if (s.before === null) {
+        try {
+          rmSync(s.file, { force: true });
+          restored = true;
+        } catch (e) {
+          log.warn(`[观察] 撤教学时删文件失败：${e.message}`);
+          restored = false;
+        }
+      } else {
+        restored = restoreFile(s.file, s.before);
+      }
+    } else {
+      restored = patchFile(s.before, s.file);
+    }
+    if (!restored) {
       return { ok: false, reason: '写不回去（文件被占用或者没有权限）' };
     }
     list.splice(i, 1);
@@ -757,12 +849,24 @@ export function undoLast(groupId = '') {
     } catch (e) {
       log.warn(`[观察] 撤回后重载知识失败（重启才生效）：${e.message}`);
     }
-    const preview = String(s.after ?? '')
-      .split('\n')
-      .filter((l) => l.trim().startsWith('- '))
-      .slice(0, 3)
-      .map((l) => l.trim().replace(/^- /, '').slice(0, 40));
-    return { ok: true, at: Number(s.at ?? 0), removed: Number(s.entries ?? 0) || 0, preview };
+    // ⚠️ 教学快照的 `after` 是**整份文件**，按 `- ` 行去筛会捞出一堆跟这次无关的旧条目
+    //    ⇒ 教学只报**主题名**（那个才是"撤了哪一条"）。
+    const preview =
+      kind === 'teach'
+        ? [String(s.title ?? '').trim()].filter(Boolean)
+        : String(s.after ?? '')
+            .split('\n')
+            .filter((l) => l.trim().startsWith('- '))
+            .slice(0, 3)
+            .map((l) => l.trim().replace(/^- /, '').slice(0, 40));
+    return {
+      ok: true,
+      kind,
+      title: String(s.title ?? ''),
+      at: Number(s.at ?? 0),
+      removed: Number(s.entries ?? 0) || 0,
+      preview,
+    };
   }
   return { ok: false, reason: gid ? '这个群还没有能撤的记录' : '没有能撤的记录' };
 }

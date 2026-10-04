@@ -46,9 +46,14 @@ const check = (ok, label, extra = '') => {
 let nextReply = '行吧，那个拼好饭又没了，我下次写你名字。';
 const seen = [];
 const server = createServer((req, res) => {
-  let body = '';
-  req.on('data', (c) => (body += c));
+  const __bodyChunks = [];
+  req.on('data', (c) => __bodyChunks.push(c));
   req.on('end', () => {
+    // ⚠️ 2026-10-06：**必须先把分片收成 Buffer 再一次性按 UTF-8 解码**。
+    //    写成 `body += c`（c 是 Buffer）会让**每个 TCP 分片各自解码** ——
+    //    中文正好跨分片时那个字就烂成 ��，断言里 includes 中文就永远匹配不上，
+    //    表现为**偶发假失败**（真凶抓到过一次：「在吗，��个事」）。
+    const body = Buffer.concat(__bodyChunks).toString('utf8');
     let j = {};
     try {
       j = JSON.parse(body);

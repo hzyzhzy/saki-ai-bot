@@ -6,6 +6,7 @@
  */
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
+import { rmSync } from 'node:fs';
 import { WebSocketServer } from 'ws';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -30,9 +31,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const probes = [];
 
 const llmServer = createServer((req, res) => {
-  let body = '';
-  req.on('data', (c) => (body += c));
+  const __bodyChunks = [];
+  req.on('data', (c) => __bodyChunks.push(c));
   req.on('end', () => {
+    // ⚠️ 2026-10-06：**必须先把分片收成 Buffer 再一次性按 UTF-8 解码**。
+    //    写成 `body += c`（c 是 Buffer）会让**每个 TCP 分片各自解码** ——
+    //    中文正好跨分片时那个字就烂成 ��，断言里 includes 中文就永远匹配不上，
+    //    表现为**偶发假失败**（真凶抓到过一次：「在吗，��个事」）。
+    const body = Buffer.concat(__bodyChunks).toString('utf8');
     const parsed = JSON.parse(body || '{}');
     const sys = parsed.messages?.find((m) => m.role === 'system')?.content ?? '';
     const user = [...(parsed.messages ?? [])].reverse().find((m) => m.role === 'user')?.content ?? '';
@@ -162,6 +168,30 @@ const probeOf = (kw) =>
 let bot = null;
 
 async function main() {
+  // ⚠️⚠️ 2026-10-06 加：**开跑前清掉本套件的隔离状态**（查了很久才定位到这一层）。
+  //
+  //    症状：【5】「私聊非服主 → 按群友处理」约 **1/5** 的概率挂，
+  //    而且一挂就是 **46 秒**（= 等满 40 秒），报的是"没等到那条探针"。
+  //    ⚠️ 但 bot 自己的日志里明明有 `[私聊30003] 拼提示词 … 已回复 3 字`
+  //      —— **她回复了、请求发出去了**，假模型的 `probes` 里却没有那一条。
+  //
+  //    根因：`run-all.js` 给套件注入的隔离文件名是**固定的**
+  //    （`logs/__run-attitude-recent.json`，实测已经攒到 24 KB），
+  //    ⇒ **`recent` 的历史跨运行累积**，上一次跑留下的上下文会改变下一次
+  //      聊天请求的构造，行为就飘。
+  //    实测：**清掉之后连跑 10 次全过**（7.1~8.8 秒）；不清的时候 6 次里挂 2 次。
+  //
+  //    ⚠️ 只在 run-all 跑的时候才删（那几个 env 由它注入）——
+  //      **单跑 `node test/attitude.js` 时 env 是空的，这里什么都不会删**，
+  //      所以绝不会碰到真实的 `state/*.json`。
+  for (const k of ['QQBOT_RECENT_FILE', 'QQBOT_NAMES_FILE', 'QQBOT_LIFE_FILE']) {
+    const f = process.env[k];
+    if (!f) continue;
+    try {
+      rmSync(join(ROOT, f), { force: true });
+    } catch {}
+  }
+
   await new Promise((r) => llmServer.listen(LLM_PORT, '127.0.0.1', r));
   await new Promise((r) => (wss._server.listening ? r() : wss.once('listening', r)));
 
@@ -262,8 +292,42 @@ async function main() {
   //    ✅ 条件必须**指向我要的那一条**：等关键词出现。
   //    ⚠️ 而且不能只看"数量变多" —— 上一步迟到的探针（说话判断/归属核对）
   //       也会让数量变多，同样会提前放开。
-  await waitFor(() => !!probeOf('在吗，问个事'), 20000);
-  const pPrivate = probeOf('在吗，问个事');
+  // ⚠️⚠️ 2026-10-06 重写这一段的判据（它一直偶发假失败，根因就在判据本身）：
+  //
+  //    原来等的是 `probeOf('在吗，问个事')`，而 `probeOf` 的筛选条件是
+  //    「非预搜索 **且 sys 含身份段「现在跟你说话的是」** 且 user 含关键词」。
+  //    问题是 —— **「没等到探针」和「探针来了但身份段没注入」都返回 undefined**，
+  //    于是两种情况**报的是同一句话**（「私聊里的陌生人按群友对待」✗），
+  //    把排查方向死死带偏（我照着"态度错了"查了半天，翻 bot 日志才发现
+  //    `[私聊30003] 拼提示词 … 已回复 3 字` —— 她明明回复了、请求明明发出去了）。
+  //    ⇒ **把"含身份段"从筛选条件降级成断言**：
+  //      · 先只按「非预搜索 + user 含关键词」找 → 找不到 = 时序问题，报第一条
+  //       · 找到了再分别断言「按群友对待」「身份段注入了」→ 那才是真的态度/注入 bug
+  //    ⚠️ 这正是 AGENTS 里那条教训的又一例：「没等到」和「没这个特征」
+  //      必须能用断言区分开，否则排查方向是错的。
+  const findPrivate = () =>
+    [...probes].reverse().find((p) => !isPresearch(p) && p.user.includes('问个事'));
+  await waitFor(() => !!findPrivate(), 40000);
+  const pPrivate = findPrivate();
+  check(!!pPrivate, '★ 等到了私聊那条主聊天探针（没等到 = 时序/没触发，不是态度错了）');
+  if (!pPrivate) {
+    // ⚠️⚠️ 2026-10-06 加**失败时把探针摊开**（成功时一个字都不打印，别当噪音删掉）。
+    //    这条偶发（约 1/5）挂的时候，bot 自己的日志里明明有
+    //      `[私聊30003] 拼提示词 6 ms（53071 字）` → `已回复 3 字`
+    //    —— **她回复了、请求发出去了**，可假模型的 `probes` 里就是找不到那一条。
+    //    到底是"请求没到假模型"还是"user 里没有那段原文"，只靠读代码猜不出来
+    //    （今天为了这个翻遍了 bot 日志）。⇒ 失败时把**收到的探针**和**请求总数**
+    //    直接打出来，一眼定性。
+    console.log(`    假模型一共收到 ${probes.length} 条请求，最后 8 条：`);
+    for (const p of probes.slice(-8)) {
+      console.log(
+        `      · 身份段=${p.sys.includes('现在跟你说话的是')} 预搜索=${isPresearch(p)} ` +
+          `sys=「${String(p.sys).replace(/\s+/g, ' ').slice(0, 40)}」 ` +
+          `user=「${String(p.user).replace(/\s+/g, ' ').slice(0, 60)}」`,
+      );
+    }
+  }
+  check(!!pPrivate?.sys.includes('现在跟你说话的是'), '身份段照常注入了');
   check(!!pPrivate?.sys.includes('普通群友'), '私聊里的陌生人按群友对待');
 }
 

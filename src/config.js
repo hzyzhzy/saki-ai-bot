@@ -212,6 +212,22 @@ const DEFAULTS = {
   //    低于下面档位就抱怨一次（按档位只报一次，落盘 state/balance.json）
   balance: {
     enable: true,
+    // ⚠️ 2026-10-06（用户：「群友用的中转站的 api，给中转站的余额接入适配一下」）：
+    //    余额接口**按服务商分好几种**，以前这里写死 DeepSeek 的 `/user/balance`，
+    //    群友换中转站之后永远查不出来 ⇒ 现在做成适配层（见 `src/balance.js`）。
+    //      auto（默认）        → 挨个试 deepseek → newapi → openai-billing，谁通用谁
+    //      deepseek           → `/user/balance`（官方，老行为）
+    //      newapi             → `/api/user/self`（new-api / one-api 面板，÷500000 = 美元）
+    //      openai-billing     → `/dashboard/billing/*`（很多中转站兼容）
+    //      custom             → 自己填 url / path / divide
+    //    ⚠️ `newapi` 要的是**面板访问令牌**（不是 sk- key），填在 `token` 里。
+    //    ⚠️ 换成中转站后币种多半是**美元**，`low` / `critical` 那两个阈值要自己按币种调。
+    provider: 'auto',
+    url: '',      // 余额查询地址；留空 = 沿用 llm.baseURL
+    token: '',    // 余额查询专用令牌；留空 = 沿用 llm.apiKey
+    path: '',     // 仅 custom：从返回 JSON 里取数值的路径（如 data.quota）
+    divide: 1,    // 仅 custom：取到的数值除以它才是金额
+    currency: '', // 强制币种（留空 = 按 provider 自己的）
     checkIntervalMs: 1800000, // 半小时查一次
     low: 5,                   // 低于 5 元抱怨一次
     critical: 2,              // 低于 2 元再抱怨一次
@@ -429,6 +445,20 @@ const DEFAULTS = {
     requeueMax: 2,
     enable: false,
     group: '',
+    // ⚠️ 2026-10-06 加（用户：「我觉得道别太快了」）—— 两个机器人互刷到什么程度算
+    //    「聊够了、该收尾」（见 `bot.js` 的 `botOnlyChain()`）。三条一起看：
+    //      botChainWindow      取最近几条发言来判断（默认 14）
+    //      botChainMin         机器人发言加起来够几条（默认 10 = 五个来回）
+    //      botChainMinSpanMs   或者：窗口首尾跨够久（默认 3 分钟）
+    //    ⚠️ 后两条是**或**关系：快刷靠条数、慢聊靠时间，设成"与"会有一头永远停不下来。
+    //    ⚠️ 窗口必须大于 botChainMin，否则条数那条永远够不到。
+    //    ⚠️ 原来是 8 / 4（两个来回就道别），实测 4 分钟里道别 2 次 ⇒ 太急。
+    botChainWindow: 14,
+    botChainMin: 10,
+    botChainMinSpanMs: 180000,
+    botChainHardMin: 24,
+    botChainHardSpanMs: 600000,
+    botChainCooldownMs: 60000,
     question: {
       enable: true,
       keywords: [],

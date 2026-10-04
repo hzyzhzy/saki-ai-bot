@@ -88,48 +88,238 @@ function save() {
 }
 
 /**
- * 查一次余额（DeepSeek 的 `/user/balance`）。
+ * 余额查询的**适配层** —— 不同服务商的接口完全不一样（2026-10-06 加）。
  *
- * @returns {Promise<{ok:boolean, total?:number, currency?:string, error?:string}>}
+ * ## 用户原话
+ *   「**群友用的中转站的 api，给中转站的余额接入适配一下**」
+ *
+ * ## 为什么要改
+ *   以前这里**写死了 DeepSeek 的 `/user/balance`**。群友把 `llm.baseURL` 换成
+ *   中转站（new-api / one-api 那一类统称）之后，那个接口**不存在** ⇒
+ *   余额**永远查不出来**，表现是「工资」一直停在旧数字，或者启动日志里一路报错。
+ *
+ * ## 四种 provider（`balance.provider` 选，**默认 `auto` 挨个试**）
+ *
+ * | provider | 打哪个接口 | 取哪个字段 | 说明 |
+ * | --- | --- | --- | --- |
+ * | `deepseek` | `{base}/user/balance` | `balance_infos[0].total_balance` | 官方 DeepSeek（老行为，不变） |
+ * | `newapi` | `{base}/api/user/self` | `data.quota` ÷ 500000 | new-api / one-api / done-hub 等同源面板 |
+ * | `openai-billing` | `{base}/dashboard/billing/subscription` + `.../usage` | `hard_limit_usd` − `total_usage`÷100 | OpenAI 那套老计费接口，**很多中转站照着兼容** |
+ * | `custom` | `balance.url`（**完整地址**） | `balance.path` ÷ `balance.divide` | 上面都对不上时自己填 |
+ *
+ * ⚠️⚠️ **为什么默认是 `auto` 而不是让用户选**：这个项目的目标是「群友几乎零成本部署」——
+ *    他换了个中转站，不该还得先搞清自己是 new-api 还是 one-api。
+ *    所以默认**挨个试**，谁先成功用谁。余额查询是低频的（`checkIntervalMs`，默认半小时），
+ *    多打一两个请求完全无所谓。
+ *
+ * ⚠️ **令牌不一样**：`newapi` 的 `/api/user/self` 要的是**面板里的访问令牌**
+ *    （`config.balance.token`），**不是** `sk-` 开头那个调用 key ——
+ *    官方文档也是这么分的。只配了 sk- key 的话，`auto` 会自动跳过 newapi、
+ *    去试 `openai-billing`（那个认 sk- key）。
+ *
+ * ⚠️⚠️ **单位/币种会变**（`low` / `critical` 那两个阈值是按**元**定的）：
+ *    · deepseek → 返回什么币种就是什么（一般是 CNY）
+ *    · newapi / openai-billing → **美元**
+ *    ⇒ 换成中转站之后，`balance.low: 5` 的含义从「5 元」变成了「5 美元」，
+ *      **阈值要自己按币种调**（本模块**不替你按汇率换算** —— 汇率天天变，猜不如不猜）。
+ *      想固定币种就写 `balance.currency`。
+ */
+
+/** 取 JSON 里 `data.quota` 这种点分路径的值（`custom` 用） */
+function pickPath(obj, path) {
+  let cur = obj;
+  for (const k of String(path ?? '')
+    .split('.')
+    .map((s) => s.trim())
+    .filter(Boolean)) {
+    if (cur == null) return undefined;
+    cur = cur[k];
+  }
+  return cur;
+}
+
+/** 统一发一个带 Bearer 的 GET，返回解析好的 JSON（失败就 throw，由各 provider 兜） */
+async function getJson(url, token, timeoutMs) {
+  const headers = token ? { Authorization: `Bearer ${token}` } : {};
+  const r = await fetch(url, {
+    headers,
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return await r.json();
+}
+
+/**
+ * 四个 provider。每个 `run(ctx)` 返回 `{total, currency}` 或 `throw`。
+ * ⚠️ `needTok: true` = 没有令牌就直接跳过（别去撞 401，那会在日志里刷无意义的错）。
+ */
+const PROVIDERS = {
+  deepseek: {
+    label: 'DeepSeek /user/balance',
+    needTok: true,
+    currency: 'CNY',
+    async run({ base, token, timeoutMs }) {
+      const j = await getJson(`${base}/user/balance`, token, timeoutMs);
+      const info = Array.isArray(j?.balance_infos) ? j.balance_infos[0] : null;
+      if (!info) throw new Error('返回里没有 balance_infos');
+      const total = Number(info.total_balance);
+      if (!Number.isFinite(total)) throw new Error('total_balance 不是数字');
+      return { total, currency: String(info.currency ?? 'CNY') };
+    },
+  },
+  newapi: {
+    label: 'new-api / one-api /api/user/self',
+    // ⚠️ 要**面板访问令牌**，不是 sk- key ⇒ 没单独配就跳过（见文件头那段）
+    needTok: true,
+    tokenMustBePanel: true,
+    currency: 'USD',
+    async run({ base, token, timeoutMs }) {
+      const j = await getJson(`${base}/api/user/self`, token, timeoutMs);
+      // ⚠️ new-api 把额度放在 `data.quota`；容错认几种常见写法，别因为少一层就整个废掉
+      const d = j?.data ?? j ?? {};
+      const raw = d.quota ?? d.remain_quota ?? d.remainQuota ?? d.remain;
+      const q = Number(raw);
+      if (!Number.isFinite(q)) throw new Error('返回里没有 quota');
+      // ⚠️ **500000 quota = 1 美元**（one-api 系的老约定，new-api 沿用）
+      return { total: q / 500000, currency: 'USD' };
+    },
+  },
+  'openai-billing': {
+    label: 'OpenAI 式 /dashboard/billing',
+    needTok: true,
+    currency: 'USD',
+    async run({ base, token, timeoutMs }) {
+      const sub = await getJson(`${base}/dashboard/billing/subscription`, token, timeoutMs);
+      const limit = Number(sub?.hard_limit_usd ?? sub?.soft_limit_usd ?? sub?.system_hard_limit_usd);
+      if (!Number.isFinite(limit)) throw new Error('subscription 里没有 hard_limit_usd');
+      // ⚠️ 用量接口要日期区间 —— 给「本月 1 号 ~ 今天」，和面板上的口径一致
+      const now = new Date();
+      const start = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
+      const end = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(
+        now.getDate(),
+      ).padStart(2, '0')}`;
+      const use = await getJson(
+        `${base}/dashboard/billing/usage?start_date=${start}&end_date=${end}`,
+        token,
+        timeoutMs,
+      );
+      const cents = Number(use?.total_usage);
+      if (!Number.isFinite(cents)) throw new Error('usage 里没有 total_usage');
+      // ⚠️ `total_usage` 的单位是**美分** ⇒ ÷100 得美元
+      return { total: limit - cents / 100, currency: 'USD' };
+    },
+  },
+  custom: {
+    label: '自定义地址',
+    needTok: false,
+    currency: '',
+    async run({ cfg, token, timeoutMs }) {
+      const url = String(cfg?.url ?? '').trim();
+      if (!url) throw new Error('custom 必须配 balance.url');
+      const j = await getJson(url, token, timeoutMs);
+      const path = String(cfg?.path ?? '').trim();
+      const raw = path ? pickPath(j, path) : j;
+      const n = Number(raw);
+      if (!Number.isFinite(n)) throw new Error(`按路径「${path || '(整个返回)'}」取到的不是数字`);
+      const div = Number(cfg?.divide);
+      const total = Number.isFinite(div) && div > 0 ? n / div : n;
+      return { total, currency: String(cfg?.currency ?? '') };
+    },
+  },
+};
+
+/** `auto` 的尝试顺序：官方的排前面（命中率最高、请求最少），自定义永远最后（要用户填东西） */
+const AUTO_ORDER = ['deepseek', 'newapi', 'openai-billing', 'custom'];
+
+/**
+ * 查一次余额。
+ *
+ * ⚠️ 原来这里写死 DeepSeek 的 `/user/balance` —— 见上面那段长注释（用户要求适配中转站）。
+ *    `provider: deepseek` 的行为和以前**一字不差**（老用户的配置不用动）。
+ *
+ * @returns {Promise<{ok:boolean, total?:number, currency?:string, via?:string, error?:string}>}
  */
 export async function fetchBalance() {
   const llm = config.llm ?? {};
-  if (!llm.apiKey) return { ok: false, error: '没配 apiKey' };
-  const base = String(llm.baseURL ?? 'https://api.deepseek.com/v1').replace(/\/v1\/?$/, '');
-  try {
-    const r = await fetch(`${base}/user/balance`, {
-      headers: { Authorization: `Bearer ${llm.apiKey}` },
-      signal: AbortSignal.timeout(Number(config.balance?.timeoutMs) > 0 ? Number(config.balance.timeoutMs) : 15000),
-    });
-    if (!r.ok) return { ok: false, error: `HTTP ${r.status}` };
-    const j = await r.json();
-    const info = Array.isArray(j?.balance_infos) ? j.balance_infos[0] : null;
-    if (!info) return { ok: false, error: '返回里没有 balance_infos' };
-    const total = Number(info.total_balance);
-    if (!Number.isFinite(total)) return { ok: false, error: 'total_balance 不是数字' };
-    state.last = { balance: total, currency: String(info.currency ?? 'CNY'), at: Date.now() };
-    // ⚠️ 余额**涨回到档位以上**就把"抱怨过"重置 ——
-    //    这样充值之后再掉下来，它会再抱怨一次（合理的）
-    for (const t of tiers()) {
-      if (total >= t.below) state.complained[t.key] = false;
-    }
-    // ⚠️ **按群那些标记也要一起重置**（2026-09-15 晚加）——
-    //    只重置全局那份的话，充值之后再掉下来，各个群反而不会提醒了。
-    for (const gid of Object.keys(state.complainedByGroup ?? {})) {
-      for (const t of tiers()) {
-        if (total >= t.below) state.complainedByGroup[gid][t.key] = false;
-      }
-    }
-    save();
-    return { ok: true, total, currency: String(info.currency ?? 'CNY') };
-  } catch (e) {
-    return { ok: false, error: e.message };
+  const bcfg = config.balance ?? {};
+  const url0 = String(bcfg.url || llm.baseURL || 'https://api.deepseek.com/v1').trim();
+  const base = url0.replace(/\/+$/, '').replace(/\/v1$/, '');
+  const token = String(bcfg.token || llm.apiKey || '').trim();
+  const timeoutMs = Number(bcfg.timeoutMs) > 0 ? Number(bcfg.timeoutMs) : 15000;
+  /** `auto` 时若用户**没单独配面板令牌**，`newapi` 那条就先跳过（sk- key 打它必 401） */
+  const hasPanelToken = Boolean(String(bcfg.token ?? '').trim());
+
+  const want = String(bcfg.provider ?? 'auto').trim().toLowerCase() || 'auto';
+  const names =
+    want === 'auto' ? AUTO_ORDER : Object.prototype.hasOwnProperty.call(PROVIDERS, want) ? [want] : null;
+  if (!names) {
+    return { ok: false, error: `不认识的 balance.provider「${want}」（可选 auto/deepseek/newapi/openai-billing/custom）` };
   }
+  if (!token && names.some((n) => PROVIDERS[n]?.needTok)) {
+    // ⚠️ 令牌一个都没有就别去撞 401 了 —— 老行为就是这么判的
+    return { ok: false, error: '没配 apiKey' };
+  }
+
+  const tried = [];
+  for (const name of names) {
+    const p = PROVIDERS[name];
+    if (p.needTok && !token) continue;
+    // ⚠️ 只在 `auto` 里跳过 newapi：用户**明确指名** newapi 时，就算只有 sk- key 也让他试
+    //    （有些面板确实吃 sk- key），失败时报错给他看，别静默换别的 provider
+    if (name === 'newapi' && p.tokenMustBePanel && want === 'auto' && !hasPanelToken) {
+      tried.push('newapi（没配 balance.token，跳过）');
+      continue;
+    }
+    try {
+      const r = await p.run({ base, token, timeoutMs, cfg: bcfg });
+      if (!Number.isFinite(r.total)) throw new Error('拿到的余额不是数字');
+      const currency = String(bcfg.currency || r.currency || 'CNY');
+      const total = r.total;
+      state.last = { balance: total, currency, at: Date.now(), via: name };
+      // ⚠️ 余额**涨回到档位以上**就把"抱怨过"重置 ——
+      //    这样充值之后再掉下来，它会再抱怨一次（合理的）
+      for (const t of tiers()) {
+        if (total >= t.below) state.complained[t.key] = false;
+      }
+      // ⚠️ **按群那些标记也要一起重置**（2026-09-15 晚加）——
+      //    只重置全局那份的话，充值之后再掉下来，各个群反而不会提醒了。
+      for (const gid of Object.keys(state.complainedByGroup ?? {})) {
+        for (const t of tiers()) {
+          if (total >= t.below) state.complainedByGroup[gid][t.key] = false;
+        }
+      }
+      save();
+      if (want === 'auto' && name !== AUTO_ORDER[0]) {
+        // ⚠️ 自动探测换了一家 → 记一条 info，排障时一眼看得出"它认的是哪个接口"
+        log.info(`[余额] 自动识别用「${p.label}」查到了：${total} ${currency}`);
+      }
+      return { ok: true, total, currency, via: name };
+    } catch (e) {
+      tried.push(`${name}：${e.message}`);
+    }
+  }
+  return { ok: false, error: `都试过了 —— ${tried.join('；')}` };
 }
 
 /** 上次查到的余额（可能是旧的） */
 export function lastBalance() {
   return state.last;
+}
+
+/**
+ * 当前已知的**币种**（查过一次余额才有）—— 给日志和文案用。
+ *
+ * ⚠️ 2026-10-06 加：换成中转站之后币种多半从 CNY 变成 USD，
+ *    而日志/启动提示里原来写死了「元」⇒ 会把美元读成元（看着像"还有 5 块钱"）。
+ *    查不到就返回空串，调用方自己决定怎么写（别在这里编一个默认值）。
+ */
+export function currencyNow() {
+  return String(state.last?.currency ?? '').trim();
+}
+
+/** 这个余额是从哪个接口查到的（`deepseek` / `newapi` / `openai-billing` / `custom`） */
+export function viaNow() {
+  return String(state.last?.via ?? '').trim();
 }
 
 /** 重新从盘上读状态（预览/测试用） */
@@ -217,7 +407,10 @@ export function balanceComplaint(opts = {}) {
       markDone(t);
       save();
       log.info(
-        `[工资] 余额 ${total} 元 < ${t.below} 元 → 提醒充值（${t.key}${gid ? `，群 ${gid}` : ''}）`,
+        // ⚠️ 2026-10-06：带上**币种** —— 余额可能是美元（中转站），
+        //    日志里写死「元」会让人对着数字猜错（`balance.provider` 见文件头那段）。
+        `[工资] 余额 ${total} ${currencyNow() || '（币种未知）'} < ${t.below} → ` +
+          `提醒充值（${t.key}${gid ? `，群 ${gid}` : ''}）`,
       );
       // ⚠️ **不再去掉名字**（2026-09-13 用户：「不能说"你"…应该说 <主人>」）——
       //    群里发的必须有指向，所以两档都带名字。
@@ -280,7 +473,9 @@ export function balanceNote() {
     '',
     feel,
     '',
-    '⚠️⚠️ **绝对不要报具体数字**（不要说「还有 X 元」「还剩 X 块」）。',
+    // ⚠️ 2026-10-06：币种可能不是元（中转站接口报美元）⇒ 举例把两种都写上，
+    //    免得她照着「元」这个字去换算（她本来就不该报数字，这里只是堵得更死）。
+    '⚠️⚠️ **绝对不要报具体数字**（不要说「还有 X 元」「还剩 X 块」「还有 X 美元」）。',
     '有人问「你还有多少钱」→ **别答数字**，含糊过去就行（「够花」「紧着呢」）。',
     '⚠️ 也别往技术上解释（不要说 API、token、系统）。',
     '',

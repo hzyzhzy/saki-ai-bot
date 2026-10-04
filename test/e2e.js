@@ -60,9 +60,12 @@ const llmCalls = [];
  */
 let streamGapMs = 0;
 const llmServer = createServer((req, res) => {
-  let body = '';
-  req.on('data', (c) => (body += c));
+  const __bodyChunks = [];
+  req.on('data', (c) => __bodyChunks.push(c));
   req.on('end', async () => {
+    // ⚠️ 2026-10-06：先把分片收成 Buffer 再一次性按 UTF-8 解码 ——`body += c`（c 是 Buffer）
+    //    会让每个 TCP 分片各自解码，中文跨分片就烂成 ��，断言 includes 中文时偶发假失败。
+    const body = Buffer.concat(__bodyChunks).toString('utf8');
     let parsed = {};
     try {
       parsed = JSON.parse(body);

@@ -3197,6 +3197,27 @@ export class Bot {
    * ⚠️ 模型生成失败就用兜底那几句：**必须真的收个尾** ——
    *    这个功能的意义就是"别一直发下去"，收尾失败等于白做。
    */
+  /**
+   * 她这句是不是**在收场**（2026-10-06 加）。
+   *
+   * ⚠️ 用户要的语义：「**机器人自己判定自己该说的话说完了没有，自己决定结束**」——
+   *    所以"停不停"由她在那一轮里**自己决定**；代码只负责**在她说出收场话之后跟上**
+   *    （记下"这个群收过尾了"，冷却期内同类说什么都不接）。
+   *
+   * ⚠️ 认的话要**宽**（她不会每次都说「拜拜」：「行，不跟你贫了」「我忙去了」「到此为止」
+   *    「先这样」「不聊了」…），但也不能太宽 —— **误认等于她被动进了冷却**
+   *    （之后同类说话她不理），所以宁可漏认几次（漏了还有硬闸兜底）。
+   *    两条护栏：① 只在**短句**里认（≤40 字，长段落不是在收场）；
+   *    ② 正则锚在"结束"的语义上，**不认光有「走了」**那种（「他走了」会误伤）。
+   */
+  isFarewell(text) {
+    const t = String(text ?? '').trim();
+    if (!t || t.length > 40) return false;
+    return /(拜拜|再见|回见|不聊了|不跟你(贫|聊|扯)|到此为止|先这样|我[^，。！？\n]{0,3}(忙|走|撤|溜)(去)?了|没空(陪你|跟你)|懒得(跟|和)你|不奉陪|说不过你)/.test(
+      t,
+    );
+  }
+
   async sayBotFarewell(gid) {
     const FALLBACK = ['行，不跟你贫了', '那我先忙去了', '拜拜，没空陪你', '行了，到此为止'];
     let text = '';
@@ -3235,48 +3256,91 @@ export class Bot {
   }
 
   /**
-   * 群里是不是**只剩两个机器人在互相说话**了（2026-10-05 用户要求）。
+   * 窗口里「谁在说话」的统计 —— `botOnlyChain` / `botChainHard` 共用。
+   * @returns {{mine:number, theirs:number, humans:number, span:number, total:number}}
+   */
+  botChainStats(groupId, win) {
+    const list = recent.speakers(groupId, win);
+    const peers = new Set(peersFor(groupId));
+    let mine = 0;
+    let theirs = 0;
+    let humans = 0;
+    const times = [];
+    for (const s of list) {
+      if (s.at) times.push(s.at);
+      if (s.self) mine++;
+      else if (peers.has(s.userId)) theirs++;
+      else humans++;
+    }
+    const span = times.length >= 2 ? Math.max(...times) - Math.min(...times) : 0;
+    const d = { mine, theirs, humans, span, total: list.length };
+    // ⚠️ 明细留给 `decide()` 打日志用（用户问过一次「为什么这会触发、也没人插话」，
+    //    当时日志里只有一行结论、看不到窗口里几条谁在说 —— 现在把数字打出来）。
+    this.botChainLast = d;
+    return d;
+  }
+
+  /**
+   * 群里是不是**只剩两个机器人在互相刷**了。
    *
-   * ## 用户原话
+   * ## 用户原话（两轮，第二轮把语义定死了）
    *   「加个机器人之间的对话到这种**他们自己觉得应该停的时候就停**吧，
-   *    要不然会像现在这样**一直发下去**」（截图：她和另一个同款机器人一来一回停不下来）
+   *    要不然会像现在这样**一直发下去**」
+   *   → 后来：「**我觉得道别太快了**」
+   *   → 最后：「**也不是一定要满多少条，最好是机器人自己说了想停下来再停**」
    *
-   * ## ⚠️ 为什么原来那道"连续接话链上限"没拦住
-   *   两个机器人**互相 @** ⇒ 而 `decide()` 里 `atMe` 是**明确召唤、直接放行** ⇒
-   *   `followUpChain` / `maxChain` 那套**整条被绕过** ✗
-   *   ⇒ 所以这里要一道**独立于链计数的**判据。
+   * ## ⚠️⚠️ 2026-10-06：这个判据的**用途变了**（别再把它当"该停"用）
+   *    · 以前：命中 ⇒ 代码**强制**让她说句收尾话 + 进冷却 —— 等于**替她决定停**。
+   *      实测太急（`bot-2026-10-05.log` 里 4 分钟道别 2 次）✗
+   *    · 现在：命中只表示**"该考虑收场了"** ⇒ 由 `buildSystemPrompt` 注入一段引导，
+   *      **让她自己决定**；她自己说出收场话之后代码才跟上记冷却
+   *      （见回复发出后那段 `looksLikeFarewell`）。
+   *    · 真的刷到离谱时的**兜底**是 `botChainHard()`，阈值高得多。
    *
-   * ## 判据（四个条件一起看）
-   *   取最近 `botChainWindow`（默认 8）条发言：
-   *   ① 机器人发言（她的 + 同类池里的）加起来 ≥ `botChainMin`（默认 4，即两个来回）；
-   *   ② **除机器人之外，一条真人发言都没有**；
-   *   ③ **两类都有**（既有她、也有同类）—— 只有她自己在说，那是"自言自语"，另一码事；
-   *   ④ ⚠️ **真人一插话就立刻解除**（条件 ② 自然保证）——
-   *      这正是"该停就停、有人来就继续"该有的语义。
+   * ## 判据（四条一起看）
+   *   取最近 `botChainWindow`（默认 14）条发言：
+   *   ① 除机器人外**一条真人发言都没有**；② 两边都说过（不是自言自语）；
+   *   ③ 并且够久了 —— 满足**任一条**：
+   *      · 机器人发言加起来 ≥ `botChainMin`（默认 10，五个来回）
+   *      · 窗口首尾两条的跨度 ≥ `botChainMinSpanMs`（默认 3 分钟）
+   *   ④ 真人在窗口里 ⇒ 立刻为假（"有人来就继续"）。
    *
-   * @returns {boolean} true = 这次**不该再回**（纯粹两个机器人在刷）
+   * ⚠️ ③ 里两条是**或**，故意如此：快刷（几秒十几条）靠条数收、
+   *    慢聊（几分钟才几条）靠时长收；设成"与"的话快刷那头永远停不下来。
    */
   botOnlyChain(groupId) {
     try {
-      const win = Math.max(4, Number(config.chat?.botChainWindow) || 8);
-      const min = Math.max(2, Number(config.chat?.botChainMin) || 4);
-      const list = recent.speakers(groupId, win);
-      if (list.length < 2) return false;
-      const peers = new Set(peersFor(groupId));
-      let mine = 0;
-      let theirs = 0;
-      let humans = 0;
-      for (const s of list) {
-        if (s.self) mine++;
-        else if (peers.has(s.userId)) theirs++;
-        else humans++;
-      }
-      if (humans > 0) return false; // 真人在场 → 一切照旧
-      if (mine + theirs < min) return false; // 还没聊够两个来回
-      if (!mine || !theirs) return false; // 只有一方在说，不算"互相聊"
-      return true;
+      const min = Math.max(2, Number(config.chat?.botChainMin) || 10);
+      const minSpan = Math.max(0, Number(config.chat?.botChainMinSpanMs) || 180000);
+      const win = Math.max(4, Number(config.chat?.botChainWindow) || 14);
+      const d = this.botChainStats(groupId, win);
+      if (d.humans > 0) return false; // 真人在场 → 一切照旧
+      if (!d.mine || !d.theirs) return false; // 只有一方在说，不算"互相聊"
+      return d.mine + d.theirs >= min || (minSpan > 0 && d.span >= minSpan);
     } catch (e) {
       log.debug(`[同类] 判断"只剩两个机器人在聊"失败（当没命中）：${e.message}`);
+      return false;
+    }
+  }
+
+  /**
+   * **硬闸**：真的刷到离谱了 ⇒ 不再等她自觉，代码直接收尾（兜底）。
+   *
+   * ⚠️ 2026-10-06 加：用户要「她自己说了想停再停」⇒ 正常路径不再强制，
+   *    但总得有个底 —— 万一她一直不肯收场，两个机器人就会无限刷下去。
+   *    阈值故意比 `botOnlyChain` 高很多（默认 24 条 / 10 分钟），
+   *    正常情况下她早该自己收了，轮不到这里。
+   */
+  botChainHard(groupId) {
+    try {
+      const hardMin = Math.max(4, Number(config.chat?.botChainHardMin) || 24);
+      const hardSpan = Math.max(0, Number(config.chat?.botChainHardSpanMs) || 600000);
+      const win = Math.max(hardMin, Number(config.chat?.botChainWindow) || 14);
+      const d = this.botChainStats(groupId, win);
+      if (d.humans > 0) return false;
+      if (!d.mine || !d.theirs) return false;
+      return d.mine + d.theirs >= hardMin || (hardSpan > 0 && d.span >= hardSpan);
+    } catch (e) {
       return false;
     }
   }
@@ -3439,15 +3503,27 @@ export class Bot {
         return null;
       }
 
-      // ② 还没在冷却里 + 判据命中（只剩两个机器人在聊） ⇒ **收个尾再停**
-      //    ⚠️ 用户纠正过：「**不是立即解除**，而是…说对话要停了，说完拜拜之类的话再停」
-      if (!cooling && this.botOnlyChain(gid0)) {
+      // ② ⚠️⚠️ 2026-10-06 改（用户原话：「**就是发出足够多条在提示词里说该结束了，
+      //    机器人自己判定自己该说的话说完了没有，自己决定结束**」）：
+      //    **不再由代码替她收尾**。条数够了（`botOnlyChain` 命中）只在**提示词里**
+      //    告诉她"该结束了"（见 `buildSystemPrompt` 里那段），
+      //    **说什么、要不要收，由她自己在那一次回复里判断**。
+      //    ⇒ 所以这里**软命中什么都不做**，照常往下走、让她正常回。
+      //    ⚠️ 只有**硬闸**（真的刷到离谱了，默认 24 条 / 10 分钟，见 `botChainHard`）
+      //      才由代码直接收尾兜底 —— 否则万一她一直不肯收，两个机器人会无限刷下去。
+      if (!cooling && this.botChainHard(gid0)) {
         this.botChainClosed.set(gid0, Date.now());
-        log.info('[同类] 只剩两个机器人在互相说话 → 让她**说一句收尾的话**再停');
+        const d = this.botChainLast ?? {};
+        log.info(
+          `[同类] ⚠️ 硬闸：两个机器人已刷到 ${d.mine ?? '?'}+${d.theirs ?? '?'} 条 / ` +
+            `${Math.round((d.span ?? 0) / 1000)} 秒（真人 ${d.humans ?? 0} 条）` +
+            ' → 不等她自己收了，代码直接收尾',
+        );
         // ⚠️ 异步发，不阻塞这条（`decide` 是同步的，这里不能 await）
         this.sayBotFarewell(gid0).catch((e) => log.warn(`[同类] 收尾话失败：${e.message}`));
         return null;
       }
+      // ③ 真人说话 ⇒ **不碰标记**，照常往下走（"我插话就能跟她说话"）
       // ③ 真人说话 ⇒ **不碰标记**，照常往下走（"我插话就能跟她说话"）
     }
 
@@ -6039,6 +6115,14 @@ export class Bot {
         // 把自己的回复也记进群聊上下文 ——
         // 不然群友说「你刚才说的那句」时它不知道自己说了什么
         recent.rememberBot(event, stripMarkers(full).trim());
+        // ⚠️ 2026-10-06 加（用户：「**机器人自己判定自己该说的话说完了没有，自己决定结束**」）：
+        //    **她自己说出收场话** ⇒ 记下"这个群收过尾了"，之后冷却期内不接同类的话。
+        //    ⇒ 停不停由她决定，代码只负责**跟上**（不再由 `botOnlyChain` 替她决定收尾）。
+        if (event?.message_type === 'group' && this.isFarewell(stripMarkers(full))) {
+          this.botChainClosed ??= new Map();
+          this.botChainClosed.set(String(event.group_id), Date.now());
+          log.info('[同类] 她自己说了收场的话 → 记下"本群收过尾"，冷却期内不接同类');
+        }
         // ⚠️ 如果这句里带了「我去搜搜」这种**承诺**，就记下"欠着一件事" ——
         //    他接着说「快去搜」时要**真的去查**（2026-09-15 用户要求）。
         this.noteLookupPromise(event, stripMarkers(full).trim(), promptText);
@@ -6567,6 +6651,11 @@ export class Bot {
       by: String(event.user_id),
       byName: event.sender?.card || event.sender?.nickname || String(event.user_id),
       where: who,
+      // ⚠️ 2026-10-06 加：撤回快照按**这次教学发生在哪个会话**归档 ——
+      //    「撤回最近一次」是按群聊算的，不传的话 A 群的"撤回"会把 B 群刚教的抹掉。
+      //    私聊用 `dm:<QQ>`（和 `recent` 那边同一个口径）。
+      groupId:
+        event.message_type === 'group' ? String(event.group_id) : `dm:${String(event.user_id)}`,
     });
 
     if (!res.ok) {
@@ -6728,7 +6817,12 @@ export class Bot {
   /** 「忘记：主题」 */
   async doForget(event, topic) {
     const who = event.message_type === 'group' ? `群${event.group_id}` : `私聊${event.user_id}`;
-    const res = forget(topic);
+    // ⚠️ 2026-10-06：带上会话号 —— 删条目也记撤回快照（删错了能退回来），
+    //    快照按会话归档，不然别的群一句"撤回"会把这边的删除还原掉。
+    const res = forget(topic, {
+      groupId:
+        event.message_type === 'group' ? String(event.group_id) : `dm:${String(event.user_id)}`,
+    });
     if (!res.ok) {
       await this.sendText(event, `没找到主题「${topic}」。想看我学到了什么，可以问「你学到了什么」。`, {
         reply: true,
@@ -7608,6 +7702,48 @@ export class Bot {
     //      他连戳三下本来就是几秒内的事，第 2、3 下必然落在 30 秒冷却里；
     //      要是被挡掉，反击提示词**永远没机会注入**，
     //      "戳三次换成反击语气"就等于没做（2026-09-30 实现时确认过这条链）。
+    // ⚠️⚠️ 2026-10-06 修（用户：「她经常分不清是谁戳过她，总是会说刚戳完就 XX，
+    //    但是其实不是那个人戳的」）—— **两个真因都在这一小段**：
+    //
+    //    ① **被冷却挡掉的戳，一个字都没留下**。他连戳三下、只有第一下回话，
+    //       后两下走的就是下面那个 `return` ⇒ 她上下文里"最近一次被戳"**还是第一个人**。
+    //       换了人更糟：A 戳（回话）→ B 戳（被冷却挡）→ B 说句别的 →
+    //       她上下文里最近被戳的是 A ⇒ **把 B 的戳算到 A 头上** ✗ 正是他报的现象。
+    //       ⇒ **"记一笔"和"回不回话"解耦**：记在冷却判断**前面**。
+    //
+    //    ② **名字是空串 ⇒ 上下文里只剩一串 QQ 号**。实测 `state/recent.json`
+    //       里戳那条存的是 `name:"123456789"` —— 戳一戳是 notice 事件、
+    //       **不带 `sender`**，于是 `recent.remember` 那行
+    //       `sender?.card || sender?.nickname || user_id` 一路退到了号码。
+    //       她认不出号码 ⇒ 只能拿"刚说过话的那个人"去猜 ⇒ **猜错** ✗
+    //       ⇒ 这里自己用 `names.label()` 把群名片查出来填进 `sender`。
+    //
+    //    ⚠️ 正文也从 `[戳一戳:捏了捏的脸]` 改成**人话**：方括号是她会**照着学**的
+    //       东西（真实踩过：她照上下文里的 `[图片]` 字面发出 `[图片]`，
+    //       见 `recent.js` 里那条长注释）。
+    //    ⚠️ message_id 必须**和下面 `fakeEvent` 用同一个** —— 差几毫秒，
+    //       `contextText()` 按 id 剔除"当前这一条"就会失效 ⇒ 她会看见两条一样的戳。
+    const pokeMsgId = payload.message_id ?? payload.notice_id ?? Date.now();
+    // ⚠️ 名字**算一次、两处共用**（`recent` 那条 + 下面 `fakeEvent.sender`）——
+    //    算两次容易出现"上下文里有名字、提示词里还是号码"这种前后不一致。
+    const pokedBy = names.label(uid, gid);
+    if (gid) {
+      recent.remember(
+        {
+          message_type: 'group',
+          group_id: gid,
+          user_id: uid,
+          message_id: pokeMsgId,
+          sender: { user_id: uid, nickname: pokedBy, card: pokedBy },
+        },
+        {
+          text: pokeText ? `（戳了你一下：${pokeText}）` : '（戳了你一下）',
+          isAtMe: true,
+          imageFiles: [],
+        },
+      );
+    }
+
     if (cooling && !wantRetort) {
       log.debug(
         `[戳一戳] ${uid} ${Math.round((Date.now() - last) / 1000)}s 前刚回过话` +
@@ -7636,9 +7772,17 @@ export class Bot {
         message_type: gid ? 'group' : 'private',
         group_id: gid || undefined,
         user_id: uid,
-        message_id: payload.message_id ?? payload.notice_id ?? Date.now(),
+        message_id: pokeMsgId,
         self_id: this.selfId,
-        sender: payload.sender ?? { user_id: uid, nickname: '' },
+        // ⚠️ 2026-10-06：名字**一定要填**。notice 事件不带 `sender`，原来那个
+        //    `payload.sender ?? { nickname: '' }` 会让提示词里只剩 QQ 号 ⇒
+        //    她认不出是谁戳的，只能拿"刚说过话的那个人"去猜（用户报的就是这个）。
+        sender: {
+          ...(payload.sender ?? {}),
+          user_id: uid,
+          nickname: payload.sender?.nickname || pokedBy,
+          card: payload.sender?.card || pokedBy,
+        },
         // ⚠️ 正文就是 `[戳一戳]`：它不是占位符（`stripPlaceholders` 不认它），
         //    所以 `realText` 非空 —— 不会掉进「只 @ 了它但没打字」那条路。
         //    什么意思由提示词里那段【他戳了你一下】解释（见 `buildSystemPrompt`）。
@@ -7662,15 +7806,9 @@ export class Bot {
             `${pokeText ? ` —— 动作文案「${pokeText}」` : '（协议端没给动作文案）'}` +
             `→ 交给她看着上下文回`,
         );
-        // ⚠️ 也记进「群里刚才在聊什么」（`recent`）—— 这样**后面**别人说话时，
-        //    上下文里能看到「他刚才戳过你」，她就不会又莫名其妙回一句「干嘛」。
-        if (gid) {
-          recent.remember(fakeEvent, {
-            text: pokeText ? `[戳一戳:${pokeText}]` : '[戳一戳]',
-            isAtMe: true,
-            imageFiles: [],
-          });
-        }
+        // ⚠️ 2026-10-06：**这里原来自己记一次 `recent.remember`** —— 已挪到上面
+        //    （冷却判断之前），因为被冷却挡掉的戳也必须留下痕迹（见那段长注释）。
+        //    同一件事只能记一处，否则连戳三下会在上下文里出现两三条一样的。
         this.scheduleHandle(fakeEvent, { poke: true }).catch((e) =>
           log.warn(`[戳一戳] 交给模型失败：${e.message}`),
         );
@@ -8544,6 +8682,21 @@ export class Bot {
         //    SnowLuma 随戳一戳事件一起给（见 `pokeBack` 里那段注释）。
         //    ⚠️ 取不到时**不许瞎编**，退回原来那句通用的"戳了你一下"。
         const pt = String(event._pokeText ?? '').trim();
+        // ⚠️⚠️ 2026-10-06 加（用户：「她经常分不清是谁戳过她，总是会说**刚戳完就 XX**，
+        //    但是其实**不是那个人戳的**」）：
+        //    **根因就在下面这两段提示词里** —— 通篇只说「**他**戳了你一下」，
+        //    从头到尾**没告诉她是谁**。而 notice（戳一戳）事件**不带 `sender`**，
+        //    原来 `fakeEvent.sender.nickname` 是空的 ⇒ 她只知道"有人戳了"，
+        //    于是拿【群里刚才在聊什么】里**最近说话的那个人**去填 ⇒ **认错人** ✗
+        //    ⇒ 这里把「谁戳的」**明说**（名字 + QQ 号），并**明确警告别安到刚说话的人头上**。
+        //    （`pokeBack` 那边已经在 `sender` 里填好群名片了，这是第二道。）
+        const pokerName = String(event.sender?.card || event.sender?.nickname || '').trim();
+        const pokerUid = String(event.user_id ?? '');
+        // ⚠️ 取名**不带 `**`** —— 星号由下面那行统一加，否则会嵌套成
+        //    `**戳你的是 **QQ 30001**（…）**` 这种不配对的写法（加粗会串到后面去）。
+        const whoPoked = pokerName
+          ? `「${pokerName}」（QQ ${pokerUid}）`
+          : `QQ ${pokerUid}（查不到他的群名片，就按这个号认人）`;
         // ⚠️⚠️ 2026-09-30（用户原话：「**那个黑祥下的戳一戳回应也得改，
         //    要有那种独立女性反击性骚扰的精神**」）：
         //    上面那一整套（「痒」「别捏脸」「别捏了嘛」、「反过来逗他」）是**客服小祥**的
@@ -8554,6 +8707,8 @@ export class Bot {
           parts.push(
             [
               '\n# 【他戳了你一下】',
+              '',
+              `⚠️ **戳你的是 ${whoPoked}** —— 就这一个人，**别安到别人头上**。`,
               '',
               pt
                 ? `⚠️ 这次进来的是 **QQ 的「戳一戳」**，他用的动作是「**${pt}**」` +
@@ -8584,6 +8739,8 @@ export class Bot {
         } else parts.push(
           [
             '\n# 【他戳了你一下】',
+            '',
+            `⚠️ **戳你的是 ${whoPoked}** —— 就这一个人，**别安到别人头上**。`,
             '',
             pt
               ? `⚠️ 这次进来的是 **QQ 的「戳一戳」**，他用的动作是「**${pt}**」` +
@@ -8616,6 +8773,8 @@ export class Bot {
               : []),
             '- ✅ **有上文时就着上文回**（优先）：上面【群里刚才在聊什么】里刚在说某件事，',
             '  就接那件事 —— **但照样要短**（比如刚聊到工资，回「又戳，工资还没发呢」）',
+            '- ⚠️⚠️ 但**刚说话的那个人不一定是戳你的那个** —— 戳你的只有上面那一位；',
+            '  接上文可以，**别把这次戳说成是他干的**（用户抓过这个：她会赖到旁边的群友头上）',
             '- ✅ 也可以反过来逗他 / 装作被戳烦了 —— 但要**换着花样**',
             '- ⚠️ 别每次被戳就发一张表情图',
             event.message_type === 'group'
@@ -9137,6 +9296,32 @@ export class Bot {
 
     // 身份 + 行为边界放最后，最靠近对话，影响力最大
     if (event) {
+      // ⚠️⚠️ 2026-10-06 加（用户原话：「**就是发出足够多条在提示词里说该结束了，
+      //    机器人自己判定自己该说的话说完了没有，自己决定结束**」）：
+      //    两个机器人已经来回够多条、而群里又没有真人 ⇒ **把"该收场了"这件事告诉她、
+      //    由她自己判断**（不是代码替她说拜拜、也不是代码替她决定停）。
+      //    判据见 `botOnlyChain()`：**条数够**（默认 10 条）**或**跨够久（默认 3 分钟），
+      //    且窗口里**一条真人都没有**。
+      //    ⚠️ 这段**只在互刷时**注入 —— 正常人聊天时一个字都不加，别影响日常语气。
+      //    ⚠️ 她真收了场（说出收场话）之后，代码才跟上记冷却（见回复发出后那段）。
+      if (event?.message_type === 'group' && this.botOnlyChain(String(event.group_id ?? ''))) {
+        parts.push(
+          [
+            '',
+            '# 【群里现在只有你们两个机器人在说话】',
+            '',
+            '⚠️ 最近这些消息里**一个真人都没有** —— 就是你跟另一个同类号在来回接，而且已经接了不少。',
+            '',
+            '## 你自己判断：想说的话说完了没有',
+            '- 还有想说的 → 接着说（**但别为了接而接**、别硬找话题、也别重复已经说过的）；',
+            '- 说完了 / 觉得没什么意思 / 只是在客气 → **用一句话收场**，例如',
+            '  「行，不跟你贫了」「我忙去了」「先这样吧」「到此为止」——',
+            '  ⚠️ 收场就**别再抛新话题、别再追问**，说完就停。',
+            '- 🚫 不用一直陪着它刷 —— 群里没人在看你们两个来回。',
+          ].join('\n'),
+        );
+      }
+
       parts.push('\n' + this.attitudeFor(this.speakerRole(event), event));
 
       // ⚠️⚠️ 2026-09-30 加：人设包的「对主人例外」开关。
@@ -10160,7 +10345,11 @@ export class Bot {
     const tiersNow = balance.tierInfo();
     log.info(
       `工资余额监控已启动（每 ${Math.round(interval / 60000)} 分钟查一次，` +
-        `档位：${tiersNow.map((t) => `${t.label}<${t.below}元`).join(' / ')}，**每个 1 档群各提醒一次**；` +
+        // ⚠️ 2026-10-06：去掉写死的「元」—— 余额可能是美元（走中转站接口时），
+        //    见 `src/balance.js` 文件头那段（用户要求适配中转站）。
+        `档位：${tiersNow.map((t) => `${t.label}<${t.below}`).join(' / ')}` +
+        `（单位按所选余额接口返回的币种：官方 DeepSeek 一般 CNY、中转站多半 USD）；` +
+        `**每个 1 档群各提醒一次**；` +
         `见底档直接发（@ 服主），偏低档要冷场 ${Math.round(quietMs / 60000)} 分钟：${groups.join('、')}）`,
     );
 
@@ -10168,8 +10357,22 @@ export class Bot {
       try {
         const r = await balance.fetchBalance();
         if (!r.ok) {
-          log.debug(`查余额失败：${r.error}`);
+          // ⚠️⚠️ 2026-10-06 改（配合「中转站余额适配」）：这里原来是 `log.debug`，
+          //    而默认日志级别是 info ⇒ **群友换成中转站之后余额查不出来，
+          //    日志里一个字都看不见**，他只看到"工资怎么不动了"，无从排查 ✗
+          //    ⇒ 升成 warn，但**节流**（余额是定时查的，别刷屏）：
+          //      同一条错 30 分钟内只报一次；错误内容变了立刻报（换了中转站会变）。
+          const nowWarn = Date.now();
+          if (r.error !== this._balErr || nowWarn - (this._balErrAt ?? 0) > 1800000) {
+            log.warn(
+              `查余额失败（balance.provider=${config.balance?.provider ?? 'auto'}）：${r.error}`,
+            );
+            this._balErr = r.error;
+            this._balErrAt = nowWarn;
+          }
         } else {
+          // ⚠️ 好了就把上次的错清掉 —— 下次再坏要能**立刻**报，不用等那 30 分钟
+          this._balErr = '';
           // ⚠️⚠️ 逐个 1 档群各问一次（2026-09-15 晚改，修 <主人> 报的
           //    「699 开头这个群好像不会发送余额报警信息」）：
           //    · 原来**只在循环外面问一次**，标记是全局的 → 第一个群收到提醒后，
@@ -10180,7 +10383,9 @@ export class Bot {
           for (const g of groups) {
             const c = balance.balanceComplaint({ total: r.total, groupId: g });
             if (!c.need) {
-              log.debug(`[工资] 余额 ${r.total} 元，群 ${g} 这次不用抱怨`);
+              log.debug(
+                `[工资] 余额 ${r.total} ${balance.currencyNow() || '（币种未知）'}，群 ${g} 这次不用抱怨`,
+              );
               continue;
             }
             // 冷场判定：**只有"偏低"那档才等冷场**。
@@ -10194,7 +10399,7 @@ export class Bot {
               );
               continue;
             }
-            log.info(`[工资] 余额 ${r.total} 元 → 在 ${g} 抱怨一句（${c.tier}）：${c.line}`);
+            log.info(`[工资] 余额 ${r.total} ${balance.currencyNow() || '（币种未知）'} → 在 ${g} 抱怨一句（${c.tier}）：${c.line}`);
             // ⚠️ 「见底」档（< 2 元）**直接 @ 服主本人**（用户 2026-09-13 要求：
             //    「2 块钱提醒加一个直接@我的qq账号，增强提醒效果」）。
             //    偏低档不 @ —— 那档只是随口提一句，每次都 @ 会变成骚扰。
@@ -10208,7 +10413,7 @@ export class Bot {
             //    润色必然失败、只能发预制话术；而"彻底没钱"这件事，
             //    每个群提醒过一次就够了，不需要反复念。
             if (!(Number(r.total) > 0)) {
-              log.info(`[工资] 余额 ${r.total} 元（已彻底耗尽）→ 按用户要求不发提醒`);
+              log.info(`[工资] 余额 ${r.total} ${balance.currencyNow() || '（币种未知）'}（已彻底耗尽）→ 按用户要求不发提醒`);
               break;
             }
             const line = await balance.phraseLine(c.tier, c.line);
@@ -11306,8 +11511,22 @@ export class Bot {
    *      「我忘记带钥匙了」「删掉这条消息」（没有指代"刚记的"）不认 ✓
    *   ③ 权限：只有服主 / 管理员 / 群管（普通群友 @ 她说这句会被婉拒）。
    *
-   * ⚠️ 撤回只作用于**这个群**那个资料库文件（`observe.undoLast(gid)`）——
+   * ⚠️ 撤回只作用于**这个群**那条快照（`observe.undoLast(gid)`）——
    *    一次总结会给好几个群各写一次，不能把别的群的记录一起卷回来。
+   *
+   * ## ⚠️ 2026-10-06 扩展：**教学也能撤**（用户原话：「把撤回扩展到教学」）
+   *
+   * 以前只有**自动观察**（群里闲聊攒出来的记忆）能撤 —— 而群主**教**给她的知识
+   * 写的是 `server-basic.md` / `server-rules.md` / `server-world.md` /
+   * `server-people.md` 那几份**全局知识库**（`learned.js`），**没有退路**：
+   * 教错一条只能去界面上手改，`撤回` 还会回一句"没有什么可撤的诶"。
+   *
+   * 现在两类**共用同一条快照队列**（`state/observe-undo.json`），所以：
+   *   · 「撤回」撤的永远是**最近发生的那一次**，不管它是观察还是教学；
+   *   · 回话会分开说（「刚才那次记的删了」/「「XXX」那条我忘了」）——
+   *     群主要能分清**是闲聊记录被删了、还是他教的东西被删了**。
+   * ⚠️ 两类快照的**还原方式不一样**（观察只换标记区、教学整文件写回），
+   *    见 `observe.undoLast()` 里那段。
    *
    * @returns {boolean} true = 这条已经处理完了（调用方直接 return，别再走正常聊天）
    */
@@ -11360,11 +11579,28 @@ export class Bot {
         this.sendToGroup(gid, `没有什么可撤的诶（${r?.reason ?? '不知道为啥'}）`).catch(() => {});
         return true;
       }
+      // ⚠️ 2026-10-06：撤回现在有**两类**目标（用户：「把撤回扩展到教学」）——
+      //    · `observe` = 自动攒的群记忆（群资料库的观察区）
+      //    · `teach`   = 群主**教**给她的知识（`server-basic.md` 那几份全局库）
+      //    她自己得说清撤的是哪一种，不然群主分不清"是把我教的删了、还是把闲聊记录删了"。
+      const isTeach = r.kind === 'teach';
+      const title = String(r.title ?? '').trim();
       log.info(
-        `[记忆] 撤回了群 ${gid} 最近一次观察（${r.removed} 条，原话：「${raw.slice(0, 40)}」）`,
+        `[记忆] 撤回了群 ${gid} 最近一次${isTeach ? `教学（「${title}」）` : '观察'}` +
+          `（${r.removed} 条，原话：「${raw.slice(0, 40)}」）`,
       );
-      const head = r.removed ? `行，刚才那次记的（${r.removed} 条）我删了` : '行，刚才那次记的删了';
-      const tail = r.preview?.length ? `\n（比如「${r.preview[0]}」）` : '';
+      const head = isTeach
+        ? title
+          ? `行，「${title}」那条我忘了`
+          : '行，刚才教我的那条我忘了'
+        : r.removed
+          ? `行，刚才那次记的（${r.removed} 条）我删了`
+          : '行，刚才那次记的删了';
+      const tail = isTeach
+        ? '\n（要再教我一遍就说）'
+        : r.preview?.length
+          ? `\n（比如「${r.preview[0]}」）`
+          : '';
       this.sendToGroup(gid, `${head}${tail}`).catch(() => {});
       return true;
     } catch (e) {

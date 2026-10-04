@@ -14,6 +14,10 @@ import { ROOT, KNOWLEDGE_DIR } from './config.js';
 import { log } from './log.js';
 import { backupKnowledge } from './backup.js';
 import { phrase } from './llm.js';
+// ⚠️ 2026-10-06：教学也要能撤回（用户：「把撤回扩展到教学」）——
+//    写成功之后记一份「写之前长什么样」，`/撤回` 或「@她 忘记刚才那个」就能退回来。
+//    ⚠️ 是**单向**依赖（observe 不 import learned），不会成环。
+import { pushTeachUndo } from './observe.js';
 
 const FILE = join(KNOWLEDGE_DIR, 'learned.md');
 const BEGIN = '<!-- LEARNED:BEGIN -->';
@@ -199,6 +203,9 @@ async function classify(topic, fact) {
  */
 function upsertIntoFile(fileName, title, body) {
   const file = join(KNOWLEDGE_DIR, fileName);
+  // ⚠️ 2026-10-06：`existed` 要记 —— 撤回时"还原成一份本来不存在的文件"
+  //    和"删除这个文件"是两件事（见 `observe.pushTeachUndo` 的 `before: null`）。
+  const existed = existsSync(file);
   let text = '';
   try {
     text = readFileSync(file, 'utf8');
@@ -211,20 +218,19 @@ function upsertIntoFile(fileName, title, body) {
   const m = re.exec(text);
   if (!m) {
     backupKnowledge(file);
-    writeFileSync(file, text.replace(/\s*$/, '') + '\n\n' + block + '\n', 'utf8');
-    return { replaced: false };
+    const next = text.replace(/\s*$/, '') + '\n\n' + block + '\n';
+    writeFileSync(file, next, 'utf8');
+    // ⚠️ 返回值里带上 before/after 全文 —— 调用方 `learn()` 靠它记撤回快照。
+    return { replaced: false, before: existed ? text : null, after: next };
   }
   const start = m.index;
   const rest = text.slice(start + m[0].length);
   const nextRel = rest.search(/^##\s/m);
   const end = nextRel === -1 ? text.length : start + m[0].length + nextRel;
   backupKnowledge(file);
-  writeFileSync(
-    file,
-    text.slice(0, start) + block + '\n\n' + text.slice(end).replace(/^\s+/, ''),
-    'utf8',
-  );
-  return { replaced: true };
+  const next = text.slice(0, start) + block + '\n\n' + text.slice(end).replace(/^\s+/, '');
+  writeFileSync(file, next, 'utf8');
+  return { replaced: true, before: existed ? text : null, after: next };
 }
 
 /**
@@ -276,6 +282,21 @@ export async function learn(topic, fact, meta = {}) {
       log.info(
         `教学「${t}」→ ${target}（${r.replaced ? '覆盖' : '新增'}，${f.length} 字，分类 ${cat}）`,
       );
+      // ⚠️ 2026-10-06：**写成功之后**才记撤回快照（写失败就不该能撤）。
+      //    ⚠️ `gid` 传教学发生的那次会话 —— 撤回是按群聊算的，
+      //      不然 A 群一句"撤回"会把 B 群刚教的东西抹掉。
+      try {
+        pushTeachUndo({
+          file: join(KNOWLEDGE_DIR, target),
+          gid: String(meta.groupId ?? meta.gid ?? ''),
+          before: r.before,
+          after: r.after,
+          title: t,
+          added: !r.replaced,
+        });
+      } catch (e) {
+        log.warn(`教学撤回快照没记上（不影响教学本身）：${e.message}`);
+      }
       return { ok: true, replaced: r.replaced, topic: t, file: target, cat };
     } catch (e) {
       // ⚠️ 写专题库失败**不能把知识丢了** —— 往下走老路径，写进 learned.md
@@ -297,6 +318,20 @@ export async function learn(topic, fact, meta = {}) {
   try {
     write(out);
     log.info(`learned.md ${replacedOld ? '覆盖' : '新增'}主题「${t}」（${f.length} 字）`);
+    // ⚠️ 2026-10-06：这里也要记撤回快照 —— 分类失败 / 归到 other 的那条走的就是这条路。
+    //    ⚠️ `before` 是**这次写之前的整份 learned.md**（`text` 就是函数开头读的那份）。
+    try {
+      pushTeachUndo({
+        file: FILE,
+        gid: String(meta.groupId ?? meta.gid ?? ''),
+        before: text,
+        after: out,
+        title: t,
+        added: !replacedOld,
+      });
+    } catch (e) {
+      log.warn(`教学撤回快照没记上（不影响教学本身）：${e.message}`);
+    }
     return { ok: true, replaced: replacedOld, topic: t, file: 'learned.md', cat };
   } catch (e) {
     log.error(`写入 learned.md 失败: ${e.message}`);
@@ -391,7 +426,8 @@ export function validateFile(text) {
   return { ok: true, entries: entries.length };
 }
 
-/** 删掉某个主题（群主可以用「忘记：xxx」） */export function forget(topic) {
+/** 删掉某个主题（群主可以用「忘记：xxx」） */
+export function forget(topic, meta = {}) {
   const t = String(topic ?? '').trim();
   const text = read();
   const entries = parseEntries(extractBlock(text));
@@ -405,6 +441,20 @@ export function validateFile(text) {
   insertChangeLog(`- ${now()} **删除**「${t}」`);
   write(out);
   log.info(`learned.md 删除主题「${t}」`);
+  // ⚠️ 2026-10-06（用户：「把撤回扩展到教学」）：**删除也算教学写入** ——
+  //    删错了（同名主题挑错、或者只是想改一下）能原样退回来。
+  try {
+    pushTeachUndo({
+      file: FILE,
+      gid: String(meta.groupId ?? meta.gid ?? ''),
+      before: text,
+      after: out,
+      title: t,
+      added: false,
+    });
+  } catch (e) {
+    log.warn(`删除撤回快照没记上（不影响删除本身）：${e.message}`);
+  }
   return { ok: true, topic: t, removed: removed.body };
 }
 
