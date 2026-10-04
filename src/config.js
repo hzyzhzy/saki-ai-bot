@@ -1233,6 +1233,9 @@ function load() {
       checkIntervalMs: 'num',
       // 群友哪句话才算"能改变剧情"（strict / normal / loose）
       replyMode: 'str',
+      // ⚠️ 2026-10-05 加：这个群**收不收 `/剧情` 命令**（默认 true）——
+      //    用户要求（同群跑两个机器人时避免冲突）。见 DEFAULT_QUEST 里那段注释。
+      commands: 'bool',
     };
     const pick = (src, keys) => {
       const out = {};
@@ -1278,6 +1281,25 @@ function load() {
           else delete c.strictness;
         }
         if (Object.keys(c).length) one.chat = c;
+      }
+      // ⚠️⚠️ 2026-10-05 加（用户要求）：「机器人**同类池**」——**按群**填 QQ 号，
+      //    填进去的直接当同类机器人（见 bot.js 的 `isPeerBot`）：
+      //      ① 上下文里标出来（别把它的立场/经历当成自己说的）；
+      //      ② **不再被"别的机器人一律不接"挡掉** —— 用户要的是"能跟它聊起来"
+      //         （⚠️ 防刷靠现有的**连续接话链上限**，不给它开特例）；
+      //      ③ 群里冷场时，她可能主动 @ 它说一句。
+      //    ⚠️ 照 `allowGroups` 那套收：去空值、统一字符串、去重、封顶 10 个。
+      if (Array.isArray(v.peers)) {
+        const seen = new Set();
+        const peers = [];
+        for (const x of v.peers) {
+          const id = String(x ?? '').trim();
+          if (!id || seen.has(id)) continue;
+          seen.add(id);
+          peers.push(id);
+          if (peers.length >= 10) break;
+        }
+        if (peers.length) one.peers = peers;
       }
       if (Object.keys(one).length) g[k] = one;
     }
@@ -1397,6 +1419,11 @@ export const DEFAULT_QUEST = {
   affinityGood: 3,
   affinityBad: -2,
   checkIntervalMs: 60000,
+  // ⚠️ 2026-10-05 加（用户要求）：「在按群设定那里加一个开关，控制是否接收 /剧情 的命令，
+  //    默认开启接收 —— 主要是等下会有**两个机器人在同一个群**，避免冲突」。
+  //    ⚠️ 默认 **true**（开着）：不设这个开关的群，行为跟以前**一模一样**。
+  //    关掉之后这个群里 `/剧情` 和 `/清除剧情` 都会被无视（不回复、也不动剧情）。
+  commands: true,
 };
 
 /**
@@ -1433,6 +1460,28 @@ export function paramsFor(kind, groupId) {
   const over = gid ? config.groupParams?.[gid]?.[kind] : null;
   if (!over || typeof over !== 'object') return { ...base };
   return { ...base, ...over };
+}
+
+/**
+ * 这个群的「**同类机器人池**」（用户 2026-10-05 要求）。
+ *
+ * 用户原话：「加一个机器人同类池放在分群设定里也分群管理，做一个和『它能在哪些群说话』
+ *   一样的输入框填 QQ 号，填入的 QQ 号**直接默认为同类机器人**，
+ *   会随机主动 @ 找那个同类机器人聊天」。
+ *
+ * ⚠️ 池里的号 = **同类**（不是"要忽略的机器人"）：
+ *   · 上下文里会标出来（`recent.contextText` 的 `isBot`）；
+ *   · **不再被"别的机器人一律不接"挡掉** —— 要能跟它聊起来；
+ *   · 冷场时她可能主动 @ 它。
+ *
+ * @param {string|number} groupId
+ * @returns {string[]} QQ 号数组（没配就是空数组）
+ */
+export function peersFor(groupId) {
+  const gid = String(groupId ?? '').trim();
+  if (!gid) return [];
+  const p = config.groupParams?.[gid]?.peers;
+  return Array.isArray(p) ? p.map(String) : [];
 }
 
 /**

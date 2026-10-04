@@ -603,6 +603,41 @@ function humanWhen(t, now = Date.now()) {
  * @param {string[]} [excludeIds]
  * @param {{limit?:number}} [opts]
  */
+/**
+ * 最近 n 条发言「分别是谁说的」（2026-10-05 加）。
+ *
+ * ⚠️ 用途：判断**群里是不是只剩两个机器人在互相说话**了 ——
+ *    见 `bot.js` 的 `botOnlyChain()`。
+ *    用户原话：「加个机器人之间的对话到这种**他们自己觉得应该停的时候就停**吧，
+ *    要不然会像现在这样**一直发下去**」。
+ *
+ * @param {string} groupId
+ * @param {number} [n]
+ * @returns {{userId:string, self:boolean, at:number}[]} 从早到晚
+ */
+export function speakers(groupId, n = 8) {
+  const list = store.get(String(groupId)) ?? [];
+  return list.slice(-Math.max(1, n)).map((m) => ({
+    userId: String(m.userId ?? ''),
+    self: m.self === true,
+    at: Number(m.time) || 0,
+  }));
+}
+
+/**
+ * 这个群**最后一条消息**是什么时候（2026-10-05 加）。
+ *
+ * ⚠️ 用途：「同类机器人」主动搭话要用它判**冷场**（见 `src/peer-chat.js`）。
+ * ⚠️ 只要时间戳、不要内容 —— 那边不需要 `contextText` 那一大套清洗。
+ *
+ * @returns {number} 毫秒时间戳；没有记录时返回 0
+ */
+export function lastAt(groupId) {
+  const list = store.get(String(groupId)) ?? [];
+  const last = list[list.length - 1];
+  return Number(last?.time) || 0;
+}
+
 export function contextText(groupId, excludeText = '', excludeIds = [], opts = {}) {
   if (!config.context?.enable) return '';
   const stored = store.get(String(groupId)) ?? [];
@@ -623,6 +658,9 @@ export function contextText(groupId, excludeText = '', excludeIds = [], opts = {
 
   const now = Date.now();
   const lines = [];
+  // ⚠️ 2026-10-05：这次上下文里出现的「同款机器人」（见下面 `who` 那段）——
+  //    收集起来在最前面统一解释一句。
+  const botHits = [];
   for (const m of list) {
     // ⚠️ 跳过「当前这条」。**优先按 message_id 排除** —— 文本比对太脆弱：
     //    @机器人的剥离方式、tidy 的空格处理、连发消息合并，
@@ -637,7 +675,23 @@ export function contextText(groupId, excludeText = '', excludeIds = [], opts = {
     //    老写法只有「N分钟前」，几小时前那条会被读成"刚发生"（见 `humanWhen` 的注释）。
     const when = humanWhen(m.time, now);
     // 自己发的要**显式标出来**，否则模型分不清哪句是自己说的
-    const who = m.self ? '【你自己说的】' : '';
+    //
+    // ⚠️⚠️ 2026-10-05 加（用户：「saki 们并没有发现另一个人说话方式和自己很像，
+    //    而且好像还把对面说的话当作自己说的话了」）：
+    //    群里有**第二个用同一套人设跑的号**（用户让小豆也接入了 saki bot）。
+    //    它说的话跟她**同名同款**（都自称 Saki、都在客服室上班）⇒
+    //    上下文里只写「是der的小豆：…**它又不替我回消息**」的时候，模型会把
+    //    它的立场/经历**当成她自己的**。实测：它说「想让它顶**我的班**啊」，
+    //    她顺着答「让它顶**我的班**，我倒是没意见」—— 把别人的班当成了自己的 ✗
+    //    ⇒ 名单里的号（`config.teach.bots`，调用方通过 `opts.isBot` 传进来）
+    //      一律打上显眼标记，并在最前面统一解释清楚（见下面的 `head`）。
+    const isBot = !m.self && m.userId && typeof opts.isBot === 'function' && opts.isBot(m.userId);
+    if (isBot) botHits.push(String(m.name || m.userId));
+    const who = m.self
+      ? '【你自己说的】'
+      : isBot
+        ? '【⚠️ 另一个在模仿你的家伙，不是你】'
+        : '';
     const at = m.atMe ? '[@了你] ' : '';
     // ⚠️ 带上 QQ 号。用户反馈「多人高密度发言时还是认错人」——
     //    只给昵称的话，一堆人同时说话时很容易把事对错人。
@@ -695,7 +749,22 @@ export function contextText(groupId, excludeText = '', excludeIds = [], opts = {
         `离现在 **${Math.round(spanMs / 3600000)} 小时**。**按每条括号里的时间理解**，` +
         '别把它们当成刚说的事；他问"多久 / 多长时间"时，直接用括号里那个相对时间回答。）\n'
       : '';
-  return head + lines.join('\n');
+  // ⚠️ 2026-10-05：这次上下文里有「同款机器人」→ 最前面统一交代一遍。
+  //    只靠行内那个标记不够显眼 —— 模型很容易顺着它的"我"继续说下去
+  //    （用户看到的就是这个：对面说「顶我的班」，她答「顶我的班」）。
+  const botNote = botHits.length
+    ? '⚠️ 下面那位 —— **' +
+      `${[...new Set(botHits)].join('、')}** 是**另一个跟你同名同款的号**，**不是你**：\n` +
+      '  · 它说的「我」是**它自己** —— 它的班、它的活、它的东西、它做过的事，**都不是你的**；\n' +
+      '  · 🚫 别顺着它说「我的…」，也别把它的经历当成你经历过的；\n' +
+      '  · 别人说「你」的时候，先看清是在跟你说话、还是在跟它说话；\n' +
+      // ⚠️ 2026-10-05 加（用户：「机器人之间的对话…该停的时候就停，要不然会一直发下去」）：
+      //    代码那边有硬闸（`botOnlyChain`），这里再让她**自己意识上**也收着点 ——
+      //    用户要的是"他们**自己觉得**应该停的时候就停"。
+      '  · 🚫 **别陪着它一句一句来回刷** —— 搭一两句、没话了就停；\n' +
+      '    真人有话要说的时候，你自然会接（不用靠一直跟它聊来显得热闹）。\n'
+    : '';
+  return botNote + head + lines.join('\n');
 }
 
 /**

@@ -1081,6 +1081,37 @@ export function ensureSentenceEnds(t) {
   return out.length > 1 ? out.join('') : s;
 }
 
+/**
+ * `/剧情` 后面那串是不是「**直接收成某个结局**」的指令（2026-10-05 用户要求）。
+ *
+ * ## 用户原话
+ *   「加一条剧情命令，`/剧情 好/坏结局`，对应 webui 里的**直接收成好/坏结局**的按钮」
+ *
+ *   ⇒ 管理界面那个按钮走的是 `quest.advance(q, { forceEnd: 'good' | 'bad' })`
+ *     （那一段**必须写成结局**、而且**结局好坏由我们定**，不看模型回什么）。
+ *     群里这条命令要的就是同一件事。
+ *
+ * ## 认哪些写法
+ *   好：`好` / `好结局` / `good` / `happy`
+ *   坏：`坏` / `坏结局` / `bad`
+ *   ⚠️ **必须整段就是这些词**（去掉「结局」两字和标点之后完全相等）——
+ *      不能写成"包含"：`/剧情 往好的方向走` 里的「好」是**方向提示**，
+ *      不是"收好结局" ✗ 那种要照旧当剧情提示词用。
+ *
+ * @param {string} raw `/剧情` 后面那串原文
+ * @returns {'good'|'bad'|null}
+ */
+export function parseEndingWord(raw) {
+  const t = String(raw ?? '')
+    .trim()
+    .replace(/[结\s局。！!，,、]/g, '')
+    .toLowerCase();
+  if (!t) return null;
+  if (t === '好' || t === 'good' || t === 'happy') return 'good';
+  if (t === '坏' || t === 'bad') return 'bad';
+  return null;
+}
+
 function parseJson(raw) {
   let t = String(raw ?? '').trim();
   t = t.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '');
@@ -1262,6 +1293,47 @@ export async function begin(p = {}) {
       ? prevQuest
       : null;
 
+  // ⚠️⚠️ 2026-10-05 加（用户截图：「**如果马上开下一个剧情，她会不记得上次剧情的内容**」）：
+  //
+  //    原来这里只有上面那个 `redeemFrom` —— **只有坏结局**才给一句「上一次的起因是…」，
+  //    而且**只有 `premise` 一句**：上一条到底演了几段、中间发生了什么、什么结局，
+  //    **一个字都没给** ✗ ⇒ 新主线等于从零开始，群友会觉得"上次那事她全忘了"。
+  //
+  //    ⇒ 现在**任何结局**都把「上一条主线的经过」摆出来：
+  //      起因 + 每段发生了什么 + 结局，并明说"这一条是接着它写的"。
+  //
+  //    ⚠️ 只取每段的 `event`（一句话摘要），**不取 `text`** —— text 是她在群里说的原话，
+  //      整段贴进来太占提示词，而且模型很容易连语气一起照抄。
+  //    ⚠️ 段数封顶 6 段、只认 7 天内的（跟 `redeemFrom` 同一扇窗）——
+  //      隔了半个月再"接着上次写"更怪。
+  //    ⚠️ 数据来源是**这个群**自己的 `recent`（`gbucket`），不会串到别的群。
+  const prevBlock = (() => {
+    const q = prevQuest;
+    if (!q) return '';
+    const since = t0 - Number(q.endedAt ?? q.startedAt ?? 0);
+    if (since > REDEEM_WINDOW_MS) return '';
+    const stages = (q.stages ?? []).slice(-6);
+    const lines = stages.map((s, i) => {
+      const what = String(s?.event ?? '').trim() || String(s?.text ?? '').trim().slice(0, 40);
+      return `    ${Number(s?.i) || i + 1}. ${what}`;
+    });
+    return [
+      '',
+      '【上一条主线（刚演完的那条）—— **这一条是接着它写的**】',
+      `  起因：${q.premise}`,
+      lines.length ? `  经过：\n${lines.join('\n')}` : '',
+      `  结局：${q.ending === 'good' ? '好结局' : '坏结局'}`,
+      '  ⚠️ 同一群人、同一件事的**余波** —— 别写成从零开始的新故事，',
+      '    也别把上一条的结果当成没发生过（**有人还记得当时发生了什么**）。',
+      redeemFrom
+        ? '  ⚠️⚠️ 上次是**坏结局** ⇒ 这一条要写**她去挽回 / 收拾残局 / 把上次没说清的补上**：' +
+          '开场就要让人看出是接着那件事的。⚠️ 但**能不能挽回是群友说了算**，你别自己定成圆满。'
+        : '',
+    ]
+      .filter(Boolean)
+      .join('\n');
+  })();
+
   // ⚠️⚠️ 2026-10-03 修（用户实测截图：他在群里发 `/剧情 saki的妈妈复活了`，
   //    生成出来的开场是「三点多了，睡不着…初华也没睡」—— **跟他填的背景毫无关系**）。
   //
@@ -1278,16 +1350,7 @@ export async function begin(p = {}) {
     timeHintText(),
     '【最近的故事线】（**起因要从这里找由头**）',
     recent || '（还没有故事线，那就从一个很小的生活由头起头）',
-    redeemFrom
-      ? [
-          '',
-          '⚠️⚠️ **上一条主线是「坏结局」，这一次就是它的续章**：',
-          `   上一次的起因是：${redeemFrom.premise}`,
-          '   这次要写**她去挽回 / 收拾残局 / 把上次没说清的补上** ——',
-          '   开场就要让人看出是接着那件事的，**别当成没发生过**，也别写成"什么都没变"。',
-          '   ⚠️ 但**能不能挽回是群友说了算** —— 你别自己就把结局定成圆满。',
-        ].join('\n')
-      : '',
+    prevBlock || '',
     // ⚠️ 手动开了由头的时候**不抽题材** —— 题材就是他那句话（见下面 user 末尾那段硬要求）
     manualHint
       ? '【这一次的题材】**就按他给的那件事来**（不要另起一个题材）。'

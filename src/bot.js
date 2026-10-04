@@ -1,4 +1,4 @@
-import { config, ROOT, KNOWLEDGE_DIR, paramsFor } from './config.js';
+import { config, ROOT, KNOWLEDGE_DIR, paramsFor, peersFor } from './config.js';
 // ⚠️ 2026-09-21：她的名字 / 外号 / 怎么称呼主人，都从 `personas/<id>/identity.json` 来
 //    （见 src/persona.js）。这些东西以前散在这个文件里写死（`['saki','小祥','祥子',…]` 那种），
 //    换个角色就换不动 —— 表现出来就是"人换了、名字还是旧的"。
@@ -15,7 +15,7 @@ import { log } from './log.js';
 import { streamChat, quickAck, phrase } from './llm.js';
 import * as msg from './message.js';
 import * as history from './history.js';
-import { knowledgeText, hasKnowledge, selectFor as knowledgeSelect, mentionsAnyTerm, whoIsBrief, aliasesOf, animeLibNames, reloadKnowledge } from './knowledge.js';
+import { knowledgeText, hasKnowledge, selectFor as knowledgeSelect, mentionsAnyTerm, whoIsBrief, aliasesOf, animeLibNames, reloadKnowledge, personaText } from './knowledge.js';
 // ⚠️ 2026-09-20 从上游 fork 挑过来：梗库（`knowledge/memes.md`）**按需**注入 ——
 //    只有对方这句话里命中了触发词才贴上来，且自带"拿不准按字面回"的总规则（防"看什么都像梗"）。
 import { memesFor } from './memes.js';
@@ -1043,6 +1043,17 @@ export class Bot {
     if (
       payload.message_type === 'group' &&
       this.tryQuestReset(payload, msg.toSegments(payload.message))
+    ) {
+      return;
+    }
+
+    // ⚠️⚠️ 2026-10-05 加（用户要求）：「@机器人 + **自然语言**说『忘记刚才那个』
+    //    就撤回她刚记下的那条 —— **区别于 / 的命令**」。
+    //    ⇒ 放在和 `/剧情` 那一批**同一个位置**：指令要在进聊天上下文之前处理掉，
+    //      也不能被"要不要接话"那套判定挡住（她是**必须**回这条的）。
+    if (
+      payload.message_type === 'group' &&
+      this.tryForgetMemory(payload, msg.toSegments(payload.message))
     ) {
       return;
     }
@@ -3176,7 +3187,124 @@ export class Bot {
    * 带昵称判断的版本 —— 消息事件里能拿到 sender 昵称/群名片。
    * @param {object} event
    */
+  /**
+   * 「两个机器人聊够了」时**收个尾再说停**（2026-10-05 用户要求）。
+   *
+   * 用户原话：「**不是立即解除**，而是…说对话要停了，**说完拜拜之类的话再停**」。
+   *
+   * ⚠️ 走 `sendChatLike`（分条 / 打码 / 口癖那一套照旧）——
+   *    它是她所有发言的**唯一出口**，别绕过。
+   * ⚠️ 模型生成失败就用兜底那几句：**必须真的收个尾** ——
+   *    这个功能的意义就是"别一直发下去"，收尾失败等于白做。
+   */
+  async sayBotFarewell(gid) {
+    const FALLBACK = ['行，不跟你贫了', '那我先忙去了', '拜拜，没空陪你', '行了，到此为止'];
+    let text = '';
+    try {
+      const ctx = String(recent.contextText(gid) ?? '').slice(0, 1500);
+      text = await phrase({
+        system: personaText(),
+        user: [
+          '你跟群里那个**跟你同名同款的家伙**已经一来一回聊了一阵，旁边没别人说话。',
+          '⚠️ 现在**收个尾**：用**一句话**结束这次对话，然后再别接下去了。',
+          '',
+          ctx ? `【你们刚才在聊】\n${ctx}` : '',
+          '',
+          '· 短（5~15 字），像「行，不跟你贫了」「那我先忙去了」「拜拜」这种；',
+          '· 可以是嫌弃的、也可以只是懒得多说，但**必须是"结束"的意思**；',
+          '· ⚠️ 中文；🚫 别再抛新话题、别再问它问题（问了它又要回你）；',
+          '· 🚫 别用破折号、别写金句、别提它名字。',
+          '直接给那句话。',
+        ]
+          .filter(Boolean)
+          .join('\n'),
+        maxTokens: 80,
+        timeoutMs: 15000,
+      });
+    } catch (e) {
+      log.debug(`[同类] 收尾话生成失败（用兜底）：${e.message}`);
+    }
+    text = String(text ?? '')
+      .replace(/@\S{1,24}/g, '')
+      .replace(/^[「『"']|[」』"']$/g, '')
+      .trim()
+      .slice(0, 40);
+    if (!text) text = FALLBACK[Math.floor(Math.random() * FALLBACK.length)];
+    await this.sendChatLike(gid, text);
+    log.info(`[同类] 收尾话发出去了：「${text}」`);
+  }
+
+  /**
+   * 群里是不是**只剩两个机器人在互相说话**了（2026-10-05 用户要求）。
+   *
+   * ## 用户原话
+   *   「加个机器人之间的对话到这种**他们自己觉得应该停的时候就停**吧，
+   *    要不然会像现在这样**一直发下去**」（截图：她和另一个同款机器人一来一回停不下来）
+   *
+   * ## ⚠️ 为什么原来那道"连续接话链上限"没拦住
+   *   两个机器人**互相 @** ⇒ 而 `decide()` 里 `atMe` 是**明确召唤、直接放行** ⇒
+   *   `followUpChain` / `maxChain` 那套**整条被绕过** ✗
+   *   ⇒ 所以这里要一道**独立于链计数的**判据。
+   *
+   * ## 判据（四个条件一起看）
+   *   取最近 `botChainWindow`（默认 8）条发言：
+   *   ① 机器人发言（她的 + 同类池里的）加起来 ≥ `botChainMin`（默认 4，即两个来回）；
+   *   ② **除机器人之外，一条真人发言都没有**；
+   *   ③ **两类都有**（既有她、也有同类）—— 只有她自己在说，那是"自言自语"，另一码事；
+   *   ④ ⚠️ **真人一插话就立刻解除**（条件 ② 自然保证）——
+   *      这正是"该停就停、有人来就继续"该有的语义。
+   *
+   * @returns {boolean} true = 这次**不该再回**（纯粹两个机器人在刷）
+   */
+  botOnlyChain(groupId) {
+    try {
+      const win = Math.max(4, Number(config.chat?.botChainWindow) || 8);
+      const min = Math.max(2, Number(config.chat?.botChainMin) || 4);
+      const list = recent.speakers(groupId, win);
+      if (list.length < 2) return false;
+      const peers = new Set(peersFor(groupId));
+      let mine = 0;
+      let theirs = 0;
+      let humans = 0;
+      for (const s of list) {
+        if (s.self) mine++;
+        else if (peers.has(s.userId)) theirs++;
+        else humans++;
+      }
+      if (humans > 0) return false; // 真人在场 → 一切照旧
+      if (mine + theirs < min) return false; // 还没聊够两个来回
+      if (!mine || !theirs) return false; // 只有一方在说，不算"互相聊"
+      return true;
+    } catch (e) {
+      log.debug(`[同类] 判断"只剩两个机器人在聊"失败（当没命中）：${e.message}`);
+      return false;
+    }
+  }
+
+  /**
+   * 这个号在**这个群**的「同类机器人池」里吗（用户 2026-10-05 要求）。
+   *
+   * 配置：`config.yml` 的 `groupParams.<群号>.peers: ['10000010']`
+   * —— 界面上在「按群设定」里，跟「能在哪些群说话」同一个样子的输入框。
+   */
+  isPeerBot(groupId, userId) {
+    const uid = String(userId ?? '').trim();
+    if (!uid) return false;
+    try {
+      return peersFor(groupId).includes(uid);
+    } catch {
+      return false;
+    }
+  }
+
   isIgnoredBotEvent(event) {
+    // ⚠️⚠️ 2026-10-05 加（用户要求）：**同类池里的号不算"要忽略的机器人"**。
+    //    用户原话：「加一个机器人同类池…填入的 QQ 号直接默认为同类机器人，
+    //    会随机主动 @ 找那个同类机器人聊天」—— 池里的号是**要跟它聊的**，
+    //    不是要躲的 ⇒ 放在所有忽略判据**之前**直接放行。
+    //    ⚠️ 防刷**不在这里管**：她收到同类的话仍走正常接话路径，
+    //      所以照样受「连续接话链上限 / 冷却」约束（不给它开特例）。
+    if (this.isPeerBot(event?.group_id, event?.user_id)) return false;
     if (this.isIgnoredBot(event?.user_id)) return true;
     const name = String(event?.sender?.card || event?.sender?.nickname || '').trim();
     if (!name) return false;
@@ -3275,6 +3403,54 @@ export class Bot {
   }
 
   decide(event, voluntary = null) {
+    // ⚠️⚠️ 2026-10-05 加（用户要求：「加个机器人之间的对话到这种他们自己觉得应该停的时候
+    //    就停吧，要不然会像现在这样**一直发下去**」）：
+    //    ⚠️ 用户随后纠正过一次：「**不是立即解除**，而是…说对话要停了，
+    //      **说完拜拜之类的话再停**」⇒ 所以**第一次**命中不是静默，
+    //      而是让她**发一句收尾话**（见 `sayBotFarewell`），并记下"这个群收过尾了"；
+    //      **之后再命中**才真的不回。
+    //    ⚠️ 真人在场时判据为假 ⇒ 顺手把"收过尾"的标记清掉
+    //      （下次又只剩两个机器人时会再收一次尾 —— 这就是"有人来就继续"）。
+    //    ⚠️ 必须放**最前面** —— 两个机器人互相 @ 时走的是下面 `atMe` 那条
+    //      "明确召唤、直接放行"的路，**绕过所有链计数** ✗
+    if (event?.message_type === 'group') {
+      const gid0 = String(event.group_id ?? '');
+      const sender0 = String(event.user_id ?? '');
+      const peers0 = new Set(peersFor(gid0));
+      this.botChainClosed ??= new Map();
+      const closedAt = Number(this.botChainClosed.get(gid0) ?? 0);
+      //    ⚠️ 2026-10-05 用户拍板：冷却**1 分钟**就够（原稿是 10 分钟，他实测后说"1 分钟就够了"）
+      //      ⇒ 配置在 `config.yml` 的 `chat.botChainCooldownMs`（热重载即可生效）。
+      const cool = Math.max(60000, Number(config.chat?.botChainCooldownMs) || 60 * 1000);
+      const cooling = closedAt > 0 && Date.now() - closedAt < cool;
+
+      // ① **同类池里的人发来的 + 刚收过尾** ⇒ 不回。
+      //    ⚠️⚠️ 2026-10-05 改（用户实测：「**我插了，没有恢复**」）：
+      //      上一版是"窗口里没有真人发言 ⇒ 收尾"，而**真人一插话就算解除** ——
+      //      结果他插完一句、大肥鱼紧跟着一句，把那条真人发言挤出窗口 ⇒
+      //      判据又成立 ⇒ 她又被拉回去 ✗
+      //      ⇒ 现在**按发送者判**：收尾后 10 分钟内，**同类说什么都不接**，
+      //        而**真人的消息照常往下走**（该不该回由它自己那套判）。
+      if (peers0.has(sender0) && cooling) {
+        log.info(
+          `[同类] 刚收过尾（${Math.ceil((cool - (Date.now() - closedAt)) / 60000)} 分钟冷却中）` +
+            ' → 同类的这条不接（真人的消息不受影响）',
+        );
+        return null;
+      }
+
+      // ② 还没在冷却里 + 判据命中（只剩两个机器人在聊） ⇒ **收个尾再停**
+      //    ⚠️ 用户纠正过：「**不是立即解除**，而是…说对话要停了，说完拜拜之类的话再停」
+      if (!cooling && this.botOnlyChain(gid0)) {
+        this.botChainClosed.set(gid0, Date.now());
+        log.info('[同类] 只剩两个机器人在互相说话 → 让她**说一句收尾的话**再停');
+        // ⚠️ 异步发，不阻塞这条（`decide` 是同步的，这里不能 await）
+        this.sayBotFarewell(gid0).catch((e) => log.warn(`[同类] 收尾话失败：${e.message}`));
+        return null;
+      }
+      // ③ 真人说话 ⇒ **不碰标记**，照常往下走（"我插话就能跟她说话"）
+    }
+
     const segments = msg.toSegments(event.message);
     const { trigger } = config;
 
@@ -3603,7 +3779,12 @@ export class Bot {
     //    只靠文本比对不稳（@ 剥离 / tidy / 连发合并都会让两边微妙不等），
     //    结果当前这句话又出现在上下文里，被模型当成别人说的（真实踩过）。
     const ids = event.message_id !== undefined ? [String(event.message_id)] : [];
-    let text = recent.contextText(recent.contextKey(event), currentText, ids);
+    let text = recent.contextText(recent.contextKey(event), currentText, ids, {
+      // ⚠️ 2026-10-05：把「已知机器人」的号交给 `contextText` —— 它会给这些行打上
+      //    「另一个在模仿你的家伙，不是你」的标记（见 recent.js 那段注释）。
+      //    用户报的正是这个：小豆接了 saki bot 之后，她把它的话当成了自己说的。
+      isBot: (uid) => (config.teach?.bots ?? []).map(String).includes(String(uid)),
+    });
     if (!text) return '';
     // ⚠️ 私聊给更宽的上限：他要的是"昨天那句"，1200 字装不下一天的话
     const max =
@@ -5885,7 +6066,11 @@ export class Bot {
           exclude: [
             promptText,
             vision,
-            recent.contextText(event.group_id, promptText, [String(event.message_id)], { limit: 20 }),
+            recent.contextText(event.group_id, promptText, [String(event.message_id)], {
+              limit: 20,
+              // ⚠️ 2026-10-05：同上 —— 名册里的机器人要标出来（见 recent.js）
+              isBot: (uid) => (config.teach?.bots ?? []).map(String).includes(String(uid)),
+            }),
           ]
             .filter(Boolean)
             .join('\n'),
@@ -10995,7 +11180,7 @@ export class Bot {
    *    不然手动推到大结局会"剧情完了但没人加分、也没有播报" ✗
    * ⚠️ 防刷：同一个群默认 30 秒只能手动推一段（`config.quest.manualAdvanceCooldownMs`）。
    */
-  questControl(event, gid, hint) {
+  questControl(event, gid, hint, forceEnd = null) {
     try {
       this.lastQuestAdvanceAt ??= {};
       const gap = Number(config.quest?.manualAdvanceCooldownMs) || 30000;
@@ -11009,11 +11194,22 @@ export class Bot {
 
       log.info(
         `[剧情] 手动推进（群 ${gid}，${event.user_id}）` +
-          (hint ? `方向：${hint.slice(0, 60)}` : '（留空 = 直接推进）'),
+          (forceEnd
+            ? `**收 ${forceEnd === 'good' ? '好' : '坏'}结局**`
+            : hint
+              ? `方向：${hint.slice(0, 60)}`
+              : '（留空 = 直接推进）'),
       );
-      this.sendToGroup(gid, hint ? '行，就往这个方向走，等我一下（' : '好，我接着说（').catch(
-        () => {},
-      );
+      this.sendToGroup(
+        gid,
+        forceEnd
+          ? forceEnd === 'good'
+            ? '行，这就收个好结局（'
+            : '行，收个坏结局（'
+          : hint
+            ? '行，就往这个方向走，等我一下（'
+            : '好，我接着说（',
+      ).catch(() => {});
 
       (async () => {
         const ask = this.questAsk();
@@ -11024,7 +11220,13 @@ export class Bot {
           );
           return;
         }
-        const r = await quest.advance(q, { ask, hint: hint || undefined });
+        // ⚠️ 2026-10-05：`forceEnd` 透传给引擎 —— 那一段**必须写成结局**，
+        //    而且**好坏由命令定**，不看模型回什么（跟管理界面那个按钮同一条路）。
+        const r = await quest.advance(q, {
+          ask,
+          hint: forceEnd ? undefined : hint || undefined,
+          forceEnd: forceEnd || undefined,
+        });
         if (!r?.ok) {
           log.warn(`[剧情] 手动推进失败（群 ${gid}）：${r?.reason}`);
           await this.sendToGroup(gid, `这段没写出来：${r?.reason ?? '不知道为啥'}`).catch(() => {});
@@ -11072,6 +11274,90 @@ export class Bot {
     }
   }
 
+  /**
+   * 「@她 + 用**人话**让她忘掉刚记的那条」—— 撤回最近一次群记忆（2026-10-05 用户要求）。
+   *
+   * ## 用户原话
+   *   「在机器人记群里内容的时候，加一个能撤回记住的机制，只要 @机器人 然后以自然语言
+   *     说出**忘记刚才那个** 之类的话，就撤回记住的那条，**区别于 / 的命令**」
+   *
+   * 拍板（问过两个来回）：粒度 = **撤销最近一次总结**；权限 = **服主 / 管理员 / 群管**。
+   *
+   * ## 三个判据，缺一不可（少一个就会误伤）
+   *   ① **必须明确对着她说**：@她 / 引用她 / 正文里叫她的名字 ——
+   *      否则群里随便一句「我忘了带钥匙」都会去删她的记忆 ✗
+   *   ② **要有"忘 / 删 / 撤 / 别记"这类动词**，**而且**挨着「刚才 / 那 / 这 / 上一条」这种指代：
+   *      「忘记刚才那个」「把刚才那条删了」「别记这个」「刚才那条忘掉」都认；
+   *      「我忘记带钥匙了」「删掉这条消息」（没有指代"刚记的"）不认 ✓
+   *   ③ 权限：只有服主 / 管理员 / 群管（普通群友 @ 她说这句会被婉拒）。
+   *
+   * ⚠️ 撤回只作用于**这个群**那个资料库文件（`observe.undoLast(gid)`）——
+   *    一次总结会给好几个群各写一次，不能把别的群的记录一起卷回来。
+   *
+   * @returns {boolean} true = 这条已经处理完了（调用方直接 return，别再走正常聊天）
+   */
+  tryForgetMemory(event, segs) {
+    try {
+      const gid = String(event?.group_id ?? '');
+      if (!gid) return false;
+      const raw = String(msg.extractText(segs) ?? '').trim();
+      if (!raw) return false;
+
+      // ① 必须明确对着她说
+      const atMe = this.selfId ? msg.isAt(segs, this.selfId) : false;
+      const quoteMe = this.isQuoteOfMe(event, segs);
+      const callMe = this.calledByName(raw);
+      if (!atMe && !quoteMe && !callMe) return false;
+
+      // ② 动词 + 指代（两个都要有，**顺序不限**）
+      //    ⚠️ 两个方向都要认：`忘记刚才那个` 和 `这个不用记了` 都是自然说法。
+      //    ⚠️ 别放宽成"只认动词"或"只认指代" —— 两个单独出现都太常见了。
+      //
+      //    ⚠️⚠️ 2026-10-05 实测补充（用户 @ 她只说了「撤回」两个字 ⇒ **完全没反应**）：
+      //      「撤回 / 撤销」是**明确的指令词**，日常聊天里不会那么用 ——
+      //      所以在**已经确认是冲她说的**（@她 / 引用她 / 叫名字）前提下，
+      //      这两个词**单独出现就够了**，不必再要求指代。
+      //      🚫 而「忘记 / 删 / 别记」这类**日常**词仍然要求挨着指代 ——
+      //        「我忘记带钥匙了」「删掉这条消息」都不会被误认成撤回指令 ✓
+      const STRONG = /(撤回|撤销)/;
+      const WEAK = '(忘|删|别记|不要记|不用记|别再记)';
+      const REF = '(刚|上一条|上一个|上一句|刚才|那条|那个|这条|这个|这些|它)';
+      const hit =
+        STRONG.test(raw) ||
+        new RegExp(`${WEAK}[^。！？\\n]{0,10}${REF}`).test(raw) ||
+        new RegExp(`${REF}[^。！？\\n]{0,8}${WEAK}`).test(raw);
+      //    ⚠️⚠️ 但「删掉这条消息 / 撤回那条消息」说的是 **QQ 消息**，不是她的记忆 ⇒ 放行。
+      //       （第一版没这条，测试里「删掉这条消息」被判成撤回记忆 —— 那种误伤是**真删东西**。）
+      const aboutMsg = /(删|撤回|撤)[^。！？\n]{0,6}(消息|聊天记录|那句话)/.test(raw);
+      if (!hit || aboutMsg) return false;
+
+      // ③ 权限
+      const role = this.speakerRole(event);
+      if (role !== 'owner' && role !== 'staff' && role !== 'admin') {
+        log.info(`[记忆] ${event.user_id} 想撤回记忆但没权限（role=${role}）→ 已回提示`);
+        this.sendToGroup(gid, '这个只有服主和管理员能用（').catch(() => {});
+        return true;
+      }
+
+      const r = observe.undoLast(gid);
+      if (!r?.ok) {
+        log.info(`[记忆] 撤回没成：${r?.reason}`);
+        this.sendToGroup(gid, `没有什么可撤的诶（${r?.reason ?? '不知道为啥'}）`).catch(() => {});
+        return true;
+      }
+      log.info(
+        `[记忆] 撤回了群 ${gid} 最近一次观察（${r.removed} 条，原话：「${raw.slice(0, 40)}」）`,
+      );
+      const head = r.removed ? `行，刚才那次记的（${r.removed} 条）我删了` : '行，刚才那次记的删了';
+      const tail = r.preview?.length ? `\n（比如「${r.preview[0]}」）` : '';
+      this.sendToGroup(gid, `${head}${tail}`).catch(() => {});
+      return true;
+    } catch (e) {
+      log.warn(`[记忆] 撤回出错：${e.message}`);
+      return false;
+    }
+  }
+
   tryQuestStart(event, segs) {
     try {
       const raw = String(msg.extractText(segs) ?? '').trim();
@@ -11080,8 +11366,27 @@ export class Bot {
       if (!m) return false;
       if (event.message_type !== 'group') return false;
 
-      const hint = String(m[1] ?? '').trim();
+      const rawHint = String(m[1] ?? '').trim();
+      // ⚠️⚠️ 2026-10-05 加（用户要求）：「加一条剧情命令，`/剧情 好/坏结局`，
+      //    对应 webui 里的**直接收成好 / 坏结局**的按钮」。
+      //    ⇒ 整段就是「好结局 / 坏 / good」这类词时，这次不是"给个方向"，
+      //      而是**命令那一段必须收成指定结局**（`quest.advance` 的 `forceEnd`）。
+      //    ⚠️ 判据是**整段相等**（见 `quest.parseEndingWord`）——
+      //      「往好的方向走」那种仍然照旧当方向提示词，不会被吃成命令。
+      const endingWord = quest.parseEndingWord(rawHint);
+      const hint = endingWord ? '' : rawHint;
       const gid = String(event.group_id);
+
+      // ⚠️⚠️ 2026-10-05 加（用户要求）：「在按群设定那里加一个开关，控制是否接收
+      //    `/剧情` 的命令，默认开启接收 —— 主要是等下会有**两个机器人在同一个群**，避免冲突」。
+      //    ⇒ 关掉的群里，`/剧情` 一律**当没看见**。
+      //    ⚠️ 这里 `return false`（而不是 true）是**故意的**：`/` 开头的消息在 `decide()`
+      //      里本来就不会回复，所以"当没看见"正好 = 不回复 + 更不会动剧情 ✓
+      //    ⚠️ 默认 `true` ⇒ 没设过这个开关的群，行为跟以前**一模一样**。
+      if (paramsFor('quest', gid)?.commands === false) {
+        log.info(`[剧情] 群 ${gid} 关掉了剧情命令 → 无视这条（${raw.slice(0, 30)}）`);
+        return false;
+      }
 
       // ── 权限 ──
       const role = this.speakerRole(event);
@@ -11090,10 +11395,12 @@ export class Bot {
         this.sendToGroup(gid, '这个只有服主和管理员能用（').catch(() => {});
         return true;
       }
-      if (!hint && !(quest.current(gid) && !quest.current(gid).endedAt)) {
+      if (!hint && !endingWord && !(quest.current(gid) && !quest.current(gid).endedAt)) {
         this.sendToGroup(
           gid,
-          '用法：/剧情 后面写上这条线的背景，比如\n/剧情 客服室来了个客人，认出她是丰川家的大小姐',
+          '用法：/剧情 后面写上这条线的背景，比如\n/剧情 客服室来了个客人，认出她是丰川家的大小姐\n' +
+            '（已经在跑一条时：后面写**方向** = 推着往那走；**留空** = 直接推一段；' +
+            '`/剧情 好结局` 或 `/剧情 坏结局` = 这一段直接收尾）',
         ).catch(() => {});
         return true;
       }
@@ -11103,7 +11410,16 @@ export class Bot {
       {
         const running = quest.current(gid);
         if (running && !running.endedAt) {
-          return this.questControl(event, gid, hint);
+          return this.questControl(event, gid, hint, endingWord);
+        }
+        // ⚠️ 2026-10-05：**没在跑剧情**却发了「/剧情 好结局」——
+        //    别把它当成"开新剧情的背景"（那样会开出一条叫"好结局"的线）✗
+        if (endingWord) {
+          log.info(`[剧情] 群 ${gid} 没有在跑的剧情，却发了收结局命令（${endingWord}）`);
+          this.sendToGroup(gid, '现在没有在跑的剧情（要开新的就发 /剧情 加一句背景）').catch(
+            () => {},
+          );
+          return true;
         }
       }
       // ── 能不能开（顺手挡住"已经在跑一条"）──
@@ -11181,6 +11497,13 @@ export class Bot {
       if (!/^[\/／]\s*清\s*除\s*剧\s*情\s*$/.test(raw)) return false;
       if (event.message_type !== 'group') return false;
       const gid = String(event.group_id);
+
+      // ⚠️ 2026-10-05：跟 `/剧情` 同一个开关 —— 关掉了剧情命令的群，这条也一律无视
+      //    （用户要的是"这个群别理剧情指令"，`/清除剧情` 当然算）。
+      if (paramsFor('quest', gid)?.commands === false) {
+        log.info(`[剧情] 群 ${gid} 关掉了剧情命令 → 无视 /清除剧情`);
+        return false;
+      }
 
       const role = this.speakerRole(event);
       if (role !== 'owner' && role !== 'staff') {

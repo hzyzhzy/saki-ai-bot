@@ -1135,10 +1135,16 @@ console.log('\n【25】★★ 上一条是坏结局 → 下一条的开场直接
   const r2 = await quest.begin({ ask, groupId: G });
   check(r2.ok === true, '第二条开起来了', r2.reason ?? '');
   const u2 = prompts[0].user;
-  check(/上一条主线是「坏结局」/.test(u2), '★★ 提示词里点明了「上一条是坏结局」');
+  check(/坏结局/.test(u2), '★★ 提示词里点明了「上一条是坏结局」');
   check(/挽回|收拾残局/.test(u2), '★★ 而且要求这一段写「挽回」');
   check(u2.includes(r1.quest.premise), '★★ 把上一条的起因也带上了（"直接参考坏结局剧情"）');
-  check(/别自己就把结局定成圆满/.test(u2), '★ 但能不能挽回交给群友，不预设圆满');
+  check(/你别自己定成圆满/.test(u2), '★ 但能不能挽回交给群友，不预设圆满');
+  // ★★ 2026-10-05 加（用户截图：「如果马上开下一个剧情，她会不记得上次剧情的内容」）：
+  //    原来只有坏结局才给一句"上一次的起因"，**上一条演了什么完全没给** ⇒
+  //    现在任何结局都摆出「上一条主线的经过（起因 + 每段 + 结局）」。
+  check(/上一条主线（刚演完的那条）/.test(u2), '★★ 摆出了「上一条主线」这一段');
+  check(/经过：/.test(u2), '★★ 带上了上一条**每一段发生了什么**');
+  check(/结局：坏结局/.test(u2), '★★ 也写明了上一条的结局');
 
   // —— 对照：好结局不触发 ——
   reset();
@@ -1151,6 +1157,13 @@ console.log('\n【25】★★ 上一条是坏结局 → 下一条的开场直接
   replies = [J({ premise: '新的小事', event: 'e', text: 't' })];
   const g2 = await quest.begin({ ask, groupId: G2 });
   check(g2.ok === true, '好结局之后也能正常开下一条');
+  // ★★ 2026-10-05：**好结局也一样**要把上一条摆出来（原来只有坏结局才有那段）——
+  //    用户要的是"她记得上次剧情的内容"，跟结局好坏无关。
+  check(
+    /上一条主线（刚演完的那条）/.test(prompts[0].user),
+    '★★ 好结局的上一条也照样摆出来（不再只有坏结局才给）',
+  );
+  check(/结局：好结局/.test(prompts[0].user), '★★ 而且写明是「好结局」');
   check(!/上一条主线是「坏结局」/.test(prompts[0].user), '★ 好结局之后**不会**硬套"挽回"');
 }
 
@@ -1412,6 +1425,100 @@ console.log('\n【24】★★ `/剧情` 在剧情进行中 = 剧情控制（带�
   };
   check(b2.tryQuestStart(evt, seg('/剧情')) === true, '命令被处理了');
   check(sent.some((t) => /用法/.test(String(t))), '★ 没剧情 + 留空 → 回用法提示');
+}
+
+// ★★ 2026-10-05 加（用户要求）：「加一条剧情命令，/剧情 好/坏结局，
+//    对应 webui 里的**直接收成好/坏结局**的按钮」。
+console.log('\n[结局命令] /剧情 好结局、/剧情 坏结局');
+{
+  // ⚠️ 这个套件顶层没直接 import Bot（前面的段都是各自动态取的）——
+  //    这里一样动态 import（ESM 有模块缓存，不会重复执行）
+  const { Bot } = await import('../src/bot.js');
+  const seg = (t) => [{ type: 'text', data: { text: t } }];
+  const evt = { message_type: 'group', group_id: '200000001', user_id: '10000001' };
+  for (const [word, want] of [
+    ['好结局', 'good'],
+    ['坏结局', 'bad'],
+    ['好', 'good'],
+    ['坏', 'bad'],
+    ['good', 'good'],
+    ['bad', 'bad'],
+    [' 坏结局 ', 'bad'],
+    ['结局', null],
+    ['往好的方向走', null], // ★ 关键反例：这是**方向提示词**，不是收结局的命令
+    ['那先收个坏结局吧', null], // 不是整段相等 → 不认
+    ['', null],
+  ]) {
+    const got = quest.parseEndingWord(word);
+    check(
+      String(got) === String(want),
+      `判据：${JSON.stringify(word)} → ${want ?? 'null'}`,
+      `实际 ${got}`,
+    );
+  }
+
+  // 没有剧情在跑时发 `/剧情 好结局` → **不许**开出一条叫"好结局"的新线
+  reset();
+  const b3 = new Bot();
+  b3.speakerRole = () => 'owner';
+  const got3 = [];
+  b3.sendToGroup = async (g, t) => {
+    got3.push(String(t));
+  };
+  b3.questControl = () => {
+    throw new Error('没有剧情时不该走 questControl');
+  };
+  check(b3.tryQuestStart(evt, seg('/剧情 好结局')) === true, '命令被处理了');
+  check(
+    got3.some((t) => /没有在跑的剧情/.test(t)),
+    '★ 没剧情 + 收结局命令 → 明确说"没有在跑的剧情"',
+  );
+  check(!got3.some((t) => /用法/.test(t)), '★ 而不是掉进用法提示 / 被当成新剧情的背景');
+}
+
+// ★★ 2026-10-05 加（用户要求）：「在按群设定那里加一个开关，控制是否接收 /剧情 的命令，
+//    默认开启接收 —— 主要是等下会有**两个机器人在同一个群**，避免冲突」。
+console.log('\n[开关] 按群关掉「收 /剧情 命令」');
+{
+  const { Bot } = await import('../src/bot.js');
+  const { config } = await import('../src/config.js');
+  const G = '999000777';
+  config.groupParams ??= {};
+  config.groupParams[G] = { quest: { commands: false } };
+
+  const b = new Bot();
+  b.speakerRole = () => 'owner';
+  const got = [];
+  b.sendToGroup = async (g, t) => {
+    got.push(String(t));
+  };
+  b.questControl = () => {
+    throw new Error('关掉了就不该走剧情控制');
+  };
+  const ev = { message_type: 'group', group_id: G, user_id: '10000001' };
+  check(
+    b.tryQuestStart(ev, [{ type: 'text', data: { text: '/剧情 开一条新的' } }]) === false,
+    '★ 关掉后 `/剧情` 被无视（返回 false，交回普通流程）',
+  );
+  check(got.length === 0, '★★ 而且**一个字都不回**（当没看见，不抢话）');
+  check(
+    b.tryQuestReset(ev, [{ type: 'text', data: { text: '/清除剧情' } }]) === false,
+    '★ `/清除剧情` 同样被无视（它也是剧情命令）',
+  );
+
+  delete config.groupParams[G];
+
+  // 对照：**没设过**开关的群照旧收（默认开启）
+  const got2 = [];
+  b.sendToGroup = async (g, t) => {
+    got2.push(String(t));
+  };
+  const ev2 = { message_type: 'group', group_id: '999000778', user_id: '10000001' };
+  check(
+    b.tryQuestStart(ev2, [{ type: 'text', data: { text: '/剧情' } }]) === true,
+    '★★ 没设过开关的群照旧收命令（默认开启，行为跟以前一样）',
+  );
+  check(got2.some((t) => /用法/.test(t)), '★ 而且走的是正常的用法提示（没被开关影响）');
 }
 
 try {

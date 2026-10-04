@@ -12,6 +12,8 @@ import * as observe from './observe.js';
 // ⚠️ 「他的资料」自动更新（2026-10-03 用户要求）：他私聊里聊到生活变化 → 自动改 owner.md
 import * as ownerUpdate from './owner-update.js';
 import * as life from './life.js';
+// ⚠️ 2026-10-05 加：同类机器人主动搭话（群里冷场时 @ 它 / 戳它一下）
+import * as peerChat from './peer-chat.js';
 import * as storyline from './storyline.js';
 import * as quest from './quest.js';
 import * as affinity from './affinity.js';
@@ -402,6 +404,12 @@ startWebUI(bot);
 
 // QQ 空间：定期判断要不要把群里的趣事发到空间
 bot.startQzoneScheduler();
+// ⚠️ 2026-10-05 加：同类机器人搭话的定时器（群里冷场时才动，见 src/peer-chat.js）
+try {
+  peerChat.start(bot);
+} catch (e) {
+  console.error(`[同类] 启动失败（不影响其它功能）：${e.message}`);
+}
 
 // ⚠️ API 余额 = 小祥的「工资」（2026-09-13 用户要求）：
 //    低于 5 元抱怨一次、低于 2 元再抱怨一次；402 也走这套话术。

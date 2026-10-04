@@ -3269,6 +3269,8 @@ async function fillGroupParams() {
   const oL = ov.life || {};
   const oQ = ov.quest || {};
   const oC = ov.chat || {};
+  // ⚠️ 2026-10-05：同类池（按群，一串 QQ 号）—— 它是**顶层**字段，不在 life/quest/chat 里。
+  const peers = Array.isArray(ov.peers) ? ov.peers : [];
   // ⚠️⚠️ 2026-09-16（用户要求）：「还是有跟全局的选项」「默认选关闭就行了」——
   //    **彻底去掉"跟全局"这个概念**：每个群就是**自己完整的一份**。
   //    所以这里所有输入框显示的都是**这个群现在实际生效的值**，
@@ -3314,8 +3316,25 @@ async function fillGroupParams() {
     </div>
 
     <div style="border:1px dashed var(--line);border-radius:8px;padding:8px;margin-bottom:8px">
+      <b>机器人同类池</b>
+      <div class="hint" style="margin:4px 0">
+        填 QQ 号，<b>一行一个</b>（逗号/空格也认）。填进去的<b>直接当同类机器人</b>：
+        她不再把它当"要忽略的机器人"（它说话她会正常接），上下文里也会标出来
+        —— 别把它的话当成她自己说的。<br>
+        ⚠️ 跟「群与触发」里那个「能在哪些群说话」不是一回事：那个填的是<b>群号</b>，这里填的是<b>人的 QQ 号</b>。
+      </div>
+      <textarea id="gp-peers" rows="3" placeholder="3516366128" style="width:100%">${esc(peers.join('\n'))}</textarea>
+      <div style="margin-top:6px">
+        ⚠️ 下面两个按钮**跳过冷场/冷却那几道时间闸**（就是想马上看到效果），点一次真发一次：
+        <button class="act" onclick="peerChatNow(false)">立刻试一次（@ 它说一句）</button>
+        <button class="act" onclick="peerChatNow(true)">立刻试一次（戳它一下）</button>
+      </div>
+    </div>
+
+    <div style="border:1px dashed var(--line);border-radius:8px;padding:8px;margin-bottom:8px">
       <b>二级剧情</b>
       <div class="kv" style="flex-wrap:wrap;gap:8px;margin-top:6px">
+        <label title="关掉之后，这个群发 /剧情 和 /清除剧情 都会被无视（同一个群里跑两个机器人时用这个避免冲突）">收 /剧情 命令 ${onoff('gp-quest-commands', Q.commands !== false)}</label>
         <label>这个群自动开剧情 ${onoff('gp-quest-enable', Q.enable === true)}</label>
         <label title="一级事件攒到点时，掷骰子自动开一条剧情的概率">概率 <input type="number" id="gp-quest-chance" min="0" max="1" step="0.01" style="width:70px" value="${val(Q.chance)}"></label>
         <label title="每 7 天最多几条">每周上限 <input type="number" id="gp-quest-max" min="1" max="20" style="width:70px" value="${val(Q.maxPerWeek)}"></label>
@@ -3357,6 +3376,25 @@ async function fillGroupParams() {
     </div>`;
 }
 
+/**
+ * ⚠️ 2026-10-05 加：手动触发一次「同类机器人搭话」（跳过冷场/冷却那几道时间闸）。
+ * ⚠️ 它**会真的发到群里**，而且照样记账（冷却该算）。
+ */
+async function peerChatNow(poke) {
+  const gid = String($('gp-group')?.value || '').trim();
+  if (!gid) return alert('先在上面选一个群');
+  try {
+    const r = await api('/api/peer-chat/now', {
+      method: 'POST',
+      body: JSON.stringify({ groupId: gid, poke: !!poke }),
+    });
+    if (!r?.ok) return alert(`没成：${r?.error || '不知道为啥'}`);
+    alert(r.poke ? `戳了「${r.name}」一下（去群里看）` : `说了：「${r.text}」`);
+  } catch (e) {
+    alert(`出错：${e.message}`);
+  }
+}
+
 async function saveGroupParams() {
   const gid = String($('gp-group')?.value || '').trim();
   if (!gid) return;
@@ -3372,7 +3410,14 @@ async function saveGroupParams() {
     const v = String($(id)?.value ?? '');
     return v === '' ? null : v === '1';
   };
+  // ⚠️ 2026-10-05 加（用户要求）：「机器人同类池」——一行一个 QQ 号（逗号/空格也认）。
+  const peers = String($('gp-peers')?.value ?? '')
+    .split(/[\s,，、]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
   const patch = {
+    // ⚠️ 同类池放在**顶层**（不是 life / quest / chat 那种 kind）—— 它是一串 QQ 号。
+    peers,
     life: {
       enable: boolOrNull('gp-life-enable'),
       holidays: boolOrNull('gp-life-holidays'),
@@ -3384,6 +3429,9 @@ async function saveGroupParams() {
       lateToleranceMs: minOrNull('gp-life-late'),
     },
     quest: {
+      // ⚠️ 2026-10-05 加（用户要求）：「控制是否接收 /剧情 的命令，默认开启接收 ——
+      //    主要是等下会有两个机器人在同一个群，避免冲突」。
+      commands: boolOrNull('gp-quest-commands'),
       enable: boolOrNull('gp-quest-enable'),
       chance: numOrNull('gp-quest-chance'),
       maxPerWeek: numOrNull('gp-quest-max'),

@@ -217,5 +217,32 @@ console.log('\n【私聊上下文 + 时间可读性】2026-10-03 加（用户报
   recent.clear(`dm:${ME}`);
 }
 
+// ★★ 2026-10-05 加（用户：小豆也接入了 saki bot 之后 ——「saki 们并没有发现另一个人
+//    说话方式和自己很像，而且好像还把对面说的话当作自己说的话了」）
+console.log('\n【8】★★ 上下文里的「同款机器人」要标出来（别把它的立场当成自己的）');
+{
+  const BOTID = '10000010'; // 是der的小豆（用了同一套 saki 人设）
+  const isBot = (uid) => String(uid) === BOTID;
+  const now2 = Date.now();
+  const ME2 = '10000001';
+  recent.__storeForTest().set(G, [
+    { name: '是der的小豆', userId: BOTID, text: '想让它顶我的班啊', atMe: false, time: now2 - 3000 },
+    { name: 'Saki', userId: '__self__', self: true, text: '我倒是没意见', atMe: false, time: now2 - 2000 },
+    { name: '<主人>', userId: ME2, text: '你俩别闹', atMe: true, time: now2 - 1000 },
+  ]);
+  const t = recent.contextText(G, '', [], { isBot });
+  check(/另一个在模仿你的家伙/.test(t), '★★ 那个同款机器人那行被标出来了');
+  check(/不是你/.test(t), '★★ 而且写明「不是你」');
+  check(
+    /它的班、它的活/.test(t),
+    '★★ 最前面有一段解释：它说的「我」是它自己 —— 它的班不是你的',
+  );
+  check(/【你自己说的】/.test(t), '★ 她自己那句仍然标着「你自己说的」（两者没被搞混）');
+  // 不传 isBot 时行为**一个字都不变**（别的调用方不受影响）
+  const t2 = recent.contextText(G);
+  check(!/另一个在模仿你的家伙/.test(t2), '★ 不传 isBot → 跟以前一模一样（向后兼容）');
+  recent.clear(G);
+}
+
 console.log(`\n结果: ${failures === 0 ? '全部通过 ✅' : `${failures} 项失败 ❌`}\n`);
 process.exit(failures === 0 ? 0 : 1);

@@ -44,6 +44,8 @@ import { listEntries } from './learned.js';
 import { faceTags, reload as reloadFaces } from './faces.js';
 import { hasKnowledge, reloadKnowledge, knowledgeText } from './knowledge.js';
 import * as life from './life.js';
+// ⚠️ 2026-10-05 加：同类机器人搭话（「立刻试一次」那个按钮要用它的 compose / pickPeer）
+import * as peerChat from './peer-chat.js';
 import * as persona from './persona.js';
 import * as personaAdmin from './persona-admin.js';
 import * as personaDraft from './persona-draft.js';
@@ -1415,6 +1417,22 @@ const routes = {
     const raw = yaml.load(readFileSync(CONFIG_FILE, 'utf8')) ?? {};
     raw.groupParams ??= {};
     const cur = raw.groupParams[gid] ?? {};
+    // ⚠️ 2026-10-05 加（用户要求）：「机器人同类池」是**顶层数组**（不是 life/quest/chat
+    //    那种 kind 对象）⇒ 单独收。规矩跟 config.js 那边一致：
+    //    去空值、统一字符串、去重、封顶 10 个。
+    if (Array.isArray(b.patch?.peers)) {
+      const seen = new Set();
+      const peers = [];
+      for (const x of b.patch.peers) {
+        const id = String(x ?? '').trim();
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        peers.push(id);
+        if (peers.length >= 10) break;
+      }
+      if (peers.length) cur.peers = peers;
+      else delete cur.peers;
+    }
     for (const [kind, fields] of Object.entries(b.patch ?? {})) {
       // ⚠️ `chat` = 收紧度这类"她怎么说话"的参数（2026-09-15 晚加）
       if (!['life', 'quest', 'chat'].includes(kind) || !fields || typeof fields !== 'object') continue;
@@ -1773,6 +1791,43 @@ const routes = {
   //    ⇒ 这个接口**只发话、不记账**。
   // ⚠️ 走 `sendChatLike`（不是裸 `send_group_msg`）—— 那是她所有发言的唯一出口，
   //    打码 / 口癖抑制 /「倒」降频 / 分条那一整套都在里面，绕过去就不是她的说话了。
+  // 立刻试一次「同类机器人搭话」（2026-10-05 加）。
+  //
+  // ⚠️ 为什么需要：那个功能的定时器是"每 5 分钟看一次、群里冷场 15 分钟才开口"——
+  //    想马上看到效果时，等它自己触发要十几分钟。这个接口**跳过那几道时间闸**
+  //    （但仍然要求"配了同类池"），直接生成一句发出去，并**照样记账**（冷却该算）。
+  'POST /api/peer-chat/now': async (req, res) => {
+    let b = {};
+    try {
+      b = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+    } catch {}
+    const gid = String(b.groupId ?? '').trim();
+    if (!gid) return send(res, 200, { ok: false, error: '要填群号' });
+    if (!bot?.selfId) return send(res, 200, { ok: false, error: 'QQ 没在线' });
+    const peers = peerChat.peersOf(gid);
+    if (!peers.length) {
+      return send(res, 200, { ok: false, error: `群 ${gid} 没配同类池（去「按群设定」里填 QQ 号）` });
+    }
+    const peer = peerChat.pickPeer(gid, peers);
+    const peerName = names.of(peer, gid) || peer;
+    try {
+      if (b.poke === true) {
+        await bot.call('send_poke', { user_id: peer, group_id: gid });
+        peerChat.note(gid, peer);
+        log.info(`管理界面手动触发：她戳了「${peerName}」一下（群 ${gid}）`);
+        return send(res, 200, { ok: true, gid, peer, name: peerName, poke: true });
+      }
+      const text = await peerChat.compose(gid, peer, 15 * 60 * 1000, 30000);
+      if (!text) return send(res, 200, { ok: false, error: '模型没生成出内容（再试一次看看）' });
+      await bot.sendToGroup(gid, text, { at: peer, atName: names.of(peer, gid) || '' });
+      peerChat.note(gid, peer);
+      log.info(`管理界面手动触发同类搭话 → 群 ${gid}，@「${peerName}」：「${text}」`);
+      send(res, 200, { ok: true, gid, peer, name: peerName, text });
+    } catch (e) {
+      send(res, 200, { ok: false, error: e.message });
+    }
+  },
+
   'POST /api/say': async (req, res) => {
     if (!bot?.selfId) return send(res, 200, { ok: false, error: 'QQ 没在线' });
     let b = {};

@@ -38,7 +38,7 @@
  * | 好感度不能修改 | 好感度**根本不在这里** —— 它在 `src/affinity.js` + `state/affinity.json`，这个模块**一个字都不碰**（连提示词里都不提它） |
  */
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { config, ROOT, KNOWLEDGE_DIR } from './config.js';
 import { log } from './log.js';
 import { reloadKnowledge, groupFileName } from './knowledge.js';
@@ -197,6 +197,16 @@ function targetFileFor(groupId, fromPrivate = false) {
 
 /** 把文件里的自动区替换成新内容；没有标记区就插在「怎么用」那节之前 */
 function patchFile(body, file = FILE) {
+  // ⚠️⚠️ 2026-10-05 加：**写之前先备份**。
+  //    起因：我自己的测试把用户**两个群的资料库**写坏又删掉了，翻提示词快照、旧备份目录
+  //    都救不回来（最后只能走 OneDrive 回收站）—— 而 `backupKnowledge` **早就在这个文件里
+  //    import 了、却一次都没调用过** ✗（`knowledge/_backup/` 里只有 server-basic / learned，
+  //    一份 groups 都没有）。观察是**自动后台写**的，没备份等于"改坏了就没了"。
+  try {
+    backupKnowledge(file);
+  } catch (e) {
+    log.debug(`[观察] 写前备份失败（继续写）：${e.message}`);
+  }
   let raw = '';
   try {
     raw = readFileSync(file, 'utf8');
@@ -443,6 +453,11 @@ export async function summarize(opts = {}) {
 
       const merged = merge(existing, parsed);
       const ok = patchFile(merged, file);
+      // ⚠️⚠️ 2026-10-05 加（用户要求：「在机器人记群里内容的时候，加一个能撤回记住的机制，
+      //    只要 @机器人 然后以自然语言说出『忘记刚才那个』之类的话，就撤回记住的那条」）：
+      //    **写成功之后**把"改之前是什么样"存一份快照 —— 撤回就是把它写回去，
+      //    见下面的 `undoLast()`。⚠️ 必须在 `patchFile` **之后**（写失败就不该能撤）。
+      if (ok) pushUndo({ file, gid, before: existing, after: merged });
       if (!ok) {
         log.warn(`[观察] 群 ${gid || '(无群号)'} 写文件失败，这批留着下次再试`);
         for (const m of batch) done.delete(m);
@@ -649,6 +664,112 @@ export async function compress(opts = {}) {
   } finally {
     running = false;
   }
+}
+
+// ── 撤回最近一次观察（2026-10-05 用户要求）──────────────────────
+//
+// 用户原话：「在机器人记群里内容的时候，加一个能撤回记住的机制，只要 @机器人
+//   然后以自然语言说出忘记刚才那个 之类的话，就撤回记住的那条，区别于 / 的命令」
+//
+// 拍板（两个来回问过的）：
+//   · 粒度 = **撤销最近一次总结**（不是"删一条"）——
+//     ⚠️ 因为 `patchFile` 是**整块替换**自动观察区，代码里压根没有"第 N 条"这种东西；
+//     存"改之前的整块"再写回去，才是可靠且可预期的做法。
+//   · 权限 = 只有服主 / 管理员 / 群管（见 `bot.js` 的 `tryForgetMemory`）。
+//
+// ⚠️ 快照必须**按群找**：一次 summarize 会给好几个群各写一次，
+//    "撤回"只该撤**当前这个群**那一次，别把别的群的记录也卷回来。
+const UNDO_FILE = process.env.QQBOT_OBSERVE_UNDO_FILE
+  ? join(ROOT, process.env.QQBOT_OBSERVE_UNDO_FILE)
+  : join(ROOT, 'state', 'observe-undo.json');
+/** 留最近几次（够用就行，别把状态文件堆大） */
+const UNDO_KEEP = 10;
+
+function readUndo() {
+  try {
+    const a = JSON.parse(readFileSync(UNDO_FILE, 'utf8'));
+    return Array.isArray(a) ? a : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeUndo(list) {
+  try {
+    mkdirSync(dirname(UNDO_FILE), { recursive: true });
+    const tmp = `${UNDO_FILE}.tmp`;
+    writeFileSync(tmp, JSON.stringify(list.slice(-UNDO_KEEP), null, 2), 'utf8');
+    renameSync(tmp, UNDO_FILE);
+  } catch (e) {
+    log.warn(`[观察] 撤回快照写不进去：${e.message}`);
+  }
+}
+
+/** 记一份「改之前长什么样」。⚠️ 只在 patchFile 成功之后调用 */
+function pushUndo({ file, gid, before, after }) {
+  const list = readUndo();
+  list.push({
+    at: Date.now(),
+    file: String(file ?? ''),
+    gid: String(gid ?? ''),
+    before: String(before ?? ''),
+    after: String(after ?? ''),
+    // ⚠️ 只用来告诉她"撤了几条" ⇒ 必须算**新增**的条数（`after - before`），
+    //    不是 `after` 里总共有几条 —— 第一版算的是总数，测试里报成 3（实际新增 2）。
+    //    改写的那些（差值 0）就报"那次记的内容删了"，不硬凑数字。
+    entries: Math.max(
+      0,
+      (String(after ?? '').match(/^- /gm) ?? []).length -
+        (String(before ?? '').match(/^- /gm) ?? []).length,
+    ),
+  });
+  writeUndo(list);
+}
+
+/** 还能撤几次（测试 / 诊断用） */
+export function undoCount(groupId = '') {
+  const gid = String(groupId ?? '');
+  return readUndo().filter((s) => !gid || String(s.gid) === gid).length;
+}
+
+/**
+ * 撤回**这个群最近一次**自动观察写入。
+ *
+ * @param {string} groupId 群号（'dm:<QQ>' 也认 —— 私聊记忆同一个机制）
+ * @returns {{ok:boolean, reason?:string, at?:number, removed?:number, preview?:string[]}}
+ */
+export function undoLast(groupId = '') {
+  const gid = String(groupId ?? '');
+  const list = readUndo();
+  for (let i = list.length - 1; i >= 0; i--) {
+    const s = list[i];
+    if (gid && String(s.gid) !== gid) continue;
+    // 把那个文件的自动观察区**写回改动前的内容**
+    if (!patchFile(s.before, s.file)) {
+      return { ok: false, reason: '写不回去（文件被占用或者没有权限）' };
+    }
+    list.splice(i, 1);
+    writeUndo(list);
+    // ⚠️ 知识是**启动时读进内存**的 —— 不重载的话，撤回只改了磁盘，
+    //    她这次说话用的还是撤掉之前那份（用户会以为"撤了但没生效"）。
+    try {
+      reloadKnowledge();
+    } catch (e) {
+      log.warn(`[观察] 撤回后重载知识失败（重启才生效）：${e.message}`);
+    }
+    const preview = String(s.after ?? '')
+      .split('\n')
+      .filter((l) => l.trim().startsWith('- '))
+      .slice(0, 3)
+      .map((l) => l.trim().replace(/^- /, '').slice(0, 40));
+    return { ok: true, at: Number(s.at ?? 0), removed: Number(s.entries ?? 0) || 0, preview };
+  }
+  return { ok: false, reason: gid ? '这个群还没有能撤的记录' : '没有能撤的记录' };
+}
+
+/** 测试用：手动塞一条撤回快照（生产路径只有 `summarize` 里那一处会调 `pushUndo`） */
+export function __pushUndoForTest(entry) {
+  pushUndo(entry);
 }
 
 export function reset() {
