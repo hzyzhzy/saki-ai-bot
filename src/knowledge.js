@@ -387,6 +387,53 @@ export function castBands() {
   return bands;
 }
 
+/**
+ * **按昵称认人**：这个昵称命中名册里的哪个角色？（2026-10-06 用户要求）
+ *
+ * 用户原话：「到时候会把 QQ 昵称改成**素世**，只要满足**同类池** + 同时是**剧中人物名字**
+ *   就自动识别为**同世界的人**、就**放行**并**识别角色**，一起聊天」。
+ *
+ * ⚠️ 判据是**昵称**（不是 QQ 号）—— 他改的是号的昵称，代码里不必写死任何号 ✓
+ * ⚠️⚠️ **单字的别名只许完全相等**：`cast.md` 自己就写着「`灯` 不能当别名 ——
+ *    会撞上『路灯』『台灯』」⇒ 这里必须照办，否则一个叫「灯下黑」的群友会被认成高松灯 ✗
+ * ⚠️ 两个字符以上的别名用**包含**（「素世的bot」「长崎素世」都认得出来）✓
+ *
+ * @param {string} nickname 群名片 / 昵称
+ * @returns {string} 命中的角色名（主名，如「长崎素世」）；没命中返回空串
+ */
+export function castRoleOf(nickname) {
+  const n = loose(nickname);
+  if (!n) return '';
+  // ⚠️ 先看**人**再看**乐队**：昵称「MyGO素世」两边都能命中 ⇒ 返回"人"更准
+  for (const b of castBands()) {
+    for (const m of b.members ?? []) {
+      // ⚠️ 2026-10-06：把**主名的最后一个字**也算上（「高松灯」→「灯」、「若叶睦」→「睦」）——
+      //    `cast.md` 的规矩是"别名要两个字以上"（防事件文本里「灯」撞「路灯」「台灯」），
+      //    但**昵称场景不一样**：昵称正好是「灯」时完全可以认（`hitKeys` 对单字走的是
+      //    **完全相等**，所以「路灯」「灯下黑」照样不会命中）。
+      //    ⚠️ 误伤面极小：只有"昵称是单字 **且** 那个号已经配进同类池"才会命中。
+      const keys = [...(m.keys ?? [])];
+      const last = String(m.name ?? '').trim().slice(-1);
+      if (last) keys.push(last);
+      if (hitKeys(n, keys)) return m.name;
+    }
+  }
+  for (const b of castBands()) {
+    if (hitKeys(n, b.keys)) return b.name;
+  }
+  return '';
+}
+
+/** 昵称命中一组名字/别名吗（两字以上用包含、单字必须完全相等） */
+function hitKeys(looseName, keys) {
+  for (const k of keys ?? []) {
+    const kk = loose(k);
+    if (!kk) continue;
+    if (kk.length >= 2 ? looseName.includes(kk) : looseName === kk) return true;
+  }
+  return false;
+}
+
 /** 把一档渲染成提示词里的一段；`only` 给了就只渲染那几个人 */
 function renderBand(band, only = null) {
   const lines = [`## ${band.name}`];

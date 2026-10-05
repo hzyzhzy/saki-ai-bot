@@ -69,6 +69,39 @@ const llmServer = createServer((req, res) => {
       return;
     }
 
+    // ⚠️⚠️ 2026-10-06 补：**预搜索**（system 里含「要不要上网查」）——
+    //    这个套件原来也漏认了它（和 `sensitivity` 同一个坑，同一天抓出来的）：
+    //    预搜索要的是 `{"search":false}`，漏认 → 解析不出来 → **退回规则** →
+    //    **每条消息真的联网搜**（10~15 秒）⇒【3】那条 20 秒的 `waitFor` **偶发超时**
+    //    （下面那句注释里写的"实测跑 4 次挂 1 次"就是它）。
+    //    ⚠️ 预搜索走 `collect(streamChat(...))` ⇒ **要 SSE、不要 JSON**。
+    if (sys.includes('要不要上网查')) {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
+      res.write(
+        `data: ${JSON.stringify({ choices: [{ delta: { content: '{"search":false,"why":"测试不搜"}' } }] })}\n\n`,
+      );
+      res.write('data: [DONE]\n\n');
+      res.end();
+      return;
+    }
+    // ⚠️ 知识录入 / 抽取：要的是 **JSON**。不认它的话每轮都要等满超时 —— 白拖慢回归
+    //    （`test/cs.js` / `test/sensitivity.js` 里都有这条，这里原来也漏了）。
+    if (sys.includes('知识录入') || sys.includes('知识抽取器')) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({ hasKnowledge: false, natural: true, topic: '', fact: '' }),
+              },
+            },
+          ],
+        }),
+      );
+      return;
+    }
+
     if (user.includes('崩溃')) reply = '行吧，又崩了。[表情:无语]';
     else if (user.includes('不存在')) reply = '试试这个 [表情:根本没有这张图] 看看';
     else if (user.includes('纯文本')) reply = '这条没有任何标记。';

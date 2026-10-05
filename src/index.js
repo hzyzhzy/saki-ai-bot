@@ -26,6 +26,7 @@ import { streamChat } from './llm.js';
 import { faceTags, faceFiles } from './faces.js';
 import { initCollector } from './collector.js';
 import * as machine from './machine.js';
+import * as cleanup from './cleanup.js';
 import * as sessions from './sessions.js';
 import * as qzoneComment from './qzone-comment.js';
 
@@ -473,6 +474,36 @@ if (config.observe?.enable !== false) {
     }).catch((e) => log.debug(`[观察] 出错：${e.message}`));
   }, every).unref();
   log.info(`群友观察：每 ${Math.round(every / 60000)} 分钟检查一次，攒够 ${config.observe.threshold} 条消息就总结`);
+}
+
+// ── 自动清理临时产物（2026-10-06 用户要求）──
+// 用户原话：「机器人自己 QQ 的聊天文件缓存占多少？我觉得可以加个自动清理的功能了，
+//   因为对机器人没用」。
+// ⚠️ 只删**临时产物**（群友发来的文件缓存 / 测试临时目录 / 按天日志 / 待审表情）——
+//    白名单（`*.md` / `*.json` / `*.bak-*` / `*备份*`）**永不碰**，见 `src/cleanup.js`。
+// ⚠️ 启动时**先清一次**（顺手把前几天攒的收掉），但**延后 20 秒** ——
+//    别跟"连协议端 / 恢复群上下文"那几件正事抢启动时间。
+if (config.cleanup?.enable !== false) {
+  const every = config.cleanup?.intervalMs ?? 6 * 3600 * 1000;
+  const tick = (why) => {
+    try {
+      const r = cleanup.run();
+      if (r.deleted?.length) {
+        log.info(
+          `[清理] ${why}：清了 ${r.deleted.length} 项，省 ${(r.freedBytes / 1048576).toFixed(1)} MB`,
+        );
+      }
+    } catch (e) {
+      log.debug(`[清理] ${why}出错：${e.message}`);
+    }
+  };
+  setTimeout(() => tick('启动清理'), 20000).unref();
+  setInterval(() => tick('定期清理'), every).unref();
+  log.info(
+    `自动清理：启动后 20 秒清一次，之后每 ${Math.round(every / 3600000)} 小时一次` +
+      `（保留：文件缓存 ${config.cleanup.uploadedDays} 天 / 临时目录 ${config.cleanup.tmpDays} 天 /` +
+      ` 日志 ${config.cleanup.logDays} 天 / 待审表情 ${config.cleanup.pendingDays} 天）`,
+  );
 }
 
 // ── 「他的资料」自动更新（2026-10-03 用户要求）──

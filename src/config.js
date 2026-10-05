@@ -912,6 +912,25 @@ function load() {
   cfg.machine.name = String(cfg.machine.name ?? '').trim();
   cfg.machine.reportIntervalMs = Math.max(0, Number(cfg.machine.reportIntervalMs) || 0);
 
+  // ── 自动清理（2026-10-06 用户要求）──────────────────
+  // 用户原话：「机器人自己 QQ 的聊天文件缓存占多少？我觉得可以加个自动清理的功能了，
+  //   因为对机器人没用」。
+  // ⚠️ 只删**临时产物**（群友发来的文件缓存 / 测试临时目录 / 按天日志 / 待审表情）——
+  //    `*.md`、`*.json`、`*.bak-*`、`*备份*` **永不碰**（发布凭据就在里面）⇒ 见 src/cleanup.js
+  cfg.cleanup ??= {};
+  cfg.cleanup.enable = cfg.cleanup.enable !== false;
+  cfg.cleanup.dryRun = cfg.cleanup.dryRun === true;
+  for (const [k, d] of [
+    ['uploadedDays', 3],
+    ['tmpDays', 3],
+    ['logDays', 7],
+    ['pendingDays', 14],
+  ]) {
+    const v = Number(cfg.cleanup[k]);
+    cfg.cleanup[k] = Number.isFinite(v) && v >= 0 ? v : d;
+  }
+  cfg.cleanup.intervalMs = Math.max(10 * 60 * 1000, Number(cfg.cleanup.intervalMs) || 6 * 3600 * 1000);
+
   const qz = cfg.qzone;
   qz.enable = qz.enable === true; // 默认关，得显式打开
   qz.auto = qz.auto !== false;

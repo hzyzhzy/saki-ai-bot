@@ -1759,6 +1759,25 @@
       </div>
       <p class="hint" id="autostart-msg" style="margin-top:10px"></p>
     </div>
+
+    <div class="card">
+      <h2>自动清理</h2>
+      <p class="hint">
+        运行期攒下的<b>临时产物</b>：群友发给它看的文件（<code>logs/_uploaded</code>）、测试临时目录、
+        按天日志、没收审核的表情 —— <b>她读完就没用了</b>，实测能占到一百多 MB。<br>
+        ⚠️ <b>白名单永不碰</b>：<code>*.md</code>（发布凭据在里面）、<code>*.json</code>、
+        <code>*.bak-*</code>、<code>*备份*</code> —— 放一百天也不删。<br>
+        ⚠️ 协议端自己的数据（SnowLuma 那八十多 MB 的库）<b>不在这张卡片的范围里</b>，
+        那个得在它自己的管理页处理。
+      </p>
+      <div id="cleanup-status" class="kvs"></div>
+      <div class="btns">
+        <button class="ghost" onclick="cleanupRun(true)">预览能清多少（不删）</button>
+        <button class="act" onclick="cleanupRun(false)">立刻清一次</button>
+        <button class="ghost" onclick="loadCleanup()">刷新</button>
+      </div>
+      <p class="hint" id="cleanup-msg" style="margin-top:10px"></p>
+    </div>
   </section>
 </div>
 
@@ -2431,12 +2450,57 @@ async function reloadAll() {
 
   // 开机自启（状态页那张卡片）—— 它自己会判元素在不在，不会把上面这些东西带停
   loadAutostart();
+  // 自动清理（2026-10-06 加）—— 同上，自己判元素在不在
+  loadCleanup();
 
   renderFaces();
 }
 
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch]));
 const kv = (k, v) => `<div class="kv"><b>${esc(k)}</b><span>${v}</span></div>`;
+
+// ── 自动清理（2026-10-06 加，用户要求）──
+//
+// ⚠️ 「立刻清一次」要二次确认：这个按钮**真删文件**（白名单不动，但删了就是删了）。
+// ⚠️ 每个元素先判存在再用 —— 这个文件里有过一次事故（见上面那段注释）。
+async function loadCleanup() {
+  const box = $('cleanup-status');
+  if (!box) return;
+  let r;
+  try {
+    r = await api('/api/cleanup');
+  } catch (e) {
+    box.innerHTML = kv('读取失败', esc(e.message));
+    return;
+  }
+  const mb = (b) => `${(b / 1048576).toFixed(1)} MB`;
+  box.innerHTML =
+    r.dirs.map((d) => kv(d.label, `${mb(d.bytes)}<span class="hint"> · ${d.files} 个文件</span>`)).join('') +
+    kv('待清（已超期）', `<b>${r.dueCount} 项 / ${mb(r.dueBytes)}</b>`) +
+    kv(
+      '保留期',
+      `文件缓存 ${r.days.uploadedDays} 天 · 临时目录 ${r.days.tmpDays} 天 · 日志 ${r.days.logDays} 天 · 待审表情 ${r.days.pendingDays} 天`,
+    ) +
+    kv('开关', r.enable ? (r.dryRun ? '✅ 开着（当前是"只演练、不真删"）' : '✅ 开着') : '⛔ 已关闭（config.yml 的 cleanup.enable）');
+}
+
+async function cleanupRun(dryRun) {
+  const msg = $('cleanup-msg');
+  const mb = (b) => `${(b / 1048576).toFixed(1)} MB`;
+  if (!dryRun && !confirm('真要删吗？删的是临时产物（白名单不动，但删了就是删了）。')) return;
+  if (msg) msg.textContent = '正在跑…';
+  try {
+    const r = await api('/api/cleanup', { method: 'POST', body: JSON.stringify({ dryRun }) });
+    if (msg) {
+      msg.textContent = dryRun
+        ? `预览：可清 ${r.deleted.length} 项 / ${mb(r.freedBytes)}（一个都没删）`
+        : `清完了：${r.deleted.length} 项 / 省 ${mb(r.freedBytes)}`;
+    }
+    loadCleanup();
+  } catch (e) {
+    if (msg) msg.textContent = `出错：${e.message}`;
+  }
+}
 
 // ── 开机自启（2026-09-17 加）──
 //
@@ -3226,7 +3290,23 @@ async function renderGroupParams() {
   const box = $('gp-form');
   if (!sel || !box) return;
   try {
-    const [st, sl] = await Promise.all([api('/api/state'), api('/api/storyline/state')]);
+    // ⚠️ 2026-10-06 加（用户：「分群调节那里要能**显示群名称**，现在有点不方便」）：
+    //    下拉里光有群号认不出是哪个群 ⇒ 顺便把**群名**也拉回来
+    //    （`GET /api/qq/groups` 本来就返回 `{id, name, count}`，只是这一页之前没用）。
+    //    ⚠️ 取不到就退回只显示群号，别让整页读不出来。
+    const [st, sl, gq] = await Promise.all([
+      api('/api/state'),
+      api('/api/storyline/state'),
+      api('/api/qq/groups').catch(() => null),
+    ]);
+    const nameOf = new Map(
+      ((gq && gq.groups) || []).map((g) => [String(g.id), String(g.name || '')]),
+    );
+    /** 群号 + 群名（取不到名字就只给号） */
+    const labelOf = (g) => {
+      const n = nameOf.get(String(g)) || '';
+      return n ? `群 ${g}（${n}）` : `群 ${g}`;
+    };
     const lv = (st.config && st.config.trigger && st.config.trigger.groupRespondTo) || {};
     const allow = ((st.config && st.config.trigger && st.config.trigger.allowGroups) || []).map(String);
     const inSl = ((sl.status && sl.status.byGroup) || []).map((x) => String(x.groupId));
@@ -3245,12 +3325,12 @@ async function renderGroupParams() {
       return;
     }
     const keep = String($('gp-group')?.value || localStorage.getItem('gp-group') || '');
-    sel.innerHTML = gpGroups.map((g) => `<option value="${esc(g)}">群 ${esc(g)}</option>`).join('');
+    sel.innerHTML = gpGroups.map((g) => `<option value="${esc(g)}">${esc(labelOf(g))}</option>`).join('');
     sel.value = gpGroups.includes(keep) ? keep : gpGroups[0];
     // ⚠️ 把"不在事件系统里"的群**明说出来** —— 不然用户会奇怪"我那个群怎么没有"
     if (skipped.length) {
       $('gp-note').innerHTML =
-        `—— 只有 1 档群能设置；${skipped.map(esc).join('、')} 现在不在事件系统里`;
+        `—— 只有 1 档群能设置；${skipped.map((g) => esc(labelOf(g))).join('、')} 现在不在事件系统里`;
     }
     await fillGroupParams();
   } catch (e) {
@@ -3389,6 +3469,14 @@ async function fillGroupParams() {
       <b>她怎么说话</b>
       <div class="kv" style="flex-wrap:wrap;gap:8px;margin-top:6px">
         <label title="0 = 最松（爱接话）、100 = 最紧（几乎不主动）">收紧度 <input type="number" id="gp-chat-strict" min="0" max="100" style="width:70px" value="${val(C.strictness ?? 50)}"></label>
+        <label title="⚠️ 默认关。群里已经有好几个 bot 的时候，服务器问题会被重复回答（一屏都是同一种话）⇒ 关掉 = 没 @ 她、也没引用她时**不主动答**服务器问题；带 @ 或引用她的**照答**">回服务器消息 ${onoff('gp-chat-answerserver', C.answerServer === true)}</label>
+      </div>
+      <div class="hint" style="margin-top:6px;border-left:3px solid #f59e0b;padding-left:8px">
+        ⚠️ <b>这一项默认是关的</b>（2026-10-06 起，署名 <b><主人></b> 的调整）：
+        <b>没 @ 她、也没引用她</b>的服务器问题，她**不再主动回答** —— 群里 bot 一多，那种问题会被好几个号
+        重复答成一屏。<br>
+        想让她答（比如群里只有她一个 bot）⇒ 把上面这个开关<b>打开</b>，保存即可（热重载，不用重启）。<br>
+        ⚠️ <b>@ 她 / 引用她</b>问服务器问题**照样答**，不受这个开关影响。
       </div>
     </div>
 
@@ -3483,7 +3571,8 @@ async function saveGroupParams() {
         return v === '' ? null : v;
       })(),
     },
-    chat: { strictness: numOrNull('gp-chat-strict') },
+    // ⚠️ 2026-10-06 加：`answerServer`（**回不回服务器消息**，默认关，见 bot.js 的 `answerServerIn`）
+    chat: { strictness: numOrNull('gp-chat-strict'), answerServer: boolOrNull('gp-chat-answerserver') },
   };
   const btn = event?.target;
   if (btn) btn.disabled = true;

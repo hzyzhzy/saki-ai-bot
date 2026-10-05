@@ -265,6 +265,40 @@ console.log('\n【7】代码层：别再退回"读全局那一份"');
   check(/fillGroupParams\(\)/.test(html), '★ 保存后回读（"马上看到变化"）');
 }
 
+console.log('\n【7】★ 回服务器消息（按群，**默认关**）—— 2026-10-06 用户要求');
+{
+  // 用户原话：「现在可以在分群调节那里加一个**是否回服务器消息**的选项了，**默认关闭**。
+  //   因为现在一个群里会有很多个 bot 同时回服务器的消息了。」
+  // ⚠️ **默认必须是"关"** —— 这是这次需求的全部意义（默认场景就是"群里已经有好几个 bot"）。
+  const { paramsFor } = await import('../src/config.js');
+  const bk = config.groupParams[GA]?.chat ?? {};
+  config.groupParams[GA] = { ...(config.groupParams[GA] ?? {}), chat: { ...bk, answerServer: true } };
+  check(paramsFor('chat', GA)?.answerServer === true, '★ A 群配了 true → 回');
+  check(paramsFor('chat', GB)?.answerServer !== true, '★ B 群没配 → **默认关**（不回）');
+
+  // 接线：那道拦截真的挂在 decide 里（不是只定义了个方法）
+  const botSrcFs = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  // ⚠️ **自己读一次** html —— 上一节那个 `html` 是在 `{}` 块里 `const` 的，出了块就没了
+  //    （第一版就是这么挂的：`ReferenceError: html is not defined`）
+  const html = readFileSync(join(ROOT, 'src', 'webui.html'), 'utf8');
+  check(/answerServerIn\(groupId\) \{/.test(botSrcFs), '★ `answerServerIn()` 在（按群读 chat.answerServer）');
+  check(/if \(!this\.answerServerIn\(/.test(botSrcFs), '★★ decide 里**真的拿它拦了**（只定义没用 = 白做）');
+  check(/默认关闭|默认关/.test(botSrcFs), '★ 注释里写清了「默认关」的来由（用户为什么这么要求）');
+  // ⚠️ 而且必须是"**直接不接**"（return null），不能只是"交给主动接话"——否则照样会回
+  check(
+    /answerServerIn\([\s\S]{0,600}?服务器问题，但本群关了[\s\S]{0,120}?return null/.test(botSrcFs),
+    '★★ 命中后是**直接不回**（不是"转普通判据"，那样等于没关）',
+  );
+
+  // 界面：按群设定里那个开关 + 保存时会提交
+  // ⚠️ 这个开关是 `onoff('gp-chat-answerserver', …)` **动态生成**的 select ⇒
+  //    源码里没有字面量 `id="…"`（第一版按字面量断言，假失败了一次）
+  check(/onoff\('gp-chat-answerserver'/.test(html), '★ 界面「按群设定」里有这个开关');
+  check(/answerServer: boolOrNull\('gp-chat-answerserver'\)/.test(html), '★ 保存时会提交它');
+  // ⚠️ 顺手钉住这次一起做的"群名显示"
+  check(/labelOf\(g\)/.test(html), '★ 分群下拉里**显示群名**（用户：「显示群名称，现在有点不方便」）');
+}
+
 console.log(
   failures === 0
     ? '\n结果: 全部通过 ✅（参数分群生效、数据各是各的、保存的一定是有效数字）\n'

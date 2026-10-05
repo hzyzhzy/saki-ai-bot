@@ -15,7 +15,7 @@ import { log } from './log.js';
 import { streamChat, quickAck, phrase } from './llm.js';
 import * as msg from './message.js';
 import * as history from './history.js';
-import { knowledgeText, hasKnowledge, selectFor as knowledgeSelect, mentionsAnyTerm, whoIsBrief, aliasesOf, animeLibNames, reloadKnowledge, personaText } from './knowledge.js';
+import { knowledgeText, hasKnowledge, selectFor as knowledgeSelect, mentionsAnyTerm, whoIsBrief, aliasesOf, animeLibNames, reloadKnowledge, personaText, castRoleOf } from './knowledge.js';
 // ⚠️ 2026-09-20 从上游 fork 挑过来：梗库（`knowledge/memes.md`）**按需**注入 ——
 //    只有对方这句话里命中了触发词才贴上来，且自带"拿不准按字面回"的总规则（防"看什么都像梗"）。
 import { memesFor } from './memes.js';
@@ -1901,6 +1901,51 @@ export class Bot {
     //    ⚠️ 这里原来是 `tryVoluntary('chat', {probability: 0.35})` —— 掷骰子，
     //    完全不看内容，所以「该回的不回、不该回的回一大段」，很随机很不像人。
     //    现在改成问一次模型（speak-judge），让它像真人一样判断「这句话我想不想接」。
+    // ③.5 ⚠️⚠️ 2026-10-06 加（用户要求）：
+    //   「一个机器人发的**随机事件**，另一个**有几率会主动接话**，几率要**高于收紧度**」。
+    //
+    //   · 「随机事件」在我们这边看到的就是**同类池那个号在自言自语**的消息
+    //     （它自己的日常事件、随口一句）—— 判据：**它没 @ 谁、也没引用谁**；
+    //     它要是正跟别人说话（@ 了人 / 引用），就不凑这个热闹，让它走下面正常的判据。
+    //   · **「高于收紧度」= 这条通道不走群里的收紧度**：改用一个**独立概率** +
+    //     一个独立冷却（`peerChat.replyChance` 默认 0.6 / `replyCooldownMs` 默认 60 秒）；
+    //     掷中之后仍然过说话判断，但那边把收紧度**打个折**再传
+    //     （`peerChat.strictnessFactor` 默认 0.7 ⇒ 这个群 40 → 28）。
+    //     ⚠️ 用户特地补过一句：「**不要完全没紧度了，略低就行了**」—— 所以**不是传 0**。
+    //   · ⚠️ 防刷屏还在：独立冷却 + 只认"自言自语"。
+    if (this.isPeerBot(String(event?.group_id ?? ''), String(event?.user_id ?? ''))) {
+      const peerSegs = msg.toSegments(event.message);
+      const talkingToSomeone = peerSegs.some((s) => s.type === 'at' || s.type === 'reply');
+      if (!talkingToSomeone) {
+        const chance = Math.min(1, Math.max(0, Number(config.peerChat?.replyChance ?? 0.6)));
+        const cdMs = Math.max(0, Number(config.peerChat?.replyCooldownMs) || 60000);
+        const bucket = `peer:${String(event?.group_id ?? '')}`;
+        this.lastPeerReplyAt ??= {};
+        const left = cdMs - (Date.now() - (this.lastPeerReplyAt[bucket] ?? 0));
+        if (left > 0) {
+          log.info(`[同类] 它在自言自语，但刚接过 → 不接（还要等 ${Math.ceil(left / 1000)}s）`);
+          return null;
+        }
+        if (Math.random() < chance) {
+          this.lastPeerReplyAt[bucket] = Date.now();
+          // ⚠️⚠️ **关键：在 event 上打个标记**。`decide()` 最前面还有一道
+          //    「同类说的话一律不接」的闸（搜 `[同类] ${sender0} 说的话不接`），
+          //    没有这个标记的话，这里判完照样会被那道闸拦掉
+          //    —— 上一版就是这么白做的（掷骰写了、功能没生效，2026-10-06 自己查出来的）。
+          //    那道闸现在会认这个标记并放行。
+          event._peerSayOk = true;
+          log.info(
+            `[同类] 它在自言自语 → 掷骰过了（${chance}）→ 放它往下走` +
+              `（接不接由后面的判据定；收紧度 ${this.strictnessOf(event)} 打` +
+              `${Math.round(Math.min(1, Math.max(0, Number(config.peerChat?.strictnessFactor ?? 0.7))) * 100)}% 传给判断）`,
+          );
+          return { mode: 'chat', needJudge: true };
+        }
+        log.info(`[同类] 它在自言自语 → 掷骰没过（${chance}）→ 不接`);
+        return null;
+      }
+    }
+
     if (level <= 1 && chat.anyMessage?.enable !== false) {
       // ⚠️⚠️ 2026-09-13 修：**"自由接话"被两道硬闸门卡死了**（用户反馈：
       //      「现在调成0，来对话的几率还是很少」）。
@@ -2146,7 +2191,19 @@ export class Bot {
           uid: String(event.user_id ?? ''),
         }),
         // ⚠️ 按群取（2026-09-15 晚）：judge 用的标准也应该是这个群的
-        strictness: isLevel1 ? this.strictnessOf(event) : undefined,
+        // ⚠️ 2026-10-06：**同类池那个号在自言自语**时，收紧度**打个折**再交给 judge ——
+        //    用户原话：「一个机器人发的随机事件，另一个有几率会主动接话，几率要高于收紧度」，
+        //    紧接着补了一句：「**不要完全没紧度了，略低就行了**」。
+        //    ⇒ 所以这里**不是传 0**，而是 `strictness × peerChat.strictnessFactor`
+        //      （默认 0.7 ⇒ 这个群 40 → 28：比群友闲聊松一档，但没完全放开）。
+        strictness: isLevel1
+          ? this.isPeerBot(String(event?.group_id ?? ''), String(event?.user_id ?? ''))
+            ? Math.round(
+                this.strictnessOf(event) *
+                  Math.min(1, Math.max(0, Number(config.peerChat?.strictnessFactor ?? 0.7))),
+              )
+            : this.strictnessOf(event)
+          : undefined,
         strictnessOnlyLevel1: isLevel1,
       });
     } catch (e) {
@@ -3395,6 +3452,50 @@ export class Bot {
     }
   }
 
+  /**
+   * 这个群**要不要回服务器消息**？（2026-10-06 用户要求，**默认关**）
+   *
+   * 用户原话：「现在可以在分群调节那里加一个**是否回服务器消息**的选项了，**默认关闭**。
+   *   因为现在一个群里会有很多个 bot 同时回服务器的消息了。」
+   *
+   * ⚠️ **默认 false = 不回** —— 因为默认场景就是"群里已经有好几个 bot 在回同样的话"。
+   * ⚠️ 配置在 `groupParams.<群号>.chat.answerServer`（界面：按群设定 → 和"收紧度"并排）。
+   * ⚠️ 关掉只影响**主动答**（没 @ 她、也没引用她）；直接 @ 她问服务器问题**照样答**。
+   */
+  answerServerIn(groupId) {
+    try {
+      return paramsFor('chat', String(groupId ?? ''))?.answerServer === true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * 同类池里的这个号，**是剧中的哪个角色**？（2026-10-06 用户要求）
+   *
+   * 用户原话：「到时候会把 QQ 昵称改成**素世**，只要满足**同类池** + 同时是
+   *   **剧中人物名字**，就自动识别为**同世界的人**、就**放行**并**识别角色**，一起聊天」。
+   *
+   * 判据两条，缺一不可：
+   *   ① 它在**同类池**里（`peers`，按群配）—— 不是谁改个昵称就能冒充；
+   *   ② 它的**昵称**命中 `cast.md` 名册（角色名 / 别名）。
+   *
+   * ⚠️ 命中之后的意义：**它不是"她在故事里转述的那个人"，而是真的在这个群里** ⇒
+   *    · 那道「同类说的话一律不接」的闸要**放行**（她本来就该能跟同世界的人聊天）；
+   *    · 上下文里要把它标成**角色名**，而不是笼统的"跟你一起的那个同类"。
+   *
+   * @returns {string} 角色名（如「长崎素世」）；不是这种情况返回空串
+   */
+  peerRoleOf(groupId, userId, nickname) {
+    try {
+      if (!this.isPeerBot(groupId, userId)) return '';
+      return castRoleOf(nickname || '') || '';
+    } catch (e) {
+      log.debug(`[同类] 认角色失败：${e.message}`);
+      return '';
+    }
+  }
+
   isIgnoredBotEvent(event) {
     const gid = String(event?.group_id ?? '');
     const uid = String(event?.user_id ?? '').trim();
@@ -3572,7 +3673,24 @@ export class Bot {
           );
           iTalkedRecently = mineAt > 0 && Date.now() - mineAt < 120000;
         } catch {}
-        if (!peerAtMe && !peerCallMe && !iTalkedRecently) {
+        // ⚠️⚠️ 2026-10-06：**`event._peerSayOk` 例外** —— 那是 `shouldJoinChat()` 里
+        //    对"它在自言自语"掷骰掷中时打的标记（用户要求：「一个机器人发的随机事件，
+        //    另一个有几率会主动接话」）。没有这一条的话，那边掷完骰照样会被**这道闸**拦掉，
+        //    整个功能等于没做（上一版就是这样，我漏了这条通路）。
+        // ⚠️⚠️ 2026-10-06 再加（用户要求：「同类池 + 昵称是剧中人物名 ⇒ 自动识别为
+        //    同世界的人、就放行并识别角色」）：**认得出角色的同类 ⇒ 一律放行** ——
+        //    不用掷骰、也不用等它 @ 她。理由：它不是"她在故事里转述的那个人"，
+        //    而是**真的在这个群里**的同世界的人（`cast.md` 里写着素世是谁、什么关系）。
+        const peerRole = this.peerRoleOf(
+          gid0,
+          sender0,
+          event?.sender?.card || event?.sender?.nickname || '',
+        );
+        if (peerRole) {
+          event._peerRole = peerRole;
+          log.info(`[同类] ${sender0} 的昵称是剧中角色「${peerRole}」→ 当成同世界的人放行`);
+        }
+        if (!peerAtMe && !peerCallMe && !iTalkedRecently && !event?._peerSayOk && !peerRole) {
           log.info(
             `[同类] ${sender0} 说的话不接（没 @ 她、没叫她，而且她 2 分钟内也没说过话）` +
               `${voluntary ? `（voluntary=${voluntary}）` : ''}`,
@@ -3694,6 +3812,26 @@ export class Bot {
     if (this.isOtherBotCommand(segments)) {
       log.debug('内容是别的机器人的指令（list 等），不回复');
       return null;
+    }
+
+    // ①.六 ⚠️⚠️ 2026-10-06 用户要求：**按群**关掉「回服务器消息」（**默认关**）——
+    //    用户原话：「现在可以在分群调节那里加一个**是否回服务器消息**的选项了，**默认关闭**。
+    //    因为现在一个群里会有很多个 bot 同时回服务器的消息了。」
+    //    ⚠️ 只在**没 @ 她、也没引用她**时拦：那两种是"在跟她说话"，照答。
+    //    ⚠️ 拦就是 **return null**（当没看见），**不是**"交给主动接话判断"——
+    //      后者照样会把它接上，等于没关。
+    if (!this.answerServerIn(String(event.group_id ?? ''))) {
+      try {
+        const atMeNow = this.selfId ? msg.isAt(segments, this.selfId) : false;
+        const quotedMe = this.isQuoteOfMe(event, segments);
+        const plain = msg.stripPlaceholders(msg.tidy(msg.extractText(segments)));
+        if (!atMeNow && !quotedMe && plain && this.shouldQueryStatus(plain)) {
+          log.info(`[群${event.group_id}] 这是服务器问题，但本群关了「回服务器消息」→ 不回`);
+          return null;
+        }
+      } catch (e) {
+        log.debug(`[服务器消息开关] 判断失败（那就当没拦）：${e.message}`);
+      }
     }
 
     // ①.五、**刷屏 → 劝一句之后保持沉默**（用户要求：
@@ -3976,6 +4114,11 @@ export class Bot {
       //    同类池里那些号（比如黑祥）在上下文里**以前被当成群友** —— 它们在 peers 池里、
       //    却不在 teach.bots 里。这里单独喂一类，recent.js 会按**昵称**标出来。
       isPeer: (uid) => peersFor(String(event.group_id ?? '')).map(String).includes(String(uid)),
+      // ⚠️⚠️ 2026-10-06 加（用户：「同类池 + 昵称是**剧中人物名字** ⇒ 自动识别为
+      //    **同世界的人**，放行并**识别角色**」）：把"这个号是哪个角色"也喂给 `recent.js` ——
+      //    它会把那一行标成「**长崎素世**（你认识的、跟你一个世界的人）」，
+      //    而不是笼统的"跟你一起的那个同类"。判据见 `peerRoleOf()`。
+      peerRole: (uid, name) => this.peerRoleOf(String(event.group_id ?? ''), uid, name),
     });
     if (!text) return '';
     // ⚠️ 私聊给更宽的上限：他要的是"昨天那句"，1200 字装不下一天的话
@@ -6274,6 +6417,11 @@ export class Bot {
               //    同类池里那些号（比如黑祥）在上下文里**以前被当成群友** —— 它们在 peers 池里、
               //    却不在 teach.bots 里。这里单独喂一类，recent.js 会按**昵称**标出来。
               isPeer: (uid) => peersFor(String(event.group_id ?? '')).map(String).includes(String(uid)),
+      // ⚠️⚠️ 2026-10-06 加（用户：「同类池 + 昵称是**剧中人物名字** ⇒ 自动识别为
+      //    **同世界的人**，放行并**识别角色**」）：把"这个号是哪个角色"也喂给 `recent.js` ——
+      //    它会把那一行标成「**长崎素世**（你认识的、跟你一个世界的人）」，
+      //    而不是笼统的"跟你一起的那个同类"。判据见 `peerRoleOf()`。
+      peerRole: (uid, name) => this.peerRoleOf(String(event.group_id ?? ''), uid, name),
             }),
           ]
             .filter(Boolean)

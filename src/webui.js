@@ -36,6 +36,7 @@ import * as provider from './provider.js';
 import * as llbot from './llbot.js';
 // ⚠️ 开机自启（2026-09-17 加）：写注册表 Run 键，界面上开/关
 import * as autostart from './autostart.js';
+import * as cleanup from './cleanup.js';
 import { backupKnowledge } from './backup.js';
 import { listUnannotated, annotateAll } from './face-annotate.js';
 // 二维码画图（纯 JS，无原生依赖）
@@ -1205,6 +1206,32 @@ const routes = {
       const st = body.enabled ? autostart.enable() : autostart.disable();
       log.info(`管理界面${body.enabled ? '开启' : '关闭'}了开机自启（启动项名：${st.valueName}）`);
       send(res, 200, { ok: true, ...st });
+    } catch (e) {
+      send(res, 400, { ok: false, error: e.message });
+    }
+  },
+
+  // ── 自动清理（2026-10-06 用户要求）──────────────────
+  // 界面上看各处占用 + 待清项，以及"立刻清一次"。
+  // ⚠️ POST **默认只演练**（`dryRun` 必须显式传 false 才真删）—— 这个接口会 rm 东西，
+  //    默认不删比默认删安全得多。
+  'GET /api/cleanup': async (_req, res) => send(res, 200, cleanup.status()),
+
+  'POST /api/cleanup': async (req, res) => {
+    let body = {};
+    try {
+      body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+    } catch {
+      /* body 坏了 → 按"只演练"处理 */
+    }
+    try {
+      const dryRun = body.dryRun !== false;
+      const r = cleanup.run({ dryRun });
+      log.info(
+        `管理界面${dryRun ? '预览' : '执行'}了自动清理：${r.deleted.length} 项 / ` +
+          `${(r.freedBytes / 1048576).toFixed(1)} MB${dryRun ? '（没真删）' : ''}`,
+      );
+      send(res, 200, { ok: true, ...r });
     } catch (e) {
       send(res, 400, { ok: false, error: e.message });
     }

@@ -25,9 +25,10 @@
  */
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { config, ROOT, paramsFor } from './config.js';
+import { config, ROOT, paramsFor, peersFor } from './config.js';
 import { log } from './log.js';
-import { personaText, castRosterBrief, personaDataFile } from './knowledge.js';
+import { personaText, castRosterBrief, personaDataFile, castRoleOf } from './knowledge.js';
+import * as names from './names.js';
 import * as storyline from './storyline.js';
 // ⚠️ 2026-09-21：剧情提示词里的名字从 `identity` 来（原来写死「祥子」「客服小祥」）——
 //    换人设后剧情那段还在说旧名字，等于"人换了、剧本没换"。
@@ -936,9 +937,33 @@ export function whoInQuest(text, groupId = '') {
   ].join('\n');
 }
 
+/**
+ * **这个群里真的有谁**（名册里的角色）—— 2026-10-06 用户要求。
+ *
+ * 判据和 `bot.peerRoleOf()` 是**同一套**：① 号在该群同类池里 ② 它的昵称命中 `cast.md` 名册。
+ * ⚠️ 为什么需要它：原来那句硬话是「名册里的人**不在这个群里**，你提到他们是在转述」——
+ *    素世（或任何角色）的 bot 一旦被拉进群、填进同类池，这句就**不准**了。
+ *
+ * @returns {string[]} 角色名（主名，如 `['长崎素世']`）；没有就是空数组
+ */
+export function rolesHere(groupId = '') {
+  const gid = String(groupId ?? '');
+  if (!gid) return [];
+  const out = [];
+  for (const uid of peersFor(gid)) {
+    const nick = names.label(String(uid), gid) || '';
+    const role = nick ? castRoleOf(nick) : '';
+    if (role && !out.includes(role)) out.push(role);
+  }
+  return out;
+}
+
 export function briefFor(groupId = '') {
   const q = current(groupId);
   if (!q || q.endedAt) return '';
+  // ⚠️ 这个群里**真的有**哪些名册里的角色（见 `rolesHere()`）——
+  //    下面「名册里的人不在这个群里」那句要按它分支（2026-10-06 用户要求）。
+  const roles = rolesHere(groupId);
   const now = Date.now();
   /** 相对时间：让摘要里每一段都带"多久以前"，别让她把过去当成现在 */
   const ago = (at) => {
@@ -1005,7 +1030,19 @@ export function briefFor(groupId = '') {
     '   · 你是**在群里跟大家讲**你生活里发生的事，群友是**听你讲的人**，不是故事里的角色；',
     '   · 群里谁说了什么、发了什么表情，那都是"群友在跟你说话"，',
     '     **别把它当成那件事里某个人的台词或行为**；',
-    `   · 那件事里的人（${persona.promptText('castNames')}）**不在这个群里**，你提到他们时是在**转述**。`,
+    // ⚠️⚠️ 2026-10-06 改（用户：「将来把昵称改成素世、填进同类池 ⇒ 认成同世界的人、放行」）：
+    //    这句原来是**硬话**「那件事里的人**不在这个群里**」—— 素世（或别的角色）的 bot
+    //    一旦真的被拉进群、填进同类池，这句就**不准**了（她会以为群里的素世是别人、
+    //    故事里的素世在别处）⇒ 按群算一遍"谁真的在群里"（判据同 `bot.peerRoleOf()`）。
+    ...(roles.length
+      ? [
+          `   · 那件事里的人（${persona.promptText('castNames')}）里，**${roles.join('、')} 就在这个群里** ——`,
+          '     群里那个号**就是本人**：跟 TA 说话是**当面**，按你们本来的关系来，**不是**转述；',
+          '     名册里其余的人不在群里，提到他们才是**转述**。',
+        ]
+      : [
+          `   · 那件事里的人（${persona.promptText('castNames')}）**不在这个群里**，你提到他们时是在**转述**。`,
+        ]),
     '⚠️ 但**别主动把后面的发展抖出来**（你自己也不知道会怎么走），也别在别的群提这件事。',
     '',
     // ⚠️⚠️ 2026-09-18 加（用户截图报的，就是上面那条根因的另一半）：

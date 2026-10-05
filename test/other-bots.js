@@ -127,5 +127,82 @@ console.log('\n【7】接线真的在（源码断言）');
   check(/cur\.otherBots = otherBots/.test(webuiSrc), '★ 后端会把它写进 groupParams（去空/去重/封顶 10 个）');
 }
 
+console.log('\n【8】★ 同类自言自语 → 按独立概率接话（2026-10-06 用户要求）');
+{
+  // 用户原话：「一个机器人发的**随机事件**，另一个**有几率会主动接话**，几率要**高于收紧度**」。
+  //
+  // ⚠️ 真正的行为在 `bot.js` 主动接话判据里那段（③.5）—— 那是一大段带随机数的分支，
+  //    这里盯**接线和默认值**；行为本身靠群里实测 + 日志里的「[同类] 它在自言自语」。
+  //    （踩过的教训：只 grep 源码不算验行为 —— 所以这一节只声称它验的是"接线"。）
+  const botSrc = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  check(/它在自言自语/.test(botSrc), '★ 判据在（日志/注释里有「它在自言自语」）');
+  check(/peerChat\?\.replyChance/.test(botSrc), '★ 用 `peerChat.replyChance`（独立概率）');
+  check(/peerChat\?\.replyCooldownMs/.test(botSrc), '★ 有独立冷却（防刷屏）');
+  check(/talkingToSomeone/.test(botSrc), '★ 只认"没 @ 人、也没引用人"的自言自语');
+  // ⚠️⚠️ 这一条是"高于收紧度"的**实现**：judge 那边同类要**打个折**再传。
+  //     ⚠️ 用户特地补过：「**不要完全没紧度了，略低就行了**」—— 所以判的是
+  //     `strictness × strictnessFactor`，**不是 0**（传 0 就等于完全放开，他要的不是那个）。
+  check(
+    /strictness: isLevel1[\s\S]{0,320}?strictnessFactor \?\? 0\.7/.test(botSrc),
+    '★★ 说话判断那边：同类按**收紧度 × strictnessFactor（默认 0.7）**传 —— 略低于收紧度，没全放',
+  );
+  check(!/strictness: isLevel1[\s\S]{0,120}?\? 0\s*:/.test(botSrc), '★ 确认**不是**直接传 0（"略低"不是"没有"）');
+  check(Number(config.peerChat?.strictnessFactor ?? 0.7) === 0.7, '默认折扣 0.7（40 → 28）');
+  check(Number(config.peerChat?.replyChance ?? 0.6) === 0.6, '默认概率 0.6（比收紧度 40 对应的意愿高）');
+}
+
+console.log('\n【9】★ 同类池 + 昵称命中剧中人物名 ⇒ 认成「同世界的人」（2026-10-06 用户要求）');
+{
+  // 用户原话：「到时候会把 QQ 昵称改成**素世**，只要满足**同类池**同时是**剧中人物名字**
+  //   就自动识别为**同世界的人**、就**放行**并**识别角色**，一起聊天」。
+  //
+  // ⚠️ 这里测的是**判据本身**（认不认得出、会不会误伤）。
+  //    "放行"和"上下文里标成角色名"那两步是接线，靠 `bot.peerRoleOf()` + 日志验证。
+  const { castRoleOf } = await import('../src/knowledge.js');
+  const names = await import('../src/names.js');
+  const quest = await import('../src/quest.js');
+
+  // ① 认得出（拿真名册 `personas/saki/cast.md` 测）
+  check(castRoleOf('素世') === '长崎素世', '★ 昵称「素世」→ 长崎素世');
+  check(castRoleOf('素世的bot') === '长崎素世', '带后缀也认（两字以上用包含）');
+  check(castRoleOf('睦') === '若叶睦' && castRoleOf('初华') === '三角初华', '单字 / 两字别名都认');
+
+  // ② ⚠️ **不许误伤** —— 这条和上面一样重要：认错了她就会对着陌生群友喊「素世」
+  for (const n of ['路灯', '台灯', '灯下黑', '小豆', '路人甲', '随便一个人']) {
+    check(castRoleOf(n) === '', `不误伤：「${n}」`);
+  }
+
+  // ③ `rolesHere`：按群算「这个群里真的有谁」（剧情提示词那句就靠它分支）
+  const G9 = '9990000019';
+  config.groupParams[G9] = { peers: ['10000201', '10000202'] };
+  names.noteFromList(G9, [
+    { user_id: '10000201', nickname: '素世' },
+    { user_id: '10000202', nickname: '路灯' },
+  ]);
+  check(
+    quest.rolesHere(G9).includes('长崎素世'),
+    '★ 群里有素世（在同类池里 + 昵称叫素世）→ 认得出来',
+    JSON.stringify(quest.rolesHere(G9)),
+  );
+  check(!quest.rolesHere(G9).includes('路灯'), '昵称像但不在名册里的 → 不算');
+  check(quest.rolesHere('9990000020').length === 0, '★ 别的群 → 空（按群算，不是全局）');
+  check(!quest.rolesHere(G9).includes('高松灯'), '没配进这个池的角色 → 不出现');
+
+  // ④ 接线：`bot.peerRoleOf()` 必须**先查同类池**（不在池里 ⇒ 昵称再像也不认）
+  const botSrc9 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  check(/\n  peerRoleOf\(groupId, userId, nickname\) \{/.test(botSrc9), '★ `peerRoleOf()` 在（同类池 + 昵称两道判据）');
+  check(
+    /peerRoleOf\(groupId, userId, nickname\) \{[\s\S]{0,300}?isPeerBot\(groupId, userId\)/.test(botSrc9),
+    '★★ 它**先查同类池** —— 不在池里的号，昵称叫素世也不算',
+  );
+  check(/&& !peerRole\) \{/.test(botSrc9), '★ 那道「同类说的话一律不接」的闸给认得出角色的**放行**');
+  const recentSrc9 = readFileSync(join(ROOT, 'src', 'recent.js'), 'utf8');
+  check(
+    /peerRole/.test(recentSrc9) && /你\*\*认识的人\*\*/.test(recentSrc9),
+    '★ 上下文里会标成「你认识的人」+ 角色名',
+  );
+  names.__clear();
+}
+
 console.log(`\n结果: ${failures === 0 ? '全部通过 ✅' : `${failures} 项失败 ❌`}\n`);
 process.exit(failures === 0 ? 0 : 1);

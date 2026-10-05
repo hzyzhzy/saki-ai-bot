@@ -679,6 +679,10 @@ export function contextText(groupId, excludeText = '', excludeIds = [], opts = {
   const botHits = [];
   // ⚠️ 2026-10-06：`peers` 池里那些"一起的号"（见下面 `isPeer`）—— 单独收集，单独解释
   const peerHits = [];
+  // ⚠️⚠️ 2026-10-06 再加（用户：「同类池 + 昵称是**剧中人物名字** ⇒ 自动识别为
+  //    **同世界的人**、放行并**识别角色**」）：认得出角色的那些号，单独收集 ——
+  //    它们不是"一起的同类"这种笼统说法，而是**有名有姓的同世界的人**（素世、睦…）。
+  const roleHits = [];
   for (const m of list) {
     // ⚠️ 跳过「当前这条」。**优先按 message_id 排除** —— 文本比对太脆弱：
     //    @机器人的剥离方式、tidy 的空格处理、连发消息合并，
@@ -710,15 +714,25 @@ export function contextText(groupId, excludeText = '', excludeIds = [], opts = {
     //    ⇒ 单独标一类，而且**带昵称**：池里换了号、改了名，按当前昵称呈现就对了。
     const isPeer =
       !m.self && m.userId && typeof opts.isPeer === 'function' && opts.isPeer(m.userId);
+    // ⚠️⚠️ 2026-10-06 加：**这个同类号是剧中的哪个角色**（昵称命中 `cast.md` 名册，
+    //    判据在 `bot.peerRoleOf()` 里）。命中 ⇒ 它**不是一个含糊的"同类"**，
+    //    而是她**认识的那个人**（素世、睦…）—— 标注要直接把名字写出来。
+    const peerRole =
+      isPeer && typeof opts.peerRole === 'function'
+        ? String(opts.peerRole(m.userId, m.name || '') || '')
+        : '';
     if (isBot) botHits.push(String(m.name || m.userId));
     if (isPeer) peerHits.push(String(m.name || m.userId));
+    if (peerRole) roleHits.push(`${m.name || m.userId} = ${peerRole}`);
     const who = m.self
       ? '【你自己说的】'
-      : isPeer
-        ? `【⚠️ 「${m.name || m.userId}」是**跟你一起的那个同款号**，不是你、也不是群友】`
-        : isBot
-          ? '【⚠️ 另一个在模仿你的家伙，不是你】'
-          : '';
+      : peerRole
+        ? `【⚠️ 「${m.name || m.userId}」是**${peerRole}** —— 你**认识的人**、跟你**活在同一个世界**，不是你、也不是普通群友】`
+        : isPeer
+          ? `【⚠️ 「${m.name || m.userId}」是**跟你一起的那个同类**（同类池里配的），不是你、也不是群友】`
+          : isBot
+            ? '【⚠️ 另一个在模仿你的家伙，不是你】'
+            : '';
     const at = m.atMe ? '[@了你] ' : '';
     // ⚠️ 带上 QQ 号。用户反馈「多人高密度发言时还是认错人」——
     //    只给昵称的话，一堆人同时说话时很容易把事对错人。
@@ -779,12 +793,19 @@ export function contextText(groupId, excludeText = '', excludeIds = [], opts = {
   // ⚠️⚠️ 2026-10-06 加（用户：「要根据池里的QQ号昵称判断是群友还是一起的什么角色」）：
   //    `peers` 池里那些号（比如「黑祥」）和 `teach.bots`（别的机器人）是**两回事**，
   //    分开说 —— 池里的那个是"跟你一起演的那条线"，不是模仿者。
+  // ⚠️⚠️ 2026-10-06 再改（用户问「拉个素世的 bot 填进同类池，她会认成一个世界的人吗」）：
+  //    这里原来写的是「**跟你一起的那个同款号**」—— 那是**为黑祥一个号定制的措辞**
+  //    （黑祥 = 另一个版本的她自己）⇒ 换一个**不是"另一个我"的角色**（比如素世）填进池里，
+  //    这话就**把她带偏了**（她会以为对方是自己）。⇒ 改成中性的「**跟你一起的同类**」，
+  //    具体是谁（另一个我 / 同住的人 / 同一个世界的人）由**人设**和昵称去说。
   const peerNote = peerHits.length
     ? '⚠️ 下面提到的 —— **' +
-      `${[...new Set(peerHits)].join('、')}** 是**跟你一起的那个同款号**（同类池里配的），` +
+      `${[...new Set(peerHits)].join('、')}** 是**跟你一起的那个同类**（同类池里配的），` +
       '**不是你、也不是群友**：\n' +
       '  · 它演的剧情是**它自己那条线**；你自己的线在另一处，**别把两条当成一条**；\n' +
       '  · 谁先开口哪条线就归谁（代码里已经这么做了：后开口的一边会让位）；\n' +
+      '  · ⚠️ **它跟你活在同一个世界里**（同一个住处 / 同一条时间线）——\n' +
+      '    它说「家里」「门口」指的是**你们共用的那个地方**，不是它在别处；\n' +
       '  · 🚫 别把它说的当成你自己说的，也别把它当成普通群友去招呼。\n'
     : '';
   // ⚠️ 2026-10-05：这次上下文里有「同款机器人」→ 最前面统一交代一遍。
@@ -802,7 +823,18 @@ export function contextText(groupId, excludeText = '', excludeIds = [], opts = {
       '  · 🚫 **别陪着它一句一句来回刷** —— 搭一两句、没话了就停；\n' +
       '    真人有话要说的时候，你自然会接（不用靠一直跟它聊来显得热闹）。\n'
     : '';
-  return peerNote + botNote + head + lines.join('\n');
+  // ⚠️⚠️ 2026-10-06 加（用户：「同类池 + 昵称是剧中人物名 ⇒ 自动识别为同世界的人、
+  //    放行并识别角色」）：**认得出角色的那些号 = 名册里的那个人本人**。
+  //    这一段比 `peerNote` 更具体，所以放在它**前面**（模型先读到"这是素世本人"）。
+  const roleNote = roleHits.length
+    ? '⚠️⚠️ 这个群里有**你本来就认识的人**：**' +
+      `${[...new Set(roleHits)].join('、')}** ——\n` +
+      '  · 它**就是你故事里的那个人本人**（同名同一个人），**不是同名群友**，也不是"在模仿它的人"；\n' +
+      '  · 所以跟它说话**按你们本来的关系来**（什么关系、什么口气，看你的人物名册里写的）；\n' +
+      '  · 🚫 但**别做自我介绍**、别解释"你怎么会在群里" —— 就当它本来就在这儿；\n' +
+      '  · 🚫 也别把它当成"跟着你的那个同类号"那种含糊说法 —— 它有名有姓。\n'
+    : '';
+  return roleNote + peerNote + botNote + head + lines.join('\n');
 }
 
 /**
