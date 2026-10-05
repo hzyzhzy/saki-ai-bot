@@ -622,6 +622,30 @@ Stop-Process -Id <PID> -Force
 
 ### ⚠️⚠️ 更阴的一手：**宽匹配会杀到我自己**（2026-09-15 踩了）
 
+> ## 🚨 硬规矩（2026-10-05 一晚**又踩两次**之后定的，别讨价还价）
+>
+> **杀进程的命令里，不许出现任何 `CommandLine` 匹配。** 一次都不许。
+> 一律走这三步：**① 只读列出全部 node → ② 人工认出 PID → ③ 用硬编码 PID 杀。**
+>
+> ⚠️ 为什么连"顺手加个 `-like`"都不行：**DSH 跑我的命令时外面套的 runner 本身就是
+> `node.exe`，而它的命令行里带着我这一整段脚本的原文** —— 我在脚本里写什么串，
+> runner 的命令行里就有什么串 ⇒ **过滤条件必然命中它自己** ⇒ 命令跑到一半、
+> 我自己把自己杀了（`exit code 4294967295`，什么都不输出）。
+>
+> ⚠️ **两次都不是"手滑"，都是"看起来很合理"的写法**：
+> · 第一次：装完包想看看「验证进程起来没有」→ `-like "*saki-install-test*"` ✗
+> · 第二次：收尾想「按 PID 杀验证进程」→ 循环里还是那个 `-like` ✗
+> ⇒ **验证脚本、收尾脚本一样算数** —— 不是只有"清理"才危险。
+>
+> ✅ 安全写法（**唯一**）：
+> ```powershell
+> # ① 只读列出，人工看（命令里不要出现任何要匹配的串）
+> Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
+>   Select-Object ProcessId, CreationDate, @{n='cmd';e={$_.CommandLine.Substring(0,80)}}
+> # ② 认出 PID 之后，硬编码杀掉
+> foreach ($id in 480300, 332844) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }
+> ```
+
 我用 `CommandLine -match 'watchdog\.ps1|看门狗\.bat'` 批量停看门狗 ——
 结果**把我自己那条 pwsh 也杀了**：因为**我的命令行里就写着这个正则**，
 它当然匹配上了。表现是命令直接 `exit code -1`、什么都没输出，查半天。
