@@ -212,6 +212,30 @@ console.log('\n【5】写文档 + 新建 + 删除');
   );
 }
 
+console.log('\n【5b】★ 真模板 `_template/persona.md` 里必须带着那条通用规则');
+{
+  // ⚠️ 2026-10-06 用户要求：「**这个提示词要默认放在人设模板里**」——
+  //    所以 `_template/persona.md` 就是**新建角色的默认人设正文**
+  //    （`createPack()` 是整包复制模板，模板里有 persona.md 就不再写空骨架）。
+  //    里面那节「没人指名你的时候你不是主角」是**通用硬要求**（换什么角色都成立）。
+  //
+  // ⚠️ 这条断言盯的是"**别哪天整理人设时把它删了**"：真删了，新角色立刻又会犯
+  //    "把自己当主角"这个毛病，而那时候不会有人想起来它原来在模板里。
+  //
+  // ⚠️ 这里读的是**真实** `personas/_template/`（不是本套件那个假池 `POOL`）——
+  //    故意如此：这条规矩的价值就在真模板上。**只读不写**，不破坏隔离。
+  const tplFile = join(ROOT, 'personas', '_template', 'persona.md');
+  check(existsSync(tplFile), '★ `_template/persona.md` 在（新角色照它建）');
+  if (existsSync(tplFile)) {
+    const t = readFileSync(tplFile, 'utf8');
+    check(/没人指名你的时候/.test(t) && /你不是主角/.test(t), '★★ 里面带着「没人指名你不是主角」那节');
+    for (const k of ['别把话题拉到自己身上', '别辩解、别自证', '回答问题的口气', '别给自己编']) {
+      check(t.includes(k), `通用禁令还在：${k}`);
+    }
+    check(/## 一、你是谁/.test(t) && /## 三、你的处境/.test(t), '骨架小标题没丢（一、你是谁 / 三、你的处境）');
+  }
+}
+
 console.log('\n【6】★ 生图参考图（立绘）：和头像是**两个字段两个文件**');
 {
   const dir = join(ROOT, POOL, 'alpha');
