@@ -898,8 +898,13 @@ function load() {
   cfg.vision.model = String(cfg.vision.model ?? 'deepseek-flash').trim() || 'deepseek-flash';
   cfg.vision.describeStickers = cfg.vision.describeStickers === true;
   cfg.vision.maxBytes = Math.max(1024*100, Number(cfg.vision.maxBytes) || 8388608);
-  // 识图慢时先甩一句「等一下」稳住对方（0=关掉这个行为）
-  cfg.vision.ackAfterMs = Math.max(0, Number(cfg.vision.ackAfterMs ?? 9000));
+  // ⚠️⚠️ 2026-10-06 **删掉一个死开关**：这里原来是一个 `vision.ackAfterMs = 9000`
+  //    （注释写着「识图慢时先甩一句『等一下』稳住对方」）。
+  //    真相：**全项目没有一行代码读它** —— 大概率是当年加了配置项、机制没接上
+  //    （或后来被删了），于是它一直躺在配置里冒充"第二个开关"。
+  //    查「为什么群友那边还有等待词」时我被它误导过一轮，还照着它给用户列了
+  //    "两个开关、一起关" ⇒ **死开关比没开关更糟，删掉**。
+  //    ⚠️ 发图慢时冒的那句等待词，走的是**同一条路**：`chat.ackAfterMs`（见下面）。
   // 识图**关掉思考链**（实测快 3.2 倍、描述还更长）。想开就设 true
   cfg.vision.thinking = cfg.vision.thinking === true;
 

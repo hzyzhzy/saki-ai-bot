@@ -95,6 +95,27 @@ async function setup(level, basePort, groupId = GROUP) {
       res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: '{"speak":true,"why":"测试","length":"short"}' } }] }));
       return;
     }
+      // ⚠️⚠️ 2026-10-06 补：**预搜索**（system 里含「这句话要不要上网查」）——
+      //    这个套件原来**漏认了它**（别的 7 个套件都认：behavior / attitude / cs /
+      //    e2e / follow-up / punctuation / teach，判据和回复都照抄它们）。
+      //
+      //    漏认的后果（这次回归红了才查到）：
+      //      预搜索要的是 `{"search":false,...}`，假模型却回了一句「收到。」⇒
+      //      `search-presearch.js` 解析不出来 ⇒ **退回规则** ⇒
+      //      **每条闲聊都真的联网搜**（日志证据：`搜索「今天天气不错啊大家觉得呢0…」
+      //      → 4 条结果`）⇒ 每条多花 10~15 秒 ⇒【3】那条"5 次 × 等 10 秒"的窗口
+      //      **偶发超时**（并发 2 那次挂「无关闲聊也会接」、单独重跑 82.7 秒全绿）。
+      //
+      //    ⚠️ 判据用**准确字样**，而且预搜索走 `collect(streamChat(...))` ⇒ **要 SSE**。
+      if (sys.includes('要不要上网查')) {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.write(
+          `data: ${JSON.stringify({ choices: [{ delta: { content: '{"search":false,"why":"测试不搜"}' } }] })}\n\n`,
+        );
+        res.write('data: [DONE]\n\n');
+        res.end();
+        return;
+      }
       res.writeHead(200, { 'Content-Type': 'text/event-stream' });
       for (const ch of '收到。') {
         res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: ch } }] })}\n\n`);
