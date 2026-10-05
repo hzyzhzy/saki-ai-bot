@@ -186,7 +186,7 @@ git -c http.proxy=http://127.0.0.1:7890 -c https.proxy=http://127.0.0.1:7890 pus
 - 查 GitHub API 也一样：`Invoke-RestMethod ... -Proxy http://127.0.0.1:7890`。
 - ⚠️ 我这边 `git push` 报 **exit code 1 但其实是成功** —— PowerShell 会把 git 写到
   stderr 的进度行当成错误记录。**看 `main -> main` 那行**，别只看退出码。
-- 公开副本远端：`https://github.com/<主人>/saki-ai-bot`（**只有公开副本能推**；
+- 公开副本远端：`https://github.com/hzyzhzy/saki-ai-bot`（**只有公开副本能推**；
   live 那份（`qq-ai-bot/`）**永远不加 remote**）。
 
 ### 🚦 推之前先给用户过一眼「推哪些 / 排除哪些」（2026-09-17 用户定）
@@ -953,7 +953,7 @@ Repository permissions 里 **`Contents: Read and write`**。
 $token = (Get-Content '<项目目录>\qq-ai-bot\logs\发布凭据.md' -Raw).Trim()
 $h  = @{ Authorization = "Bearer $token"; 'User-Agent' = 'dsh-release'; Accept = 'application/vnd.github+json' }
 $px = 'http://127.0.0.1:7890'
-$api = 'https://api.github.com/repos/<主人>/saki-ai-bot'
+$api = 'https://api.github.com/repos/hzyzhzy/saki-ai-bot'
 
 # ① 建 Release（body 是中文 + markdown ⇒ 必须自己转 UTF8 字节，别直接传字符串）
 $payload = @{ tag_name='v1.0.x'; name='标题'; body=$body; draft=$false; prerelease=$false } | ConvertTo-Json -Compress
@@ -962,7 +962,7 @@ Invoke-RestMethod -Method Post -Uri "$api/releases" -Headers $h -Proxy $px `
 
 # ② 传附件（走 uploads.github.com）
 Invoke-RestMethod -Method Post -Headers $h -Proxy $px -ContentType 'application/octet-stream' -TimeoutSec 1200 `
-  -Uri "https://uploads.github.com/repos/<主人>/saki-ai-bot/releases/<id>/assets?name=saki-setup-1.0.x.exe" `
+  -Uri "https://uploads.github.com/repos/hzyzhzy/saki-ai-bot/releases/<id>/assets?name=saki-setup-1.0.x.exe" `
   -InFile '<项目目录>\qq-ai-bot\installer\dist\saki-setup-1.0.x.exe'
 ```
 
