@@ -20,14 +20,14 @@
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { config, ROOT } from './config.js';
+import { config, ROOT, stateDir } from './config.js';
 import { log } from './log.js';
 
 // ⚠️ 测试用：`QQBOT_MONTHLY_FILE` 可以指向临时文件，避免污染真实的"已发"记录。
 //    这个记录**绝不能脏**：脏了就会导致工资单重发 / 该发不发。
 const FILE = process.env.QQBOT_MONTHLY_FILE
   ? join(ROOT, process.env.QQBOT_MONTHLY_FILE)
-  : join(ROOT, 'state', 'monthly-report.json');
+  : join(stateDir(), 'monthly-report.json');
 let state = { lastSent: {} };
 
 try {

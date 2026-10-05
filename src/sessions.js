@@ -20,7 +20,7 @@
  */
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { config, ROOT } from './config.js';
+import { config, ROOT, stateDir } from './config.js';
 import { log } from './log.js';
 import { queryServer } from './status.js';
 
@@ -32,7 +32,7 @@ import { queryServer } from './status.js';
 //    指向测试自己的文件之后，套件写一份固定历史，那段就**永远在**。
 const STATE = process.env.QQBOT_SESSIONS_FILE
   ? join(ROOT, process.env.QQBOT_SESSIONS_FILE)
-  : join(ROOT, 'state', 'player-sessions.json');
+  : join(stateDir(), 'player-sessions.json');
 
 /** { since: {玩家名: 时间戳}, history: [{name, from, to, minutes}] } */
 let state = { since: {}, history: [] };

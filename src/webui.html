@@ -590,6 +590,10 @@
   <nav>
     <div class="navsec">
       <div class="navgrp">基础</div>
+      <!-- ⚠️ 2026-10-07 加：**多 QQ 号**的「切换正在控制哪个号」（用户要求放在基础卡片里）。
+           ⚠️ 文字由 JS 更新（`accPaintNav()`）—— 后面挂一个「· 现在控制谁」，
+              免得切完之后忘了自己在给哪个号改设置。 -->
+      <button data-tab="accounts" id="nav-accounts">QQ 号</button>
       <button data-tab="model">模型</button>
       <button data-tab="groups">群与触发</button>
     </div>
@@ -621,6 +625,88 @@
       <button data-tab="about">作者信息</button>
     </div>
   </nav>
+
+  <!-- ⚠️ 2026-10-07 加（用户要求）：「我希望从一个应用端控制多个 QQ 号……
+       直接在基础卡片新增一个切换正在控制的 QQ 的页面」。
+       一个号一个后台进程，各自回各自群里的消息；这一页决定
+       **下面那些页面改的是哪个号**（模型页除外，那是所有号共用的）。 -->
+  <section id="tab-accounts" class="hidden">
+    <div class="card">
+      <h2>正在控制哪个 QQ</h2>
+      <p class="hint">
+        一个 QQ 号跑一个后台进程，<b>各自回各自群里的消息</b>，互不干扰。<br>
+        选中哪个号，下面这些页面（<b>群与触发 / 人设 / 知识库 / 表情包 / 按群设定 /
+        日常事件 / 二级剧情 / 好感度 / QQ空间</b>）改的就是<b>那个号</b>的设置。<br>
+        ⚠️ <b>「模型」页是共用的</b>：API 地址、Key、模型、生图、联网搜索这些
+        改一次<b>所有号一起变</b> —— 这就是「只有模型页所有 QQ 共用」。
+      </p>
+      <div id="acc-split-hint"></div>
+      <div id="acc-list" class="kvs"><span class="hint">读取中…</span></div>
+      <div class="btns">
+        <button class="ghost" onclick="renderAccounts()">刷新</button>
+        <span class="msg" id="msg-acc"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>加一个 QQ 号</h2>
+      <p class="hint">
+        填 QQ 号 → 自动分一个管理界面端口，并按你选的那个号<b>复制一份设置</b>
+        （灵敏度、按群设定、剧情参数… 新号加了相同的群就不用重配）。<br>
+        ⚠️ 复制<b>不含</b>「协议端连接」和「机器人 QQ」—— 那两样是每个号自己的。
+      </p>
+      <div class="row">
+        <div><label>新号的 QQ</label><input type="text" id="acc-new-qq" placeholder="例如 10000001"></div>
+        <div><label>备注名（自己看的）</label><input type="text" id="acc-new-name" placeholder="例如 素世那个号"></div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <div>
+          <label>复制哪个号的设置（可选）</label>
+          <select id="acc-new-copy"><option value="">不复制（用默认值）</option></select>
+        </div>
+      </div>
+      <div class="btns">
+        <button class="act" onclick="accCreate()">加这个号</button>
+        <span class="msg" id="msg-acc-new"></span>
+      </div>
+      <p class="hint" style="margin-top:8px" id="acc-new-hint"></p>
+    </div>
+
+    <div class="card">
+      <h2>复制设置（老号 → 新号）</h2>
+      <p class="hint">
+        两个号在同一个群时，把老号那套设置（含<b>按群设定</b>）复制给新号，
+        省得同一个群配两遍。<br>
+        ⚠️ <b>会覆盖目标号同名的设置</b>；协议端连接和机器人 QQ <b>不受影响</b>。
+      </p>
+      <div class="row">
+        <div><label>从哪个号</label><select id="acc-copy-from"></select></div>
+        <div><label>复制给哪个号</label><select id="acc-copy-to"></select></div>
+      </div>
+      <div class="btns">
+        <button class="act" onclick="accCopy()">复制整个号的设置</button>
+        <span class="msg" id="msg-acc-copy"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>机器人池自动同步</h2>
+      <p class="hint">
+        <b>同类池</b>（会互相搭话的同类机器人）：这里管的每个号，只要<b>在同一个群里</b>，
+        就自动互相进对方的池。<br>
+        <b>不同类池</b>（完全不回应的那种别的机器人，比如小豆）：在任何一个号上配过的，
+        会自动抄给其它号。<br>
+        ⚠️ 只<b>追加</b>，绝不删你手配的那些号（黑祥、小豆… 都留着）。<br>
+        ⚠️ 「在不在同一个群」看的是各号自己的「<b>能在哪些群说话</b>」名单。<br>
+        ⚠️ 加号时会<b>自动跑一次</b>；这里是手动补一次（比如你刚给某个号新加了群）。
+      </p>
+      <div class="btns">
+        <button class="act" onclick="poolsSync(false)">同步一次</button>
+        <button class="ghost" onclick="poolsSync(true)">先看看会改什么</button>
+        <span class="msg" id="msg-pools"></span>
+      </div>
+    </div>
+  </section>
 
   <!-- 模型 -->
   <section id="tab-model" class="hidden">
@@ -2231,9 +2317,382 @@ let STATE = null;
 })();
 
 
+// ── 多 QQ 号：现在控制哪个号（2026-10-07 加）──────────────────────
+//
+// 用户原话：「我希望从一个应用端控制多个 QQ 号……基础卡片新增一个切换正在控制的
+// QQ 的页面，只有模型页面所有 QQ 共用，其他配置全部分 QQ 控制」。
+//
+// 实现上：一个号一个 `node src/index.js` 进程（各自一套状态），
+// 每个进程开自己的管理界面端口；**这个页面只连着一个进程**，
+// 切号 = 之后的每个请求都带 `x-saki-account: <QQ>`，
+// 服务端看到"不是我"就转发给那个号的进程（见 webui.js 的 `proxyToAccount`）。
+// ⇒ 所有既有接口一行都不用改，它们在那个进程里读写自己的数据。
+let CUR_ACCOUNT = localStorage.getItem('saki-account') || '';
+let ACC_LIST = [];
+let ACC_SELF = { qq: '', main: '', isMain: true, port: 3099 };
+
 async function api(path, opts) {
-  const r = await fetch(path, opts);
+  const o = { ...(opts || {}) };
+  // ⚠️ 这两个接口是"管所有号"的：`/api/accounts`（列表/增删/复制）
+  //    和 `/api/whoami`（问"我连着的这个进程是谁"）——
+  //    它们**绝不能**跟着当前号转发，否则"问自己是谁"会问到别人头上。
+  if (CUR_ACCOUNT && !/^\/api\/(accounts|whoami|pools)\b/.test(path)) {
+    o.headers = { ...(o.headers || {}), 'x-saki-account': CUR_ACCOUNT };
+  }
+  const r = await fetch(path, o);
   return r.json();
+}
+
+/** 显示成「备注（QQ）」；没写备注就只显示 QQ */
+function accName(a) {
+  const n = String(a?.name ?? '').trim();
+  return n ? `${n}（${a.qq}）` : String(a?.qq ?? '');
+}
+
+/** 侧栏那个按钮上挂出"现在控制谁" —— 切完号最容易忘的就是这件事 */
+function accPaintNav() {
+  const b = $('nav-accounts');
+  if (!b) return;
+  const hit = ACC_LIST.find((a) => a.qq === CUR_ACCOUNT);
+  const label = hit ? (hit.name || hit.qq) : CUR_ACCOUNT;
+  b.textContent = label ? `QQ 号 · ${label}` : 'QQ 号';
+}
+
+/** 页面一打开问一句"我连着的这个进程是哪个号"，没记录过就默认它 */
+async function initAccounts() {
+  try {
+    const w = await api('/api/whoami');
+    if (w && w.ok) {
+      ACC_SELF = w;
+      if (!CUR_ACCOUNT) CUR_ACCOUNT = w.qq || '';
+    }
+  } catch {}
+  accPaintNav();
+}
+
+async function renderAccounts() {
+  const box = $('acc-list');
+  if (box) box.innerHTML = '<span class="hint">读取中…</span>';
+  const r = await api('/api/accounts').catch(() => null);
+  if (!r || !r.ok) {
+    if (box) box.innerHTML = '<span class="hint">读不到号列表（服务端出错了）</span>';
+    return;
+  }
+  ACC_LIST = r.accounts || [];
+  accPaintNav();
+
+  // ⚠️⚠️ 拆分状态**每次都同步进 ACC_SELF**（2026-10-07 修）。
+  //    它原来只在页面打开时从 `/api/whoami` 取一次 —— 用户在别处拆过之后，
+  //    这里还拿着旧值 ⇒ 点「加这个号」被"还没拆分"拦住（用户报的
+  //    「为什么加不上新号，一直说没拆分」就是这个）。
+  ACC_SELF.split = !!r.split;
+  ACC_SELF.needRestart = !!r.needRestart;
+
+  const hintEl = $('acc-split-hint');
+  if (hintEl) {
+    if (!r.split) {
+      hintEl.innerHTML = `<div style="border:1px solid rgba(255,170,60,.5);border-radius:16px;padding:12px 14px;margin:4px 0 12px">
+           ⚠️ <b>还没做「多号拆分」</b>：现在所有设置都还存在共用的 <span class="mono">config.yml</span> 里，
+           直接加新号的话，<b>新号会继承主号那些设置</b>（群列表、灵敏度、按群设定…）。
+           <div class="btns" style="margin-top:8px">
+             <button class="act" onclick="accMigrate()">把当前设置拆成多号结构</button>
+             <span class="msg" id="msg-acc-split"></span>
+           </div>
+           <div class="hint" style="margin-top:6px">
+             内容等价（只是换个文件存），原 config.yml 会先备份；<b>拆完要重启机器人</b>才生效。
+           </div>
+         </div>`;
+    } else if (r.needRestart) {
+      // ⚠️ 磁盘上拆好了、但这个进程还是旧身份 —— 必须重启，否则保存私有设置
+      //    仍然会写回共用的 config.yml（那就白拆了）。这条提示不是客套。
+      hintEl.innerHTML = `<div style="border:1px solid rgba(120,190,255,.5);border-radius:16px;padding:12px 14px;margin:4px 0 12px">
+           ℹ️ 多号结构<b>已经拆好了</b>（<span class="mono">accounts/${esc(r.main || '')}.yml</span>）。
+           <b>重启一次机器人</b>，这个进程才会按新结构跑 ——
+           不重启的话，在这里保存的"这个号的设置"仍会写回共用的 config.yml。
+         </div>`;
+    } else {
+      hintEl.innerHTML = '';
+    }
+  }
+
+  const opts = ACC_LIST.map((a) => `<option value="${a.qq}">${esc(accName(a))}</option>`).join('');
+  const fill = (id, extra) => {
+    const el = $(id);
+    if (!el) return;
+    const keep = el.value;
+    el.innerHTML = (extra || '') + opts;
+    if (keep) el.value = keep;
+  };
+  fill('acc-copy-from');
+  fill('acc-copy-to');
+  fill('acc-new-copy', '<option value="">不复制（用默认值）</option>');
+  // ⚠️ 「复制给哪个号」默认选**下一个**号 —— 加完新号接着就要做这件事
+  const toEl = $('acc-copy-to');
+  if (toEl && !toEl.value && ACC_LIST.length > 1) toEl.value = ACC_LIST[1].qq;
+
+  if (!box) return;
+  if (!ACC_LIST.length) {
+    box.innerHTML = '<span class="hint">还没有号（正常应该至少有一个主号）</span>';
+    return;
+  }
+  box.innerHTML = ACC_LIST.map((a) => {
+    const on = a.qq === CUR_ACCOUNT;
+    const state = a.alive
+      ? '<b style="color:#63d68a">在跑</b>'
+      : '<span style="opacity:.65">没在跑</span>';
+    const bits = [
+      `人设 ${esc(a.persona)}`,
+      `界面端口 ${a.port}`,
+      a.pid ? `PID ${a.pid}` : '',
+      // ⚠️ 协议端那一路的状态（多号最容易卡在这儿）
+      a.protoPort
+        ? `协议端 :${a.protoPort}`
+        : a.protoLoggedIn
+          ? '协议端：已登录、还没配端口'
+          : '协议端：这个号还没登进去',
+    ].filter(Boolean).join(' · ');
+    return `<div style="display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid rgba(255,255,255,.08);flex-wrap:wrap">
+      <div style="flex:1;min-width:260px">
+        <div><b>${esc(a.name || '（没写备注）')}</b>
+          <span class="mono">${esc(a.qq)}</span>
+          ${a.isMain ? '<span class="hint" style="margin-left:6px">主号</span>' : ''}
+          <span class="hint" style="margin-left:8px">${state}</span>
+          ${a.hasFile ? '' : '<span class="hint" style="margin-left:8px">⚠️ 还没建配置文件</span>'}
+        </div>
+        <div class="hint" style="margin:3px 0 0">${bits}</div>
+      </div>
+      <button class="${on ? 'ghost' : 'act'}" ${on ? 'disabled' : ''}
+        onclick="accSwitch('${a.qq}')">${on ? '正在控制' : '切到这个号'}</button>
+      <button class="ghost" onclick="accRename('${a.qq}')">改名</button>
+      ${!a.isMain && !a.protoPort ? `<button class="ghost" onclick="accProvider('${a.qq}')">接协议端</button>` : ''}
+      ${a.isMain ? '' : `<button class="ghost" onclick="accRemove('${a.qq}')">删除</button>`}
+    </div>`;
+  }).join('');
+}
+
+/** 切号：整页按那个号重读 */
+function accSwitch(qq) {
+  CUR_ACCOUNT = String(qq);
+  localStorage.setItem('saki-account', CUR_ACCOUNT);
+  const a = ACC_LIST.find((x) => x.qq === CUR_ACCOUNT);
+  const msg = a && a.alive
+    ? `已切到 ${accName(a)}`
+    : `已切到 ${CUR_ACCOUNT} —— 它现在**没在跑**，下面几个页面会读不到它的数据（它起来之后就正常了）`;
+  flash($('msg-acc'), a && a.alive ? true : null, msg);
+  accPaintNav();
+  renderAccounts();
+  // ⚠️ 必须整页重读：`/api/state` 里带着那个号的配置（按群设定、灵敏度、剧情…）
+  reloadAll();
+}
+
+/**
+ * 「接协议端」：给这个号在协议端配一个 OneBot 端口（用户要求「我自动改协议端配置」）。
+ *
+ * ⚠️ 两件事分开确认，因为**代价完全不同**：
+ *   · 配端口 = 只改文件，正在跑的连接不受影响；
+ *   · 重启协议端 = **所有号掉线约 1 分钟**（它们会自动重连）。
+ * ⚠️ 前置条件自动化不了：新号必须先在协议端自己的界面里**登录过**（扫码），
+ *    协议端才会为它生成配置文件。没登录过就在这里如实告诉他。
+ */
+async function accProvider(qq) {
+  const r = await api('/api/accounts').catch(() => null);
+  const p = r?.provider;
+  if (!p || !p.supported) {
+    return flash($('msg-acc'), false, p?.reason || '当前协议端不支持自动配端口');
+  }
+  const a = (r.accounts || []).find((x) => x.qq === qq);
+  if (!a) return flash($('msg-acc'), false, `列表里找不到号 ${qq}`);
+  if (!a.protoLoggedIn) {
+    return flash(
+      $('msg-acc'),
+      null,
+      `协议端里还没有号 ${qq} 的配置 —— 先在协议端自己的界面（${p.manageUrl || '它的管理页'}）` +
+        '把这个 QQ 号登进去（要扫码），登好之后回来再点一次「接协议端」。',
+    );
+  }
+  const okSync = confirm(
+    `给号 ${qq} 在协议端配一个 OneBot 端口？\n\n` +
+      '· 自动挑一个没被占用的端口（3001 是主号在用的，不会动）\n' +
+      '· 同时把这个号的接入点（地址 + token）写进它的配置\n' +
+      '· 配好之后要**重启协议端**才生效 —— 那一步会再问你一次',
+  );
+  if (!okSync) return;
+  const r2 = await api('/api/accounts/provider', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ action: 'sync', qq }),
+  });
+  if (!r2.ok) return flash($('msg-acc'), false, r2.error || '配端口失败');
+  flash($('msg-acc'), true, `配好了：号 ${qq} 走端口 ${r2.port}。要重启协议端才生效。`);
+
+  const okRestart = confirm(
+    `现在重启协议端，让端口 ${r2.port} 生效？\n\n` +
+      '⚠️ 所有号会掉线约 1 分钟（它们会自动重连，不用管）。\n' +
+      '选「取消」也行 —— 等你下次重启协议端时一起生效。',
+  );
+  if (!okRestart) return flash($('msg-acc'), null, '端口配好了，等你下次重启协议端时生效。');
+  flash($('msg-acc'), null, '正在重启协议端，最长要等 1 分钟…');
+  const r3 = await api('/api/accounts/provider', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ action: 'restart' }),
+  });
+  if (!r3.ok) return flash($('msg-acc'), false, r3.error || '重启协议端失败');
+  flash(
+    $('msg-acc'),
+    true,
+    `协议端重启完了（${Math.round((r3.waitedMs || 0) / 1000)} 秒）。各号会在几秒内自己重连。`,
+  );
+  renderAccounts();
+}
+
+/**
+ * 「机器人池」同步（2026-10-07 用户要求）。
+ *
+ * ⚠️ `dry=true` 是**只算不改** —— 这一下会改到**所有号**的按群设定，
+ *    所以界面上专门留了个"先看看会改什么"的按钮（别让人盲点）。
+ * ⚠️ 同名池只追加不删（后端保证），所以你手配的黑祥、小豆那些号不会丢。
+ */
+async function poolsSync(dry) {
+  const r = await api('/api/pools/sync', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ dryRun: !!dry }),
+  }).catch(() => null);
+  if (!r || !r.ok) return flash($('msg-pools'), false, r?.error || '同步失败');
+  const list = r.changed || [];
+  if (!list.length) {
+    return flash($('msg-pools'), true, (dry ? '【预览】' : '') + ((r.notes || [])[0] || '已经是最新的，不用改'));
+  }
+  const detail = list
+    .map((c) => `${c.qq}：同类 +${c.peersAdded.length}、不同类 +${c.otherAdded.length}`)
+    .join('；');
+  flash($('msg-pools'), true, `${dry ? '【预览】会改 ' : '改好了：'}${list.length} 个号 —— ${detail}`);
+  if (!dry) renderAccounts();
+}
+
+/** 拆分：把 config.yml 里属于这个号的设置搬进 accounts/<QQ>.yml */async function accMigrate() {
+  const qq = ACC_SELF.qq || '';
+  if (!/^\d{5,12}$/.test(qq)) {
+    return flash($('msg-acc-split'), false, '读不到主号的 QQ —— 先去「模型」页把「机器人 QQ」填上');
+  }
+  const okGo = confirm(
+    '把当前设置拆成「多号结构」？\n\n' +
+      `· 把 config.yml 里属于号 ${qq} 的设置（灵敏度 / 按群设定 / 日常事件 / 剧情…）\n` +
+      `  搬进 accounts/${qq}.yml\n` +
+      '· config.yml 只留共用的（大模型 / 生图 / 搜索 / 协议端…）\n' +
+      '· 原 config.yml 先备份成 config.yml.bak-多号拆分-<时间戳>\n\n' +
+      '合并出来的配置逐字不变，但**要重启机器人**才生效。',
+  );
+  if (!okGo) return;
+  const r = await api('/api/accounts', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ action: 'migrate', qq }),
+  });
+  if (!r.ok) return flash($('msg-acc-split'), false, r.error || '拆分失败');
+  flash(
+    $('msg-acc-split'),
+    true,
+    `拆好了：${r.moved.length} 段搬进 accounts/${qq}.yml。重启机器人后生效（原文件备份在 ${r.backup}）。`,
+  );
+  renderAccounts();
+}
+
+async function accCreate() {
+  const qq = ($('acc-new-qq')?.value || '').trim();
+  const name = ($('acc-new-name')?.value || '').trim();
+  const copyFrom = $('acc-new-copy')?.value || '';
+  if (!/^\d{5,12}$/.test(qq)) return flash($('msg-acc-new'), false, 'QQ 号要填 5~12 位数字');
+
+  // ⚠️ 判断"拆没拆"必须用**刚拉到的**状态（2026-10-07 修）：
+  //    页面打开时那份可能早就过时了（用户已经拆过、或者刚重启过机器人），
+  //    拿旧值就会一直把他拦在"还没拆分"上 —— 用户报的正是这个。
+  const who = await api('/api/whoami').catch(() => null);
+  if (who && who.ok) ACC_SELF = { ...ACC_SELF, ...who };
+
+  // ⚠️ 没拆分就加号 = 新号会继承主号的私有设置。先让用户把这一步做掉。
+  if (!ACC_SELF.split) {
+    const okSplit = confirm(
+      '加号之前要先做一次「多号拆分」，否则新号会继承主号那些设置。\n\n' +
+        '现在就去拆吗？（拆完要重启机器人，然后再回来加号）',
+    );
+    if (okSplit) await accMigrate();
+    return;
+  }
+  const r = await api('/api/accounts', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ action: 'create', qq, name, copyFrom }),
+  });
+  if (!r.ok) return flash($('msg-acc-new'), false, r.error || '加号失败');
+  flash(
+    $('msg-acc-new'),
+    true,
+    `加好了：${qq}（管理界面端口 ${r.port}）` +
+      (copyFrom ? `，设置复制自 ${copyFrom}` : '') +
+      '。下一步：在协议端给这个号开一个 WS 端口并登录。',
+  );
+  if ($('acc-new-qq')) $('acc-new-qq').value = '';
+  if ($('acc-new-name')) $('acc-new-name').value = '';
+  renderAccounts();
+}
+
+async function accCopy() {
+  const from = $('acc-copy-from')?.value || '';
+  const to = $('acc-copy-to')?.value || '';
+  if (!from || !to) return flash($('msg-acc-copy'), false, '先把两个号选上');
+  if (from === to) return flash($('msg-acc-copy'), false, '源和目标不能是同一个号');
+  const okGo = confirm(
+    `把 ${from} 的设置整个复制给 ${to}？\n\n` +
+      '会覆盖目标号同名的设置（灵敏度 / 按群设定 / 剧情参数…）。\n' +
+      '协议端连接、机器人 QQ、备注名不受影响。',
+  );
+  if (!okGo) return;
+  const r = await api('/api/accounts', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ action: 'copy', from, to }),
+  });
+  if (!r.ok) return flash($('msg-acc-copy'), false, r.error || '复制失败');
+  flash($('msg-acc-copy'), true, `复制好了：${from} → ${to}（${(r.sections || []).length} 段）`);
+  renderAccounts();
+}
+
+async function accRename(qq) {
+  const a = ACC_LIST.find((x) => x.qq === qq) || { qq };
+  const name = prompt(`号 ${qq} 的备注名（自己看的，填这个号在干什么）`, a.name || '');
+  if (name === null) return;
+  const r = await api('/api/accounts', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ action: 'rename', qq, name }),
+  });
+  if (!r.ok) return flash($('msg-acc'), false, r.error || '改名失败');
+  flash($('msg-acc'), true, '改好了');
+  renderAccounts();
+}
+
+async function accRemove(qq) {
+  const okGo = confirm(
+    `删掉号 ${qq} 的配置文件？\n\n` +
+      '只删配置文件，它的运行数据（state/accounts/…、群记忆）都留着。\n' +
+      '原文件会先备份到 accounts/_deleted/，可以手动拿回来。',
+  );
+  if (!okGo) return;
+  const r = await api('/api/accounts', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ action: 'remove', qq }),
+  });
+  if (!r.ok) return flash($('msg-acc'), false, r.error || '删除失败');
+  flash($('msg-acc'), true, `删掉了 ${qq}（备份：${r.backup}）`);
+  if (CUR_ACCOUNT === qq) {
+    CUR_ACCOUNT = ACC_SELF.qq || '';
+    localStorage.setItem('saki-account', CUR_ACCOUNT);
+    reloadAll();
+  }
+  renderAccounts();
 }
 
 // ── 这个标签页是不是旧的？（2026-09-15 加）──
@@ -2277,7 +2736,7 @@ document.querySelectorAll('nav button').forEach(b => {
     b.classList.add('on');
     // ⚠️ 这个列表必须跟 nav 里的 data-tab 一一对应 —— 漏了哪个，哪个标签就切不过去
     //    （qzone 就漏过一阵子，面板永远显示不出来）
-    ['model','groups','faces','knowledge','persona','qzone','life','quest','groupcfg','affinity','qqlogin','status','about'].forEach(t => {
+    ['model','groups','faces','knowledge','persona','qzone','life','quest','groupcfg','affinity','qqlogin','status','about','accounts'].forEach(t => {
       const el = $('tab-' + t);
       if (el) el.classList.toggle('hidden', t !== b.dataset.tab);
     });
@@ -2293,6 +2752,7 @@ document.querySelectorAll('nav button').forEach(b => {
     if (b.dataset.tab === 'groupcfg') renderGroupParams();
     if (b.dataset.tab === 'affinity') renderAffinity();
     if (b.dataset.tab === 'qqlogin') qqRefresh();
+    if (b.dataset.tab === 'accounts') renderAccounts();
   };
 });
 
@@ -2326,7 +2786,12 @@ async function reloadAll() {
   const c = r.config;
   fillQuestGroup();                        // 「立即开始剧情」发到哪个群（1 档群列表）
 
-  $('hdr').textContent = `表情 ${r.stats.faces} · 学到 ${r.stats.learned} 条 · ${c.llm.model}`;
+  // ⚠️ 2026-10-07 多 QQ 号：这行也标出"现在控制哪个号" ——
+  //    侧栏按钮上虽然挂着，但那是要眯着眼找的；这一行一眼就能看见。
+  const meAcc = ACC_LIST.find((a) => a.qq === CUR_ACCOUNT);
+  $('hdr').textContent =
+    (CUR_ACCOUNT ? `【${meAcc?.name || CUR_ACCOUNT}】 ` : '') +
+    `表情 ${r.stats.faces} · 学到 ${r.stats.learned} 条 · ${c.llm.model}`;
 
   // 身份（主人 / 机器人）—— 2026-09-15 用户要求：可编辑，而且「群主」改称「主人」
   $('id-ownerQQ').value = c.ownerQQ || '';
@@ -3472,11 +3937,11 @@ async function fillGroupParams() {
         <label title="⚠️ 默认关。群里已经有好几个 bot 的时候，服务器问题会被重复回答（一屏都是同一种话）⇒ 关掉 = 没 @ 她、也没引用她时**不主动答**服务器问题；带 @ 或引用她的**照答**">回服务器消息 ${onoff('gp-chat-answerserver', C.answerServer === true)}</label>
       </div>
       <div class="hint" style="margin-top:6px;border-left:3px solid #f59e0b;padding-left:8px">
-        ⚠️ <b>这一项默认是关的</b>（2026-10-06 起，署名 <b><主人></b> 的调整）：
-        <b>没 @ 她、也没引用她</b>的服务器问题，她**不再主动回答** —— 群里 bot 一多，那种问题会被好几个号
+        ⚠️ <b>这一项默认是关的</b>：
+        <b>没 @ 她、也没引用她</b>的服务器问题，她<b>不再主动回答</b> —— 群里 bot 一多，那种问题会被好几个号
         重复答成一屏。<br>
         想让她答（比如群里只有她一个 bot）⇒ 把上面这个开关<b>打开</b>，保存即可（热重载，不用重启）。<br>
-        ⚠️ <b>@ 她 / 引用她</b>问服务器问题**照样答**，不受这个开关影响。
+        ⚠️ <b>@ 她 / 引用她</b>问服务器问题<b>照样答</b>，不受这个开关影响。
       </div>
     </div>
 
@@ -4432,6 +4897,7 @@ async function loadGroupRespond() {
       el.textContent = '没取到群列表（机器人可能没连上 QQ）';
       return;
     }
+    const ans = r.answerServer || {};
     el.innerHTML = r.groups.map((g) => {
       const cur = per[g.id] ?? 0;
       const opts = [0, 1, 2, 3].map((v) =>
@@ -4440,11 +4906,41 @@ async function loadGroupRespond() {
       const mark = per[g.id] ? ' <b style="color:#d97706">已单独设置</b>' : '';
       return `<div class="gr-row">
         <div class="gr-name">${esc(g.name || '(无名群)')}<span class="gr-id">${esc(g.id)}${g.count ? ' · ' + g.count + ' 人' : ''}</span>${mark}</div>
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;opacity:.92;white-space:nowrap;margin:0" title="⚠️ 默认关。群里已经有好几个 bot 的时候，服务器问题会被重复回答（一屏都是同一种话）⇒ 关掉 = 没 @ 她、也没引用她时**不主动答**服务器问题；带 @ 或引用她的照答。">
+          <input type="checkbox"${ans[g.id] ? ' checked' : ''}
+            onchange="setGroupAnswerServer('${esc(g.id)}', this.checked, this)"> 回服务器消息
+        </label>
         <select onchange="setGroupRespond('${esc(g.id)}', this.value, this)">${opts}</select>
       </div>`;
     }).join('');
   } catch (e) {
     el.textContent = '出错：' + e.message;
+  }
+}
+
+/**
+ * 「这个群回不回服务器消息」（2026-10-07 从「按群设定」页搬过来的）。
+ *
+ * ⚠️ 为什么搬：用户原话是「在**分群调节**那里加一个是否回服务器消息的选项」——
+ *    而它原来在「按群设定」页，那一页**只列 1 档群**（事件系统的门槛），
+ *    于是 2/3 档群压根看不到这个开关 ⇒ 用户报「找不到了」。
+ *    它本来就跟事件系统无关（是"她怎么说话"），放在分群档位旁边才对。
+ */
+async function setGroupAnswerServer(gid, on, box) {
+  const msg = $('msg-group-respond');
+  if (box) box.disabled = true;
+  try {
+    const r = await api('/api/group-params', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ groupId: gid, patch: { chat: { answerServer: !!on } } }),
+    });
+    flash(msg, r.ok, r.ok ? `${gid}：回服务器消息已${on ? '打开' : '关闭'}` : '保存失败：' + r.error);
+    if (r.ok) await loadGroupRespond();
+  } catch (e) {
+    flash(msg, false, '出错：' + e.message);
+  } finally {
+    if (box) box.disabled = false;
   }
 }
 
@@ -4939,7 +5435,13 @@ async function saveKnowledge() {
 loadKnowledgeList().then(() => loadKnowledge());
 
 // 启动
-reloadAll();
+// ⚠️ 2026-10-07 多 QQ 号：**先问清"这个进程在控制哪个号"，再拉整页数据** ——
+//    顺序反了的话，切过号的人一刷新会先看到"本进程那个号"的设置。
+(async () => {
+  await initAccounts();
+  await renderAccounts();
+  reloadAll();
+})();
 // ─────────────────────────────────────────────────────────────
 // 人设页（2026-09-21 加：能直接切换机器人核心人设）
 // ─────────────────────────────────────────────────────────────

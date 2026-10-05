@@ -21,7 +21,7 @@
  */
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { config, ROOT } from './config.js';
+import { config, ROOT, stateDir } from './config.js';
 import { log } from './log.js';
 
 // ⚠️ 路径可以用 `QQBOT_SPEND_FILE` 覆盖 —— 给测试用。
@@ -29,7 +29,7 @@ import { log } from './log.js';
 //    又不能污染真账本，所以要能让它指向临时文件。
 const FILE = process.env.QQBOT_SPEND_FILE
   ? join(ROOT, process.env.QQBOT_SPEND_FILE)
-  : join(ROOT, 'state', 'spend.json');
+  : join(stateDir(), 'spend.json');
 
 /** 价格表：元 / 百万 token。peak = 高峰价，off = 空闲价（高峰的一半） */
 const PRICES = {
@@ -105,7 +105,7 @@ try {
   };
   consider(join(ROOT, 'package.json'));
   consider(join(ROOT, 'src'));
-  const dir = join(ROOT, 'state');
+  const dir = join(stateDir());
   if (existsSync(dir)) for (const f of readdirSync(dir)) consider(join(dir, f));
   if (earliest) epochDay = dayKey(new Date(earliest));
 } catch (e) {
@@ -152,7 +152,7 @@ function isAncient(k) {
  */
 const BASE_FILE = process.env.QQBOT_SPEND_BASE
   ? join(ROOT, process.env.QQBOT_SPEND_BASE)
-  : join(ROOT, 'state', 'spend-baseline.json');
+  : join(stateDir(), 'spend-baseline.json');
 let baseline = {};
 try {
   if (existsSync(BASE_FILE)) baseline = JSON.parse(readFileSync(BASE_FILE, 'utf8')) ?? {};

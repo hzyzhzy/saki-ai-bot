@@ -51,7 +51,7 @@
  */
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, copyFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { config, ROOT } from './config.js';
+import { config, ROOT, stateDir } from './config.js';
 import { log } from './log.js';
 import { streamChat } from './llm.js';
 import * as persona from './persona.js';
@@ -65,7 +65,7 @@ async function collect(messages, opts) {
 
 const STATE_FILE = process.env.QQBOT_STORYLINE_FILE
   ? join(ROOT, process.env.QQBOT_STORYLINE_FILE)
-  : join(ROOT, 'state', 'storyline.json');
+  : join(stateDir(), 'storyline.json');
 
 /** 重要度 1~5，只影响**一级**条目的压缩优先级；二级一律锁定 */
 export const MIN_IMP = 1;
@@ -178,7 +178,7 @@ function load() {
 
 function save() {
   try {
-    mkdirSync(join(ROOT, 'state'), { recursive: true });
+    mkdirSync(join(stateDir()), { recursive: true });
     const tmp = `${STATE_FILE}.tmp`;
     const groups = {};
     for (const [gid, b] of buckets) {

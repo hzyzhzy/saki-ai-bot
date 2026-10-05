@@ -8,6 +8,11 @@ config.local.yml
 config.probe.yml
 config.*-probe.yml
 
+# ── 每个 QQ 号自己那份配置（多号功能，2026-10-07 加）─────
+#    ⚠️ 里面有 onebot 的 accessToken（明文）+ 真实群号，绝不许提交
+#    没有这个目录也没关系：项目会退回"单号"模式
+accounts/
+
 # ── 运行期数据（聊天记录 / 群友信息 / 状态）─────────────
 logs/
 state/

@@ -28,7 +28,7 @@
  */
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { config, ROOT } from './config.js';
+import { config, ROOT, stateDir } from './config.js';
 import { log } from './log.js';
 import { phrase } from './llm.js';
 import * as affinity from './affinity.js';
@@ -37,7 +37,7 @@ import { personaText } from './knowledge.js';
 
 const STATE_FILE = process.env.QQBOT_FRIEND_FILE
   ? join(ROOT, process.env.QQBOT_FRIEND_FILE)
-  : join(ROOT, 'state', 'friend.json');
+  : join(stateDir(), 'friend.json');
 
 const cfg = () => config.friend ?? {};
 const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
@@ -67,7 +67,7 @@ function load() {
 
 function save() {
   try {
-    mkdirSync(join(ROOT, 'state'), { recursive: true });
+    mkdirSync(join(stateDir()), { recursive: true });
     const tmp = `${STATE_FILE}.tmp`;
     writeFileSync(tmp, JSON.stringify(st, null, 2), 'utf8');
     renameSync(tmp, STATE_FILE);

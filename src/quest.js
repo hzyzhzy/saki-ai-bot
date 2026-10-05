@@ -25,7 +25,7 @@
  */
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { config, ROOT, paramsFor, peersFor } from './config.js';
+import { config, ROOT, paramsFor, peersFor, stateDir } from './config.js';
 import { log } from './log.js';
 import { personaText, castRosterBrief, personaDataFile, castRoleOf } from './knowledge.js';
 import * as names from './names.js';
@@ -38,7 +38,7 @@ import { naturalize } from './rewrite.js';
 
 const STATE_FILE = process.env.QQBOT_QUEST_FILE
   ? join(ROOT, process.env.QQBOT_QUEST_FILE)
-  : join(ROOT, 'state', 'quest.json');
+  : join(stateDir(), 'quest.json');
 
 export const MAX_STAGES = 10;
 export const BEST_STAGES = 3;
@@ -453,7 +453,7 @@ function save() {
   // ⚠️ 沙箱里绝不落盘 —— 模拟的剧情不能写进真实的 state/quest.json
   if (sandbox) return;
   try {
-    mkdirSync(join(ROOT, 'state'), { recursive: true });
+    mkdirSync(join(stateDir()), { recursive: true });
     const tmp = `${STATE_FILE}.tmp`;
     writeFileSync(tmp, JSON.stringify(st, null, 2), 'utf8');
     renameSync(tmp, STATE_FILE);

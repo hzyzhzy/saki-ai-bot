@@ -36,6 +36,11 @@
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+// ⚠️ 2026-10-07：本套件会**在这个进程里**读 `config`（例如 `config.botQQ`）——
+//    而配置分家之后那些属于**每个号私有**（`accounts/<QQ>.yml`），`config.yml` 里没有。
+//    ⇒ 先把 `QQBOT_CONFIG` 指到"共用 + 主号私有"合并后的那份（见 `_config-base.mjs`）。
+await import('./_config-base.mjs');
+
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 let failures = 0;

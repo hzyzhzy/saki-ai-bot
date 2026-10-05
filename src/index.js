@@ -2,7 +2,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { readFileSync, writeFileSync, rmSync, statSync, utimesSync } from 'node:fs';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { config, validate, ROOT, DEFAULT_LIFE, DEFAULT_QUEST, paramsFor } from './config.js';
+import { config, validate, ROOT, DEFAULT_LIFE, DEFAULT_QUEST, paramsFor, stateDir } from './config.js';
 // ⚠️ 协议端适配层：启动横幅要报它、管理能力也由它决定（换协议端只改 config.yml）
 import * as provider from './provider.js';
 import { log } from './log.js';
@@ -27,6 +27,7 @@ import { faceTags, faceFiles } from './faces.js';
 import { initCollector } from './collector.js';
 import * as machine from './machine.js';
 import * as cleanup from './cleanup.js';
+import * as providerWatch from './provider-watch.js';
 import * as sessions from './sessions.js';
 import * as qzoneComment from './qzone-comment.js';
 
@@ -58,7 +59,7 @@ if (problems.length) {
 //       "明明没别的实例却被拒绝启动"，按提示删掉锁文件即可（不丢数据）。
 // ⚠️ 测试必须隔离：`QQBOT_LOCK_FILE` 指到别处，否则 `test/behavior.js` 里
 //    `spawn(node, [src/index.js])` 会被正在跑的真机器人挡在门外。
-const LOCK_FILE = process.env.QQBOT_LOCK_FILE || join(ROOT, 'state', 'bot.lock');
+const LOCK_FILE = process.env.QQBOT_LOCK_FILE || join(stateDir(), 'bot.lock');
 
 /**
  * 锁**多久没被蹭过**就当作"那个实例已经没了"。
@@ -474,6 +475,17 @@ if (config.observe?.enable !== false) {
     }).catch((e) => log.debug(`[观察] 出错：${e.message}`));
   }, every).unref();
   log.info(`群友观察：每 ${Math.round(every / 60000)} 分钟检查一次，攒够 ${config.observe.threshold} 条消息就总结`);
+}
+
+// ── 协议端自愈（2026-10-06 用户要求）──
+// 实测：SnowLuma 跑约 2 小时后短暂抖过 1 分钟（3001 没人听、进程却还在），
+// 那段时间机器人只能 ECONNREFUSED 反复重连 —— 用户看到的就是"她不回话"。
+// ⚠️ 只探端口 + 只启动，**绝不杀任何进程**（要"找出哪个是协议端"就得按命令行匹配，
+//    而那条路会打中 DSH 的 runner 自己 —— 项目里踩过两次）⇒ 完整说明见 `src/provider-watch.js` 顶部。
+try {
+  providerWatch.start();
+} catch (e) {
+  log.debug(`协议端自愈启动失败（不影响其他功能）：${e.message}`);
 }
 
 // ── 自动清理临时产物（2026-10-06 用户要求）──

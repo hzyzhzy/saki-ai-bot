@@ -15,6 +15,7 @@
  * 用法: node test/observe-compress.js
  */
 import { createServer } from 'node:http';
+import { configWithOnebot } from './_config-base.mjs';
 import { writeFileSync, readFileSync, rmSync, mkdirSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -191,7 +192,7 @@ console.log('\n【7】★ 观察频率相关的配置（用户要求"提升记�
   // 一次写的群友条数上限：5 → 12（原来 5 会把细节扔掉）
   check(/people\.length < 12/.test(src), '一次最多记 12 条性格（原 5）');
   // 性格保留上限：20 → 60（原来攒到 20 条就开始挤掉最老的）
-  const cfg = readFileSync(join(ROOT, 'config.yml'), 'utf8');
+  const cfg = configWithOnebot();
   check(/keepPeople:\s*60/.test(cfg), 'config 里 keepPeople = 60');
   check(/threshold:\s*120/.test(cfg), 'config 里 threshold = 120（原 200）');
   check(/群友观察尽量多写/.test(src), '提示词里明确要求"群友观察尽量多写"');

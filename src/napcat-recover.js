@@ -26,7 +26,7 @@
  */
 import { readFileSync, writeFileSync, rmSync, existsSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { config, ROOT } from './config.js';
+import { config, ROOT, stateDir } from './config.js';
 import { log } from './log.js';
 import * as provider from './provider.js';
 
@@ -37,7 +37,7 @@ const ENABLED_FOR_PROVIDER = provider.isNapcat();
 
 const FILE = process.env.QQBOT_NAPCAT_REQ_FILE
   ? join(ROOT, process.env.QQBOT_NAPCAT_REQ_FILE)
-  : join(ROOT, 'state', 'napcat-restart.request');
+  : join(stateDir(), 'napcat-restart.request');
 
 const cfg = () => config.napcatRecover ?? {};
 const nz = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);

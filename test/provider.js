@@ -19,6 +19,7 @@
  * 用法: node test/provider.js
  */
 import { spawn, spawnSync } from 'node:child_process';
+import { configWithOnebot } from './_config-base.mjs';
 import { readFileSync, writeFileSync, existsSync, unlinkSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -35,7 +36,7 @@ const check = (ok, label, extra = '') => {
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const realCfg = readFileSync(join(ROOT, 'config.yml'), 'utf8');
+const realCfg = configWithOnebot();
 
 /**
  * 造一份临时配置：把 provider 段换成要测的那份（其余照抄真实配置，保证参数真实）。

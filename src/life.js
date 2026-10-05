@@ -34,7 +34,7 @@
  */
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { config, ROOT, KNOWLEDGE_DIR, paramsFor } from './config.js';
+import { config, ROOT, KNOWLEDGE_DIR, paramsFor, stateDir } from './config.js';
 import { log } from './log.js';
 import { phrase } from './llm.js';
 import * as storyline from './storyline.js';
@@ -62,7 +62,7 @@ function file() {
 
 const STATE_FILE = process.env.QQBOT_LIFE_FILE
   ? join(ROOT, process.env.QQBOT_LIFE_FILE)
-  : join(ROOT, 'state', 'life.json');
+  : join(stateDir(), 'life.json');
 
 // ─────────────────────────────────────────────────────────────
 // 事件库解析
@@ -309,7 +309,7 @@ function loadState() {
     try {
       const stamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '');
       writeFileSync(
-        join(ROOT, 'state', `life.备份-分群前-${stamp}.json`),
+        join(stateDir(), `life.备份-分群前-${stamp}.json`),
         JSON.stringify(j, null, 2),
         'utf8',
       );
@@ -326,7 +326,7 @@ function loadState() {
 
 function save() {
   try {
-    mkdirSync(join(ROOT, 'state'), { recursive: true });
+    mkdirSync(join(stateDir()), { recursive: true });
     const byGroup = {};
     for (const [k, b] of buckets) byGroup[k] = b;
     const tmp = `${STATE_FILE}.tmp`;

@@ -21,6 +21,10 @@
  */
 // ⚠️ 隔离状态文件必须在 import 业务模块**之前**设好（模块加载时就定路径）
 process.env.QQBOT_QZONE_COMMENT_FILE = 'logs/__test-qzone-comment.json';
+// ⚠️ 2026-10-07：`config.yml` 现在只剩"共用"那半份，而 `botQQ` / `qzone` 这些
+//    属于**每个号私有**（`accounts/<QQ>.yml`）⇒ 先把配置源指到"合并后"的那一份，
+//    否则配置读出来是空的、断言会莫名其妙红（本套件就这么红过 6 条）。
+await import('./_config-base.mjs');
 
 let failures = 0;
 const check = (ok, label, extra = '') => {

@@ -67,10 +67,62 @@ function Test-Network {
   return $false
 }
 
+# ── ⚠️ 2026-10-07 多 QQ 号：先算出"主号是哪个"、以及"怎么**按号**判活" ──────
+#
+# 判据用**锁文件**（`src/index.js` 每 30 秒蹭一次 mtime）：
+#   主号   → `state\bot.lock`
+#   其它号 → `state\accounts\<QQ>\bot.lock`（见 `config.js` 的 `stateDir()`）
+# 锁在 + 里面那个 PID 活着 + 5 分钟内有心跳 = 那个号在跑。
+#
+# ⚠️ "谁是主号"的顺序和 `src/config.js` 的 `resolveAccount()` **保持一致**
+#    （botQQ → mainAccount → 账号目录第一个）—— 两处口径不同会把主号也当成"别的号"。
+$AcctDir = Join-Path $BotDir 'accounts'
+$MainQQ = $BotQQ
+if (-not $MainQQ) {
+  try {
+    $m2 = Select-String -Path (Join-Path $BotDir 'config.yml') -Pattern "^\s*mainAccount\s*:\s*['""]?(\d+)" -ErrorAction SilentlyContinue |
+      Select-Object -First 1
+    if ($m2) { $MainQQ = $m2.Matches[0].Groups[1].Value }
+  } catch {}
+}
+$AcctFiles = @()
+if (Test-Path $AcctDir) {
+  $AcctFiles = @(Get-ChildItem -Path $AcctDir -Filter '*.yml' -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.BaseName -match '^\d{5,12}$' } | Sort-Object Name)
+}
+if (-not $MainQQ -and $AcctFiles.Count) { $MainQQ = $AcctFiles[0].BaseName }
+
+function Test-BotForQQ {
+  param([string]$Qq)
+  $lock = if ($Qq -eq $MainQQ) { Join-Path $BotDir 'state\bot.lock' } else { Join-Path $BotDir ("state\accounts\{0}\bot.lock" -f $Qq) }
+  if (-not (Test-Path -LiteralPath $lock)) { return $false }
+  try {
+    $j = Get-Content -LiteralPath $lock -Raw -ErrorAction Stop | ConvertFrom-Json
+    $procId = [int]$j.pid
+    if (-not (Get-Process -Id $procId -ErrorAction SilentlyContinue)) { return $false }
+    $age = ((Get-Date) - (Get-Item -LiteralPath $lock).LastWriteTime).TotalSeconds
+    return ($age -lt 300)
+  } catch {
+    return $false
+  }
+}
+
 function Test-Bot {
-  $p = Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
-    Where-Object { $_.CommandLine -match 'src[\\/]index\.js' }
-  return [bool]$p
+  # ⚠️⚠️ 2026-10-07 改：**按主号判**（用锁文件），不再问"有没有**任何一个**机器人进程"。
+  #
+  #    踩到的（真实发生）：多号之后，另一个号在跑 ⇒ 老写法永远返回 true ⇒
+  #    **主号挂了也没人补**（用户那天的主号就是我手动起的）。
+  #
+  #    ⚠️ 顺带把原来的 `CommandLine -match 'src[\\/]index\.js'` 去掉 —— 那种匹配
+  #      在 DSH（AI 会话）环境下会**命中正在执行命令的 runner 自己**（AGENTS 里的硬规矩）；
+  #      锁文件里记着 PID + 心跳，比按命令行猜干净得多。
+  if (-not $MainQQ) {
+    # 一个号都没配（老配置、还没做多号拆分）⇒ 退回老判据，行为不变
+    $p = Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
+      Where-Object { $_.CommandLine -match 'src[\\/]index\.js' }
+    return [bool]$p
+  }
+  return (Test-BotForQQ $MainQQ)
 }
 
 function Get-BotToken {
@@ -366,8 +418,35 @@ function Get-ProviderName {
 $ProviderName = Get-ProviderName
 Say "协议端：$ProviderName（只有 napcat 才由看门狗代管；其它一律只保机器人、不碰协议端）"
 
+# ── ⚠️ 2026-10-07 多 QQ 号：**其余几个号也归看门狗管** ────────────────────
+#
+# `$MainQQ` / `Test-BotForQQ` 已经在上面（`Test-Bot` 那一段）定义好了 ——
+# 主号那条链也要按号判活，所以先定义、这里再管"除主号之外的号"。
+#
+# ⚠️ 没有 `accounts\` 目录时 `$ExtraQq` 是空的 ⇒ 这一段整个不生效，
+#    看门狗的行为跟以前一字不差。
+$ExtraQq = @($AcctFiles | Where-Object { $_.BaseName -ne $MainQQ } | ForEach-Object { $_.BaseName })
+# 每个号上次被拉起的时间（防抖：起不来时别每 20 秒堆一个进程）
+$ExtraLastStart = @{}
+if ($ExtraQq.Count) { Say "另外还有 $($ExtraQq.Count) 个号也一起看着：$($ExtraQq -join '、')" }
+
+function Sync-ExtraBots {
+  if (-not $ExtraQq.Count) { return }
+  foreach ($qq in $ExtraQq) {
+    if (Test-BotForQQ $qq) { continue }
+    if ($ExtraLastStart.ContainsKey($qq) -and ((Get-Date) - $ExtraLastStart[$qq]).TotalSeconds -lt 90) { continue }
+    $ExtraLastStart[$qq] = Get-Date
+    Say "❌ 号 $qq 不在了 —— 重新拉起"
+    Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', '_run-bot.bat', $qq -WorkingDirectory $BotDir -WindowStyle Hidden
+  }
+}
+
 while ($true) {
   Start-Sleep -Seconds $CheckSeconds
+
+  # ⚠️ 2026-10-07 多 QQ 号：其余几个号先扫一遍（主号那条链在下面）。
+  #    放在最前面是故意的 —— 下面有 `continue`，放后面就会被跳过。
+  Sync-ExtraBots
 
   # ⚠️⚠️ 2026-09-20 改：**只有 napcat 才走下面那套 NapCat 自愈**。
   #    原来写的是「`-eq 'llonebot'` 才走这个"只保机器人"的分支」——

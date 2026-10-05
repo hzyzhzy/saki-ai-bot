@@ -17,7 +17,7 @@
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { config, ROOT } from './config.js';
+import { config, ROOT, stateDir } from './config.js';
 import { log } from './log.js';
 import * as llm from './llm.js';
 // ⚠️ 2026-09-21：她**怎么称呼主人**从 `identity.address` 来 ——
@@ -29,7 +29,7 @@ import * as persona from './persona.js';
 //    （那个状态脏了就会导致该提醒的不提醒 / 重复提醒）。
 const FILE = process.env.QQBOT_BALANCE_FILE
   ? join(ROOT, process.env.QQBOT_BALANCE_FILE)
-  : join(ROOT, 'state', 'balance.json');
+  : join(stateDir(), 'balance.json');
 
 /**
  * 抱怨档位（从低到高判断）—— 阈值可配（`config.balance.critical` / `.low`）。

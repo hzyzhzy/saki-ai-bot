@@ -29,7 +29,7 @@
  */
 import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { config, ROOT } from './config.js';
+import { config, ROOT, stateDir } from './config.js';
 import { log } from './log.js';
 import { phrase } from './llm.js';
 import { personaText } from './knowledge.js';
@@ -39,7 +39,7 @@ import * as life from './life.js';
 
 const FILE = process.env.QQBOT_PEERCHAT_FILE
   ? join(ROOT, process.env.QQBOT_PEERCHAT_FILE)
-  : join(ROOT, 'state', 'peer-chat.json');
+  : join(stateDir(), 'peer-chat.json');
 
 const cfg = () => config.peerChat ?? {};
 const nz = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);

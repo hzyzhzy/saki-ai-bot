@@ -29,12 +29,12 @@
  */
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { config, ROOT } from './config.js';
+import { config, ROOT, stateDir } from './config.js';
 import { log } from './log.js';
 
 const FILE = process.env.QQBOT_OUTBOX_FILE
   ? join(ROOT, process.env.QQBOT_OUTBOX_FILE)
-  : join(ROOT, 'state', 'outbox.json');
+  : join(stateDir(), 'outbox.json');
 
 const cfg = () => config.outbox ?? {};
 const nz = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);

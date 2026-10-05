@@ -47,7 +47,7 @@
  */
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { ROOT, config } from './config.js';
+import { ROOT, config, stateDir } from './config.js';
 import { log } from './log.js';
 import { gtkFromCookies } from './qzone-http.js';
 import * as llm from './llm.js';
@@ -55,7 +55,7 @@ import * as persona from './persona.js';
 
 const STATE_FILE = process.env.QQBOT_QZONE_COMMENT_FILE
   ? join(ROOT, process.env.QQBOT_QZONE_COMMENT_FILE)
-  : join(ROOT, 'state', 'qzone-comment.json');
+  : join(stateDir(), 'qzone-comment.json');
 
 const UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36';
@@ -78,7 +78,7 @@ function todayStr() {
 
 function save() {
   try {
-    mkdirSync(join(ROOT, 'state'), { recursive: true });
+    mkdirSync(join(stateDir()), { recursive: true });
     const tmp = `${STATE_FILE}.tmp`;
     writeFileSync(
       tmp,

@@ -309,6 +309,59 @@ if (-not $ok) {
 
 Write-Step '      机器人已连接。'
 
+# ── ⚠️ 2026-10-07 多 QQ 号：**把其余号也起起来** ──────────────────────
+#
+# 用户要求：「从一个应用端控制多个 QQ 号」⇒ 一个号一个进程（各自一套状态文件），
+# 所以有几个号就要有几个 node —— 主号上面已经起来了，这一段管**另外几个**。
+#
+# ⚠️ 没有 `accounts/` 目录时 `$extraQq` 是空的，整段不执行 ⇒ 行为跟以前一字不差。
+# ⚠️ 判断"哪个是主号"的顺序和 `src/config.js` 的 `resolveAccount()` **保持一致**
+#    （botQQ → mainAccount → 账号目录第一个）—— 两处口径不同的话会把主号再起一遍。
+$acctDir = Join-Path $BotDir 'accounts'
+$mainQQ = $BotQQ
+if (-not $mainQQ) {
+  $m2 = Select-String -Path (Join-Path $BotDir 'config.yml') -Pattern "^\s*mainAccount\s*:\s*['""]?(\d+)" -ErrorAction SilentlyContinue |
+    Select-Object -First 1
+  if ($m2) { $mainQQ = $m2.Matches[0].Groups[1].Value }
+}
+$acctFiles = @()
+if (Test-Path $acctDir) {
+  $acctFiles = @(Get-ChildItem -Path $acctDir -Filter '*.yml' -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.BaseName -match '^\d{5,12}$' } | Sort-Object Name)
+}
+if (-not $mainQQ -and $acctFiles.Count) { $mainQQ = $acctFiles[0].BaseName }
+
+$extraQq = @($acctFiles | Where-Object { $_.BaseName -ne $mainQQ } | ForEach-Object { $_.BaseName })
+if ($extraQq.Count) {
+  Write-Step "      另外还有 $($extraQq.Count) 个号，一起起起来…"
+  foreach ($qq in $extraQq) {
+    Write-Step "        - 号 $qq"
+    Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', '_run-bot.bat', $qq `
+      -WorkingDirectory $BotDir -WindowStyle Hidden
+  }
+  # 等它们各自连上 —— **每个号写自己的日志**：`logs\bot-<日期>-<QQ>.log`
+  $waited2 = 0
+  $allUp = $false
+  while ($waited2 -lt 40) {
+    Start-Sleep -Milliseconds 1500
+    $waited2 += 1.5
+    $allUp = $true
+    foreach ($qq in $extraQq) {
+      $lf = Join-Path $BotDir ("logs\bot-{0}-{1}.log" -f (Get-Date -Format 'yyyy-MM-dd'), $qq)
+      $hit = (Test-Path $lf) -and (Select-String -Path $lf -Pattern '已连接到协议端|已连接到 NapCat' -Quiet -ErrorAction SilentlyContinue)
+      if (-not $hit) { $allUp = $false }
+    }
+    if ($allUp) { break }
+    Write-Host '.' -NoNewline
+  }
+  Write-Host ''
+  if ($allUp) {
+    Write-Step '      其余号都连上了。'
+  } else {
+    Write-Host '[警告] 有号没在 40 秒内连上 —— 看它自己的日志：logs\bot-<日期>-<QQ>.log' -ForegroundColor Yellow
+  }
+}
+
 # ── 3. 汇总 ────────────────────────────────────────
 Write-Host ''
 Write-Host '============================================'

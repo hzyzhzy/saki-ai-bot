@@ -17,7 +17,7 @@
  */
 import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync } from 'node:fs';
 import { join, basename } from 'node:path';
-import { config, ROOT, CONFIG_FILE } from './config.js';
+import { config, ROOT, CONFIG_FILE, stateDir } from './config.js';
 import { log } from './log.js';
 import * as persona from './persona.js';
 
@@ -28,7 +28,7 @@ const store = new Map();
 // 落盘（2026-09-17 加，见顶部注释）
 // ─────────────────────────────────────────────────────────────
 
-const STATE_DIR = join(ROOT, 'state');
+const STATE_DIR = join(stateDir());
 
 /**
  * 状态文件落在哪 —— 沿用 `tic.js` / `meal.js` 那套三步优先：

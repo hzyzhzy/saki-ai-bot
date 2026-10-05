@@ -15,6 +15,7 @@
  * 用法: node test/sensitivity.js
  */
 import { createServer } from 'node:http';
+import { configWithOnebot } from './_config-base.mjs';
 import { spawn } from 'node:child_process';
 import { WebSocketServer } from 'ws';
 import { writeFileSync, readFileSync, unlinkSync } from 'node:fs';
@@ -161,7 +162,7 @@ async function setup(level, basePort, groupId = GROUP) {
   await new Promise((r) => llm.listen(LLM_PORT, '127.0.0.1', r));
   await new Promise((r) => (wss._server.listening ? r() : wss.once('listening', r)));
 
-  const base = readFileSync(join(ROOT, 'config.yml'), 'utf8');
+  const base = configWithOnebot();
   const cfgText = base
     .replace(/url:\s*ws:\/\/127\.0\.0\.1:\d+/, `url: ws://127.0.0.1:${WS_PORT}`)
     .replace(/accessToken:\s*"?[^"\r\n]*"?/, `accessToken: "${TOKEN}"`)

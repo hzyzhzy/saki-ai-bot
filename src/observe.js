@@ -39,7 +39,7 @@
  */
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
-import { config, ROOT, KNOWLEDGE_DIR } from './config.js';
+import { config, ROOT, KNOWLEDGE_DIR, knowledgePrivateDir, stateDir } from './config.js';
 import { log } from './log.js';
 import { reloadKnowledge, groupFileName } from './knowledge.js';
 import { groupsOf } from './names.js';
@@ -53,7 +53,13 @@ async function collect(messages) {
   return out;
 }
 
-const FILE = join(KNOWLEDGE_DIR, 'group-memory.md');
+/**
+ * ⚠️ 2026-10-07：**群记忆 / 群资料 / 私聊记忆都是按号分的**（用户拍板）。
+ *    观察是"她在这个号上看到的东西"，两个号写进同一个文件 = 串味。
+ *    主号 / 单号时 `KDIR === KNOWLEDGE_DIR` ⇒ 路径一个字都不变。
+ */
+const KDIR = knowledgePrivateDir();
+const FILE = join(KDIR, 'group-memory.md');
 const BEGIN = '<!-- AUTO-OBSERVE:BEGIN -->';
 const END = '<!-- AUTO-OBSERVE:END -->';
 
@@ -76,7 +82,7 @@ const stats = { runs: 0, added: 0, lastRunAt: 0, lastError: '', compressRuns: 0,
  */
 const STATE_FILE = process.env.QQBOT_OBSERVE_FILE
   ? join(ROOT, process.env.QQBOT_OBSERVE_FILE)
-  : join(ROOT, 'state', 'observe.json');
+  : join(stateDir(), 'observe.json');
 
 function loadState() {
   try {
@@ -90,7 +96,7 @@ function loadState() {
 
 function saveState() {
   try {
-    mkdirSync(join(ROOT, 'state'), { recursive: true });
+    mkdirSync(join(stateDir()), { recursive: true });
     const tmp = `${STATE_FILE}.tmp`;
     writeFileSync(tmp, JSON.stringify({ lastCompressAt: stats.lastCompressAt }, null, 2), 'utf8');
     renameSync(tmp, STATE_FILE);
@@ -180,17 +186,17 @@ function targetFileFor(groupId, fromPrivate = false) {
   const gid = String(groupId ?? '').trim();
   if (gid) {
     const name = groupFileName(gid);
-    if (name) return join(KNOWLEDGE_DIR, name);
+    if (name) return join(KDIR, name);
     // ⚠️ 2026-09-17：私聊的人**第一次**被总结时，`dm/<QQ号>.md` 还不存在，
     //    而 `groupFileName()` 查的是**已加载**的表 → 查不到。
     //    这里必须能把路径**算出来**，否则会掉进下面的 FILE 分支，
     //    把**私聊内容写进共享的群记忆**里 —— 那是会被所有群看到的地方 ✗✗
-    if (gid.startsWith('dm:')) return join(KNOWLEDGE_DIR, 'dm', `${gid.slice(3)}.md`);
+    if (gid.startsWith('dm:')) return join(KDIR, 'dm', `${gid.slice(3)}.md`);
     // ⚠️⚠️ 2026-09-17：**私聊归到群号、但那个群还没有自己的资料库文件** ——
     //    这种情况**绝不能**掉回共享的 `group-memory.md`（所有群都看得到，等于泄漏）。
     //    改成**就地给这个群建一份** `groups/<群号>.md`。
     //    （这条是 `test/dm-memory.js` 【3】抓出来的 —— 我第一版就是这么漏的。）
-    if (fromPrivate) return join(KNOWLEDGE_DIR, 'groups', `${gid}.md`);
+    if (fromPrivate) return join(KDIR, 'groups', `${gid}.md`);
   }
   return FILE;
 }
@@ -219,7 +225,7 @@ function patchFile(body, file = FILE) {
       const isGroup = /[\\/]groups[\\/]/.test(file);
       try {
         mkdirSync(
-          isDm ? join(KNOWLEDGE_DIR, 'dm') : isGroup ? join(KNOWLEDGE_DIR, 'groups') : KNOWLEDGE_DIR,
+          isDm ? join(KDIR, 'dm') : isGroup ? join(KDIR, 'groups') : KDIR,
           { recursive: true },
         );
       } catch { /* 建不出来就等写盘那步自己报错 */ }
@@ -681,7 +687,7 @@ export async function compress(opts = {}) {
 //    "撤回"只该撤**当前这个群**那一次，别把别的群的记录也卷回来。
 const UNDO_FILE = process.env.QQBOT_OBSERVE_UNDO_FILE
   ? join(ROOT, process.env.QQBOT_OBSERVE_UNDO_FILE)
-  : join(ROOT, 'state', 'observe-undo.json');
+  : join(stateDir(), 'observe-undo.json');
 /** 留最近几次（够用就行，别把状态文件堆大） */
 const UNDO_KEEP = 10;
 

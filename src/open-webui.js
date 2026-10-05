@@ -17,15 +17,22 @@
 import { spawn } from 'node:child_process';
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { config, ROOT } from './config.js';
+import { config, ROOT, stateDir, ACCOUNT } from './config.js';
 import { log } from './log.js';
 
-const STATE = join(ROOT, 'state', 'webui-autoopen.json');
+const STATE = join(stateDir(), 'webui-autoopen.json');
 const GAP_MS = 10 * 60 * 1000;
 
 export function maybeOpenWebUI() {
   try {
     if (config.webui?.autoOpen === false) return false;
+    // ⚠️ 2026-10-07 多 QQ 号：**只有主号自动开** ——
+    //    别的号各开各的界面端口，无脑开就会"加几个号弹几个标签页"。
+    //    它们照样能开界面，只是要用户自己点（或者在主界面里切过去）。
+    if (ACCOUNT.id && !ACCOUNT.isMain) {
+      log.debug(`[界面] 号 ${ACCOUNT.id} 不是主号 → 不自动打开浏览器`);
+      return false;
+    }
     if (process.env.QQBOT_NO_OPEN_WEBUI === '1') return false;
     // ⚠️ 测试套件都会把 `QQBOT_CONFIG` 指到 `config.*-test.yml`（见 AGENTS 的隔离约定）
     const cfgName = String(process.env.QQBOT_CONFIG ?? '').trim();
@@ -56,7 +63,7 @@ export function maybeOpenWebUI() {
       return false;
     }
     const url = `http://127.0.0.1:${Number(config.webui?.port) || 3099}`;
-    mkdirSync(join(ROOT, 'state'), { recursive: true });
+    mkdirSync(join(stateDir()), { recursive: true });
     writeFileSync(STATE, JSON.stringify({ at: Date.now(), url }), 'utf8');
     // ⚠️ 用 `cmd /c start`（Windows 打开默认浏览器的标准做法）+ `stdio: 'ignore'`
     //    （受限环境下管道会 EPERM；而且这里也不需要它的输出）

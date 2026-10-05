@@ -10,7 +10,7 @@
  */
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { ROOT, KNOWLEDGE_DIR } from './config.js';
+import { ROOT, KNOWLEDGE_DIR, knowledgePrivateDir } from './config.js';
 import { log } from './log.js';
 import { backupKnowledge } from './backup.js';
 import { phrase } from './llm.js';
@@ -19,7 +19,15 @@ import { phrase } from './llm.js';
 //    ⚠️ 是**单向**依赖（observe 不 import learned），不会成环。
 import { pushTeachUndo } from './observe.js';
 
-const FILE = join(KNOWLEDGE_DIR, 'learned.md');
+/**
+ * ⚠️ 2026-10-07：学习档案是**按号分**的（用户拍板「学习档案分 QQ 控制」）——
+ *    `learned.md` 是"她在这个号上被人教过什么"，两个号混在一起会串味。
+ *    主号 / 单号时 `knowledgePrivateDir()` 返回的就是 `knowledge/` 本身 ⇒ 路径不变。
+ * ⚠️ 但 `server-*.md`（服务器知识）仍是**共用**的 —— 那台服务器只有一个，
+ *    见下面 `upsertIntoFile()` 里的分派。
+ */
+const KDIR = knowledgePrivateDir();
+const FILE = join(KDIR, 'learned.md');
 const BEGIN = '<!-- LEARNED:BEGIN -->';
 const END = '<!-- LEARNED:END -->';
 /** 单条知识最大长度，防止有人灌长文 */
@@ -29,7 +37,12 @@ function read() {
   try {
     return readFileSync(FILE, 'utf8');
   } catch (e) {
-    log.error(`读取 learned.md 失败: ${e.message}`);
+    // ⚠️ 2026-10-07 多 QQ 号：**"文件还不存在"是正常情况**，不该报错。
+    //    学习档案按号分家之后（`knowledge/accounts/<QQ>/learned.md`），
+    //    新加的号第一次跑时那个目录/文件当然还没有 —— 那表示"这个号还没被教过东西"。
+    //    ⚠️ 以前只有一份共用的 `learned.md`、它一定存在，所以这里写的是 `log.error`；
+    //      分家之后照旧写 ERR 的话，新号的日志会被这条刷屏（真实发生过）。
+    if (e.code !== 'ENOENT') log.error(`读取 learned.md 失败: ${e.message}`);
     return '';
   }
 }
@@ -202,7 +215,9 @@ async function classify(topic, fact) {
  * ⚠️ 覆盖时只替换"这一条到下一个 `## ` 之前"，其余内容一个字不动。
  */
 function upsertIntoFile(fileName, title, body) {
-  const file = join(KNOWLEDGE_DIR, fileName);
+  // ⚠️ 2026-10-07：`server-*.md` 是**共用**的（同一台服务器），
+  //    只有 `learned.md` 落到"这个号私有"的目录里。别把两者搅在一起。
+  const file = join(fileName === 'learned.md' ? KDIR : KNOWLEDGE_DIR, fileName);
   // ⚠️ 2026-10-06：`existed` 要记 —— 撤回时"还原成一份本来不存在的文件"
   //    和"删除这个文件"是两件事（见 `observe.pushTeachUndo` 的 `before: null`）。
   const existed = existsSync(file);

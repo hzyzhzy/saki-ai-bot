@@ -12,6 +12,7 @@
  * 用法: node test/webui.js
  */
 import { spawn } from 'node:child_process';
+import { configWithOnebot } from './_config-base.mjs';
 import { readFileSync, writeFileSync, existsSync, unlinkSync, copyFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -33,7 +34,7 @@ const check = (ok, label) => {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // 临时配置：深拷贝真实配置，改端口，避免动到用户文件
-const realCfg = readFileSync(join(ROOT, 'config.yml'), 'utf8');
+const realCfg = configWithOnebot();
 writeFileSync(
   CFG,
   realCfg

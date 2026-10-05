@@ -29,10 +29,10 @@
  */
 import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync } from 'node:fs';
 import { join, basename } from 'node:path';
-import { ROOT, config, CONFIG_FILE } from './config.js';
+import { ROOT, config, CONFIG_FILE, stateDir } from './config.js';
 import { log } from './log.js';
 
-const STATE_DIR = join(ROOT, 'state');
+const STATE_DIR = join(stateDir());
 
 /**
  * ⚠️⚠️ 状态文件落在哪 —— 必须保证**测试不污染真实记录**。

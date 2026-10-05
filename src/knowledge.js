@@ -4,7 +4,7 @@
  */
 import { readFileSync, readdirSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { ROOT, KNOWLEDGE_DIR, config, personaId, personaDir } from './config.js';
+import { ROOT, KNOWLEDGE_DIR, knowledgePrivateDir, config, personaId, personaDir } from './config.js';
 import { log } from './log.js';
 import { learnedText, listEntries } from './learned.js';
 import { animeWorks } from './persona.js';
@@ -14,6 +14,19 @@ import * as names from './names.js';
 
 /** ⚠️ 走 `config.js` 的 `KNOWLEDGE_DIR`（测试可以用 `QQBOT_KNOWLEDGE_DIR` 整份搬走） */
 const DIR = KNOWLEDGE_DIR;
+/**
+ * ⚠️ 2026-10-07 加：**这个号私有**的那部分知识目录。
+ *
+ * 用户拍板的分法（「其他配置全部分 QQ 控制」）——
+ *   · **按号分**：群记忆、学习档案、群资料库（`groups/`）、私聊记忆（`dm/`）
+ *     —— 它们是"**这个号**在群里攒下来的经历"，两个号混在一起就是串味；
+ *   · **共用**：`owner.md`（同一个主人）、`server-*.md`（同一台服务器）、
+ *     `holidays.md`、`anime/`、`memes.md`、`friends.md`、`relationship.md`。
+ *
+ * ⚠️ **主号 / 单号时 `KDIR === DIR`**（`knowledgePrivateDir()` 的约定）⇒
+ *    下面所有"扫两个目录"的代码都退化成"扫一个"，老路径一个字都不变。
+ */
+const KDIR = knowledgePrivateDir();
 /** 学习档案单独处理（优先级更高），不参与下面的通用拼接 */
 const LEARNED = 'learned.md';
 /**
@@ -26,6 +39,8 @@ const LEARNED = 'learned.md';
  *       "全局知识"列表**天然看不见它**（不递归），不会混进去。
  */
 const GROUP_DIR = join(DIR, 'groups');
+/** ⚠️ 这个号私有的群资料库（主号时和上面是同一个目录，下面用 `KDIR !== DIR` 跳过重复扫） */
+const KGROUP_DIR = join(KDIR, 'groups');
 
 /**
  * 动画库（`knowledge/anime/<库名>.md`）—— 2026-09-21 从"一个共用 `anime.md`"改过来。
@@ -57,6 +72,8 @@ const ANIME_DIR = join(DIR, 'anime');
  *    所以**真实的私聊内容不会进公开仓库**（这条比什么都重要）。
  */
 const DM_DIR = join(DIR, 'dm');
+/** ⚠️ 这个号私有的私聊记忆 */
+const KDM_DIR = join(KDIR, 'dm');
 /** 群号 → { name, content }（`name` 是给人看的相对路径 `groups/<群号>.md`） */
 let groupFiles = new Map();
 
@@ -150,11 +167,16 @@ function load() {
     } else {
       log.warn(`人设包目录不存在（${pdir}）—— 她将没有任何性格设定，去 personas/ 下建一个`);
     }
-    for (const n of readdirSync(DIR)) {
-      if (!n.toLowerCase().endsWith('.md')) continue;
-      if (n.toLowerCase() === LEARNED) continue; // 学习档案单独处理
-      if (collected.some((c) => c.name.toLowerCase() === n.toLowerCase())) continue;
-      collected.push({ name: n, file: join(DIR, n), from: 'knowledge' });
+    // ⚠️ 多 QQ 号：**这个号私有的 md 排在前面** —— 里面那行去重是"先到先得"，
+    //    所以同名文件（比如两个号各有一份 group-memory.md）以**私有那份**为准。
+    const roots = KDIR !== DIR && existsSync(KDIR) ? [KDIR, DIR] : [DIR];
+    for (const root of roots) {
+      for (const n of readdirSync(root)) {
+        if (!n.toLowerCase().endsWith('.md')) continue;
+        if (n.toLowerCase() === LEARNED) continue; // 学习档案单独处理
+        if (collected.some((c) => c.name.toLowerCase() === n.toLowerCase())) continue;
+        collected.push({ name: n, file: join(root, n), from: 'knowledge' });
+      }
     }
     // persona 放最前面，其余按文件名排序
     collected.sort((a, b) => {
@@ -219,6 +241,11 @@ function load() {
     };
     scanDir(GROUP_DIR, (id) => id, (n) => `groups/${n}`);
     const dmCount = scanDir(DM_DIR, (id) => `dm:${id}`, (n) => `dm/${n}`);
+    // ⚠️ 多 QQ 号：这个号私有的群资料 / 私聊记忆**后扫** ⇒ 同名覆盖共用的那份
+    if (KDIR !== DIR) {
+      scanDir(KGROUP_DIR, (id) => id, (n) => `groups/${n}`);
+      scanDir(KDM_DIR, (id) => `dm:${id}`, (n) => `dm/${n}`);
+    }
     groupFiles = gmap;
 
     // ⚠️ 人设包和共用库**分开报** —— 换人设那一下能不能生效，看这行最直观

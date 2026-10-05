@@ -35,11 +35,11 @@
  */
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { ROOT, config } from './config.js';
+import { ROOT, config, stateDir } from './config.js';
 import { log } from './log.js';
 import * as persona from './persona.js';
 
-const STATE_DIR = join(ROOT, 'state');
+const STATE_DIR = join(stateDir());
 // ⚠️ 给测试留出口（和 QQBOT_AFFINITY_FILE / QQBOT_TIC_FILE 一个套路）
 const FILE = process.env.QQBOT_MAMA_FILE
   ? join(ROOT, process.env.QQBOT_MAMA_FILE)

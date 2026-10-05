@@ -15,11 +15,11 @@
  */
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { config, ROOT } from './config.js';
+import { config, ROOT, stateDir } from './config.js';
 import { log } from './log.js';
 import * as persona from './persona.js';
 
-const STATE_DIR = join(ROOT, 'state');
+const STATE_DIR = join(stateDir());
 // ⚠️ 路径可以用环境变量覆盖 —— **给测试用**（2026-09-14 加）。
 //
 //    原来写死 `state/qzone-posts.json`，于是测试一调 `qzone.publish()`，

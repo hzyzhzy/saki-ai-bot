@@ -17,8 +17,12 @@
  * ⚠️ 纯离线：只读配置、不起进程、不碰真 QQ、不花钱。
  * 用法: node test/status-kw.js
  */
-// ⚠️ 用真实 config.yml（关键词表在它里面）—— 只读，不写回
-process.env.QQBOT_CONFIG ??= 'config.yml';
+// ⚠️ 2026-10-07：配置**分家**之后 `config.yml` 只剩"共用"那半份 ——
+//    服务器关键词表（`status.keywords`）属于**每个号私有**（`accounts/<QQ>.yml`），
+//    所以不能再拿 `config.yml` 当配置源（那样读到的关键词是空的 ⇒ 断言全红）。
+//    这一步把 `QQBOT_CONFIG` 指到"共用 + 主号私有"**合并后**的那份临时配置
+//    （`QQBOT_CONFIG` 显式设过的话不动它 —— 那是有意的调试用法）。
+await import('./_config-base.mjs');
 
 const { Bot } = await import('../src/bot.js');
 

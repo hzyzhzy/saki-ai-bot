@@ -1,7 +1,14 @@
 @echo off
 rem 启动机器人并把日志写进 logs\bot.log。
 rem 单独做成一个文件是为了避开 cmd /c start 的多层引号转义问题。
+rem
+rem ⚠️ 2026-10-07 多 QQ 号：**带一个参数 = 跑那一个号**（`_run-bot.bat 10000002`）。
+rem    不带参数 = 老行为（那个号由 config.yml 的 mainAccount 决定）。
+rem    ⚠️ 不带参数这条路**必须一直留着**：老用户升级上来时账号目录还是空的，
+rem      启动脚本也还是老的，行为不能变。
 cd /d "%~dp0"
+set "SAKI_ACCT=%~1"
+if not "%SAKI_ACCT%"=="" set "QQBOT_ACCOUNT=%SAKI_ACCT%"
 if not exist "logs" mkdir "logs"
 
 rem ── 让 node 走系统代理（2026-09-12 加）──────────────────────────
@@ -75,7 +82,11 @@ rem      原来写 `logs\bot-console.log`（在 OneDrive 里）⇒ 每次 consol
 rem      **同步写 + 云同步**，而 `buildSystemPrompt` 里有 14 处日志
 rem      ⇒ 实测「拼提示词 5565 ms」（纯字符串拼接不该几秒）。
 rem      排障时想看它：`%TEMP%\saki-bot-console.log`（本地盘，快）。
+rem    ⚠️ 2026-10-07：多个号时**每个号一份**（不加后缀的话几个进程会抢同一个文件）。
 if not exist "logs" mkdir "logs"
 forfiles /p "logs" /m "bot-????-??-??.log" /d -7 /c "cmd /c del @path" >nul 2>&1
 
-node src\index.js > "%TEMP%\saki-bot-console.log" 2>&1
+set "SAKI_LOG=%TEMP%\saki-bot-console.log"
+if not "%SAKI_ACCT%"=="" set "SAKI_LOG=%TEMP%\saki-bot-console-%SAKI_ACCT%.log"
+
+node src\index.js > "%SAKI_LOG%" 2>&1

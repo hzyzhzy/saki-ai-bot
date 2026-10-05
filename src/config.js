@@ -2,9 +2,12 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, isAbsolute } from 'node:path';
 import yaml from 'js-yaml';
+// ⚠️ 多 QQ 号（2026-10-07）：`accounts.js` **不 import 本文件**（否则成环），
+//    所以 ROOT 以它那份为准 —— 只留一个真相。
+import * as accounts from './accounts.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-export const ROOT = join(__dirname, '..');
+export const ROOT = accounts.ROOT;
 
 /** 允许用环境变量指向另一份配置，方便测试 */
 export const CONFIG_FILE = process.env.QQBOT_CONFIG
@@ -530,6 +533,16 @@ const DEFAULTS = {
   ownerQQ: '',
   botQQ: '',
   adminQQ: '',
+  /**
+   * ⚠️ 2026-10-07 加：**主号是哪个 QQ**（多号模式下唯一"用老路径"的那个）。
+   *
+   * 为什么要显式写：主号的数据文件**不搬到子目录**（`state/*.json`、
+   * `knowledge/group-memory.md`、`logs/bot-<日期>.log` 全都不动）——
+   * 这正是"加多号"对老用户零迁移的原因。但"谁是主号"必须有个**确定**的出处：
+   * 靠目录里第一个文件猜（字典序）会随加号而变 ⇒ 那会让主号的数据**换个目录读**。
+   * 所以写在这儿，不写则退回"账号目录里第一个"。
+   */
+  mainAccount: '',
   chunking: {
     maxChars: 260,
     delayMs: 700,
@@ -554,6 +567,86 @@ function merge(base, override) {
   return out;
 }
 
+/**
+ * 算出**这个进程在控制哪个 QQ 号**，并把那个号的私有配置读出来。
+ *
+ * 判据只有两个来源（别再加）：
+ *   1. 环境变量 `QQBOT_ACCOUNT` —— 启动器拉起某个号的进程时设的（多号的主路径）；
+ *   2. `config.yml` 的 `mainAccount` —— 没设环境变量时用它（老用户升级上来就是这个）。
+ *
+ * ⚠️ 一个号都没有（`accounts/` 是空的、`mainAccount` 也没写）时返回 `id = ''`
+ *    ⇒ 整个项目退回**单号老行为**（路径也全是老的）。这条是"向后兼容"的根：
+ *    所有既有回归套件都不设账号，跑的就是这条路。
+ */
+function resolveAccount(shared) {
+  const fileMain = String(shared?.mainAccount ?? '').trim();
+  const want = String(process.env.QQBOT_ACCOUNT ?? '').trim();
+  const wantOk = /^\d{5,12}$/.test(want) ? want : '';
+  const ids = accounts.ids();
+  // ⚠️⚠️ 「谁是主号」的兜底链里 `wantOk` 必须排在 `''` **之前**：
+  //    没写 `mainAccount`、账号目录也还是空的时候（= 老用户还没做多号迁移），
+  //    env 指定的那个号**就是主号** ⇒ 它继续走老路径。
+  //    少了这一条会出**最吓人的那种故障**：给主号进程设一个 `QQBOT_ACCOUNT`，
+  //    它的数据目录就从 `state/` 跳到 `state/accounts/<QQ>/` ——
+  //    表现是「好感度、剧情、群记忆全线归零」（其实是读了一个空的新目录）。
+  const main = /^\d{5,12}$/.test(fileMain) ? fileMain : (ids[0] || wantOk);
+  const id = wantOk || main;
+  if (!id) return { id: '', main: '', isMain: true, private: null, privateFile: '' };
+  return {
+    id,
+    main,
+    // ⚠️ 主号 = **老路径**（它的数据文件一个都不搬）。env 设没设都不影响这条判定 ——
+    //    启动器会给主号的进程也设 env（日志/界面里要认得出它是谁），
+    //    但它的 `state/`、`knowledge/`、日志名仍然是老的那套。
+    isMain: id === main,
+    private: accounts.read(id),
+    privateFile: accounts.fileOf(id),
+  };
+}
+
+/**
+ * 「**所有 QQ 共用**」的那几段（用户拍板：只有模型页那一类共用）。
+ *
+ * ⚠️ 私有文件（`accounts/<QQ>.yml`）里写了这些段也**一律不认** —— 这不是洁癖：
+ *    哪天某个号的私有文件里混进一个 `llm.apiKey`，那个号就会**悄悄不跟随
+ *    "模型页"的改动**，表现是「我明明改了模型，怎么这个号没变」——
+ *    而界面上那个号的一切看起来都正常。宁可在启动日志里吵一行，也不要这种坑。
+ *
+ * `webui` 是特例：`enable`/`host` 共用，但 **`port` 必须按号**（每个号一个界面端口）。
+ */
+export const SHARED_SECTIONS = Object.freeze([
+  'llm',
+  'imagegen',
+  'search',
+  'saucenao',
+  'bilibili',
+  'balance',
+  'vision',
+  'provider',
+  'cleanup',
+  'machine',
+]);
+
+/** 只保留私有文件里**真正属于这个号**的段；返回 `{ body, ignored }` */
+function privateSectionsOnly(priv) {
+  if (!priv || typeof priv !== 'object') return { body: null, ignored: [] };
+  const ignored = [];
+  const body = {};
+  for (const [k, v] of Object.entries(priv)) {
+    if (SHARED_SECTIONS.includes(k)) {
+      ignored.push(k);
+      continue;
+    }
+    if (k === 'webui') {
+      // 只认 port（其余共用）
+      if (v && typeof v === 'object' && v.port !== undefined) body.webui = { port: v.port };
+      continue;
+    }
+    body[k] = v;
+  }
+  return { body, ignored };
+}
+
 function load() {
   const path = CONFIG_FILE;
   let raw;
@@ -573,7 +666,21 @@ function load() {
     throw new Error('config.yml 顶层必须是一个对象（键值对）');
   }
 
-  const cfg = merge(DEFAULTS, parsed);
+  let cfg = merge(DEFAULTS, parsed);
+
+  // ── 多 QQ 号：把这个号**私有**的那份覆盖上来（2026-10-07）──────────
+  //
+  //   `config.yml`   = 共用（大模型 / 生图 / 搜索 / 识图 / 协议端 / 界面 …）
+  //   `accounts/<QQ>.yml` = 这个号私有（灵敏度 / 按群设定 / 剧情 / 好感度 …）
+  //
+  //   ⚠️ 顺序是 **默认值 ← 共用 ← 私有**：私有文件里只写要改的键，
+  //      没写的自动跟着共用走（用户要的"模型页所有号共用"就是这么实现的）。
+  //   ⚠️ 现在（还没做迁移时）`config.yml` 里仍然带着全套私有段，
+  //      所以**主号的行为逐字不变**；迁移（把私有段搬进 accounts/）是可选的下一步。
+  const acct = resolveAccount(parsed);
+  const priv = privateSectionsOnly(acct.private);
+  if (priv.body) cfg = merge(cfg, priv.body);
+  cfg.__account = { ...acct, ignoredPrivate: priv.ignored };
 
   // ⚠️ 2026-09-13：把**用户显式写过的配置**记下来，给「收紧度」滑块用。
   //    滑块只在用户**没手写**那一项时接管它 —— 否则用户手调的值会被悄悄覆盖，
@@ -868,6 +975,23 @@ function load() {
   cfg.provider.dir = String(cfg.provider.dir ?? '').trim();
   cfg.provider.launcher = String(cfg.provider.launcher ?? '').trim();
   cfg.provider.manageUrl = String(cfg.provider.manageUrl ?? '').trim();
+  // ── 协议端自愈（2026-10-06 用户要求）──────────────────
+  // 实测：SnowLuma 跑约 2 小时后会**短暂抖 1 分钟**（3001 没人听、进程却还在）
+  // ⇒ 那段时间机器人只能 ECONNREFUSED 反复重连、用户看到的就是"她不回话"。
+  // ⚠️ 这里只配"多久探一次、几次算挂、挂多久才动手、动手后冷却多久" ——
+  //    真正动手的部分（只启动、不杀进程）在 `src/provider-watch.js` 顶部有完整说明。
+  cfg.provider.watch = cfg.provider.watch ?? {};
+  cfg.provider.watch.enable = cfg.provider.watch.enable !== false;
+  cfg.provider.watch.intervalMs = Math.max(5000, Number(cfg.provider.watch.intervalMs) || 30000);
+  cfg.provider.watch.maxFails = Math.max(1, Math.floor(Number(cfg.provider.watch.maxFails) || 3));
+  cfg.provider.watch.cooldownMs = Math.max(
+    0,
+    Number(cfg.provider.watch.cooldownMs) || 5 * 60 * 1000,
+  );
+  cfg.provider.watch.probeTimeoutMs = Math.max(
+    500,
+    Number(cfg.provider.watch.probeTimeoutMs) || 3000,
+  );
 
   cfg.saucenao.enable = cfg.saucenao.enable !== false;
   cfg.saucenao.apiKey = String(cfg.saucenao.apiKey ?? '').trim();
@@ -1440,6 +1564,47 @@ function load() {
 }
 
 export const config = load();
+
+/**
+ * ── 多 QQ 号：**路径分家**（2026-10-07 用户要求）─────────────────────
+ *
+ * 用户原话：「我希望从一个应用端控制多个 QQ 号……其他配置全部分 QQ 控制」。
+ * 一个号一个进程，所以每个进程必须知道**自己是谁**，才能把运行期数据
+ * （状态文件、群记忆、日志）写到自己的地方去 —— 不然两个号会互相覆盖。
+ *
+ * ⚠️⚠️ **主号（`mainAccount`）一律走老路径**：`state/*.json`、
+ *    `knowledge/group-memory.md`、`logs/bot-<日期>.log` 一个都不搬。
+ *    这是"加多号对老用户零迁移"的关键 —— 也让**全部既有回归套件**
+ *    （不设账号 ⇒ `ACCOUNT.id === ''`）跑的还是原来那条路。
+ *    非主号才落到子目录 `state/accounts/<QQ>/`、`knowledge/accounts/<QQ>/`。
+ */
+export const ACCOUNT = config.__account ?? { id: '', main: '', isMain: true, privateFile: '' };
+
+/** 这个进程在控制哪个 QQ 号（`''` = 单号老模式，路径全都不变） */
+export const accountId = () => ACCOUNT.id;
+/** 是不是"主号"（主号用老路径；判定依据见 `resolveAccount`） */
+export const isMainAccount = () => ACCOUNT.isMain;
+
+/** 运行期状态文件的目录（`state/`） */
+export function stateDir() {
+  return ACCOUNT.id && !ACCOUNT.isMain
+    ? join(ROOT, 'state', 'accounts', ACCOUNT.id)
+    : join(ROOT, 'state');
+}
+
+/**
+ * 知识库里**按号分**的那部分目录。
+ *
+ * ⚠️ 共用那些（`owner.md`、`server-*.md`、`holidays.md`、`anime/`）仍在
+ *    `knowledge/` 根 —— 它们是"同一个主人 / 同一台服务器 / 同一套节日"，
+ *    没有按号分的道理。按号分的是**这个号的经历**：
+ *    群记忆、学习档案、群资料库（`groups/`）、私聊记忆（`dm/`）。
+ */
+export function knowledgePrivateDir() {
+  return ACCOUNT.id && !ACCOUNT.isMain
+    ? join(KNOWLEDGE_DIR, 'accounts', ACCOUNT.id)
+    : KNOWLEDGE_DIR;
+}
 
 /**
  * ⚠️⚠️ 2026-09-16：**life / quest 的「全局默认」取消了**。

@@ -35,10 +35,10 @@
  */
 import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync } from 'node:fs';
 import { join, basename } from 'node:path';
-import { ROOT, config, CONFIG_FILE } from './config.js';
+import { ROOT, config, CONFIG_FILE, stateDir } from './config.js';
 import { log } from './log.js';
 
-const STATE_DIR = join(ROOT, 'state');
+const STATE_DIR = join(stateDir());
 
 function stateFile() {
   const explicit = process.env.QQBOT_WHERE_FILE;

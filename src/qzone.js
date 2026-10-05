@@ -10,7 +10,7 @@
  *   ② 两次之间最短间隔
  *   ③ 素材不够新、不够多就不发
  */
-import { config, ROOT } from './config.js';
+import { config, ROOT, stateDir } from './config.js';
 import { log } from './log.js';
 import { facePath } from './faces.js';
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs';
@@ -21,7 +21,7 @@ import * as digest from './digest.js';
 let today = { date: '', count: 0 };
 let lastPostAt = 0;
 
-const STATE_DIR = join(ROOT, 'state');
+const STATE_DIR = join(stateDir());
 // ⚠️ 路径可以用环境变量覆盖 —— **给测试用**（2026-09-14 加）。
 //
 //    原来这里是写死的 `join(STATE_DIR, 'qzone-count.json')`，

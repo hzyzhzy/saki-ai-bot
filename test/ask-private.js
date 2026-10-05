@@ -9,6 +9,7 @@
  *       node test/ask-private.js "你的问题"   只问一个
  */
 import { spawn } from 'node:child_process';
+import { configWithOnebot } from './_config-base.mjs';
 import { WebSocketServer } from 'ws';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -35,7 +36,7 @@ const questions = args.length ? [args.join(' ')] : DEFAULT_QUESTIONS;
 
 // 用真实 config.yml 生成一份探针配置（只改连接相关）
 const cfgFile = 'config.probe.yml';
-const base = readFileSync(join(ROOT, 'config.yml'), 'utf8');
+const base = configWithOnebot();
 writeFileSync(
   join(ROOT, cfgFile),
   base

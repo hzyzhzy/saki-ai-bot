@@ -32,7 +32,7 @@
 
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { config, ROOT, KNOWLEDGE_DIR } from './config.js';
+import { config, ROOT, KNOWLEDGE_DIR, stateDir } from './config.js';
 import { log } from './log.js';
 import { reloadKnowledge } from './knowledge.js';
 import { backupKnowledge } from './backup.js';
@@ -41,7 +41,7 @@ import { streamChat } from './llm.js';
 const FILE = join(KNOWLEDGE_DIR, 'owner.md');
 const STATE_FILE = process.env.QQBOT_OWNER_UPDATE_FILE
   ? join(ROOT, process.env.QQBOT_OWNER_UPDATE_FILE)
-  : join(ROOT, 'state', 'owner-update.json');
+  : join(stateDir(), 'owner-update.json');
 
 /** 每次最多处理几条消息（防止一次塞太长的提示词） */
 const MAX_BATCH = 40;
@@ -71,7 +71,7 @@ function loadState() {
 
 function saveState() {
   try {
-    mkdirSync(join(ROOT, 'state'), { recursive: true });
+    mkdirSync(join(stateDir()), { recursive: true });
     const tmp = `${STATE_FILE}.tmp`;
     writeFileSync(tmp, JSON.stringify({ pending, lastAt }, null, 2), 'utf8');
     renameSync(tmp, STATE_FILE);

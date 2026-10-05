@@ -39,10 +39,10 @@
  */
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { ROOT } from './config.js';
+import { ROOT, stateDir } from './config.js';
 import { log } from './log.js';
 
-const STATE_DIR = join(ROOT, 'state');
+const STATE_DIR = join(stateDir());
 // ⚠️ 给测试留出口（和 QQBOT_AFFINITY_FILE / QQBOT_TIC_FILE 一个套路）
 const FILE = process.env.QQBOT_NAMES_FILE
   ? join(ROOT, process.env.QQBOT_NAMES_FILE)

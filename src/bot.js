@@ -1,4 +1,4 @@
-import { config, ROOT, KNOWLEDGE_DIR, paramsFor, peersFor, otherBotsFor } from './config.js';
+import { config, ROOT, KNOWLEDGE_DIR, paramsFor, peersFor, otherBotsFor, stateDir } from './config.js';
 // ⚠️ 2026-09-21：她的名字 / 外号 / 怎么称呼主人，都从 `personas/<id>/identity.json` 来
 //    （见 src/persona.js）。这些东西以前散在这个文件里写死（`['saki','小祥','祥子',…]` 那种），
 //    换个角色就换不动 —— 表现出来就是"人换了、名字还是旧的"。
@@ -1795,7 +1795,25 @@ export class Bot {
     //        · 不再"必接"，**交给 speak-judge 判断该不该说**
     //          （followUp 的判断门槛比主动搭话低一点，见 shouldJoinChatAsync）
     const f = chat.followUp;
-    if (f.enable && text.length >= f.minChars) {
+    // ⚠️⚠️ 2026-10-07 修（用户报「现在还是会接剧情套话」）：
+    //    **同类池里的号不走 `followUp`**。
+    //
+    //    日志实证（群里的实况）：
+    //      `刚才就在跟他聊（<同类池那个号>），接着说（隔了 5s）→ 直接接（不判）`
+    //      —— 她回了一句之后，这一条会把对方**后面每一句**都放行（"直接接（不判）"
+    //      连 judge 都不问）⇒ 两个 bot **无限互刷**，看起来就是在互相接剧情、
+    //      你一句我一句地演下去 ✗
+    //
+    //    ⚠️ **真人接着聊照旧直接接** —— 那是 2026-10-03 用户明确要的
+    //      （「正在和小祥聊天的消息不该被掐断」）。这条**只**针对同类池里的号。
+    //    ⇒ 排除掉之后，同类的消息会落到下面 ③.5 那道同类闸：
+    //      独立概率 `peerChat.replyChance` + 独立冷却 `replyCooldownMs`
+    //      ⇒ 变成"**偶尔**接一句"，而不是"每句都接"。
+    const fromPeerBot = this.isPeerBot(
+      String(event?.group_id ?? ''),
+      String(event?.user_id ?? ''),
+    );
+    if (f.enable && !fromPeerBot && text.length >= f.minChars) {
       const conv = this.activeConv?.get(key);
       // ⚠️ 收紧度滑块（只对 1 档生效）：续话窗口和上限也跟着收
       //    —— 这两个是"它自己不停接话"的主要来源，光降概率治不住。
@@ -3601,7 +3619,7 @@ export class Bot {
    *    bot.js 拿不到；而且配置重载会覆盖。独立文件更简单也不会打架。
    */
   saveIgnoreBots() {
-    const dir = join(ROOT, 'state');
+    const dir = join(stateDir());
     mkdirSync(dir, { recursive: true });
     const file = join(dir, 'ignore-bots.json');
     const tmp = `${file}.tmp`;
@@ -3612,7 +3630,7 @@ export class Bot {
   /** 启动时把登记过的机器人读回来 */
   loadIgnoreBots() {
     try {
-      const file = join(ROOT, 'state', 'ignore-bots.json');
+      const file = join(stateDir(), 'ignore-bots.json');
       if (!existsSync(file)) return;
       const j = JSON.parse(readFileSync(file, 'utf8'));
       this.ignoreBots = new Set((j.names ?? []).map(String).filter(Boolean));

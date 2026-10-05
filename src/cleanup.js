@@ -70,7 +70,9 @@ const RULES = [
     label: '按天日志（bot-YYYY-MM-DD.log）',
     dir: 'logs',
     days: () => days().logDays,
-    match: (n) => /^bot-\d{4}-\d{2}-\d{2}\.log$/.test(n),
+    // ⚠️ 2026-10-07 多 QQ 号：非主号的日志带号后缀（`bot-<日期>-<QQ>.log`），
+    //    这条规则要一起收，否则那些号的日志会**永远留在盘上**。
+    match: (n) => /^bot-\d{4}-\d{2}-\d{2}(-\d{5,12})?\.log$/.test(n),
   },
   {
     id: 'testlog',

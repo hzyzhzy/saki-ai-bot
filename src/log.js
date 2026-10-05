@@ -6,7 +6,7 @@ import { mkdirSync } from 'node:fs';
 //      因为 `diskBroken` 一置位就"只输出到控制台"，而控制台在 %TEMP% 里）
 import { appendFile } from 'node:fs/promises';
 import { join, basename } from 'node:path';
-import { config, ROOT, CONFIG_FILE } from './config.js';
+import { config, ROOT, CONFIG_FILE, ACCOUNT } from './config.js';
 
 const LEVELS = { debug: 10, info: 20, warn: 30, error: 40 };
 const threshold = LEVELS[config.logLevel] ?? LEVELS.info;
@@ -57,7 +57,14 @@ function logFile() {
   if (/test/i.test(cfgName)) {
     return join(LOG_DIR, `__test-${cfgName.replace(/\.ya?ml$/i, '')}.log`);
   }
-  return join(LOG_DIR, `bot-${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}.log`);
+  // ⚠️ 2026-10-07 多 QQ 号：**非主号**写到带号后缀的文件（`bot-<日期>-<QQ>.log`），
+  //    免得两个进程的行交错在一起 —— 排障时"这一句到底是谁说的"必须一眼看出来。
+  //    主号（也是默认那个号）**保持老文件名**，用户翻日志的习惯不变。
+  const suffix = ACCOUNT.id && !ACCOUNT.isMain ? `-${ACCOUNT.id}` : '';
+  return join(
+    LOG_DIR,
+    `bot-${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}${suffix}.log`,
+  );
 }
 
 /**

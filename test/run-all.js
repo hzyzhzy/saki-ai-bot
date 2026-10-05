@@ -61,6 +61,19 @@ const SUITES = [
   //   没超期的不许删。⚠️ 它自己在临时根目录里跑（`QQBOT_CLEANUP_ROOT`）——
   //   这个模块干的是 rm -rf，没这层隔离的话套件本身就是事故。
   'cleanup',
+  // ★ 协议端自愈（2026-10-06 用户要求：3001 掉了就把协议端拉起来）。
+  //   重点盯四件：阈值才动手 / 冷却 / 没 launcher 不许假装成功 /
+  //   **源码里不许有 CommandLine 匹配式杀进程**（那会打中 DSH 的 runner 自己）。
+  //   ⚠️ 它在测试里把 launcher 置空 ⇒ **绝不会真拉起协议端**（那会动到 QQ 登录）。
+  'provider-watch',
+  // ★ 多 QQ 号（2026-10-07 用户要求：「从一个应用端控制多个 QQ 号，
+  //   只有模型页面所有 QQ 共用，其他配置全部分 QQ 控制，配置可以被复用」）。
+  //   重点盯四件：私有覆盖共用 / **共用段写进私有文件里也不认** /
+  //   主号走老路径而别的号落 state/accounts/<QQ>/ /
+  //   **跨进程转发**（向主号进程要二号的配置，拿回来的必须是二号的）。
+  //   ⚠️ 它起**两个真的界面进程**，而且自己钉住 QQBOT_ACCOUNTS_DIR ——
+  //   没那层隔离的话套件会往真实 accounts/ 里写测试号（那里面有 token）。
+  'accounts',
   'observe-undo',
   'observe-compress',
   'monthly-report',
@@ -330,6 +343,11 @@ function isolatedStateEnv(name) {
     //    用固定名字就会和上一轮留下的撞 —— 实测 `test/punctuation.js`
     //    因此**连续两轮回归都失败**（残留锁里的 PID 被复用，探活误判成"有实例在跑"）。
     QQBOT_LOCK_FILE: `logs/__run-${safe}-${process.pid}-lock.json`,
+    // ⚠️ 2026-10-07 加：多 QQ 号的**账号目录**。必须隔离 ——
+    //    `accounts/<QQ>.yml` 里放着 onebot 的 accessToken，是**真实凭据**；
+    //    哪怕只是"新建一个测试账号"写进去也是污染。指到 logs/ 下的临时目录，
+    //    想怎么写都行（`accounts.js` 读 env，见那边的 `ACCOUNTS_DIR`）。
+    QQBOT_ACCOUNTS_DIR: `logs/__accounts-${safe}`,
   };
 }
 

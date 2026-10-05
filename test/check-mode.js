@@ -5,6 +5,7 @@
  * 用法: node test/check-mode.js
  */
 import { spawn } from 'node:child_process';
+import { configWithOnebot } from './_config-base.mjs';
 import { WebSocketServer } from 'ws';
 import { writeFileSync, readFileSync, unlinkSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -36,7 +37,7 @@ wss.on('connection', (s) => {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 await new Promise((r) => (wss._server.listening ? r() : wss.once('listening', r)));
 
-const base = readFileSync(join(ROOT, 'config.yml'), 'utf8');
+const base = configWithOnebot();
 writeFileSync(
   CFG,
   base

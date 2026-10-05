@@ -6,6 +6,7 @@
  * 注意：运行前请先停掉机器人（NapCat 只允许单客户端）。
  */
 import { spawn } from 'node:child_process';
+import { configWithOnebot } from './_config-base.mjs';
 import { WebSocketServer } from 'ws';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -22,7 +23,7 @@ const MEMBER = { id: '30003', role: 'member', name: '某群友' };
 // 用真实 config.yml，只改连接
 writeFileSync(
   join(ROOT, 'config.attitude-probe.yml'),
-  readFileSync(join(ROOT, 'config.yml'), 'utf8')
+  configWithOnebot()
     .replace(/url:\s*ws:\/\/127\.0\.0\.1:\d+/, `url: ws://127.0.0.1:${PORT}`)
     .replace(/accessToken:\s*"[^"]*"/, `accessToken: "${TOKEN}"`),
   'utf8',
