@@ -1546,15 +1546,15 @@ console.log('\n【14】★★ 谁先开口谁主导 —— 同款机器人在演
   q.__peerPlots().clear();
   check(q.leadership(G) === 'none', '★ 自己没在跑剧情 → none（轮不到让位）');
   check(
-    q.notePeerPlot(G, { uid: '3516366128', text: '是睦' }) === false,
+    q.notePeerPlot(G, { uid: '10000001', text: '是睦' }) === false,
     '短句不进记录',
   );
   check(
-    q.notePeerPlot(G, { uid: '3516366128', text: '玻璃还在地上，初华蹲着捡，手割了。我把纸递过去，她没接。' }) === true,
+    q.notePeerPlot(G, { uid: '10000001', text: '玻璃还在地上，初华蹲着捡，手割了。我把纸递过去，她没接。' }) === true,
     '★ 长剧情句记下了',
   );
   check(q.__peerPlots().get(G)?.firstAt > 0, '记下了首次时间（用来比谁先开口）');
-  check(q.__peerPlots().get(G)?.uid === '3516366128', '记下了是哪个号在演');
+  check(q.__peerPlots().get(G)?.uid === '10000001', '记下了是哪个号在演');
   q.__peerPlots().clear();
 }
 
@@ -1563,7 +1563,7 @@ console.log('\n【15】★★ 机器人发的 / 命令一律不执行（用户�
   const { Bot } = await import('../src/bot.js');
   const { config } = await import('../src/config.js');
   const G = '999000901';
-  const PEER = '3516366128';
+  const PEER = '10000001';
   // 把 PEER 配成这个群的同类
   config.groupParams = config.groupParams ?? {};
   config.groupParams[G] = { ...(config.groupParams[G] ?? {}), peers: [PEER] };

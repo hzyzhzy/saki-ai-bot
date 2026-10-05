@@ -1515,6 +1515,30 @@ export function peersFor(groupId) {
 }
 
 /**
+ * 「不同类机器人池」—— 这个群里**她完全不回应**的机器人（2026-10-06 用户要求）。
+ *
+ * 用户原话：「和刚加的那个同类机器人池一样，再加个**不同类机器人池**，
+ *   和那个**相反**，这个池专门放**小豆这种机器人**，saki **直接完全不回应**」。
+ *
+ * ⚠️⚠️ 和同类池（`peersFor`）**正好相反**，两个千万别搞混：
+ *   · `peers`     = **同类**（另一个"她自己"，比如黑祥）→ 要**能聊起来**，冷场时还会主动找它；
+ *   · `otherBots` = **异类**（小豆那种别的机器人）→ **一个字都不回**（连 @ 她也不回）。
+ *
+ * ⚠️ 和 `teach.bots` 的区别：那个是**全局**的"已知机器人"名单（最早用来挡教学、
+ *    后来顺带挡回复），不分群；这个是**按群**配的，语义只有一个 —— 这个群里别理它。
+ *    ⇒ 两个名单**可以同时用**，不冲突（`teach.bots` 那边留着不影响）。
+ *
+ * @param {string|number} groupId
+ * @returns {string[]} QQ 号数组（没配就是空数组）
+ */
+export function otherBotsFor(groupId) {
+  const gid = String(groupId ?? '').trim();
+  if (!gid) return [];
+  const p = config.groupParams?.[gid]?.otherBots;
+  return Array.isArray(p) ? p.map(String) : [];
+}
+
+/**
  * 重新从 config.yml 读取配置（管理界面改完配置后调用，不用重启机器人）。
  * 保留同一个对象引用，这样所有 `import { config }` 的地方都能看到新值。
  */

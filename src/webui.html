@@ -3289,6 +3289,8 @@ async function fillGroupParams() {
   const oC = ov.chat || {};
   // ⚠️ 2026-10-05：同类池（按群，一串 QQ 号）—— 它是**顶层**字段，不在 life/quest/chat 里。
   const peers = Array.isArray(ov.peers) ? ov.peers : [];
+  // ⚠️ 2026-10-06：不同类池（同样是顶层的一串 QQ 号）—— 和同类池**正好相反**。
+  const otherBots = Array.isArray(ov.otherBots) ? ov.otherBots : [];
   // ⚠️⚠️ 2026-09-16（用户要求）：「还是有跟全局的选项」「默认选关闭就行了」——
   //    **彻底去掉"跟全局"这个概念**：每个群就是**自己完整的一份**。
   //    所以这里所有输入框显示的都是**这个群现在实际生效的值**，
@@ -3347,6 +3349,18 @@ async function fillGroupParams() {
         <button class="act" onclick="peerChatNow(false)">立刻试一次（@ 它说一句）</button>
         <button class="act" onclick="peerChatNow(true)">立刻试一次（戳它一下）</button>
       </div>
+    </div>
+
+    <div style="border:1px dashed var(--line);border-radius:8px;padding:8px;margin-bottom:8px">
+      <b>不同类机器人池</b>
+      <div class="hint" style="margin:4px 0">
+        填 QQ 号，<b>一行一个</b>（逗号/空格也认）。填进去的<b>她一个字都不回</b> ——
+        连 @ 她、引用她也不回，也不进剧情和好感度。<br>
+        专门放<b>别的机器人</b>（小豆那种）：<b>和上面那个同类池正好相反</b> ——
+        同类池是"要跟它聊的"，这个池是"当它不存在的"。<br>
+        ⚠️ 同一个号两个池都填 → 按"完全不回应"处理（日志里会提醒你一声）。
+      </div>
+      <textarea id="gp-other-bots" rows="3" placeholder="填不要理会的机器人 QQ 号" style="width:100%">${esc(otherBots.join('\n'))}</textarea>
     </div>
 
     <div style="border:1px dashed var(--line);border-radius:8px;padding:8px;margin-bottom:8px">
@@ -3433,9 +3447,15 @@ async function saveGroupParams() {
     .split(/[\s,，、]+/)
     .map((s) => s.trim())
     .filter(Boolean);
+  // ⚠️ 2026-10-06 加：「不同类机器人池」—— 同一种填法，意思**相反**（完全不回应）。
+  const otherBots = String($('gp-other-bots')?.value ?? '')
+    .split(/[\s,，、]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
   const patch = {
-    // ⚠️ 同类池放在**顶层**（不是 life / quest / chat 那种 kind）—— 它是一串 QQ 号。
+    // ⚠️ 两个池都放在**顶层**（不是 life / quest / chat 那种 kind）—— 都是一串 QQ 号。
     peers,
+    otherBots,
     life: {
       enable: boolOrNull('gp-life-enable'),
       holidays: boolOrNull('gp-life-holidays'),

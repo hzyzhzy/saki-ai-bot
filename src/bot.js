@@ -1,4 +1,4 @@
-import { config, ROOT, KNOWLEDGE_DIR, paramsFor, peersFor } from './config.js';
+import { config, ROOT, KNOWLEDGE_DIR, paramsFor, peersFor, otherBotsFor } from './config.js';
 // ⚠️ 2026-09-21：她的名字 / 外号 / 怎么称呼主人，都从 `personas/<id>/identity.json` 来
 //    （见 src/persona.js）。这些东西以前散在这个文件里写死（`['saki','小祥','祥子',…]` 那种），
 //    换个角色就换不动 —— 表现出来就是"人换了、名字还是旧的"。
@@ -3396,6 +3396,29 @@ export class Bot {
   }
 
   isIgnoredBotEvent(event) {
+    const gid = String(event?.group_id ?? '');
+    const uid = String(event?.user_id ?? '').trim();
+
+    // ⚠️⚠️ 2026-10-06 加（用户要求）：「**不同类机器人池**」——
+    //    这个群里她**完全不回应**的机器人（小豆那种）。
+    //    用户原话：「和刚加的那个同类机器人池一样，再加个不同类机器人池，
+    //    和那个**相反**，这个池专门放小豆这种机器人，saki **直接完全不回应**」。
+    //    ⇒ 一个号进了这个池 = 跟 `teach.bots` 里的号一样待遇：不管 @ 不 @ 她、
+    //      内容像不像问题，一律当没看见。
+    //
+    //    ⚠️ 位置在 `isPeerBot` 放行**之前**：一个号**同时**配进两个池时，
+    //      按"完全不回应"处理（少说一句比乱搭话安全），并留一条 warn 便于查配置。
+    if (uid) {
+      if (otherBotsFor(gid).includes(uid)) {
+        if (peersFor(gid).includes(uid)) {
+          log.warn(
+            `⚠️ 群 ${gid}：${uid} 同时配在「同类池」和「不同类池」里 —— 按"完全不回应"处理（建议去掉其中一个）`,
+          );
+        }
+        return true;
+      }
+    }
+
     // ⚠️⚠️ 2026-10-05 加（用户要求）：**同类池里的号不算"要忽略的机器人"**。
     //    用户原话：「加一个机器人同类池…填入的 QQ 号直接默认为同类机器人，
     //    会随机主动 @ 找那个同类机器人聊天」—— 池里的号是**要跟它聊的**，

@@ -1433,6 +1433,22 @@ const routes = {
       if (peers.length) cur.peers = peers;
       else delete cur.peers;
     }
+    // ⚠️ 2026-10-06 加（用户要求）：「不同类机器人池」—— 和同类池**正好相反**：
+    //    填进去的号她**完全不回应**（连 @ 她都不回，也不进剧情/好感度）。
+    //    规矩跟 `peers` 一模一样：去空值、统一字符串、去重、封顶 10 个。
+    if (Array.isArray(b.patch?.otherBots)) {
+      const seen = new Set();
+      const otherBots = [];
+      for (const x of b.patch.otherBots) {
+        const id = String(x ?? '').trim();
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        otherBots.push(id);
+        if (otherBots.length >= 10) break;
+      }
+      if (otherBots.length) cur.otherBots = otherBots;
+      else delete cur.otherBots;
+    }
     for (const [kind, fields] of Object.entries(b.patch ?? {})) {
       // ⚠️ `chat` = 收紧度这类"她怎么说话"的参数（2026-09-15 晚加）
       if (!['life', 'quest', 'chat'].includes(kind) || !fields || typeof fields !== 'object') continue;
