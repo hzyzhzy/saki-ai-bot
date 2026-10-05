@@ -11005,7 +11005,12 @@ export class Bot {
       segs.push({ type: 'at', data: { qq: uid, name: names.of(uid, gid) || String(t?.name ?? '') } });
     }
     if (segs.length) segs.push({ type: 'text', data: { text: ' ' } });
-    segs.push({ type: 'text', data: { text: this.maskPhone(tic.softenDao(line)) } });
+    // ⚠️ 2026-10-06：出口改写链 = `maskPhone`（打掉号码）→ `softenDao`（「倒」降频）
+    //    → `detype`（硬凑的量词，见 `tic.detype` 的注释）。
+    //    ⚠️ **抽成一个变量**：下面记 `recent` 时必须记**实际发出去的那句** ——
+    //      两处各写一遍迟早会漂掉（改了一处忘了另一处，她就会跟自己的原话对不上）。
+    const outLine = this.maskPhone(tic.detype(tic.softenDao(line)));
+    segs.push({ type: 'text', data: { text: outLine } });
 
     if (isGroup) {
       const r = await this.call('send_group_msg', { group_id: gid, message: segs });
@@ -11024,7 +11029,7 @@ export class Bot {
       try {
         recent.rememberBot(
           { message_type: 'group', group_id: gid, user_id: this.selfId },
-          this.maskPhone(tic.softenDao(line)),
+          outLine,
           r?.message_id ?? '',
         );
       } catch (e) {
@@ -11194,9 +11199,9 @@ export class Bot {
     //    原话：「倒是真的还是出现的太频繁了，这样肯定不行。直接检测到倒和倒是
     //    就以百分之 90 的概率去替换其他词吧」。
     //    ⚠️ 放在这里（发言出口）而不是提示词里 —— 前面两轮提示词都没压住。
-    const softened = tic.softenDao(text);
+    const softened = tic.detype(tic.softenDao(text));
     if (softened !== text) {
-      log.debug(`[口癖] 「倒」→ 降频改写：${String(text).slice(0, 40)} ⇒ ${String(softened).slice(0, 40)}`);
+      log.debug(`[口癖] 出口改写：${String(text).slice(0, 40)} ⇒ ${String(softened).slice(0, 40)}`);
     }
     text = softened;
     // ⚠️ 2026-09-18：「她人在哪 / 在做什么」的状态机（用户要求）——

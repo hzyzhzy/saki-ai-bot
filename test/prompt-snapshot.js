@@ -376,12 +376,99 @@ for (const v of Object.values(ISOLATED)) {
   } catch {}
 }
 
+/**
+ * 存基线前先打印「跟现有基线比，到底变了什么」（2026-10-06 加，用户拍板）。
+ *
+ * ⚠️ 为什么加：基线**陈旧了两轮没人发现** —— 旧基线连更早加的「黑祥」那一节都没有，
+ *    直到下一次回归才报「提示词变了，1837 行不同」，看着像我刚把人设改坏了，
+ *    其实只是"该存基线了"这件事被攒了两轮 ⇒ 白查一阵。
+ *    ⇒ 让 `--save` 这个动作**自带对照**，别让"存基线"变成一次盲操作。
+ *
+ * ⚠️ 这里只给**粗块**（首个不同行 → 最后一个不同行），不追求精确 diff：
+ *    目的是"一眼看出是不是我这次改的那一节"，够用就行（精确 diff 在回归分支里）。
+ */
+function printSnapshotDelta(now, oldText) {
+  let base;
+  try {
+    base = JSON.parse(oldText);
+  } catch (e) {
+    console.log(`  ⚠️ 旧基线读不了（当作没有，直接存新的）：${e.message}`);
+    return;
+  }
+  const names = [...new Set([...Object.keys(base), ...Object.keys(now)])].sort();
+  let changed = 0;
+  const addedAll = new Map();
+  for (const n of names) {
+    const a = base[n];
+    const b = now[n];
+    if (a === undefined) {
+      console.log(`  · ${n}：**新增的场景**`);
+      changed += 1;
+      continue;
+    }
+    if (b === undefined) {
+      console.log(`  · ${n}：**这次没生成出来**（要查，别顺手存了）`);
+      changed += 1;
+      continue;
+    }
+    if (a === b) continue;
+    changed += 1;
+    const la = a.split('\n');
+    const lb = b.split('\n');
+    let p = 0;
+    while (p < la.length && p < lb.length && la[p] === lb[p]) p += 1;
+    let s = 0;
+    while (s < la.length - p && s < lb.length - p && la[la.length - 1 - s] === lb[lb.length - 1 - s]) s += 1;
+    const del = la.slice(p, la.length - s);
+    const add = lb.slice(p, lb.length - s);
+    console.log(`  · ${n}：${la.length} → ${lb.length} 行（这一段里：删 ${del.length} / 增 ${add.length}）`);
+    for (const l of add) addedAll.set(l, (addedAll.get(l) ?? 0) + 1);
+  }
+  if (!changed) {
+    console.log('  ✅ 与现有基线**逐字节一致** —— 这次人设其实没变过，存不存都一样');
+    return;
+  }
+  console.log(`\n  共 ${changed} 个场景变了。新增的行（去重后前 12 条，×N = 在几个场景里都出现）：`);
+  [...addedAll.entries()]
+    .sort((x, y) => y[1] - x[1])
+    .slice(0, 12)
+    .forEach(([l, n]) => console.log(`    ×${n}  ${l.length > 90 ? `${l.slice(0, 90)}…` : l}`));
+  console.log('  ⚠️ 扫一眼上面这些 —— **确认都是你这次有意改的**（不是路径、密钥、测试残留）。');
+}
+
+/**
+ * 存基线前的敏感内容自检（同一次加的）。
+ *
+ * ⚠️ **只警告不拦**：余额那几个场景的提示词里本来就可能出现 key 字样，
+ *    拦下来会让合法流程卡死。但"存的时候顺手看一眼"成本为零。
+ */
+function scanSnapshotLeaks(text) {
+  const pats = [
+    ['绝对路径（C:\\Users…）', /[A-Za-z]:\\Users\\/],
+    ['OneDrive 路径', /OneDrive/],
+    ['真实 sk- key', /sk-(?!snapshot-fake)[A-Za-z0-9_-]{16,}/],
+    ['ark- key', /ark-[a-z0-9-]{16,}/],
+    ['OneBot accessToken', /accessToken["'\s:]+[A-Za-z0-9]{16,}/],
+  ];
+  const hit = pats.filter(([, re]) => re.test(text)).map(([n]) => n);
+  if (hit.length) console.log(`  ⚠️ 自检：基线里出现 ${hit.join('、')} —— 确认不是真凭据再往下走`);
+  else console.log('  ✅ 自检：没有绝对路径 / 真实 key');
+}
+
 // ── 存 或 比 ────────────────────────────────────────────
 if (saveMode || !existsSync(SNAP_FILE)) {
-  writeFileSync(SNAP_FILE, JSON.stringify(now, null, 1), 'utf8');
+  // ⚠️ 2026-10-06：**存之前先对照**（顺序不能反 —— 写完就读不到旧的了）
+  if (existsSync(SNAP_FILE)) {
+    console.log('\n  ── 跟现有基线比，这次到底变了什么 ──');
+    printSnapshotDelta(now, readFileSync(SNAP_FILE, 'utf8'));
+    console.log('');
+  }
+  const text = JSON.stringify(now, null, 1);
+  scanSnapshotLeaks(text);
+  writeFileSync(SNAP_FILE, text, 'utf8');
   const why = saveMode ? '（--save）' : '（原来没有基线）';
   console.log(`  📝 已存基线 ${why}：${SNAP_FILE}`);
-  console.log(`     改完人设相关代码后，跑不带 --save 的这次，必须**零差异**。`);
+  console.log(`     存完再跑一次**不带 --save** 的，必须零差异。`);
   check(true, `基线已写入（${sceneCount} 个场景）`);
 } else {
   let base;

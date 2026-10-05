@@ -388,6 +388,61 @@ console.log('\n【16】口癖词表可以改，表外的词不乱抓');
   config.tic.words = before;
 }
 
+console.log('\n【17】★ 硬凑的量词：「那一套 / 那一截」（2026-10-06 用户反馈）');
+{
+  // 用户原话：「一组东西或者技巧，机器人很喜欢说 **XX 那一套 / 那一截**，
+  //   应该**不要硬套一个适合的量词**，直接描述成**那个**或者**那坨**，随意一点，
+  //   或者**直接不加"那"后面那一坨文字**」。
+  //
+  // ⚠️ 这又是"提示词压不住、只能从出口改"的那一类（和「倒」同一个教训）——
+  //    所以断言分两层：① `detype()` 本身改得对；② **它真的接在了发言出口上**。
+  fresh();
+
+  // ① 该改的
+  check(tic.detype('你说的那一套我不吃') === '你说的那个我不吃', '「那一套」→「那个」');
+  check(tic.detype('这一套流程走下来太累了') === '这个流程走下来太累了', '「这一套」→「这个」');
+  check(tic.detype('上面那一截你再看一眼') === '上面那块你再看一眼', '「那一截」→「那块」');
+  check(tic.detype('这一截代码有问题') === '这块代码有问题', '「这一截」→「这块」');
+  check(tic.detype('那一套。这一截') === '那个。这块', '一句话里两处都能改');
+  check(
+    tic.detype('那就按你那一套来') === '那就按你那个来',
+    '跟「倒」叠在一起也不冲突（先 softenDao 再 detype）',
+  );
+
+  // ② ⚠️ 反向（最危险的地方）：**真在数东西的不能动**
+  for (const s of ['买了一串钥匙', '来了一波人', '一堆脏衣服堆在椅子上', '那截绳子断了', '一整套流程']) {
+    check(tic.detype(s) === s, `不碰「${s}」（真在数东西）`);
+  }
+
+  // ③ 边界
+  check(tic.detype('') === '', '空串安全');
+  check(tic.detype(null) === '', 'null 安全（她的话可能是 undefined）');
+  check(
+    tic.detype(tic.detype('你说的那一套')) === tic.detype('你说的那一套'),
+    '幂等（同一句话过两遍不会再变）',
+  );
+
+  // ④ ★ 接线：她的话**真的会过这道闸**吗
+  //
+  // ⚠️ 这里只能查源码里有没有那两处调用 —— 但**别把它当成行为验证**：
+  //    行为由上面 ①②③ 保证，"接没接上"由这里保证，两个都得有。
+  //    （踩过的教训：`tic.reload()` 少一行时，闸静默失效、任何单元断言都照样绿。）
+  const botSrc = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  const callSites = botSrc.match(/tic\.detype\(/g) ?? [];
+  check(
+    callSites.length >= 2,
+    `★ bot.js 的发言出口接上了（找到 ${callSites.length} 处调用）`,
+  );
+  check(
+    /const outLine = this\.maskPhone\(tic\.detype\(tic\.softenDao\(line\)\)\)/.test(botSrc),
+    '★ 提醒那条路：改写后的句子还**抽成了变量**（发出去的 = 记进 recent 的，不能各写一遍）',
+  );
+  check(
+    /const softened = tic\.detype\(tic\.softenDao\(text\)\)/.test(botSrc),
+    '★ sendChatLike（她所有发言的唯一出口）上挂着这道闸',
+  );
+}
+
 try {
   rmSync(TIC_PATH, { force: true });
   rmSync(join(ROOT, CFG_REL), { force: true });

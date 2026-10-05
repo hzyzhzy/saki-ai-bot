@@ -241,10 +241,17 @@ console.log('\n【8】★★ 接线：三根线都接上了');
 
   // ① `/好感度` 排行榜
   check(/tryAffinityBoard\(event, segs\)/.test(botSrc), '★ 群消息里挂了 `/好感度` 的处理');
+  // ⚠️⚠️ 2026-10-06 修（回归里红的这一条）：原来写死成
+  //    `payload.message_type === 'group' &&` **紧跟** `this.tryAffinityBoard(payload,` ——
+  //    后来在这中间加了「**同类池 / 已知机器人发的命令一律不认**」那道闸
+  //    （`!cmdSenderIsBot &&`），字面就对不上了 ⇒ **假失败**（代码是好的）。
+  //    ⇒ 断言该盯**意图**，不是字面：① 调用点前面确实是"群消息"的判断；
+  //      ② 它后面**紧跟 `return`** —— 那才叫"处理完就不走后面的流程"。
   check(
-      /payload\.message_type === 'group' &&\s*this\.tryAffinityBoard\(payload,/.test(botSrc),
-      '★ 处理完就不走后面的流程（`/好感度` 不进聊天上文、也不分条）',
-    );
+    /payload\.message_type === 'group' &&[\s\S]{0,160}?this\.tryAffinityBoard\(payload,/.test(botSrc) &&
+      /this\.tryAffinityBoard\(payload,[\s\S]{0,120}?\)\s*\)\s*\{\s*return;/.test(botSrc),
+    '★ 处理完就不走后面的流程（`/好感度` 不进聊天上文、也不分条）',
+  );
   check(
     /好感度排行榜/.test(botSrc) && /sendToGroup\(event\.group_id/.test(botSrc),
     '★★ 排行榜走 `sendToGroup`（**不是** `sendChatLike` 的分条 —— 那会把每条都算成"她说过的话"）',
