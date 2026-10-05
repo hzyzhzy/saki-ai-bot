@@ -1669,7 +1669,7 @@ export class Bot {
     );
     const atOtherInText = this.textAtOf(realText, segs);
     if (this.selfId && (atOtherInSegs || atOtherInText)) {
-      log.debug(
+      log.info(
         `消息 @ 的是别人，不插嘴（${atOtherInSegs ? 'at 段' : '文本形态'}${atOtherInText ? `：@${atOtherInText}` : ''}）`,
       );
       return null;
@@ -1705,7 +1705,7 @@ export class Bot {
       const inConvWithMe = conv && Date.now() - conv.lastBotReplyAt < (chat.followUp?.idleMs ?? 180000);
 
       if (!askingServer && !aboutMe && !inConvWithMe) {
-        log.debug('两个人在互相对话，且跟它无关，不插嘴');
+        log.info('两个人在互相对话，且跟它无关，不插嘴');
         return null;
       }
     }
@@ -1753,7 +1753,7 @@ export class Bot {
 
         // ② 新表情才说话
         if (!stickerIsNew) {
-          log.debug('表情包：见过的表情，它只是辅助说话，不单独回');
+          log.info('表情包：见过的表情，它只是辅助说话，不单独回');
           return null;
         }
         if (chat.sticker?.enable !== false) {
@@ -1851,7 +1851,7 @@ export class Bot {
 
       if (withinWindow) {
         if (chain >= maxChain) {
-          log.debug(`[${key}] 已经连续接了 ${chain} 次话（且不是刚才聊的人），这次不接了`);
+          log.info(`[${key}] 已经连续接了 ${chain} 次话（且不是刚才聊的人），这次不接了`);
           return null;
         }
         log.debug(
@@ -1942,7 +1942,7 @@ export class Bot {
           `[接话] 冷却中，跳过「${text}」（还要等 ${Math.ceil(left / 1000)}s / 共 ${cd}ms）`,
         );
       } else {
-        log.debug(`[接话] 太短（${text.length} < ${minChars} 字），跳过「${text}」`);
+        log.info(`[接话] 太短（${text.length} < ${minChars} 字），跳过「${text}」`);
       }
     }
 
