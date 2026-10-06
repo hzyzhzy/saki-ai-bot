@@ -3530,12 +3530,38 @@ export class Bot {
    */
   botOnlyChain(groupId) {
     try {
-      const min = Math.max(2, Number(config.chat?.botChainMin) || 10);
-      const minSpan = Math.max(0, Number(config.chat?.botChainMinSpanMs) || 180000);
+      const gid = String(groupId ?? '');
+      // ⚠️⚠️ 2026-10-07 加（用户原话：「如果不是剧情接话，或者机器人之前互相 @，
+      //    而是**机器人接了一个真人的话**时，要**尽量提早结束对话**，防止两个
+      //    机器人一直刷**打断真人的聊天**」——他还当场举了"就比如刚刚"）：
+      //    **真人起的话头** ⇒ 阈值大幅降低（3 条 / 1 分钟，默认值）。
+      const fromHuman = this.isHumanOrigin(gid);
+      const min = fromHuman
+        ? Math.max(2, Number(config.chat?.botChainMinFromHuman) || 3)
+        : Math.max(2, Number(config.chat?.botChainMin) || 10);
+      const minSpan = fromHuman
+        ? Math.max(0, Number(config.chat?.botChainMinSpanFromHumanMs) || 60000)
+        : Math.max(0, Number(config.chat?.botChainMinSpanMs) || 180000);
       const win = Math.max(4, Number(config.chat?.botChainWindow) || 14);
-      const d = this.botChainStats(groupId, win);
-      if (d.humans > 0) return false; // 真人在场 → 一切照旧
+      const d = this.botChainStats(gid, win);
       if (!d.mine || !d.theirs) return false; // 只有一方在说，不算"互相聊"
+
+      if (fromHuman) {
+        // ⚠️⚠️ 关键是这一条：判据从"窗口里有没有真人"换成
+        //    **"真人最后开口之后过了多久"** ——
+        //    实测（用户举的"刚刚"那次）：01:34:44 他说了一句、她接上，
+        //    然后两个机器人从 01:34:50 一直刷到 01:35:45，**他中间插了两句都没打断** ✗
+        //    而老判据 `d.humans > 0 → return false` 恰恰因为"他在窗口里"
+        //    而**永远不触发** ⇒ 越是他插话，她们越不收 ✗（这就是真因）
+        //    ⇒ 现在：**他 30 秒没吭声、而两个机器人还在互刷** ⇒ 该收了。
+        const humanAt = this.lastHumanAt(gid);
+        const sinceHuman = humanAt ? Date.now() - humanAt : Infinity;
+        const quiet = sinceHuman > Math.max(0, Number(config.chat?.botChainHumanQuietMs) || 30000);
+        if (!quiet) return false;
+        return d.mine + d.theirs >= min || (minSpan > 0 && d.span >= minSpan);
+      }
+
+      if (d.humans > 0) return false; // 真人在场 → 一切照旧
       return d.mine + d.theirs >= min || (minSpan > 0 && d.span >= minSpan);
     } catch (e) {
       log.debug(`[同类] 判断"只剩两个机器人在聊"失败（当没命中）：${e.message}`);
@@ -3857,6 +3883,51 @@ export class Bot {
     return /晚安|早睡|睡了睡了|睡了啊|去睡了|该睡了|早点睡|睡吧|闭眼|闭麦|都闭|明天见|明早|明儿见|回头见|下次见|再见|回见|拜拜|安了/.test(
       t,
     );
+  }
+
+  /**
+   * 记下"这个群最近的这轮对话是**真人起的头**"（2026-10-07 用户要求）。
+   *
+   * 用户原话：「如果不是剧情接话，或者机器人之前互相 @，而是**机器人接了一个
+   *   真人的话**时，要**尽量提早结束对话**，防止两个机器人一直刷**打断真人的聊天**」。
+   *
+   * ⚠️ 为什么要单独记：`botOnlyChain()` 原来只数"窗口里有没有真人"——
+   *    真人说一句、两个机器人接手，**他不再说话之后窗口里就没真人了** ⇒
+   *    要等满 10 条 / 3 分钟才收 ✗ 而这段时间他的聊天已经被刷没了。
+   *    ⇒ 记下"这轮是真人起的头"，把收场阈值降到 **3 条 / 1 分钟**。
+   *
+   * ⚠️ **机器人互相 @ 时清掉**（那是它们自己起的头，不算"接真人的话"），
+   *    见 `decide()` 里同类那一侧。
+   */
+  noteHumanOrigin(groupId) {
+    try {
+      const gid = String(groupId ?? '').trim();
+      if (!gid) return;
+      this._humanOriginAt ??= new Map();
+      this._humanOriginAt.set(gid, Date.now());
+    } catch {}
+  }
+
+  /** 这个群的对话是不是**真人起的头**（见 `noteHumanOrigin`；5 分钟内有效） */
+  isHumanOrigin(groupId) {
+    const gid = String(groupId ?? '').trim();
+    if (!gid) return false;
+    const at = Number(this._humanOriginAt?.get(gid) ?? 0);
+    return at > 0 && Date.now() - at < 300000;
+  }
+
+  /** 清掉"真人起的头"的标记（机器人自己互相 @ 起来时用） */
+  clearHumanOrigin(groupId) {
+    try {
+      this._humanOriginAt?.delete(String(groupId ?? '').trim());
+    } catch {}
+  }
+
+  /** **最后一条真人消息**是什么时候（没有就返回 0）—— `botOnlyChain` 要用它判"他多久没吭声了" */
+  lastHumanAt(groupId) {
+    const gid = String(groupId ?? '').trim();
+    if (!gid) return 0;
+    return Number(this._humanOriginAt?.get(gid) ?? 0) || 0;
   }
 
   /**
@@ -4440,6 +4511,21 @@ export class Bot {
         // ⚠️ 2026-10-07：真人说话了 ⇒ 也清掉"同类正在跟她说话"的标记 ——
         //    不然他插一句问事，她还要先"打字"几秒才答 ✗（那是给同类之间用的）
         this.clearPeerTalking(gid0);
+        // ⚠️⚠️ 2026-10-07 加（用户要求：机器人接了**真人**的话时，要尽量提早结束
+        //    对话，防止两个机器人一直刷打断真人）：
+        //    **记下"最后一条真人消息"的时间** —— `botOnlyChain()` 靠它判
+        //    "他已经 30 秒没吭声、可两个机器人还在互刷"⇒ 该收了。
+        this.noteHumanOrigin(gid0);
+      } else {
+        // ⚠️ 同类说话：**如果它是 @ 她 / 叫她的名字**，那这轮是**机器人自己起的头**
+        //    ⇒ 不算"接真人的话"，把标记清掉（免得拿真人那套低阈值去管它们）。
+        //    ⚠️ 只认"明确叫她"的那种；普通接话（在刷屏）**不清** ——
+        //    否则真人起头之后它俩一互接，标记就没了、低阈值也跟着失效 ✗
+        try {
+          const s0 = msg.toSegments(event.message);
+          const atMe0 = this.selfId ? msg.isAt(s0, this.selfId) : false;
+          if (atMe0) this.clearHumanOrigin(gid0);
+        } catch {}
       }
       // ③ 真人说话 ⇒ **不碰标记**，照常往下走（"我插话就能跟她说话"）
       // ③ 真人说话 ⇒ **不碰标记**，照常往下走（"我插话就能跟她说话"）
@@ -10386,12 +10472,26 @@ export class Bot {
       //    ⚠️ 这段**只在互刷时**注入 —— 正常人聊天时一个字都不加，别影响日常语气。
       //    ⚠️ 她真收了场（说出收场话）之后，代码才跟上记冷却（见回复发出后那段）。
       if (event?.message_type === 'group' && this.botOnlyChain(String(event.group_id ?? ''))) {
+        // ⚠️ 2026-10-07：分两种口吻 —— **真人起的话头**（要早收）和**纯机器人互刷**。
+        const fromHuman0 = this.isHumanOrigin(String(event.group_id ?? ''));
         parts.push(
           [
             '',
-            '# 【群里现在只有你们两个机器人在说话】',
+            fromHuman0
+              ? '# 【这轮是你俩接了一句真人的话，现在只剩你俩在刷】'
+              : '# 【群里现在只有你们两个机器人在说话】',
             '',
-            '⚠️ 最近这些消息里**一个真人都没有** —— 就是你跟另一个同类号在来回接，而且已经接了不少。',
+            fromHuman0
+              ? '⚠️ 开头是**真人**说了话，你俩接上之后就一句接一句停不下来了 ——' +
+                '**他还在群里看着**，你俩刷屏会把他要说的话顶掉（他插话你们都停不下来）。'
+              : '⚠️ 最近这些消息里**一个真人都没有** —— 就是你跟另一个同类号在来回接，而且已经接了不少。',
+            ...(fromHuman0
+              ? [
+                  '',
+                  '⚠️⚠️ **这一轮该收了**：他起的话头已经接完，别再自己找新话题、也别接着对方的客气话往下滚。',
+                  '**回完这条就停** —— 或者这条干脆别回。',
+                ]
+              : []),
             '',
             '## 你自己判断：想说的话说完了没有',
             '- **还有新东西要说**（新信息 / 下一步 / 一个结果）→ 接着说；',

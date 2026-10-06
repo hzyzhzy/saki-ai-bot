@@ -549,5 +549,62 @@ console.log('\n【14】★★ 同类之间「按字数算的打字延迟」（20
   );
 }
 
+console.log('\n【15】★★ 真人起的话头 ⇒ 尽早收场（2026-10-07 用户要求，他举的例子是「就比如刚刚」）');
+{
+  // 用户原话：「如果不是剧情接话，或者机器人之前互相 @，而是**机器人接了一个
+  //   真人的话**时，要**尽量提早结束对话**，防止两个机器人一直刷**打断真人的聊天**」。
+  // 实测那次（日志）：01:34:44 他说一句 → 她接上 → 两个机器人从 01:34:50 刷到 01:35:45，
+  // **他中间插了两句都没能打断**。
+  // ⚠️ 老判据 `if (d.humans > 0) return false`（窗口里有真人就不触发）恰恰
+  //    因为"他在窗口里"而**永远不触发** ⇒ 越是他插话、她们越不收 —— 这就是真因。
+  const { Bot } = await import('../src/bot.js');
+  const G15 = '999000015';
+  const b15 = new Bot();
+
+  b15.clearHumanOrigin(G15);
+  check(b15.isHumanOrigin(G15) === false, '★ 没标记 → 不当"真人起的头"');
+  check(b15.lastHumanAt(G15) === 0, '★ 顺带：最后一条真人消息的时间是 0（没有）');
+  b15.noteHumanOrigin(G15);
+  check(b15.isHumanOrigin(G15) === true, '★ 记下之后 → 认');
+  check(b15.lastHumanAt(G15) > 0, '★ 记的是**时间戳**（`botOnlyChain` 靠它算"他多久没吭声"）');
+  b15.clearHumanOrigin(G15);
+  check(b15.isHumanOrigin(G15) === false, '★ 能清掉（机器人自己 @ 起来时用）');
+
+  const src15 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  check(/botChainMinFromHuman\) \|\| 3/.test(src15), '★★ 起因是真人 → 条数阈值降到 **3**（默认 10）');
+  check(
+    /botChainMinSpanFromHumanMs\) \|\| 60000/.test(src15),
+    '★★ 时间阈值降到 **1 分钟**（默认 3 分钟）',
+  );
+  check(
+    /botChainHumanQuietMs\) \|\| 30000/.test(src15),
+    '★★ 而且要求"真人**已经 30 秒没吭声**"—— 他还在说的时候别抢',
+  );
+  check(
+    /const quiet = sinceHuman[\s\S]{0,200}?if \(!quiet\) return false;/.test(src15),
+    '★★ "他刚说完（30 秒内）→ 不触发"这条真的在',
+  );
+  check(
+    /this\.noteHumanOrigin\(gid0\)/.test(src15),
+    '★ 真人说话时**记时间**（不然这条判据永远是空）',
+  );
+  check(
+    /atMe0\) this\.clearHumanOrigin\(gid0\)/.test(src15),
+    '★★ 但**同类 @ 她**时清掉 —— 那是机器人自己起的头，不算"接真人的话"',
+  );
+  check(
+    /if \(d\.humans > 0\) return false; \/\/ 真人在场/.test(src15),
+    '★ 老判据还在（**纯机器人互刷**时，真人在场照旧不触发 —— 别把那条也改了）',
+  );
+  check(
+    /这轮是你俩接了一句真人的话/.test(src15) && /回完这条就停/.test(src15),
+    '★★ 提示词也分了口吻：真人起头时明说"他还在群里看着"「回完这条就停」',
+  );
+  check(
+    /不是剧情/.test(src15) || /fromHuman/.test(src15),
+    '★ 判据是"起因"而不是"当前有没有真人"（老判据正是被这一点坑了）',
+  );
+}
+
 console.log(`\n结果: ${failures === 0 ? '全部通过 ✅' : `${failures} 项失败 ❌`}\n`);
 process.exit(failures === 0 ? 0 : 1);
