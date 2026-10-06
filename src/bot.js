@@ -2086,8 +2086,36 @@ export class Bot {
     //      但"要不要等"和"要不要接"是两件事 —— 这里只负责等它安静。
     //    ⚠️ **只对同类**：真人问话一分不等。
     if (this.isPeerBot(String(event?.group_id ?? ''), String(event?.user_id ?? ''))) {
-      this.notePeerTalking(event.group_id); // 先把"它刚说过话"记上（时间戳 = 这一条的）
-      await this.waitPeerQuiet(event.group_id);
+      const gid = String(event.group_id ?? '');
+      this.notePeerTalking(gid); // 先把"它刚说过话"记上（时间戳 = 这一条的）
+      this.notePeerLine(event); // 再把这一条暂存起来（等安静后合并用）
+      await this.waitPeerQuiet(gid);
+
+      // ⚠️⚠️ 2026-10-07 加（用户诊断：「**主要还是合并消息没用成功合并另一个机器人
+      //    的分条消息**」）：安静之后**把这几条合并成一条**再处理。
+      //    规则：**只有最后一条**继续走（它把前面的都并进来）——
+      //    前面几条醒来时发现自己不是最后一条就**直接退出**（它们已经在最后那条里了）
+      //    ⇒ 一次生成、一条回复、引用挂在最后那句上 ✓
+      const lines = this.peerLines(gid);
+      if (lines.length && lines[lines.length - 1] !== event) {
+        log.info(
+          `[同类] 它后面还有 ${lines.length - 1 - lines.indexOf(event)} 条没处理 → 这条不单独回（并进最后那条）`,
+        );
+        return null;
+      }
+      const extra = lines.filter((e) => e !== event);
+      if (extra.length) {
+        const merged = extra.flatMap((e) => e.message ?? []);
+        event.message = [...merged, ...(event.message ?? [])];
+        // ⚠️ 提示词里要标明"这几条分别是谁说的"（同类虽然都是同一个号，但保持口径一致）
+        try {
+          event._sources = [...extra.map((e) => srcOf(e)), ...(event._sources ?? [srcOf(event)])];
+        } catch {}
+        log.info(
+          `[同类] 把它的 ${extra.length} 条分条消息**合并成一条**了（共 ${event.message.length} 段）→ 只回这一次`,
+        );
+      }
+      this.clearPeerLines(gid);
     }
     const join = this.shouldJoinChat(event, opts);
     if (!join) return null;
@@ -3982,6 +4010,46 @@ export class Bot {
     const gid = String(groupId ?? '').trim();
     if (!gid) return 0;
     return Number(this._peerTalkingAt?.get(gid) ?? 0) || 0;
+  }
+
+  // ── 同类分条消息的暂存（2026-10-07 用户诊断出来的）────────────────────
+  //
+  // 用户原话：「又出现引用了，我觉得**主要还是合并消息没用成功合并另一个机器人
+  //   的分条消息**」——**完全正确**：
+  //   ⚠️ 同类消息走的是 `shouldJoinChatAsync → enqueue`，**根本不过 `scheduleHandle`
+  //      那套合并窗口**（那是"普通消息"走的路）⇒ 它分条发的几条会**各自**被处理一次、
+  //      各自生成一次回复，引用自然各挂各的 ✗
+  //   ⇒ 所以光"等它安静"不够，**还得把等下来的那几条合并成一条**处理。
+  //   ⚠️ 合并的时机：等安静之后由**最后一条**来合并（见 `shouldJoinChatAsync`）——
+  //      前面几条醒来时发现自己不是最后一条，就**直接退出**（它们已经被并进最后那条了）。
+
+  /** 记下一条同类发来的消息（等安静之后合并用） */
+  notePeerLine(event) {
+    try {
+      const gid = String(event?.group_id ?? '').trim();
+      if (!gid) return;
+      this._peerLines ??= new Map();
+      const arr = this._peerLines.get(gid) ?? [];
+      arr.push(event);
+      // 上限：别让刷屏把缓冲撑爆（合并成超长 prompt 反而更糟）
+      const max = Math.max(2, Number(config.peerChat?.mergeMax ?? 10) || 10);
+      while (arr.length > max) arr.shift();
+      this._peerLines.set(gid, arr);
+    } catch {}
+  }
+
+  /** 这个群暂存着哪几条同类消息（时间正序） */
+  peerLines(groupId) {
+    const gid = String(groupId ?? '').trim();
+    if (!gid) return [];
+    return this._peerLines?.get(gid) ?? [];
+  }
+
+  /** 清掉暂存（最后那条合并处理完之后调） */
+  clearPeerLines(groupId) {
+    try {
+      this._peerLines?.delete(String(groupId ?? '').trim());
+    } catch {}
   }
 
   /**

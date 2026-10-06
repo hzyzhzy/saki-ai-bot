@@ -688,5 +688,56 @@ console.log('\n【16】★★ 同类「话没说完就先别生成」（2026-10-
   );
 }
 
+console.log('\n【17】★★ 同类分条消息**合并成一条**再回（2026-10-07 用户诊断出来的）');
+{
+  // 用户原话：「又出现引用了，我觉得**主要还是合并消息没用成功合并另一个机器人
+  //   的分条消息**」——**完全正确**：同类消息走 `shouldJoinChatAsync → enqueue`，
+  //   **根本不过 `scheduleHandle` 那套合并窗口** ⇒ 它分条发的几条各自被处理一次、
+  //   各自生成一次回复，引用自然各挂各的 ✗
+  const { Bot } = await import('../src/bot.js');
+  const G17 = '999000017';
+  const b17 = new Bot();
+  const evt = (t) => ({
+    message_type: 'group',
+    group_id: G17,
+    user_id: '10000009',
+    message: [{ type: 'text', data: { text: t } }],
+  });
+
+  b17.clearPeerLines(G17);
+  check(b17.peerLines(G17).length === 0, '★ 一开始是空的');
+  const e1 = evt('第一句');
+  const e2 = evt('第二句');
+  b17.notePeerLine(e1);
+  b17.notePeerLine(e2);
+  check(b17.peerLines(G17).length === 2, '★ 攒下两条（它分条发的）');
+  check(b17.peerLines(G17)[0] === e1 && b17.peerLines(G17)[1] === e2, '★ 时间正序');
+  b17.clearPeerLines(G17);
+  check(b17.peerLines(G17).length === 0, '★ 处理完能清掉');
+
+  for (let i = 0; i < 30; i++) b17.notePeerLine(evt(`第${i}句`));
+  check(
+    b17.peerLines(G17).length <= 10,
+    `★ 有上限（攒了 30 条只留 ${b17.peerLines(G17).length} 条 —— 合并成超长 prompt 反而更糟）`,
+  );
+  b17.clearPeerLines(G17);
+
+  const src17 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  check(/this\.notePeerLine\(event\)/.test(src17), '★ 同类消息进来时**先暂存**');
+  check(
+    /lines\[lines\.length - 1\] !== event[\s\S]{0,240}?return null;/.test(src17),
+    '★★ **只有最后一条**继续走 —— 前面几条醒来发现自己不是最后一条就退出（它们会被并进最后那条）',
+  );
+  check(
+    /event\.message = \[\.\.\.merged, \.\.\.\(event\.message \?\? \[\]\)\]/.test(src17),
+    '★★ 真的把分条消息**并进当前这条**的 message（一次生成、一条回复、引用挂在最后那句）',
+  );
+  check(
+    /const extra = lines\.filter\(\(e\) => e !== event\);[\s\S]{0,120}?if \(extra\.length\)/.test(src17),
+    '★ 合并只在"真的攒到了别的条"时才做',
+  );
+  check(/this\.clearPeerLines\(gid\)/.test(src17), '★ 合并完清掉暂存');
+}
+
 console.log(`\n结果: ${failures === 0 ? '全部通过 ✅' : `${failures} 项失败 ❌`}\n`);
 process.exit(failures === 0 ? 0 : 1);
