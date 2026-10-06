@@ -3531,11 +3531,14 @@ export class Bot {
   botOnlyChain(groupId) {
     try {
       const gid = String(groupId ?? '');
-      // ⚠️⚠️ 2026-10-07 加（用户原话：「如果不是剧情接话，或者机器人之前互相 @，
-      //    而是**机器人接了一个真人的话**时，要**尽量提早结束对话**，防止两个
-      //    机器人一直刷**打断真人的聊天**」——他还当场举了"就比如刚刚"）：
-      //    **真人起的话头** ⇒ 阈值大幅降低（3 条 / 1 分钟，默认值）。
-      const fromHuman = this.isHumanOrigin(gid);
+      // ⚠️⚠️ **剧情例外**（用户原话第一句就是「**如果不是剧情接话**，或者机器人
+      //    之前互相 @，而是机器人接了一个真人的话时…」——我第一次改漏了它）：
+      //    开剧情时他发的 `/剧情` **也是真人发言** ⇒ 会把下面这条低阈值打开 ⇒
+      //    剧情刚起来就被催着收 ✗（用户实测：「为什么刚才开剧情反而一下就收了」）
+      //    ⇒ 剧情进行中一律**不走**真人起头那套低阈值（照旧 10 条 / 3 分钟，
+      //      而剧情段落之间本来就该慢慢演）。
+      const inQuest0 = !!quest.current(gid);
+      const fromHuman = !inQuest0 && this.isHumanOrigin(gid);
       const min = fromHuman
         ? Math.max(2, Number(config.chat?.botChainMinFromHuman) || 3)
         : Math.max(2, Number(config.chat?.botChainMin) || 10);
@@ -4364,7 +4367,12 @@ export class Bot {
         //    ⚠️ 例外**只留 @ 她**，**不留"叫名字"** —— 实测那句就是
         //      「明早六点半等着瞧嗷。**晚安啦祥祥**」：它叫了名字，可内容还是道晚安，
         //      留着名字例外就等于这条闸形同虚设 ✗（测试第一次就是这么红的）
-        if (!peerAtMe && this.isFarewellLine(peerText0)) {
+        //    ⚠️⚠️ **剧情例外**（用户原话第一句就是「**如果不是剧情接话**…」）：
+        //      开剧情时 `/剧情` 的**确认回执**是「行，就按这个来，**等我一下**（」——
+        //      里面带"等我一下"，被这条闸当成告辞拦掉了 ✗
+        //      （日志实证 `01:41:06 [同类] … 说的是告辞类的话 → 不接`）
+        //      ⇒ **剧情进行中一律不拦**：剧情里本来就该一句接一句地演。
+        if (!quest.current(gid0) && !peerAtMe && this.isFarewellLine(peerText0)) {
           const t0 = String(peerText0).replace(/\s+/g, ' ').trim().slice(0, 24);
           log.info(
             `[同类] ${sender0} 说的是**告辞类**的话（「${t0}」）→ 不接` +
@@ -4383,9 +4391,14 @@ export class Bot {
         //    ⚠️ 必须**两条一起**满足（"我也说过" + "它也说了"）才拦 —— 单看任一条
         //      都会误伤（正常聊到"早点睡"、或者对方一句"再见"就再也不理人）。
         //    ⚠️ 这是**兜底**；主力是提示词（教模型自己判断该不该结束）。
-        //    ⚠️ 例外**只留 @ 她**（同上：那句「晚安啦祥祥」也叫了名字，
-        //      留着名字例外这条闸就白做了）。
-        if (!peerAtMe && this.farewellPingPong(gid0) && this.hasFarewellWord(peerText0)) {
+        //    ⚠️⚠️ **剧情例外**（同上：「**如果不是剧情接话**」）：剧情里互相道
+        //      "晚安/走了"本来就是戏的一部分，别在剧情里拦 ✗
+        if (
+          !quest.current(gid0) &&
+          !peerAtMe &&
+          this.farewellPingPong(gid0) &&
+          this.hasFarewellWord(peerText0)
+        ) {
           const t1 = String(peerText0).replace(/\s+/g, ' ').trim().slice(0, 26);
           log.info(
             `[同类] **收尾拉锯**：${sender0} 又是一句收尾话（「${t1}」），` +
