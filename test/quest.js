@@ -1670,8 +1670,11 @@ console.log('\n【16】★★ 发了 /清除剧情 ⇒ 强制静默 1 分钟（2
     '★★ 而**复读**那条路单独堵了（它裸调 `send_group_msg`，绕过所有出口 —— 实测就是它）',
   );
   check(
-    /isMuted\(groupId\)\) \{[\s\S]{0,200}?return \{ skipped: 'muted' \}/.test(bsrc16),
-    '★ 静默期直接返回、不真发（并且留个 `skipped` 便于排查）',
+    // ⚠️ 2026-10-07 修：这里原来返回 `{ skipped: 'muted' }`，可剧情那条路的调用方是
+    //    `const sent = await sendChatLike(...)` 然后 `for (const x of sent)`
+    //    ⇒ 报 `sent is not iterable`（日志实证）⇒ 改成**返回空数组**。
+    /isMuted\(groupId\)\) \{[\s\S]{0,700}?return \[\];/.test(bsrc16),
+    '★★ 静默期直接返回、不真发 —— ⚠️ 而且**返回数组**（剧情那条路要 `for...of` 它）',
   );
 }
 
