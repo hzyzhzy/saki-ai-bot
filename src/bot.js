@@ -1719,7 +1719,26 @@ export class Bot {
     //      · 有人在聊「小祥」（那是聊到它了）
     //      · 它刚回过话（它在跟人对话，不该突然闭嘴）
     //    所以先算「该不该接」，能接就放行；只有**纯闲聊**才被两人对话挡住。
-    if (this.isOthersTalking(event)) {
+    //    ⚠️⚠️ 2026-10-07 加**两个例外**（用户报「**这次爱音没回**」，日志实证）：
+    //      这条闸把"**同类在演剧情**"也当成了"两个人在互相对话，跟我无关" ✗
+    //      （日志：`两个人在互相对话，且跟它无关，不插嘴` → `判定返回：null（不接）`）
+    //      ⇒ **对方是同类** 或 **本群正在跑剧情** ⇒ 都不算"别人在对话"，直接往下走。
+    const _peerSay0 = this.isPeerBot(
+      String(event?.group_id ?? ''),
+      String(event?.user_id ?? ''),
+    );
+    const _inQuest0 = (() => {
+      try {
+        return !!quest.current(String(event?.group_id ?? ''));
+      } catch {
+        return false;
+      }
+    })();
+    if (_peerSay0 || _inQuest0) {
+      log.debug(
+        `[同类] ${_peerSay0 ? '对方是同类' : '本群在跑剧情'} ⇒ 不算"别人在对话"，不套这条闸`,
+      );
+    } else if (this.isOthersTalking(event)) {
       // ⚠️ key 必须在这里先算 —— 下面判断「它刚回过话」要用。
       //    原来 key 定义在更后面，直接用会踩 const 的暂时性死区（运行时报错，
       //    `node --check` 查不出来）。
