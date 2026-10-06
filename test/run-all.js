@@ -321,6 +321,10 @@ function isolatedStateEnv(name) {
     QQBOT_STORYLINE_FILE: p('story'),
     QQBOT_LIFE_FILE: p('life'),
     QQBOT_QUEST_FILE: p('quest'),
+    // ⚠️ 2026-10-07 加：剧情起因现在有一份**两个进程共享**的（让位方 + 聊天提示词都读它）。
+    //    它默认写在 `state/quest-shared.json` ⇒ **测试必须也隔离**，
+    //    不然离线套件会把用户真实那条剧情的起因写坏、或者读到它。
+    QQBOT_QUEST_SHARED_FILE: p('quest-shared'),
     QQBOT_FRIEND_FILE: p('friend'),
     QQBOT_OUTBOX_FILE: p('outbox'),
     // ⚠️ 2026-09-15 加：QQ号→名字（群名片/昵称）那张表。

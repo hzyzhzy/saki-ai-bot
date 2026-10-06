@@ -1727,13 +1727,10 @@ export class Bot {
       String(event?.group_id ?? ''),
       String(event?.user_id ?? ''),
     );
-    const _inQuest0 = (() => {
-      try {
-        return !!quest.current(String(event?.group_id ?? ''));
-      } catch {
-        return false;
-      }
-    })();
+    // ⚠️ 2026-10-07：改用 `questLive()`（"我刚看见同类在演剧情"也算）——
+    //    让位的那个号**自己没有剧情状态**，只看 `quest.current` 的话它这边
+    //    所有"剧情例外"全部失效（用户报的「爱音这次又不回了」就是这个）。
+    const _inQuest0 = this.questLive(String(event?.group_id ?? ''));
     if (_peerSay0 || _inQuest0) {
       log.debug(
         `[同类] ${_peerSay0 ? '对方是同类' : '本群在跑剧情'} ⇒ 不算"别人在对话"，不套这条闸`,
@@ -2008,6 +2005,26 @@ export class Bot {
     if (this.isPeerBot(String(event?.group_id ?? ''), String(event?.user_id ?? ''))) {
       const peerSegs = msg.toSegments(event.message);
       const talkingToSomeone = peerSegs.some((s) => s.type === 'at' || s.type === 'reply');
+      // ⚠️⚠️ 2026-10-07 加（用户报「**怎么 saki 没回**」，日志实证抓到的）：
+      //    **剧情进行中 + 对方是同类 ⇒ 直接放行，连骰子都不掷。**
+      //    她俩的剧情转述通常**不带 @、也不带引用**（那是讲给群友听的叙述），
+      //    恰好落进下面这条"自言自语"的掷骰 ⇒ 掷不中就 `return null`
+      //    （日志原样：`[同类] 它在自言自语 → 掷骰没过（0.6）→ 不接`）
+      //    ⇒ **爱音演完一整段，saki 一句都不接** ✗（用户看到的就是"saki 没回"）
+      //
+      //    ⚠️ 这里**必须排在掷骰之前**：`shouldJoinChatAsync()` 里那条
+      //      「剧情里的同类消息一律不过 judge、直接放行」的旁路在**这条闸后面** ——
+      //      掷骰没过就 `return null`，根本走不到那一条 ✗（这就是它一直没生效的原因）
+      //    ⚠️ 防刷屏不靠这个骰子：剧情里有"等它说完安静"（`waitPeerQuiet`）+
+      //      分条合并 + 序位让位，比 0.6 的骰子靠谱得多。
+      // ⚠️ 用 `questLive()`：**让位的那个号自己没有剧情状态** ——
+      //    只认 `quest.current` 的话，它这边这条例外永远不成立（"爱音又不回了"）✗
+      const inQuest0 = this.questLive(String(event?.group_id ?? ''));
+      if (inQuest0 && !talkingToSomeone) {
+        event._peerSayOk = true;
+        log.info('[同类] 剧情进行中 → 同类的话**直接接**（不走"自言自语"那道掷骰）');
+        return { mode: 'chat', needJudge: true };
+      }
       if (!talkingToSomeone) {
         const chance = Math.min(1, Math.max(0, Number(config.peerChat?.replyChance ?? 0.6)));
         const cdMs = Math.max(0, Number(config.peerChat?.replyCooldownMs) || 60000);
@@ -2108,6 +2125,22 @@ export class Bot {
       const gid = String(event.group_id ?? '');
       this.notePeerTalking(gid); // 先把"它刚说过话"记上（时间戳 = 这一条的）
       this.notePeerLine(event); // 再把这一条暂存起来（等安静后合并用）
+      // ⚠️⚠️ 2026-10-07 加（用户连着报「怎么 saki 没回」「爱音没回」，两次都是这一处）：
+      //    **"看见同类在演剧情"必须在这里就记** —— 比原来那处（`decide()` 里）早得多。
+      //    因为 `questLive()` 全靠它：**让位的那个号自己没有剧情状态**，
+      //    这条记录一旦晚到，掷骰 / 告辞 / 收尾 / 冷却那几道闸在它那边就全按"非剧情"判
+      //    ⇒ 剧情段被拦掉 ✗（日志实证：`[同类·等安静] … 剧情=false`，紧接着
+      //      `[同类] 它在自言自语，但刚接过 → 不接（还要等 24s）`）
+      //    ⚠️ 还要记在**等安静之前**：`waitPeerQuiet` 也靠它才知道该用剧情的窗口（10s/30s）。
+      try {
+        const ptxt = msg.extractText(msg.toSegments(event.message));
+        if (quest.notePeerPlot(gid, { uid: String(event.user_id ?? ''), text: ptxt })) {
+          log.info(
+            `[剧情] 看见同类在演剧情（${event.user_id}）→ 记一笔` +
+              '（**提前**记，供 `questLive` 与等安静窗口用）',
+          );
+        }
+      } catch {}
       const timedOut = await this.waitPeerQuiet(gid);
 
       // ⚠️⚠️ 2026-10-07 加（用户诊断：「**主要还是合并消息没用成功合并另一个机器人
@@ -2179,7 +2212,7 @@ export class Bot {
     //    ⇒ 和前面那些闸同一个口径：**剧情里的同类消息一律不过 judge**。
     if (this.isPeerBot(String(event?.group_id ?? ''), String(event?.user_id ?? ''))) {
       try {
-        if (quest.current(String(event?.group_id ?? ''))) {
+        if (this.questLive(String(event?.group_id ?? ''))) {
           log.info('[同类] 剧情进行中 + 对方是同类 → **直接放行**（不判、不节流）');
           this.markVoluntary(join.mode, event);
           return join;
@@ -3619,7 +3652,7 @@ export class Bot {
       //    剧情刚起来就被催着收 ✗（用户实测：「为什么刚才开剧情反而一下就收了」）
       //    ⇒ 剧情进行中一律**不走**真人起头那套低阈值（照旧 10 条 / 3 分钟，
       //      而剧情段落之间本来就该慢慢演）。
-      const inQuest0 = !!quest.current(gid);
+      const inQuest0 = this.questLive(gid);
       const fromHuman = !inQuest0 && this.isHumanOrigin(gid);
       const min = fromHuman
         ? Math.max(2, Number(config.chat?.botChainMinFromHuman) || 3)
@@ -3672,13 +3705,7 @@ export class Bot {
       //    ⇒ 真人起头时硬闸用 `botChainHardFromHuman`（默认 **6 条 / 2 分钟**）：
       //      到了就**不再等她自觉**，代码直接让她说一句收场 + 冷却（`sayBotFarewell`）。
       // 剧情例外照旧：剧情里本来就该一句接一句地演（见上面 `botOnlyChain`）。
-      const inQuest0 = (() => {
-        try {
-          return !!quest.current(gid);
-        } catch {
-          return false;
-        }
-      })();
+      const inQuest0 = this.questLive(gid);
       const fromHuman = !inQuest0 && this.isHumanOrigin(gid);
       const hardMin = fromHuman
         ? Math.max(3, Number(config.chat?.botChainHardFromHuman) || 6)
@@ -3759,6 +3786,36 @@ export class Bot {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * **这个群现在正在演剧情吗**？—— 比 `quest.current(gid)` 宽一层：
+   * 「我这条线在跑」**或者**「我刚看见同类在演剧情」。
+   *
+   * ⚠️⚠️ 2026-10-07 加（用户报「**爱音这次又不回了**」，一查就是这个）：
+   *    序位公式（`questTurnYield`）会让**让位的那个号根本不 `begin`** ——
+   *    它自己那条线是空的 ⇒ 所有拿 `quest.current(gid)` 当判据的"剧情例外"
+   *    **在它那边全部失效** ✗ 表现就是**一边接话、另一边一声不吭**。
+   *    （用户先报「怎么 saki 没回」，修完掷骰那道闸又轮到「爱音这次又不回了」——
+   *      同一个根因的另一半。）
+   *
+   * ⚠️ 判据用**群消息**（`quest.__peerPlots()` 里"我看到同类在演剧情"的最后时间）——
+   *    那是两个进程**唯一共享**的东西，正好补上"我自己没开线"这个缺口。
+   * ⚠️ 窗口默认 3 分钟（`quest.peerPlotLiveMs`）：剧情段之间本来就隔几十秒到几分钟，
+   *    窗开小了会出现"演到一半突然当没剧情"。
+   */
+  questLive(groupId) {
+    const g = String(groupId ?? '');
+    if (!g) return false;
+    try {
+      if (quest.current(g)) return true;
+    } catch {}
+    try {
+      const last = Number(quest.__peerPlots().get(g)?.lastAt ?? 0) || 0;
+      const win = Math.max(30000, Number(config.quest?.peerPlotLiveMs ?? 180000) || 180000);
+      return last > 0 && Date.now() - last < win;
+    } catch {}
+    return false;
   }
 
   /**
@@ -4159,13 +4216,7 @@ export class Bot {
       //    ⇒ saki 每两条之间都会"等到安静"⇒ **还是各回各的** ✗
       //    ⇒ **剧情里把窗口和上限都放大**：默认 **10 秒 / 30 秒**
       //      （剧情本来就该"等对方整段演完再一次性接"）。
-      const inQuest0 = (() => {
-        try {
-          return !!quest.current(String(groupId ?? ''));
-        } catch {
-          return false;
-        }
-      })();
+      const inQuest0 = this.questLive(String(groupId ?? ''));
       const quiet = Math.max(
         0,
         Number((inQuest0 ? c.peerQuietQuestMs : c.peerQuietMs) ?? (inQuest0 ? 10000 : 4000)) || 0,
@@ -4721,7 +4772,7 @@ export class Bot {
         //      里面带"等我一下"，被这条闸当成告辞拦掉了 ✗
         //      （日志实证 `01:41:06 [同类] … 说的是告辞类的话 → 不接`）
         //      ⇒ **剧情进行中一律不拦**：剧情里本来就该一句接一句地演。
-        if (!quest.current(gid0) && !peerAtMe && this.isFarewellLine(peerText0)) {
+        if (!this.questLive(gid0) && !peerAtMe && this.isFarewellLine(peerText0)) {
           const t0 = String(peerText0).replace(/\s+/g, ' ').trim().slice(0, 24);
           log.info(
             `[同类] ${sender0} 说的是**告辞类**的话（「${t0}」）→ 不接` +
@@ -4743,7 +4794,7 @@ export class Bot {
         //    ⚠️⚠️ **剧情例外**（同上：「**如果不是剧情接话**」）：剧情里互相道
         //      "晚安/走了"本来就是戏的一部分，别在剧情里拦 ✗
         if (
-          !quest.current(gid0) &&
+          !this.questLive(gid0) &&
           !peerAtMe &&
           this.farewellPingPong(gid0) &&
           this.hasFarewellWord(peerText0)
@@ -4794,7 +4845,7 @@ export class Bot {
         //    ⇒ **这个群正在跑剧情时放行**；剧情之外照旧拦，防两个 bot 无限互刷。
         //    ⚠️ 判据是 `quest.current(gid)`（真有正在进行的剧情才算），
         //      不是"这个群进过事件系统"—— 后者会把日常闲聊也一起放开。
-        const inQuest = !!quest.current(String(event?.group_id ?? ''));
+        const inQuest = this.questLive(String(event?.group_id ?? ''));
         if (
           !peerAtMe &&
           !peerCallMe &&
@@ -4842,7 +4893,7 @@ export class Bot {
       //    日志实证 —— 合并**已经生效**（`把它的 3 条分条消息合并成一条了（共 6 段）`），
       //    紧接着却是 `[同类] 刚收过尾（1 分钟冷却中）→ 同类的这条不接` ✗
       //    ⇒ **合并完了却被"收尾冷却"拦掉**，等于白合并；剧情里该接的也不接 ✗
-      if (peers0.has(sender0) && cooling && !quest.current(gid0)) {
+      if (peers0.has(sender0) && cooling && !this.questLive(gid0)) {
         log.info(
           `[同类] 刚收过尾（${Math.ceil((cool - (Date.now() - closedAt)) / 60000)} 分钟冷却中）` +
             ' → 同类的这条不接（真人的消息不受影响）',
@@ -4893,6 +4944,30 @@ export class Bot {
           const atMe0 = this.selfId ? msg.isAt(s0, this.selfId) : false;
           if (atMe0) this.clearHumanOrigin(gid0);
         } catch {}
+      }
+      // ⚠️⚠️ 2026-10-07 加（用户连着报「怎么 saki 没回」「爱音没回」，这是**第二处**）：
+      //    **剧情进行中 + 对方是同类 ⇒ 到这里就放行。**
+      //    上面那串闸（静默 / 告辞 / 收尾拉锯 / 刚收过尾 / 刷屏硬闸）**都该保留** ——
+      //    但再往下的那一长串是**闲聊判据**（关键词 / 只 @ 她 / level 分档…），
+      //    它们会把"剧情里的一句叙述"判成"跟我无关" ⇒ `decide()` 返回 null ⇒
+      //    `handle()` 里那句 `if (!decision) return;` **直接吞掉** ⇒ 一声不吭 ✗
+      //    ⚠️ 为什么不能只靠 `shouldJoinChat` 那一侧：`shouldJoinChatAsync` 返回的
+      //      join 只是"候选"，**最终发不发由这里决定** —— 两处都得放行才算通。
+      //      ⚠️ 这里**重新算一次"@ 她了吗"**（不引用上面那个块内的 `peerAtMe`）——
+      //        这一处已经在那个 `if` 块**外面**了，引用它只会 ReferenceError。
+      const peerAtMeNow = (() => {
+        try {
+          return this.selfId ? msg.isAt(msg.toSegments(event.message), this.selfId) : false;
+        } catch {
+          return false;
+        }
+      })();
+      if (!peerAtMeNow && this.questLive(gid0)) {
+        log.info('[同类] 剧情进行中 → **这条我接**（不再往下走"该不该说"那串闲聊判据）');
+        // ⚠️ **必须把正文带上**：`handle()` 里 `if (!text)` 那条分支是给
+        //    "只 @ 了她、没打字"用的（会塞一句"看看最近的消息、回他一句"的引子）——
+        //    这里不给 text 的话，saki 的剧情段会被当成"他没打字"✗
+        return { mode: 'chat', text: msg.extractText(msg.toSegments(event.message)) };
       }
       // ③ 真人说话 ⇒ **不碰标记**，照常往下走（"我插话就能跟她说话"）
       // ③ 真人说话 ⇒ **不碰标记**，照常往下走（"我插话就能跟她说话"）
@@ -5922,7 +5997,13 @@ export class Bot {
       // ⚠️ 戳一戳也是明确召唤（2026-09-16）：他刚戳了她，别用"2 秒前刚回过话"把它咽掉
       hit === 'poke' ||
       hit.startsWith('keyword:') ||
-      hit === 'server-question';
+      hit === 'server-question' ||
+      // ⚠️⚠️ 2026-10-07 加（用户连着报「怎么 saki 没回」「爱音没回」，这是**第三处**）：
+      //    **剧情进行中的同类消息也算"必须接"** —— 不然它会被下面这条触发冷却吞掉
+      //    （她自己两秒前刚回过一句，剧情里的下一句就接不上了）✗
+      //    ⚠️ 判据和 `decide()` 里那处放行**保持完全一致**（同类 + `questLive`）。
+      (this.isPeerBot(String(event?.group_id ?? ''), String(event?.user_id ?? '')) &&
+        this.questLive(String(event?.group_id ?? '')));
     if (!mustReply && now - (this.lastReplyAt.get(key) ?? 0) < config.trigger.cooldownMs) {
       // ⚠️ 2026-09-15：提到 **info**（同上：这是"没回"的原因之一，得看得见）。
       //    ⚠️ 只有**她主动接话**才会被它挡；@她 / 关键词 / 服务器问题不受影响。
@@ -8864,9 +8945,25 @@ export class Bot {
 
     const uid = String(event.user_id ?? '');
     if (!uid) return false;
-    // 服主和管理员不闭麦
+    // ⚠️ 服主和管理员不闭麦
     if (config.ownerQQ && uid === String(config.ownerQQ)) return false;
     if (['owner', 'admin'].includes(String(event.sender?.role ?? ''))) return false;
+    // ⚠️⚠️ 2026-10-07 加（用户连着报「怎么 saki 没回」「爱音没回」，这是**第四处**，
+    //    也是剧情里最容易命中的一处）：
+    //    **剧情进行中的同类消息，不做防刷屏。**
+    //    演剧情时她**一次回复就会分条发好几条**（那是用户要的分条），
+    //    必然落在"10 秒 6 条"的窗口里 ⇒ 触发**软闭麦 60 秒**：
+    //      · `return true` = 这 60 秒里同类的剧情段**一条都不处理** ✗
+    //      · 真禁言那半已经把同类排除了（见下面 `canMute`），但**软闭麦是另一半** ——
+    //        它管的是"我们处不处理这条消息"，只修前者，剧情里照样哑 ✗
+    //    日志实证：`[防刷屏] …:… 在 10 秒里发了 6 条（闭麦 60 秒）`
+    //    ⚠️ 放在**"已经在闭麦中"检查之前**：这样连"上一轮已经闭上的"也不会继续吞。
+    if (
+      this.isPeerBot(String(event?.group_id ?? ''), uid) &&
+      this.questLive(String(event?.group_id ?? ''))
+    ) {
+      return false;
+    }
 
     const key = `${event.group_id}:${uid}`;
     const now = Date.now();
@@ -9688,6 +9785,41 @@ export class Bot {
     // ⚠️ 解题模式：**放在最前面**（紧挨着系统提示词）。
     //    这个是"这次要做的事"的说明，比人设细节更需要模型优先看到。
     if (solveMode) parts.push('\n' + SOLVE_GUIDE);
+
+    // ⚠️⚠️ 2026-10-07 加（用户报：「我刚才都这么写了，**她们两个还是不听写的字，
+    //    连爱音自己都在找出口**」）：
+    //    **正在演的那条剧情，起因要进聊天提示词。**
+    //    原来起因只在"生成剧情段"那条路（`quest.js` 的 `buildSystem`）里，
+    //    而她们平时**接话/闲聊**走的是这里 ⇒ 根本不知道在演什么、规矩是什么，
+    //    只能从群消息里看到半句台词 ⇒ 表现就是"不听写在门板上的字、还在找别的出口" ✗
+    //    ⚠️ 起因从**共享文件**读（`quest.chatBrief`）—— 让位的那个号没有这条线的状态，
+    //      不共享的话它一个字都拿不到（就是"爱音自己也在找出口"的原因）。
+    //    ⚠️ 只在"这个群正在演剧情"时才有内容，日常聊天一个字都不加 ✓
+    if (event?.message_type === 'group') {
+      try {
+        const brief = quest.chatBrief(String(event.group_id ?? ''));
+        if (brief) parts.push('\n' + brief);
+      } catch {}
+      // ⚠️⚠️ 2026-10-07 加（用户报：「**清除剧情之后她们还在说推柜子出房间**」）：
+      //    他清掉剧情之后，**上下文里那几句台词还留着**（两个进程各存一份 recent）⇒
+      //    静默那 60 秒一过，她们就顺着上文接着演 ✗
+      //    ⇒ 清过之后有一个**作废窗口**（默认 10 分钟，`quest.wipedQuietMs`）：
+      //      这期间明说"那条剧情作废了、别提那个房间/门/柜子"，当它没发生过。
+      try {
+        const wipedUntil = this.questWipedUntil?.get(String(event.group_id ?? '')) ?? 0;
+        if (wipedUntil > Date.now()) {
+          parts.push(
+            '\n' +
+              [
+                '⚠️⚠️ **刚才那条剧情已经被管理员清掉了（作废）**：',
+                '   · 🚫 不许再接着它演 —— 别主动提那个房间 / 门 / 柜子 / 怎么出去 / 那个秘密；',
+                '   · 🚫 也别换个说法绕回去（"刚才说到哪儿了"这种也算）—— 就当那件事没发生过；',
+                '   · ✅ 群里说别的事、问她别的，照常正常聊；他要是自己提起，你就当没印象。',
+              ].join('\n'),
+          );
+        }
+      } catch {}
+    }
 
     // ⚠️ 跟服主的关系要在**开头就点一句**。
     //    原来只在提示词末尾（94% 处、前面压着 1.9 万字）讲这事，
@@ -13063,6 +13195,112 @@ export class Bot {
   }
 
   /**
+   * 「按序位让位」——**开场和后面每一段共用同一条公式**（2026-10-07 用户要求）。
+   *
+   * ## 用户原话
+   *   「首先发剧情命令之后所有的机器人都会发一个接剧情的消息，这个时候停一秒
+   *     所有机器人算出加入剧情机器人的总数，然后根据固定公式算出到底哪个机器人来开场，
+   *     **后面接话的顺序是什么**」；
+   *   随后又补：「**下段剧情的转述顺序可以直接沿用**」。
+   *
+   * ## 公式（`quest.orderFor(gid)`）
+   *   = 我自己 + 本群同类池，按 **QQ 号升序** —— 这是配置，两边各自算一次必然得到同一个数组：
+   *     · **第 1 位**：直接上，不让位；
+   *     · **第 n 位**：先等 `(n-1) × quest.openStepMs`（默认 8 秒）错开，然后**盯着群**：
+   *       只要**看见有同类转述了这一次的段** ⇒ **让位**（这一句根本不用生成）。
+   *
+   * ## 为什么不用"停一秒互相统计"
+   *   同类池是**配置**，两个进程都读得到 ⇒ 不需要通信、也不会算出不一致；
+   *   而某个号不在线时，它后面那位等到窗口结束自己上 ⇒ **不会卡死** ✓
+   *
+   * ## 两个关键设计
+   *   ① ⚠️ **让位判断放在生成之前**（`begin` / `advance` 都不调）——
+   *      生成要十几秒，先判断才发现"轮不到我"就白花一次调用，
+   *      而且让位方那条线会多出一段**群里没人见过**的剧情 ✗
+   *   ② ⚠️ **判据是"这一次"而不是"最近"**：`peerPlots.lastAt >= since`
+   *      （`since` = 命令到达那一刻）。用"最近 8 秒有没有人说话"的话，
+   *      上一次留下的旧记录会让后面那位白白让位。
+   *
+   * ⚠️ 窗口（`quest.openWaitMs`，默认 90 秒）必须**够长到覆盖对面一次生成 + 发送**
+   *    （`questAsk` 是 150 秒超时，实测十几秒到几十秒）—— 太短就会两人都发。
+   *    窗口内对面一直没动静（掉线 / 生成失败）⇒ 我到点自己上，不哑火。
+   *
+   * @param {string} gid
+   * @param {{since?:number, where?:string}} [p]
+   * @returns {Promise<boolean>} true = 让位（**这一段不要生成、也不要发**）
+   */
+  async questTurnYield(gid, { since = 0, where = '', rotate = false } = {}) {
+    try {
+      const order = quest.orderFor(gid);
+      const me = String(config.botQQ ?? '');
+      const myRank = order.indexOf(me);
+      // 没配同类池（就我一个）或者不在名单里 ⇒ 没什么可让的
+      if (order.length <= 1 || myRank < 0) return false;
+      // ⚠️⚠️ 2026-10-07 加（用户问：「**为什么这几次都是 saki 开的**」）：
+      //    **开场要轮流。** 原来 `order` 是按 QQ 号升序**固定**的 ⇒ 号小的那位
+      //    永远排第一、立即开场，另一位每次都让位 —— 不是巧合，是公式把它内定了。
+      //    现在：**上一次是谁起的头，这一次就把它挪到名单最后**（其余整体前移）：
+      //      · 我这一侧 = 我最近一次开的剧情（`quest.lastOwnStartAt`）
+      //      · 对面那一侧 = 我在群里看到的同类剧情首条（`peerPlots.firstAt`）
+      //    ⚠️⚠️ 必须是**整体重排**，不能只把"上次那位"排到最后就完事 ——
+      //      v1 就是这么写的，结果**两人都在等**：上次开过的那位排最后（要等），
+      //      另一位仍然是第 2 位（也要等观察窗口）⇒ **谁都不先开口** ✗✗
+      //      （用户实测：「**怎么不接剧情命令了**」—— 没回执、没开场，就是卡在这）
+      //      ⇒ 重排之后**必然有人排第 1**、立即开场 ✓
+      //    ⚠️ 两个进程各自算一次，结论必然一致（同一对时间戳 + 同一张名单）✓
+      //    ⚠️ 都没记录（这个群还没演过）⇒ 按号序，行为不变 ✓
+      //    ⚠️ **只对开场生效**（`rotate`）：推进那一路要"同一个人把这条线演连贯"，
+      //      不能也轮着来 —— 所以推进仍然只按号序让位。
+      const myAt = quest.lastOwnStartAt(gid);
+      const peerPlot0 = quest.__peerPlots().get(String(gid));
+      const peerAt = Number(peerPlot0?.firstAt ?? 0) || 0;
+      let ord = order;
+      let rotatedFrom = '';
+      if (rotate) {
+        const lastOpener =
+          myAt > peerAt ? me : peerAt > myAt ? String(peerPlot0?.uid ?? '') : '';
+        if (lastOpener && order.includes(lastOpener)) {
+          ord = [...order.filter((x) => x !== lastOpener), lastOpener];
+          rotatedFrom = lastOpener;
+        }
+      }
+      const myIdx = ord.indexOf(me);
+      const stepMs = Math.max(1000, Number(config.quest?.openStepMs ?? 8000) || 8000);
+      const waitMax = Math.max(stepMs, Number(config.quest?.openWaitMs ?? 90000) || 90000);
+      log.info(
+        `[剧情] ${where}序位公式：本群参与 ${order.length} 个号（${order.join(' → ')}）` +
+          (rotatedFrom
+            ? `，上次是 ${rotatedFrom} 起的头 → 这次轮到下一位先开（名单变成 ${ord.join(' → ')}）`
+            : '') +
+          `，我排第 ${myIdx + 1} 位` +
+          (myIdx > 0 ? ` → 先等前一位开口（最多 ${Math.round(waitMax / 1000)} 秒）` : ' → 我直接开'),
+      );
+      if (myIdx <= 0) return false;
+      // 按序位错开：第 2 位等 1 个窗口、第 3 位等 2 个（跟开场完全一样）
+      await sleep(Math.min(myIdx * stepMs, waitMax));
+      const deadline = Date.now() + waitMax;
+      for (;;) {
+        const p = quest.__peerPlots().get(String(gid));
+        if (Number(p?.lastAt ?? 0) >= Number(since ?? 0)) {
+          log.info(
+            `[剧情] ${where}前一位已经在转述了（${p?.uid ?? ''}）→ **我这一句不发**（按序位让位）`,
+          );
+          return true;
+        }
+        if (Date.now() >= deadline) {
+          log.info(`[剧情] ${where}序位里前面那位一直没动静（超过 ${Math.round(waitMax / 1000)} 秒）→ **我上**`);
+          return false;
+        }
+        await sleep(1000);
+      }
+    } catch (e) {
+      // ⚠️ 判断出错时**宁可自己上**（让位是优化，哑火才是 bug）
+      log.warn(`[剧情] 序位让位判断出错（${where}）：${e.message}`);
+      return false;
+    }
+  }
+
+  /**
    * ⚠️⚠️ 2026-10-03 加（用户要求）：「如果**正在进行剧情**，`/剧情` 这个指令可以用作
    *   **剧情控制**，后面写的话作为**剧情发展提示词**，**留空直接推进**」。
    *
@@ -13097,18 +13335,24 @@ export class Bot {
               ? `方向：${hint.slice(0, 60)}`
               : '（留空 = 直接推进）'),
       );
-      this.sendToGroup(
-        gid,
-        forceEnd
-          ? forceEnd === 'good'
-            ? '行，这就收个好结局（'
-            : '行，收个坏结局（'
-          : hint
-            ? '行，就往这个方向走，等我一下（'
-            : '好，我接着说（',
-      ).catch(() => {});
-
       (async () => {
+        // ⚠️ 序位判据的起点 = **命令到达这一刻**（两个号几乎同时收到这条命令）
+        const since = Date.now();
+        // ⚠️⚠️ 2026-10-07 用户要求：「**下段剧情的转述顺序可以直接沿用**」——
+        //    所以**手动推进也走开场那一套序位公式**（见 `questTurnYield`）。
+        //    ⚠️ 判断必须在**回执和生成之前**：轮不到我的号**既不回执、也不生成** ——
+        //      不然群里会冒出两条「好，我接着说（」，而且还要白花一次模型调用。
+        if (await this.questTurnYield(gid, { since, where: '推进' })) return;
+        this.sendToGroup(
+          gid,
+          forceEnd
+            ? forceEnd === 'good'
+              ? '行，这就收个好结局（'
+              : '行，收个坏结局（'
+            : hint
+              ? '行，就往这个方向走，等我一下（'
+              : '好，我接着说（',
+        ).catch(() => {});
         const ask = this.questAsk();
         const q = quest.current(gid);
         if (!q || q.endedAt) {
@@ -13376,7 +13620,6 @@ export class Bot {
       //    （日志：`[静默] 这条不发了（大半夜的，我跟祥祥现在关在一个房间里出不…）`
       //      然后群里一分钟没人说话 ⇒ 看起来就是哑火）
       this.muteGroup(gid, 0, '开新剧情 → 解除静默');
-      this.sendToGroup(gid, '行，就按这个来，等我一下（').catch(() => {});
 
       // ── 后台生成（十几秒），生成完自己发到群里 ──
       (async () => {
@@ -13385,41 +13628,26 @@ export class Bot {
         //    稍微写长一点就被截断 ⇒ `parseJson` 失败 ⇒ 兜底把**原文（JSON）当台词发出去** ✗✗
         //    ⇒ 和 `webui.js` 的 `llmAsk` 对齐（16000 / 关思考 / 150 秒）。
         //    ⚠️ 现已抽成 `this.questAsk()`（手动推进那条路共用同一套参数）。
+        // ⚠️ 序位判据的起点 = **命令到达这一刻**（不是"判断的时候"）——
+        //    两个号几乎同时收到这条命令，起点一致，"这一次"的段才算数。
+        const since = Date.now();
+        // ⚠️⚠️ 2026-10-07 用户要求：**开场和后面每一段共用同一条序位公式**
+        //    （见 `questTurnYield`）。这一步必须在 `begin` **和回执之前**：
+        //    · 轮不到我的时候**连生成都不用做**（省一次调用，也不会在自己那条线里
+        //      多出一段"群里没人见过"的剧情）；
+        //    · 回执也只有真正开场的那个号发 —— 不然群里会出现两条
+        //      「行，就按这个来，等我一下（」✗
+        // ⚠️ 开场**要轮流**（`rotate: true`）——用户问过「为什么这几次都是 saki 开的」：
+        //    排第一的号如果上次已经开过，这次就排到最后。推进那一路**不轮换**
+        //    （同一个人把一条线演连贯），所以它不传这个参数。
+        if (await this.questTurnYield(gid, { since, where: '开场', rotate: true })) return;
+        this.sendToGroup(gid, '行，就按这个来，等我一下（').catch(() => {});
         const ask = this.questAsk();
         const r = await quest.begin({ ask, extraHint: hint, groupId: gid, manual: true });
         if (!r?.ok) {
           log.warn(`[剧情] 手动开始失败（群 ${gid}）：${r?.reason}`);
           await this.sendToGroup(gid, `这个开头没写出来：${r?.reason ?? '不知道为啥'}`).catch(() => {});
           return;
-        }
-        // ⚠️⚠️ 2026-10-07 按用户要求改成**通用公式**（用户原话：
-        //    「首先发剧情命令之后所有的机器人都会发一个接剧情的消息，这个时候停一秒
-        //     所有机器人算出加入剧情机器人的总数，然后根据固定公式算出到底哪个机器人
-        //     来开场，后面接话的顺序是什么」）：
-        //    **公式**：把"这个群的同类池 + 我自己"按 **QQ 号升序**排 ——
-        //      · **第 1 位立刻开场**；
-        //      · **第 n 位先等 `(n-1) × stepMs`**（默认 8 秒）；
-        //      · 等到自己该开口时，要是**已经看见有人在演剧情了** ⇒ **让位、不发** ✓
-        //    ⚠️ 为什么不用"停一秒互相统计"：**同类池是配置，两边都读得到** ⇒
-        //      各自算一次就得到**同一个顺序**，不需要通信、也不会算出不一致；
-        //      而且某个号不在线时，后面的号到点自己上（不会卡死）。
-        const order = [...new Set([String(config.botQQ ?? ''), ...peersFor(gid).map(String)])]
-          .filter(Boolean)
-          .sort();
-        const myIdx = Math.max(0, order.indexOf(String(config.botQQ ?? '')));
-        const stepMs = Math.max(1000, Number(config.quest?.openStepMs ?? 8000) || 8000);
-        if (myIdx > 0) {
-          const wait = myIdx * stepMs;
-          log.info(
-            `[剧情] 开场公式：本群参与 ${order.length} 个号（${order.join(' → ')}），` +
-              `我排第 ${myIdx + 1} 位 → 先等 ${Math.round(wait / 1000)} 秒`,
-          );
-          await sleep(wait);
-          const p0 = quest.__peerPlots().get(gid);
-          if (p0?.lastAt && Date.now() - p0.lastAt < stepMs) {
-            log.info('[剧情] 前一位已经在演了 → **我这条开始段不发**（按序位让位）');
-            return;
-          }
         }
         const sent = await this.sendChatLike(gid, r.text);
         for (const x of sent) quest.rememberHerMsg(r.quest, x?.message_id);
@@ -13474,6 +13702,41 @@ export class Bot {
         log.info(`[剧情] ${event.user_id} 想清除剧情但没权限（role=${role}）→ 已回提示`);
         this.sendToGroup(gid, '这个只有服主和管理员能用（').catch(() => {});
         return true;
+      }
+
+      // ⚠️⚠️ 2026-10-07 加（用户报：「**清除剧情之后她们还在说推柜子出房间**」）：
+      //    **静默只有 60 秒，不够。** 过了那 60 秒，**上下文里那几句台词还在**
+      //    （各进程各存一份 recent），她们就顺着上文继续演 —— 用户看到的就是
+      //    "清完剧情还在说推柜子出房间" ✗
+      //    ⇒ 除了静默，再记一个**"那条剧情作废"的窗口**（默认 10 分钟）：
+      //      这期间聊天提示词里会**明说**"别提那个房间 / 门 / 柜子、当它没发生过"。
+      //    ⚠️ 两个号都会收到这条指令、各自记一份 ⇒ 两边都压得住 ✓
+      //    ⚠️ 放在权限检查**之后**、清不清的**之前** —— 哪怕这次没得清，也该压住。
+      this.questWipedUntil ??= new Map();
+      this.questWipedUntil.set(
+        gid,
+        Date.now() + Math.max(60000, Number(config.quest?.wipedQuietMs ?? 600000) || 600000),
+      );
+
+      // ⚠️⚠️ 2026-10-07 加（用户截图：**没主导剧情的那个号，`/清除剧情` 把上上一个剧情清了**）：
+      //    让位的那个号**自己没有这条线**（序位公式让它没 `begin`），
+      //    于是 `quest.purge()` 里 `running` 为空、退到"清 `recent` 里最后一条已结束的"——
+      //    那条往往是**更早的、跟这次完全无关**的剧情 ✗（截图里爱音就是这么干的）
+      //    ⇒ **正在演的那条不是我起的头 ⇒ 这条命令不该我处理**：
+      //      既不清、也不回执（群里只该有一条回执，由真正在记这条线的那个号发）。
+      //    ⚠️ 判据和别处一致：`questLive()` = "这个群在演剧情"，再看"那条是不是我的"。
+      {
+        const cur0 = quest.current(gid);
+        const mineRunning = !!(cur0 && !cur0.endedAt);
+        if (!mineRunning && this.questLive(gid)) {
+          // ⚠️ **静默照旧**（用户要求「发了清除剧情就强制停发一分钟」）——
+          //    两个号是各自收到这条指令的，都要静默；只是**清**这件事归主导方。
+          this.muteGroup(gid, 60000, '收到 /清除剧情（这条不是我起的头）');
+          log.info(
+            `[剧情] /清除剧情：群 ${gid} 正在演的这条**不是我起的头** → 我不清、也不回执`,
+          );
+          return true;
+        }
       }
 
       const r = quest.purge(gid);

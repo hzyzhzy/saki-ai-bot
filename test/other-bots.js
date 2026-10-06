@@ -616,18 +616,18 @@ console.log('\n【15】★★ 真人起的话头 ⇒ 尽早收场（2026-10-07 �
     '★★ 剧情进行中**不用**"真人起头"那套低阈值（`!inQuest0 &&`）',
   );
   check(
-    /!quest\.current\(gid0\) && !peerAtMe && this\.isFarewellLine\(peerText0\)/.test(src15),
+    /!this\.questLive\(gid0\) && !peerAtMe && this\.isFarewellLine\(peerText0\)/.test(src15),
     '★★ "纯告辞不接"那条闸在剧情里**不生效**（`/剧情` 的回执就栽在这儿）',
   );
   check(
-    /!quest\.current\(gid0\) &&[\s\S]{0,80}?this\.farewellPingPong\(gid0\)/.test(src15),
+    /!this\.questLive\(gid0\) &&[\s\S]{0,80}?this\.farewellPingPong\(gid0\)/.test(src15),
     '★★ 收尾拉锯那条闸同样有剧情例外（剧情里道别是戏的一部分）',
   );
   // ⚠️ 2026-10-07（用户：「开剧情时每个 bot 都发一大堆消息，**必须要合并回复**，
   //    要不然要回的消息会越回越多」）：日志实证**合并已经生效**了，可紧接着是
   //    `[同类] 刚收过尾（1 分钟冷却中）→ 同类的这条不接` ✗ ⇒ 合并白做 + 剧情里不接 ✗
   check(
-    /if \(peers0\.has\(sender0\) && cooling && !quest\.current\(gid0\)\)/.test(src15),
+    /if \(peers0\.has\(sender0\) && cooling && !this\.questLive\(gid0\)\)/.test(src15),
     '★★ "刚收过尾"那条冷却也有剧情例外（实测合并完就被它拦掉，等于白合并）',
   );
 }
@@ -679,7 +679,7 @@ console.log('\n【16】★★ 同类「话没说完就先别生成」（2026-10-
 
   const src16 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
   check(
-    /async shouldJoinChatAsync\(event, opts = \{\}\) \{[\s\S]{0,1200}?await this\.waitPeerQuiet/.test(src16),
+    /async shouldJoinChatAsync\(event, opts = \{\}\) \{[\s\S]{0,2200}?await this\.waitPeerQuiet/.test(src16),
     '★★ 接在同类消息处理的**最前面**（连"要不要接"都还没判就先等）',
   );
   check(
@@ -744,6 +744,646 @@ console.log('\n【17】★★ 同类分条消息**合并成一条**再回（2026
     '★ 合并只在"真的攒到了别的条"时才做',
   );
   check(/this\.clearPeerLines\(gid\)/.test(src17), '★ 合并完清掉暂存');
+}
+
+console.log('\n【18】★★ 剧情转述的序位 —— **下段沿用开场那条公式**（2026-10-07 用户要求）');
+{
+  // 用户原话：「**下段剧情的转述顺序可以直接沿用**」——
+  //   即：开场那套「本群参与的号按 QQ 升序排、第 n 位错开后让位」**不是开场专用**，
+  //   后面每一次推进（`/剧情 继续`、`/剧情 往哪走`）都走同一条公式。
+  // ⚠️ 这就修掉了他报的「**两个人都转述剧情**」：让位的那一位**连生成都不做**。
+  const quest = await import('../src/quest.js');
+  const { Bot } = await import('../src/bot.js');
+  // ⚠️ 离线套件不连 QQ，`config.botQQ` 可能是空的 —— 而序位公式正是靠它算"我排第几"，
+  //    所以这里先钉一个测试号（`orderFor` 是要过滤掉空串的，空号会让整个名单只剩同类）。
+  config.botQQ = config.botQQ || '999000099';
+  const me = String(config.botQQ);
+  const num = (d) => (/^\d+$/.test(me) ? String(BigInt(me) + BigInt(d)) : d > 0 ? '99999999' : '00000001');
+  const BIGGER = num(1); // 一定排在我后面 ⇒ 我排第 1
+  const SMALLER = num(-1); // 一定排在我前面 ⇒ 我排第 2
+  const GF = '999000011';
+  const GL = '999000012';
+  config.groupParams[GF] = { peers: [BIGGER] };
+  config.groupParams[GL] = { peers: [SMALLER] };
+
+  const oF = quest.orderFor(GF);
+  const oL = quest.orderFor(GL);
+  check(
+    oF[0] === me && oF[oF.length - 1] === BIGGER,
+    '★ 参与者顺序 = 我自己 + 本群同类池，按 QQ 号升序',
+    oF.join(' → '),
+  );
+  check(oL[0] === SMALLER && oL[oL.length - 1] === me, '★ 号小的排前面（这一组我排第 2）', oL.join(' → '));
+  check(
+    JSON.stringify(quest.orderFor(GF)) === JSON.stringify(quest.orderFor(GF)),
+    '★★ 同一个群算两次结果一样 —— 两个进程各自算，必须得出同一个顺序（不然两边都以为轮到自己）',
+  );
+
+  const b18 = new Bot();
+  const tNoPeer = Date.now();
+  const noPeer = await b18.questTurnYield('999000013', { since: Date.now(), where: '自检' });
+  check(
+    noPeer === false && Date.now() - tNoPeer < 300,
+    '★ 没配同类池（就我一个）⇒ 立刻返回"不让位"，不白等窗口',
+  );
+
+  const tFirst = Date.now();
+  const first = await b18.questTurnYield(GF, { since: Date.now(), where: '自检' });
+  check(first === false && Date.now() - tFirst < 300, '★ 排第 1 位 ⇒ 立刻上，一秒都不等');
+
+  // 窗口调小，好在测试里等得起
+  config.quest = { ...(config.quest ?? {}), openStepMs: 300, openWaitMs: 2000 };
+
+  const since1 = Date.now();
+  quest.notePeerPlot(GL, {
+    uid: SMALLER,
+    text: '我把门推开一条缝，屋里没有人说话，只有风。',
+    at: Date.now(),
+  });
+  const tSecond = Date.now();
+  const second = await b18.questTurnYield(GL, { since: since1, where: '自检' });
+  check(second === true, '★★ 排第 2 位 + 前一位**这一次**已经转述了 ⇒ **让位**（这一段不生成、也不发）');
+  check(Date.now() - tSecond >= 250, `★ 让位前先按序位错开了一下（等了 ${Date.now() - tSecond}ms）`);
+
+  // ⚠️ 这里的关键是"旧记录不算数"：peerPlots 里明明还有上一条（时间更早），
+  //    但 `since` 比它晚 ⇒ 不该因此让位。
+  const since2 = Date.now();
+  const tLate = Date.now();
+  const late = await b18.questTurnYield(GL, { since: since2, where: '自检' });
+  check(
+    late === false,
+    '★★ 前一位这一次没动静（窗口到点）⇒ **我自己上** —— 不会为了等一个不会来的人哑火',
+  );
+  check(Date.now() - tLate >= 1800, `★ 确实等满了窗口才上（${Date.now() - tLate}ms）`);
+
+  const src18 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  check(
+    (src18.match(/this\.questTurnYield\(gid, \{ since, where: /g) ?? []).length === 2,
+    '★★ **开场和手动推进共用同一条序位公式**（两处都调它，不是各抄一份）',
+  );
+  check(
+    /async questTurnYield\(gid, \{ since = 0, where = '', rotate = false \} = \{\}\)/.test(src18),
+    '★ 序位让位是个共用方法',
+  );
+  check(
+    /if \(await this\.questTurnYield\(gid, \{ since, where: '开场', rotate: true \}\)\) return;[\s\S]{0,240}?const r = await quest\.begin/.test(
+      src18,
+    ),
+    '★★ 开场的让位判断排在 `quest.begin` **之前**（轮不到我的号连生成都不做）',
+  );
+  check(
+    /if \(await this\.questTurnYield\(gid, \{ since, where: '推进' \}\)\) return;[\s\S]{0,1400}?const r = await quest\.advance/.test(
+      src18,
+    ),
+    '★★ 推进的让位判断也排在 `quest.advance` **之前**',
+  );
+  const sq = readFileSync(join(ROOT, 'src', 'quest.js'), 'utf8');
+  check(
+    /export function orderFor\(groupId\)/.test(sq),
+    '★ 顺序统一由 `quest.orderFor` 算（只看配置，双方各自算得出同一个数组）',
+  );
+}
+
+console.log('\n【19】★★ 剧情进行中，同类的话**不掷骰**（2026-10-07 用户报「怎么 saki 没回」）');
+{
+  // ## 现场日志（原样）
+  //   `[同类] 它在自言自语 → 掷骰没过（0.6）→ 不接`
+  //   ⇒ 爱音演完一整段，saki 一句都不接 —— 用户看到的就是"saki 没回"。
+  // ## 为什么
+  //   她俩的剧情转述**不带 @、也不带引用**（那是讲给群友听的叙述）⇒ 正好落进
+  //   `decide()` 里"同类自言自语"那条掷骰（0.6 + 60 秒冷却）；而
+  //   `shouldJoinChatAsync()` 里那条"剧情里的同类消息直接放行"的旁路
+  //   **排在掷骰后面** ⇒ 掷不中就 `return null`，根本走不到那一条 ✗
+  // ## 所以盯两件事
+  //   ① 顺序：剧情例外必须**排在掷骰之前**（这次的 bug 就是顺序错）；
+  //   ② 行为：真塞一条在跑的剧情，同类没 @ 没引用也必须**直接接**。
+  const quest19 = await import('../src/quest.js');
+  const { Bot } = await import('../src/bot.js');
+  const G19 = '999000019';
+  const PEER19 = '10000019';
+  config.groupParams[G19] = { peers: [PEER19] };
+  // ⚠️ `shouldJoinChat()` 头上有几道"这个群收不收主动接话"的闸（灵敏度档位 / 群白名单）——
+  //    测试里先把它们摆成**放行**，否则测到的是那几道闸、不是我们关心的这一条。
+  config.trigger = {
+    ...(config.trigger ?? {}),
+    respondTo: 1,
+    groupRespondTo: { ...(config.trigger?.groupRespondTo ?? {}), [G19]: 1 },
+    allowGroups: [],
+  };
+  // ⚠️ 前面的段落把 `chat.enable` 关掉过（那是"群里到底接不接话"的总开关）——
+  //    这里要放行，否则 `shouldJoinChat()` 第一道闸就返回 null，测的不是我们关心的东西。
+  config.chat = { ...(config.chat ?? {}), enable: true };
+  const b19 = new Bot();
+
+  const src19 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  const iQuest19 = src19.indexOf('剧情进行中 → 同类的话');
+  const iRoll19 = src19.indexOf('Math.random() < chance');
+  check(
+    iQuest19 > 0 && iRoll19 > 0 && iQuest19 < iRoll19,
+    '★★ 剧情例外**排在掷骰之前**（顺序错的话它跟没写一样）',
+  );
+  check(
+    /inQuest0 && !talkingToSomeone/.test(src19),
+    '★ 判据 = 这个群在跑剧情 + 它没 @ 谁也没引用谁',
+  );
+
+  const evt19 = () => ({
+    post_type: 'message',
+    message_type: 'group',
+    group_id: G19,
+    user_id: PEER19,
+    self_id: String(config.botQQ ?? ''),
+    sender: { card: '', nickname: '' },
+    message: [
+      { type: 'text', data: { text: '她把手搭在门把上，没回头，说这扇门认的不是敲没敲过。' } },
+    ],
+  });
+
+  // ⚠️ `__set` 只改**内存**、不落盘（`begin` 会写盘 —— other-bots 这个套件
+  //    直接 `node test/other-bots.js` 跑时**没有隔离 env**，绝不能写真实剧情）
+  quest19.__set({
+    byGroup: {
+      [G19]: {
+        current: {
+          id: 'q-19',
+          groupId: G19,
+          startedAt: Date.now(),
+          premise: '门锁死了，门板上写着出去的条件',
+          plannedStages: 3,
+          stageIndex: 1,
+          endedAt: 0,
+          stages: [{ i: 1, at: Date.now(), text: '门板上写着条件。' }],
+          herMsgIds: [],
+          pending: [],
+          cast: [],
+          humanReplies: 0,
+          autoContinues: 0,
+        },
+        recent: [],
+        starts: [],
+      },
+    },
+  });
+  check(!!quest19.current(G19), '★ 测试用的剧情已经"在跑"了（塞进内存，不写盘）');
+  // ⚠️ 卡点在 `shouldJoinChat()`（同步）——**不是** `decide()`：
+  //    真实日志是 `[同类] 它在自言自语 → 掷骰没过 → 不接` 紧接着
+  //    `[主动接话] 判定返回：null（不接）`，也就是说这条消息**根本没进 handle**，
+  //    所以修在 `shouldJoinChat` 里、断言也必须打在它上面。
+  const d19 = b19.shouldJoinChat(evt19());
+  check(
+    !!d19 && d19.mode === 'chat',
+    '★★ 剧情里同类没 @ 没引用 ⇒ **直接接**（不再被 0.6 的骰子拦掉）',
+    JSON.stringify(d19),
+  );
+  check(
+    d19?.needJudge === true,
+    '★ 仍然带 needJudge（由 `shouldJoinChatAsync` 里那条"剧情里同类直接放行"的旁路兜住）',
+  );
+
+  // ③ ⚠️⚠️ **让位方**：自己没开线（序位公式让它根本不 begin），只在群里看到同类在演 ——
+  //    用户报的第二半就是「**爱音这次又不回了**」：所有拿 `quest.current()` 当判据的
+  //    "剧情例外"在它那边全部失效 ⇒ 一边接话、另一边一声不吭 ✗
+  quest19.__set({ byGroup: {} });
+  check(!quest19.current(G19), '★ 先确认：我自己这条线是**空的**（让位方的状态）');
+  quest19.notePeerPlot(G19, {
+    uid: PEER19,
+    text: '她把手搭在门把上，没回头，说这扇门认的不是敲没敲过。',
+  });
+  check(
+    b19.questLive(G19),
+    '★★ 自己没开线、但"看见同类在演" ⇒ `questLive` 仍然算**剧情进行中**',
+  );
+  const d19b = b19.shouldJoinChat(evt19());
+  check(
+    !!d19b && d19b.mode === 'chat',
+    '★★ 让位方照样**直接接**（不再出现"一边接、另一边哑"）',
+    JSON.stringify(d19b),
+  );
+  const src19b = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  check(
+    (src19b.match(/this\.questLive\(/g) ?? []).length >= 6,
+    '★★ 那些"剧情里别拦"的判据**统一走 `questLive`**（两边的口径必须一样）',
+    `用了 ${(src19b.match(/this\.questLive\(/g) ?? []).length} 处`,
+  );
+  quest19.__set({ byGroup: {} });
+  quest19.__peerPlots().delete(G19);
+}
+
+console.log('\n【20】★★ 剧情里的同类消息，不许被"吞消息"的闸拦掉（2026-10-07 用户连报三次"没回"）');
+{
+  // ## 这一套盯的是"消息被静默丢掉"的那几处（每一处都单独造成过"一声不吭"）
+  //   ① 防刷屏的**软闭麦**：演剧情时她一次分条发好几条 ⇒ 必然命中"10 秒 6 条"
+  //      ⇒ 60 秒内同类的剧情段**一条都不处理**（日志实证 `[防刷屏] … 闭麦 60 秒`）
+  //   ② 触发冷却：她两秒前刚回过一句 ⇒ 下一句剧情被"距上次回复不足 N 秒"吞掉
+  //   ③ `decide()` 那处放行**必须带正文**，不然会被当成"只 @ 了没打字"
+  //   ④ 剧情记录"起步严、续记宽"：第一段之后短句也要算剧情延续
+  const quest20 = await import('../src/quest.js');
+  const { Bot } = await import('../src/bot.js');
+  const G20 = '999000020';
+  const PEER20 = '10000020';
+  config.groupParams[G20] = { peers: [PEER20] };
+  config.flood = {
+    ...(config.flood ?? {}),
+    enable: true,
+    windowMs: 10000,
+    count: 6,
+    muteMs: 60000,
+  };
+  const ev20 = (t = '她把手搭在门把上，没回头。') => ({
+    post_type: 'message',
+    message_type: 'group',
+    group_id: G20,
+    user_id: PEER20,
+    self_id: String(config.botQQ ?? ''),
+    sender: { card: '', nickname: '' },
+    message: [{ type: 'text', data: { text: t } }],
+  });
+
+  // ① 对照：**没有剧情**时，同类连发照样会被防刷屏闭麦（这条闸本身必须还在）
+  quest20.__set({ byGroup: {} });
+  quest20.__peerPlots().delete(G20);
+  const b20 = new Bot();
+  let blocked0 = 0;
+  for (let i = 0; i < 7; i++) if (b20.checkFlood(ev20())) blocked0++;
+  check(
+    blocked0 > 0,
+    '★ 对照：没有剧情时，同类连发 6 条 ⇒ **照样闭麦**（闸没被拆掉）',
+    `blocked=${blocked0}`,
+  );
+
+  // ② 剧情进行中 ⇒ 一条都不闭麦
+  const b20b = new Bot();
+  quest20.__set({
+    byGroup: {
+      [G20]: {
+        current: {
+          id: 'q20',
+          groupId: G20,
+          startedAt: Date.now(),
+          premise: '门锁死了',
+          plannedStages: 3,
+          stageIndex: 1,
+          endedAt: 0,
+          stages: [{ i: 1, at: Date.now(), text: '门板上写着条件。' }],
+          herMsgIds: [],
+          pending: [],
+          cast: [],
+          humanReplies: 0,
+          autoContinues: 0,
+        },
+        recent: [],
+        starts: [],
+      },
+    },
+  });
+  let blocked1 = 0;
+  for (let i = 0; i < 10; i++) if (b20b.checkFlood(ev20())) blocked1++;
+  check(
+    blocked1 === 0,
+    '★★ 剧情进行中：同类连发 10 条也**不闭麦**（"没回"的第四个真凶）',
+    `blocked=${blocked1}`,
+  );
+
+  const src20 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  check(
+    /isPeerBot\(String\(event\?\.group_id \?\? ''\), String\(event\?\.user_id \?\? ''\)\) &&\s*this\.questLive/.test(
+      src20,
+    ),
+    '★★ 触发冷却那道闸也放行"剧情里的同类"（不然她刚回过一句就接不上下一句）',
+  );
+  check(
+    /return \{ mode: 'chat', text: msg\.extractText\(msg\.toSegments\(event\.message\)\) \};/.test(src20),
+    '★★ decide 的放行**带上了正文**（不带就会被当成"只 @ 了没打字"）',
+  );
+
+  // ③ 剧情记录"起步严、续记宽"
+  quest20.__set({ byGroup: {} });
+  quest20.__peerPlots().delete(G20);
+  check(
+    quest20.notePeerPlot(G20, { uid: PEER20, text: '嗯。' }) === false,
+    '★ 还没起步过 ⇒ 短句不算（别把闲聊当成剧情）',
+  );
+  check(
+    quest20.notePeerPlot(G20, {
+      uid: PEER20,
+      text: '她把手搭在门把上，没回头，说这扇门认的不是敲没敲过。',
+    }) === true,
+    '★ 第一条（长句）记上 —— 严格判据仍然管"起步"',
+  );
+  check(
+    quest20.notePeerPlot(G20, { uid: PEER20, text: '嗯。' }) === true,
+    '★★ 起步之后**短句也续记**（不然演到一半一条短句就让整条例外链失效）',
+  );
+  quest20.__peerPlots().delete(G20);
+  quest20.__set({ byGroup: {} });
+}
+
+console.log('\n【21】★★ `/清除剧情` 只由**主导那条线的号**执行 + 整链端到端（2026-10-07 用户截图）');
+{
+  // ## 截图里的问题
+  //   让位的那个号（自己**没有**这条剧情线）也执行了清除 ⇒ `quest.purge()` 里
+  //   `running` 为空、退到"清 `recent` 里最后一条已结束的" ⇒
+  //   **把上上一个剧情清了** ✗（用户原话：「另一个没主导剧情的在清剧情的时候
+  //   会清掉上上一个剧情」）
+  const quest21 = await import('../src/quest.js');
+  const { Bot } = await import('../src/bot.js');
+  const src21 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  check(
+    /const cur0 = quest\.current\(gid\);[\s\S]{0,240}?if \(!mineRunning && this\.questLive\(gid\)\)/.test(src21),
+    '★★ 正在演的那条**不是我起的头** ⇒ 我不清（判据 = 我没有在跑的线 + 群里在演剧情）',
+  );
+  check(
+    /this\.muteGroup\(gid, 60000, '收到 \/清除剧情（这条不是我起的头）'\)/.test(src21),
+    '★ 但**静默照旧**（两个号都停发一分钟 —— 那是他发这条指令的意图）',
+  );
+  check(
+    /if \(!mineRunning && this\.questLive\(gid\)\)[\s\S]{0,500}?const r = quest\.purge\(gid\);/.test(src21),
+    '★★ 这个判断排在 `quest.purge()` **之前**（顺序错就等于没写）',
+  );
+
+  // ── 整链端到端：`shouldJoinChatAsync()` 对"剧情里的同类消息"必须放行 ──
+  //    这一条把前面几处串起来测：提前记剧情 + 掷骰例外 + 剧情直接放行。
+  const G21 = '999000021';
+  const PEER21 = '10000021';
+  config.groupParams[G21] = { peers: [PEER21] };
+  config.peerChat = {
+    ...(config.peerChat ?? {}),
+    peerQuietMs: 30,
+    peerQuietQuestMs: 30,
+    peerQuietMaxMs: 300,
+    peerReplyCooldownMs: 0,
+    peerMinWaitMs: 0,
+  };
+  const b21 = new Bot();
+  quest21.__peerPlots().delete(G21);
+  const j21 = await b21.shouldJoinChatAsync({
+    post_type: 'message',
+    message_type: 'group',
+    group_id: G21,
+    user_id: PEER21,
+    self_id: String(config.botQQ ?? ''),
+    sender: { card: '', nickname: '' },
+    message: [
+      { type: 'text', data: { text: '她把手搭在门把上，没回头，说这扇门认的不是敲没敲过。' } },
+    ],
+  });
+  check(
+    !!j21 && j21.mode === 'chat',
+    '★★ 整条链（shouldJoinChatAsync）放行"剧情里的同类消息"',
+    JSON.stringify(j21),
+  );
+  check(
+    b21.questLive(G21),
+    '★★ 而且这一步就**提前记下了**"看见同类在演剧情"（让位方全靠它才知道在演剧情）',
+  );
+  quest21.__peerPlots().delete(G21);
+}
+
+console.log('\n【22】★★ 开场**轮流**（2026-10-07 用户问「为什么这几次都是 saki 开的」）');
+{
+  // ## 为什么之前总是同一个人开
+  //   `quest.orderFor()` 按 QQ 号升序排，是**固定**的 ⇒ 号小的那位永远排第一、
+  //   立即开场，另一位每次都让位 —— 不是巧合，是公式把它内定了。
+  // ## 现在
+  //   上一次是谁起的头，这一次就轮到另一个人：
+  //     · 我这一侧 = `quest.lastOwnStartAt()`（`recent` 里只有**我开过的**线）
+  //     · 对面那一侧 = `peerPlots.firstAt`
+  //     · 谁更晚 ⇒ 谁上次开的 ⇒ 这次它排到最后
+  //   ⚠️ 两个进程各自比一次，结论必然一致；都没记录 ⇒ 按号序（行为不变）。
+  const quest22 = await import('../src/quest.js');
+  const { Bot } = await import('../src/bot.js');
+  const G22 = '999000022';
+  const meNum22 = String(config.botQQ ?? '999000099');
+  // ⚠️ 必须是一个**一定排在我后面**的号（字符串升序）—— 写死 '999000023' 会比我小，
+  //    那"我排第 2"本来就要等，断言会看不出轮换的效果。
+  const BIG22 = /^\d+$/.test(meNum22) ? String(BigInt(meNum22) + 1n) : '99999999';
+  config.botQQ = config.botQQ || '999000099';
+  config.groupParams[G22] = { peers: [BIG22] };
+  config.quest = { ...(config.quest ?? {}), openStepMs: 150, openWaitMs: 700 };
+  const b22 = new Bot();
+
+  quest22.__set({ byGroup: {} });
+  quest22.__peerPlots().delete(G22);
+  check(quest22.lastOwnStartAt(G22) === 0, '★ 没开过 ⇒ `lastOwnStartAt` = 0');
+  let t22 = Date.now();
+  const y1 = await b22.questTurnYield(G22, { since: Date.now(), where: '自检', rotate: true });
+  check(
+    y1 === false && Date.now() - t22 < 200,
+    '★★ 第一次（都没记录）：按号序**我直接开**（行为不变）',
+    `${Date.now() - t22}ms`,
+  );
+
+  // 上次是我开的（`starts` 里最后一条是刚才）⇒ 这次我排到最后，先让对面
+  quest22.__set({
+    byGroup: {
+      [G22]: {
+        current: null,
+        recent: [],
+        // ⚠️ 证据在 `starts`（`begin` 时 push 的），**不是** `recent` ——
+        //    用户常「先 /清除剧情 再开新的」，`recent` 会被清掉，`starts` 不会。
+        starts: [Date.now() - 60000],
+      },
+    },
+  });
+  check(quest22.lastOwnStartAt(G22) > 0, '★ 读得到"我上一次开的"时间（`starts` 最后一条）');
+  t22 = Date.now();
+  const y2 = await b22.questTurnYield(G22, { since: Date.now(), where: '自检', rotate: true });
+  const waited22 = Date.now() - t22;
+  check(y2 === false, '★ 对面一直没开 ⇒ 到点**我还是上**（不哑火）');
+  check(waited22 >= 500, `★★ 但**先让了对面一轮**才上（等了 ${waited22}ms，不是立刻开）`);
+
+  // 上次是**对面**开的 ⇒ 这次我优先
+  quest22.__set({
+    byGroup: {
+      [G22]: {
+        current: null,
+        recent: [],
+        starts: [Date.now() - 600000],
+      },
+    },
+  });
+  quest22.__peerPlots().delete(G22);
+  quest22.notePeerPlot(G22, {
+    uid: BIG22,
+    text: '她把手搭在门把上，没回头，说这扇门认的不是敲没敲过。',
+    at: Date.now() - 60000,
+  });
+  t22 = Date.now();
+  const y4 = await b22.questTurnYield(G22, { since: Date.now(), where: '自检', rotate: true });
+  check(
+    y4 === false && Date.now() - t22 < 200,
+    '★★ 上次是**对面**开的 ⇒ 这次**轮到我直接开**（真的在轮流）',
+    `${Date.now() - t22}ms`,
+  );
+
+  const src22 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  check(/where: '开场', rotate: true/.test(src22), '★★ 开场那一路传了 `rotate: true`');
+  check(
+    !/where: '推进', rotate/.test(src22),
+    '★★ 推进**不轮换**（同一个人把一条线演连贯，只按号序让位）',
+  );
+  // ⚠️⚠️ 用户实测踩到的（「**怎么不接剧情命令了**」）：
+  //    v1 的轮换是"把上次那位排到**最后**" ⇒ 另一位仍然是第 2 位（也要等观察窗口）
+  //    ⇒ **两人都在等、谁都不先开口**，群里看起来就是"指令没反应"✗
+  //    ⇒ 必须是**整体重排**：把上次那位挪到末尾、其余整体前移 ⇒ 必然有人排第 1 ✓
+  check(
+    /ord = \[\.\.\.order\.filter\(\(x\) => x !== lastOpener\), lastOpener\]/.test(src22),
+    '★★★ 轮换是**整体重排**（保证永远有一个人排第 1、立即开场）',
+  );
+  check(
+    !/myIdx = iOpenedLast \? order\.length/.test(src22),
+    '★★★ 旧写法（"排到最后"）已经删掉 —— 那版会让两个号都在等，剧情指令看起来没反应',
+  );
+  quest22.__peerPlots().delete(G22);
+  quest22.__set({ byGroup: {} });
+}
+
+console.log('\n【23】★★ 剧情起因进**聊天提示词**、并且**两个进程共享**（2026-10-07 用户报「不听写的字」）');
+{
+  // ## 用户报的现场
+  //   「/剧情 …其实这一切都是爱音干的，但是现在爱音要保守这个秘密。
+  //     我刚才都这么写了，**她们两个还是不听写的字，连爱音自己都在找出口**」
+  // ## 两个机制原因
+  //   ① 起因原来**只进"生成剧情段"那条路** ⇒ 她们平时**接话**走的是聊天提示词，
+  //      那里**从来没有注入过剧情** ⇒ 不知道在演什么、规矩是什么；
+  //   ② 让位的那个号**自己根本没有这条线的状态**（序位公式让它没 begin）
+  //      ⇒ 它连起因都拿不到（"连爱音自己都在找出口"就是这个）。
+  //   ⇒ 所以起因要放一份**两个进程共享**的，聊天提示词据此注入。
+  const quest23 = await import('../src/quest.js');
+  const G23 = '999000030';
+  const PREM23 = '门板上写着必须做到 X 才出得去；其实这一切都是爱音干的，她要保守这个秘密。';
+
+  check(quest23.sharedPremise(G23) === '', '★ 没演剧情时是空串（日常聊天一个字都不加）');
+  check(quest23.chatBrief(G23) === '', '★ 没演剧情时聊天简报也是空的');
+  check(
+    quest23.noteSharedPremise(G23, { premise: PREM23, by: '999000099' }) === true,
+    '★★ 起因写得进共享那份（`begin` 时写）',
+  );
+  check(quest23.sharedPremise(G23) === PREM23, '★★ 另一个进程读得到（这就是让位方能拿到设定的通道）');
+  const brief23 = quest23.chatBrief(G23);
+  check(brief23.includes('硬设定'), '★★ 聊天简报里点明"这是硬设定，不是背景资料"');
+  check(/你就是那个人/.test(brief23) && /岔开/.test(brief23), '★★ 秘密那条：当事人要守着（会慌、会岔开）');
+  check(/你不是那个人/.test(brief23), '★★ 而且**不是当事人的那个号就当自己不知道**（不然 saki 会当场说破）');
+  check(/不许绕开它另找出口/.test(brief23), '★★ 规则那条：不许绕开它另找出口');
+  check(quest23.clearSharedPremise(G23) === true, '★ 清得掉（剧情结束 / 被清除时要用）');
+  check(quest23.sharedPremise(G23) === '', '★ 清掉之后不再注入');
+
+  const src23 = readFileSync(join(ROOT, 'src', 'quest.js'), 'utf8');
+  const bsrc23 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  check(
+    /noteSharedPremise\(quest\.groupId/.test(src23),
+    '★★ `begin` 里真的写了共享起因',
+  );
+  check(
+    /clearSharedPremise\(quest\.groupId\)/.test(src23) && /clearSharedPremise\(k\)/.test(src23),
+    '★★ `finish` / `purge` 里都撤掉了（不然收尾、清剧情之后还一直挂着）',
+  );
+  check(
+    /quest\.chatBrief\(String\(event\.group_id \?\? ''\)\)/.test(bsrc23),
+    '★★ 聊天提示词（`buildSystemPrompt`）真的注入了剧情简报',
+  );
+  check(/6c-4\./.test(src23), '★ 剧情提示词里有 6c-4（真相 / 秘密必须演出来）');
+  check(
+    /开场不许急着找出口/.test(src23),
+    '★★ 开场那一段单独强化过：**开场不许急着找出口**（用户看到的就是开头就去找风）',
+  );
+
+  // ── 用户第二/第三次追问：「剧情开始词要不要重新再加固一下」→
+  //    「**我是说 /剧情 后面写的句子**」────────────────────────────────
+  //    他写的那段话**通常不止一件事**（场景 + 规矩 + 真相），实测模型只落实了一件半。
+  check(/6c-5\./.test(src23), '★★ 剧情提示词里有 6c-5：起因那句话要**逐条照顾**，一条都不许漏');
+  check(
+    /先在心里把它拆成几条/.test(src23),
+    '★★ 开场那边明确要求：**先把他那段话拆成几条，再逐条落实**',
+  );
+  check(/不许改设定/.test(src23), '★★ 而且**不许改设定**（换个说法就是改题）');
+
+  // ── 代码兜底：开场拐去"找出口" ⇒ 重写一次 ──────────────────
+  const HINT23 = '爱音和祥子被关在没有窗户的房间里，门板上写着必须做到亲密才能出去，其实这一切都是爱音干的';
+  check(
+    quest23.looksLikeDodgingOpening(
+      JSON.stringify({ text: '她敲了四面墙，又趴下看门缝的风，说外面是通的。' }),
+      HINT23,
+    ) === true,
+    '★★ 兜底认得出来："敲墙 / 门缝的风" 就是跑偏',
+  );
+  check(
+    quest23.looksLikeDodgingOpening(
+      JSON.stringify({ text: '她把门板上那行字念了一遍，然后发现爱音一句话都没说。' }),
+      HINT23,
+    ) === false,
+    '★ 正常开场不误伤',
+  );
+  check(
+    quest23.looksLikeDodgingOpening(
+      JSON.stringify({ text: '她敲了四面墙。' }),
+      '今天天气不错',
+    ) === false,
+    '★ 起因里没有硬条件时**不管**（免得误伤"本来就在找东西"的剧情）',
+  );
+
+  const G23b = '999000031';
+  config.groupParams[G23b] = { peers: ['10000023'] };
+  let calls23 = 0;
+  const fakeAsk23 = async () => {
+    calls23++;
+    return calls23 === 1
+      ? JSON.stringify({
+          premise: HINT23,
+          event: 'e',
+          text: '她敲了四面墙，又趴下看门缝的风，说外面是通的。',
+        })
+      : JSON.stringify({
+          premise: HINT23,
+          event: 'e',
+          text: '她把门板上那行字念了一遍，然后发现爱音一句话都没说。',
+        });
+  };
+  const r23 = await quest23.begin({
+    ask: fakeAsk23,
+    extraHint: HINT23,
+    groupId: G23b,
+    manual: true,
+  });
+  check(calls23 === 2, `★★ 开场跑偏 ⇒ **真的让它重写了一次**（ask 调了 ${calls23} 次）`);
+  check(
+    r23?.ok === true && !/门缝/.test(String(r23.text ?? '')),
+    '★★ 用的是**重写后**那一版（跑偏那版被丢掉了）',
+    String(r23?.text ?? '').slice(0, 24),
+  );
+  quest23.clearSharedPremise(G23b);
+  quest23.__set({ byGroup: {} });
+
+  // ④ ⚠️⚠️ 用户报：「**清除剧情之后她们还在说推柜子出房间**」——
+  //    静默只有 60 秒，过了之后**上下文里那几句台词还在**（各进程各存一份 recent）
+  //    ⇒ 她们顺着上文接着演 ✗ 所以清完还要有一个"这条剧情作废"的窗口。
+  const G23c = '999000032';
+  config.groupParams[G23c] = { peers: ['10000023'] };
+  const b23 = new Bot();
+  b23.speakerRole = () => 'owner';
+  const wiped = b23.tryQuestReset(
+    {
+      message_type: 'group',
+      group_id: G23c,
+      user_id: '10000001',
+      sender: { card: '', nickname: '' },
+      message: [{ type: 'text', data: { text: '/清除剧情' } }],
+    },
+    [{ type: 'text', data: { text: '/清除剧情' } }],
+  );
+  check(wiped === true, '★ `/清除剧情` 被认出来了');
+  check(
+    (b23.questWipedUntil?.get(G23c) ?? 0) > Date.now(),
+    '★★ 记下了**作废窗口**（不然 60 秒静默一过，她们又顺着上文演）',
+  );
+  check(
+    /刚才那条剧情已经被管理员清掉了（作废）/.test(bsrc23),
+    '★★ 聊天提示词里明说"那条剧情作废了、别提那个房间/门/柜子"',
+  );
+  check(
+    /别主动提那个房间 \/ 门 \/ 柜子/.test(bsrc23),
+    '★★ 而且点名了"柜子出房间"这类接法（用户看到的就是这个）',
+  );
 }
 
 console.log(`\n结果: ${failures === 0 ? '全部通过 ✅' : `${failures} 项失败 ❌`}\n`);

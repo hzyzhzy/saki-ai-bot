@@ -1757,5 +1757,56 @@ console.log('\n【17】★★ /暂停：**打断正在生成的** + **静默 2 �
   );
 }
 
+console.log('\n【18】★★ 剧情的「用词红线」——人设里那条硬线在剧情里被收窄（2026-10-07 用户拍板）');
+{
+  // ## 用户原话
+  //   「**不是不写细节，是不写违禁词就行了，没细节剧情会很苍白**」
+  // ## 为什么这条重要
+  //   人设里写着「唯一的硬线：不写性内容（性行为描写 / 性器官 / 露骨的身体描写 / 违禁词）…
+  //   这个 QQ 号的账号安全」，而它**整份都拼进了剧情的 system**（`buildSystem()`）⇒
+  //   起因里写死的条件（"必须做到 X 才出得去"）和它**直接打架** ⇒
+  //   实测结果：模型**既不写那件事、也不敢写放弃，于是无限找别的出口** ✗
+  //   （用户报的原话：「她们还是不按房子的来，又在找其他路」。）
+  // ## 所以盯的是
+  //   ① 剧情这边那条硬线**被换成了"不写违禁词 + 细节照写"**；
+  //   ② 聊天那边**一个字都没动**（账号安全那条照旧守）；
+  //   ③ `buildSystem` 真的用的是剧情版人设（不是白写一个函数没人调）。
+  const knowledge = await import('../src/knowledge.js');
+  const questSide = String(quest.questPersonaText() ?? '');
+  const chatSide = String(knowledge.personaText() ?? '');
+  check(
+    questSide.length > 5000 && questSide.length !== chatSide.length,
+    '★ 剧情这边**还是完整人设**（不是换了一份精简的）',
+    `${questSide.length} 字 / 聊天那份 ${chatSide.length} 字`,
+  );
+  check(
+    !/不写性内容/.test(questSide),
+    '★★ 剧情里**不再出现**「不写性内容」那条硬线声明（它就是"绕开情节"的推手）',
+  );
+  check(!/账号安全/.test(questSide), '★ 连带那句「账号安全」也不在剧情提示词里了');
+  check(/用词红线/.test(questSide), '★★ 换成了剧情版用词红线');
+  check(/不出现违禁词/.test(questSide), '★★ 红线的内容 = 不写违禁词');
+  check(
+    /细节照写/.test(questSide),
+    '★★ 而且明确**允许写细节**（用户说"没细节剧情会很苍白" —— 这条别被谁删掉）',
+  );
+  check(/不写性内容/.test(chatSide), '★★ 聊天的**人设原文一点没动**（那条硬线只对剧情收窄）');
+  check(/账号安全/.test(chatSide), '★ 聊天那边「账号安全」那句还在');
+  const src18 = readFileSync(join(ROOT, 'src', 'quest.js'), 'utf8');
+  check(
+    /persona = questPersonaText\(\)/.test(src18),
+    '★★ `buildSystem` 用的**真的是**剧情版人设（不是写了函数却没人调）',
+  );
+  check(
+    /6c-3\./.test(src18) && /反例清单/.test(src18),
+    '★ 提示词里有"另找出路"的**反例清单**（敲墙 / 门缝的风 / 通风口 / 手机求救）',
+  );
+  const bsrc18 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  check(
+    /questTurnYield\(gid, \{ since, where: '推进' \}\)/.test(bsrc18),
+    '★ 顺带钉住：情节推进那条路还在（上一轮那套序位让位）',
+  );
+}
+
 console.log(`\n结果: ${failures === 0 ? '全部通过 ✅' : `${failures} 项失败 ❌`}\n`);
 process.exit(failures === 0 ? 0 : 1);
