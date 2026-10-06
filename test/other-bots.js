@@ -277,5 +277,94 @@ console.log('\n【10】★★ 剧情里同类之间要能**互相 @**（2026-10-
   names.__clear();
 }
 
+console.log('\n【11】★★ 同类的**纯告辞**不接（用户截图：去吧/一会儿见/回见 刷三个来回）');
+{
+  // 用户原话：「**还是有这种无意义循环**」—— 截图里她俩依次说了
+  //   「行啦，去吧，装完喊我」→「收到（那我去了」→「嗯，去吧，我等着」→
+  //   「嗯，一会儿见（」→「好，回见」→「走啦（」，三个来回、信息量为零。
+  // ⚠️ 上一轮那条"别原地顶嘴"压不住它：那条针对**互相评价**，
+  //    而这几句看着都像在"推进事情" ⇒ 只能单独认这一种。
+  const { Bot } = await import('../src/bot.js');
+  const G11 = '999000011';
+  const P11 = '10000302';
+  const HUMAN11 = '30003';
+  config.groupParams[G11] = { peers: [P11] };
+  const b11 = new Bot();
+  b11.selfId = '10000002';
+
+  // ① 认得出（截图里那几句原样搬过来）
+  for (const t of [
+    '收到（那我去了',
+    '嗯，一会儿见（',
+    '好，回见',
+    '走啦（',
+    '那我先走了',
+    '晚点聊',
+    '拜拜',
+    '那我去了',
+    '出门了',
+  ]) {
+    check(b11.isFarewellLine(t) === true, `★ 认得出告辞：「${t}」`);
+  }
+
+  // ② ⚠️ **不误伤**（误伤 = 正常聊天她突然不理人，比漏掉更糟）
+  for (const t of [
+    '收到',
+    '好的',
+    '嗯嗯',
+    '在吗',
+    '去吧台那边看看有没有人',
+    '你去了记得把那个装完再回来再说这个事',
+    '那我先按你说的试试看行不行',
+    '',
+  ]) {
+    check(b11.isFarewellLine(t) === false, `★★ 不误伤：「${t}」`);
+  }
+
+  // ③ 行为：同类发来告辞 ⇒ `decide()` 直接不接
+  const ev11 = (uid, text) => ({
+    post_type: 'message',
+    message_type: 'group',
+    group_id: G11,
+    user_id: uid,
+    self_id: '10000002',
+    message_id: Math.floor(Math.random() * 1e9),
+    message: [{ type: 'text', data: { text } }],
+    sender: { user_id: uid, card: 'Anon', nickname: 'Anon' },
+  });
+  check(b11.decide(ev11(P11, '好，回见')) === null, '★★ 同类说「好，回见」→ **不接**');
+
+  // ⚠️ 但**明确叫她**的照旧要接（那是真在跟她说话，不是客套）
+  const atEv = ev11(P11, '回见');
+  atEv.message = [
+    { type: 'at', data: { qq: '10000002' } },
+    { type: 'text', data: { text: '回见' } },
+  ];
+  check(b11.decide(atEv) !== null, '★★ 但 @ 她 + 同一句话 ⇒ **照样接**（例外没被误杀）');
+
+  // ④ 这条闸**只管同类** —— 群友说「回见」照旧走原来那套判定，不归它管。
+  //    ⚠️ 这里用源码断言（位置），**不能**用 `decide(群友那条) !== null` 去测：
+  //       群友的话在测试配置下本来就可能被别的闸挡住（收紧度、窗口…），
+  //       那样测出来的是"别的闸"，跟这条无关。
+  const bsrc11 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  const iFarewell11 = bsrc11.indexOf('this.isFarewellLine(peerText0)');
+  const iPeerBlock11 = bsrc11.indexOf('if (peers0.has(sender0)) {');
+  check(
+    iPeerBlock11 > 0 && iFarewell11 > iPeerBlock11 && iFarewell11 - iPeerBlock11 < 900,
+    '★ 这条闸就在 `if (peers0.has(sender0))` 块内 ⇒ **只对同类生效**（群友完全不受影响）',
+  );
+
+  // ⑤ 接线：它必须在"认得出角色的同类一律放行"**之前**
+  check(
+    /if \(!peerAtMe && !peerCallMe && this\.isFarewellLine\(peerText0\)\)/.test(bsrc11),
+    '★★ 判据写成"没 @ 她、没叫她 + 是告辞"（例外留住）',
+  );
+  check(
+    iFarewell11 < bsrc11.indexOf('if (peerRole) {'),
+    '★★ 而且接在**"认得出角色的同类一律放行"之前** —— 否则同世界的人之间还是会无限互相告辞',
+  );
+  delete config.groupParams[G11];
+}
+
 console.log(`\n结果: ${failures === 0 ? '全部通过 ✅' : `${failures} 项失败 ❌`}\n`);
 process.exit(failures === 0 ? 0 : 1);
