@@ -9798,7 +9798,16 @@ export class Bot {
     //    ⚠️ 只在"这个群正在演剧情"时才有内容，日常聊天一个字都不加 ✓
     if (event?.message_type === 'group') {
       try {
-        const brief = quest.chatBrief(String(event.group_id ?? ''));
+        const gid0 = String(event.group_id ?? '');
+        // ⚠️ 2026-10-07 加（用户：「**重点是聊天不要死磕一个点，要有进展变化**」）：
+        //    把"你们刚说过的几句"一起喂进去 —— 让它**看见自己/对方刚说过什么**，
+        //    比只在提示词里写"要有新东西"管用得多。
+        const brief = quest.chatBrief(gid0, {
+          recentLines: recent.lastBotLines(gid0, {
+            n: 6,
+            uids: peersFor(gid0).map(String),
+          }),
+        });
         if (brief) parts.push('\n' + brief);
       } catch {}
       // ⚠️⚠️ 2026-10-07 加（用户报：「**清除剧情之后她们还在说推柜子出房间**」）：
@@ -14230,7 +14239,16 @@ export class Bot {
         //    所以要把她在这个群里发过的剧情消息 id 传进去
         herIds: q.herMsgIds ?? [],
       });
-      if (!verdict.hit) return;
+      // ⚠️⚠️ 2026-10-07 加（用户：「加」—— 承接他那句
+      //    「**聊天时也是要能推动剧情的，因为内容也会进模型为生成下一段做参考**」）：
+      //    **同类在剧情群里说的话，也要进下一段的素材。**
+      //    ⚠️ 上面那个判据（`isPlotReply`）是**给真人设计的**（@她 / 回复她 / 建议句式 / 问句）——
+      //      而两个 bot 之间的转述和接话**一条都不沾** ⇒ 对方聊得再精彩，
+      //      主导方的下一段**看不到它的原话** ✗（用户要的"聊天推动剧情"就差在这一环）
+      //    ⇒ 同类的话单独放行：只要求"有点内容"（≥4 字），不要求长得像提问。
+      //    ⚠️ 她自己说的话仍然不算（上一行已经 return）✓ 不会重复记。
+      const fromPeer = this.isPeerBot(gid, String(event.user_id ?? ''));
+      if (!verdict.hit && !(fromPeer && String(text ?? '').trim().length >= 4)) return;
 
       quest.noteReply(q, {
         userId: String(event.user_id),
@@ -14238,9 +14256,13 @@ export class Bot {
         text,
         // ⚠️ 判据一起存下来 —— 界面上要按它**分开显示**"真在推剧情"和"随口一句"
         //    （2026-09-17 用户要求：「这个等下一段的状态可以细化一点」）。
-        why: verdict.why,
+        //    ⚠️ 同类放行的那种标成 `suggest`（已存在的值，界面认识）✓
+        why: verdict.hit ? verdict.why : 'suggest',
       });
-      log.info(`[剧情] 记下一条可能改变走向的发言（${verdict.why}）：${text.slice(0, 30)}`);
+      log.info(
+        `[剧情] 记下一条可能改变走向的发言（${verdict.hit ? verdict.why : '同类的话'}）：` +
+          `${text.slice(0, 30)}`,
+      );
     } catch (e) {
       log.debug(`剧情发言收集失败：${e.message}`);
     }

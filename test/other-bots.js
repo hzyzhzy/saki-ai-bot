@@ -1269,8 +1269,8 @@ console.log('\n【23】★★ 剧情起因进**聊天提示词**、并且**两�
     '★★ `finish` / `purge` 里都撤掉了（不然收尾、清剧情之后还一直挂着）',
   );
   check(
-    /quest\.chatBrief\(String\(event\.group_id \?\? ''\)\)/.test(bsrc23),
-    '★★ 聊天提示词（`buildSystemPrompt`）真的注入了剧情简报',
+    /quest\.chatBrief\(gid0, \{/.test(bsrc23),
+    '★★ 聊天提示词（`buildSystemPrompt`）真的注入了剧情简报（并带上"刚说过的几句"）',
   );
   check(/6c-4\./.test(src23), '★ 剧情提示词里有 6c-4（真相 / 秘密必须演出来）');
   check(
@@ -1282,6 +1282,21 @@ console.log('\n【23】★★ 剧情起因进**聊天提示词**、并且**两�
   //    「**我是说 /剧情 后面写的句子**」────────────────────────────────
   //    他写的那段话**通常不止一件事**（场景 + 规矩 + 真相），实测模型只落实了一件半。
   check(/6c-5\./.test(src23), '★★ 剧情提示词里有 6c-5：起因那句话要**逐条照顾**，一条都不许漏');
+  // ⚠️ 2026-10-07 加（用户：「**重点是聊天不要死磕一个点，要有进展变化**」）：
+  //    光在提示词里写"要有新东西"压不住 ⇒ 把"你们刚说过的几句"直接摆到它面前。
+  const recentSrc23 = readFileSync(join(ROOT, 'src', 'recent.js'), 'utf8');
+  check(
+    /export function lastBotLines\(groupId, \{ n = 6, uids = \[\] \} = \{\}\)/.test(recentSrc23),
+    '★★★ 新增 `recent.lastBotLines()`：取最近几条"她 + 对方"说过的话',
+  );
+  check(
+    /你们刚刚已经说过这几句了/.test(src23),
+    '★★★ 聊天提示词里把它们列出来 + 明说"别再重复同样的意思"',
+  );
+  check(
+    /recentLines: recent\.lastBotLines\(gid0, \{/.test(bsrc23),
+    '★★ 而且真的接进去了（不是写了没用）',
+  );
   check(
     /先在心里把它拆成几条/.test(src23),
     '★★ 开场那边明确要求：**先把他那段话拆成几条，再逐条落实**',

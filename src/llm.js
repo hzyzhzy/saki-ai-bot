@@ -268,6 +268,11 @@ export async function* streamChat(messages, outerSignal, opts = {}) {
         ...(opts.thinking
           ? { thinking: opts.thinking }
           : (() => {
+              // ⚠️⚠️ 2026-10-07：**试过默认关掉，用户要求调回**（原话：「直接调回思考链」）——
+              //    实测数据：生成耗时一直在 8~20 秒（那次 52 秒是异常尖峰），
+              //    所以"慢"的主因**不是**它；而关掉它确实会让回答少一层推敲 ⇒ 按用户要求恢复。
+              //    ⚠️ 留个记号：思考链**不受 `budget_tokens` 约束**（实测能烧满 8000 token / 72 秒），
+              //      哪天真要提速，改 `config.llm.thinkingBudget`（0 = 不传 thinking 字段）。
               const b = Number(config.llm?.thinkingBudget ?? 3000);
               return Number.isFinite(b) && b > 0 ? { thinking: { type: 'enabled', budget_tokens: b } } : {};
             })()),

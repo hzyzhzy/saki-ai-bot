@@ -893,6 +893,29 @@ export function clear(groupId) {  store.delete(String(groupId));  tone.delete(St
 }
 
 /**
+ * ⚠️ 2026-10-07 加（用户：「**现在重点是聊天不要死磕一个点，要有进展变化**」）：
+ * 取这个群**最近几条"机器人说的话"**（她自己的 + 传进来的那几个号）。
+ *
+ * 用途：剧情进行中，把这几条塞回给她看，并明说「这些已经说过了、别重复」——
+ * 光在提示词里写"要有新东西"压不住，得让它**看见自己刚说过什么** ✓
+ *
+ * @param {string} groupId
+ * @param {{n?:number, uids?:string[]}} opts `uids` = 另一个机器人的号
+ * @returns {string[]} 由旧到新的正文
+ */
+export function lastBotLines(groupId, { n = 6, uids = [] } = {}) {
+  const g = String(groupId ?? '');
+  const arr = store.get(g);
+  if (!Array.isArray(arr) || !arr.length) return [];
+  const set = new Set((uids ?? []).map(String).filter(Boolean));
+  return arr
+    .filter((m) => m?.self === true || set.has(String(m?.userId ?? '')))
+    .slice(-Math.max(1, Number(n) || 6))
+    .map((m) => String(m?.text ?? '').trim())
+    .filter(Boolean);
+}
+
+/**
  * ⚠️ 2026-10-07 加（`/清除剧情` 用）：把**某一段时间里、某几个人说的话**从上下文里抹掉。
  *
  * 用户报：「**清除剧情之后她们还在说推柜子出房间**」——
