@@ -193,6 +193,11 @@ function normalize(s) {
 const G = '200000001';
 const OWNER = '10000001';
 const MEMBER = '30001';
+// ⚠️ 2026-10-07 加：**同类机器人**那条路要用**单独的群号** ——
+//    同类池是**按群配**的（`groupParams.<群>.peers`），借用 `G` 会把上面
+//    那些场景的提示词也一起改掉（每个都多出"同类"那一节），基线跟着乱。
+const GPA = '200000002';
+const PEER = '10000009';
 const seg = (t) => [{ type: 'text', data: { text: t } }];
 
 const SCENES = {
@@ -249,6 +254,20 @@ const SCENES = {
     ev: { message_type: 'group', group_id: G, user_id: MEMBER, message: seg('小祥最近怎么样') },
     voluntary: 'mention',
     text: '小祥最近怎么样',
+  },
+  // ⚠️⚠️ 2026-10-07 加：**同类机器人发来的消息**（`isPeerBot()` 为真）那条路。
+  //
+  //    为什么必须补这一个：用户截图报「bot 之间的对话很容易陷进吵嘴死循环」，
+  //    我为此在那条路上加了一整节「把事往前推，别原地顶嘴」。
+  //    加完跑 `--save` —— 结果 **13 个场景逐字节一致** ⇒ 说明**那段提示词
+  //    一个场景都没覆盖** ✗（"全绿"在这里恰恰等于"没测到"，和上面
+  //    `group-at-who` 那次一模一样）。
+  //
+  //    ⚠️ 用 `GPA`（单独的群）+ 一个不在任何池里的号当发送者，
+  //      这样只影响这一个场景。
+  'group-peer-bot': {
+    ev: { message_type: 'group', group_id: GPA, user_id: PEER, message: seg('嫌我软就别站风里呗') },
+    text: '嫌我软就别站风里呗',
   },
 };
 
@@ -324,6 +343,11 @@ cfg.imagegen = { ...(cfg.imagegen ?? {}), enable: true, apiKey: 'sk-snapshot-fak
 //    它必须在**第一次 `import('../src/config.js')` 之前**执行，原因见那儿的注释。
 
 const { Bot } = await import('../src/bot.js');
+
+// ⚠️ 2026-10-07 加：给 `group-peer-bot` 那个场景配一个**同类池** ——
+//    没有它 `isPeerBot()` 为假，"同类"那一节提示词就不会注入，场景等于白加。
+cfg.groupParams ??= {};
+cfg.groupParams[GPA] = { ...(cfg.groupParams[GPA] ?? {}), peers: [PEER] };
 
 const bot = new Bot();
 bot.selfId = '10002';

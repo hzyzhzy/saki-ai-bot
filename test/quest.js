@@ -1595,5 +1595,143 @@ console.log('\n【15】★★ 机器人发的 / 命令一律不执行（用户�
   delete config.groupParams[G];
 }
 
+console.log('\n【16】★★ 发了 /清除剧情 ⇒ 强制静默 1 分钟（2026-10-07 用户要求）');
+{
+  // 用户原话：「**发了清除剧情应该强制 bot 停发消息一分钟**，要不然她们会
+  //   接着上文继续聊」。
+  // ⚠️ 为什么光"清剧情"不够：剧情状态是清了，但**上下文里那几句还在**，
+  //    而"对话延续"（直接接、不判）跟剧情状态**无关** ⇒ 清完照接不误。
+  // ⚠️ 所以静默要**拦全**：`decide()`（@ 她 / 关键词 / 同类 / 追补的总入口）、
+  //    `shouldJoinChat()`（主动接话）、以及 `peer-chat.js` 的**定时主动搭话**
+  //    （它走 `sendToGroup` 直发，**不经过 `decide()`** —— 漏了它就不是"停发消息"）。
+  const { Bot } = await import('../src/bot.js');
+  const b = new Bot();
+  b.selfId = '10000002';
+  const G16 = '999000186';
+
+  check(typeof b.muteGroup === 'function' && typeof b.isMuted === 'function', '★ 有"群级静默"这套接口');
+  check(b.isMuted(G16) === false, '没设过 → 不静默');
+  b.muteGroup(G16, 60000, '自检');
+  check(b.isMuted(G16) === true, '★★ 设了之后 → 这个群静默中');
+  check(b.isMuted('999000187') === false, '★ **只静默这一个群**（别的群一点不受影响）');
+  b.muteGroup(G16, 0, '自检');
+  check(b.isMuted(G16) === false, '★ 传 0 秒 = **解除静默**（调用方要取消就靠它）');
+
+  // 静默期内 **@ 她也不回**（用户要的是"强制停发"，不是"少说两句"）
+  b.muteGroup(G16, 60000, '自检');
+  const evAt16 = {
+    message_type: 'group',
+    group_id: G16,
+    user_id: '30003',
+    self_id: '10000002',
+    message: [
+      { type: 'at', data: { qq: '10000002' } },
+      { type: 'text', data: { text: '在吗' } },
+    ],
+    sender: { card: '路人甲', nickname: '路人甲' },
+  };
+  check(b.decide(evAt16) === null, '★★ 静默期内**连 @ 她都不回**（"强制"就是这个意思）');
+  check(b.shouldJoinChat(evAt16) === null, '★★ 主动接话那条路也直接不接');
+
+  // 接线（光有函数不算数）
+  const bsrc16 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  check(
+    /const r = quest\.purge\(gid\);[\s\S]{0,900}?muteGroup\(gid, 60000/.test(bsrc16),
+    '★★ `/清除剧情` 那条路真的调了「静默 60 秒」',
+  );
+  check(
+    /decide\(event, voluntary = null\) \{[\s\S]{0,1200}?isMuted\(/.test(bsrc16),
+    '★★ `decide()` **最前面**就拦（所有回复路径的总入口）',
+  );
+  check(
+    /shouldJoinChat\(event, \{ stickerIsNew = false[\s\S]{0,600}?isMuted\(/.test(bsrc16),
+    '★ 主动接话那条路也各拦了一道',
+  );
+  const psrc16 = readFileSync(join(ROOT, 'src', 'peer-chat.js'), 'utf8');
+  check(
+    /isMuted\?\.\(gid\)/.test(psrc16),
+    '★★ 定时主动搭话也拦（它直发，不走 decide —— 这条最容易漏）',
+  );
+}
+
+console.log('\n【17】★★ /暂停：**打断正在生成的** + **静默 2 分钟**（2026-10-07 用户要求）');
+{
+  // 用户原话：「再加一个 /暂停 指令，**直接打断所有正在生成的消息**，
+  //   并**停止发送消息 2 分钟**」。
+  // ⚠️ 两个动作缺一不可：只静默不打断 → 那条生成到一半的还会继续往外发；
+  //    只打断不静默 → 下一句话进来她又开始生成。
+  const { Bot } = await import('../src/bot.js');
+  const b = new Bot();
+  b.selfId = '10000002';
+  const G17 = '999000187';
+  const key17 = `group:${G17}`; // ⚠️ 和 `history.sessionKey` 同一口径
+  const seg = (t) => [{ type: 'text', data: { text: t } }];
+  const ev17 = (uid) => ({
+    message_type: 'group',
+    group_id: G17,
+    user_id: uid,
+    self_id: '10000002',
+    sender: { card: '服主', nickname: '服主' },
+  });
+
+  const aborted = [];
+  const muted = [];
+  let said = [];
+  b.running = new Map([[key17, { abort: (e) => aborted.push(String(e?.message ?? '')) }]]);
+  b.sendToGroup = async (g, t) => {
+    said.push(String(t));
+  };
+  b.speakerRole = () => 'owner';
+  // ⚠️ 把静默拦下来单独看（不然只能靠 `isMuted()` 间接推）
+  b.muteGroup = (gid, ms, why) => {
+    muted.push([String(gid), Number(ms), String(why ?? '')]);
+    return 0;
+  };
+
+  check(
+    b.tryPauseCommand(ev17('10000001'), seg('/暂停')) === true,
+    '★ `/暂停` 被认出来（返回 true ⇒ 不再当聊天处理）',
+  );
+  check(aborted.length === 1, '★★ **正在生成的那条被真的打断了**（`abort()` 调到了）', JSON.stringify(aborted));
+  check(
+    muted.some(([g, ms]) => g === G17 && ms === 120000),
+    '★★ 而且**这个群静默 2 分钟**（120000ms）',
+    JSON.stringify(muted),
+  );
+  check(said.length === 1 && /不说话/.test(said[0]), '★ 回执发了（否则分不清"生效了"还是"没认出来"）', JSON.stringify(said));
+
+  // ⚠️ 权限：普通群友不许用（这是"强制全体闭嘴"级别的操作）
+  b.speakerRole = () => 'member';
+  aborted.length = 0;
+  said = [];
+  b.running = new Map([[key17, { abort: () => aborted.push('不该发生') }]]);
+  check(
+    b.tryPauseCommand(ev17('30003'), seg('/暂停')) === true,
+    '★ 普通群友发 → 仍然被"认出来"（不再当聊天内容）',
+  );
+  check(aborted.length === 0, '★★ 但**一点都没打断**（权限挡住了）');
+  check(said.some((t) => /服主和管理员/.test(t)), '★ 回了权限提示');
+
+  // ⚠️ 不误伤：只有**整条就是** `/暂停` 才算
+  b.speakerRole = () => 'owner';
+  for (const t of ['/暂停一下', '暂停', '/暂停 2 分钟', '/清除剧情', '/停止', '/paused']) {
+    check(b.tryPauseCommand(ev17('10000001'), seg(t)) === false, `★ 不误认：「${t}」`);
+  }
+  check(
+    b.tryPauseCommand({ message_type: 'private', user_id: '10000001' }, seg('/暂停')) === false,
+    '★ 私聊里 `/暂停` 不算（它只管群）',
+  );
+
+  const bsrc17 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  check(
+    /this\.tryPauseCommand\(payload/.test(bsrc17),
+    '★★ 指令真的**接在 `onRaw` 里**了（不然群里发了没反应）',
+  );
+  check(
+    /tryPauseCommand\(event, segs\) \{[\s\S]{0,1400}?ctl\.abort\(/.test(bsrc17),
+    '★★ 它走的是**已有的**中止机制（`this.running` 里的 AbortController），不是新造一个',
+  );
+}
+
 console.log(`\n结果: ${failures === 0 ? '全部通过 ✅' : `${failures} 项失败 ❌`}\n`);
 process.exit(failures === 0 ? 0 : 1);

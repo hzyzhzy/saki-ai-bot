@@ -775,6 +775,21 @@
         <div><label>单次最大 token</label><input type="number" id="llm-maxTokens"></div>
         <div><label>超时（毫秒）</label><input type="number" id="llm-timeout"></div>
       </div>
+      <!-- ⚠️⚠️ 2026-10-07 加（用户要求，专门对付「中转站盗版慢速模型」）：
+           一轮生成拖太久的时候，**把后面排队等着的消息直接丢掉** ——
+           不丢的话队列永远追不上，回的还都是几分钟前那些已经过时的话。
+           判据和理由写在 `src/config.js` 的 `slowQueueDrop` 那一段。 -->
+      <div class="row" style="margin-top:10px;align-items:center;gap:14px;flex-wrap:wrap">
+        <label style="display:flex;align-items:center;gap:6px;margin:0">
+          <input type="checkbox" id="llm-slowDrop" style="width:auto;margin:0">
+          生成太慢时，丢掉排队等着的消息
+        </label>
+        <div style="display:flex;align-items:center;gap:6px">
+          <span class="hint" style="margin:0">超过</span>
+          <input type="number" id="llm-slowDropMs" style="width:84px" min="1" step="10">
+          <span class="hint" style="margin:0">秒还没生成完 → 后面排队的先不回（等它生成完、有新消息进来就自动恢复）</span>
+        </div>
+      </div>
       <div class="btns">
         <button class="act" onclick="saveModel()">保存</button>
         <button class="ghost" onclick="testLLM()">测试连通性</button>
@@ -2810,6 +2825,9 @@ async function reloadAll() {
   $('llm-temperature').value = c.llm.temperature ?? 0.5;
   $('llm-maxTokens').value = c.llm.maxTokens ?? 800;
   $('llm-timeout').value = c.llm.timeout ?? 60000;
+  // ⚠️ 2026-10-07：慢模型丢弃积压（**默认开** —— 只有明确写成 false 才算关）
+  $('llm-slowDrop').checked = c.llm.slowQueueDrop !== false;
+  $('llm-slowDropMs').value = Math.round((c.llm.slowQueueDropMs ?? 60000) / 1000);
 
   // 生图
   const ig = c.imagegen || {};
@@ -4304,6 +4322,12 @@ async function saveModel() {  const el = $('msg-llm');
       temperature: Number($('llm-temperature').value),
       maxTokens: Number($('llm-maxTokens').value),
       timeout: Number($('llm-timeout').value),
+      // ⚠️ 2026-10-07：慢模型丢弃积压（复选框 + 秒 → 毫秒）。
+      //    ⚠️ 这里必须**显式写 false**（不能省略）—— 省略等于"没改"，
+      //       用户就关不掉这个闸了。
+      slowQueueDrop: !!$('llm-slowDrop').checked,
+      slowQueueDropMs:
+        Math.max(1000, Math.round(Number($('llm-slowDropMs').value) * 1000)) || 60000,
     }})
   });
   flash(el, r.ok, r.ok ? '已保存并生效' : ('保存失败：' + r.error));

@@ -1064,6 +1064,19 @@ export class Bot {
       return;
     }
 
+    // ⚠️⚠️ 2026-10-07 加（用户要求）：「再加一个 `/暂停` 指令，**直接打断所有
+    //    正在生成的消息**，并**停止发送消息 2 分钟**」。
+    //    ⚠️ 放在**这里**（和 `/剧情` `/清除剧情` 同一批）—— 指令要在进聊天上下文
+    //      之前处理掉；而且它**不能被静默自己挡住**（`/暂停` 期间再发一次 `/暂停`
+    //      应该能续期，所以它必须在 `decide()` 那道静默闸**之前**）。
+    if (
+      payload.message_type === 'group' &&
+      !cmdSenderIsBot &&
+      this.tryPauseCommand(payload, msg.toSegments(payload.message))
+    ) {
+      return;
+    }
+
     // ⚠️⚠️ 2026-10-05 加（用户要求）：「@机器人 + **自然语言**说『忘记刚才那个』
     //    就撤回她刚记下的那条 —— **区别于 / 的命令**」。
     //    ⇒ 放在和 `/剧情` 那一批**同一个位置**：指令要在进聊天上下文之前处理掉，
@@ -1564,6 +1577,11 @@ export class Bot {
   shouldJoinChat(event, { stickerIsNew = false, echoSticker = null } = {}) {
     const { chat } = config;
     const level = this.resolveRespondTo(event);
+
+    // ⚠️⚠️ 2026-10-07 加（用户：「**发了清除剧情应该强制 bot 停发消息一分钟**，
+    //    要不然她们会接着上文继续聊」）：静默期 ⇒ **什么主动接话都不做**。
+    //    放在**最前面**（连灵敏度都不看）—— 这条是"强制"，不是"看情况"。
+    if (this.isMuted(event?.group_id)) return null;
 
     // 灵敏度 3：只认 @，不主动接话
     if (level >= 3) return null;
@@ -2969,8 +2987,21 @@ export class Bot {
         //    现在统一在这里重置。
         if (this.batchState?.has(bkey)) {
           const st = this.batchState.get(bkey);
+          // ⚠️ 2026-10-07 加（用户要求：「生成完了正好超过 2 分钟的那条之后也
+          //    **不要恢复**，只有**发完并且新消息再生成完之后**再恢复」）：
+          //    慢模式的解除**只在这里结算** —— 只有"试探轮正常跑完"才算追上。
+          this.noteGeneratingDone(bkey, st);
           if (!st.items.length) {
-            this.batchState.delete(bkey);
+            // ⚠️⚠️ 慢模式还开着时**绝不能把状态整个删掉** —— 一删 `slowMode` 就丢了，
+            //    下一条新消息会被当成"全新的一轮"⇒ 等于"那条慢的一生成完就恢复"，
+            //    正是用户不要的行为 ✗（留着状态，下一条进来就是那"试探轮"）
+            if (st.slowMode) {
+              st.running = false;
+              st.pending = false;
+              this.batchState.set(bkey, st);
+            } else {
+              this.batchState.delete(bkey);
+            }
           } else {
             st.running = false;
             st.pending = false;
@@ -3632,6 +3663,164 @@ export class Bot {
    *    而且真人名字重名/互相包含极多，误 @ 一次就是一次骚扰。
    * ⚠️ 单字名一律丢掉（`length >= 2`）：满屏误命中，宁缺勿滥。
    */
+  /**
+   * 「慢模型丢弃积压」这个闸**开着吗**（2026-10-07 用户要求）。
+   *
+   * 配置：`config.llm.slowQueueDrop`（界面上在「模型 → 大模型」卡片里，**默认开**）。
+   * 判据与动作都在 `enqueue()` 里那段 —— 一句话：
+   * **这一轮生成得太久 ⇒ 后面排队的别等了**。
+   */
+  slowDropOn() {
+    try {
+      return config.llm?.slowQueueDrop !== false;
+    } catch {
+      return true;
+    }
+  }
+
+  /** 超过多久算"慢得离谱"（毫秒，默认 **60 秒**；见 `slowDropOn`） */
+  slowDropMs() {
+    try {
+      const n = Number(config.llm?.slowQueueDropMs);
+      return Number.isFinite(n) && n > 0 ? n : 60000;
+    } catch {
+      return 60000;
+    }
+  }
+
+  /**
+   * **慢模型兜底**：这一轮已经生成太久 ⇒ 这条**不攒**、连已经攒着的一起扔。
+   *
+   * 判据与理由写在 `src/config.js` 的 `slowQueueDrop` 那一段；调用点在
+   * `scheduleHandle()` 里（那正是"生成期间新来的消息先攒着"那个分支）。
+   *
+   * ⚠️ 抽成独立方法是为了**能单独测**（`test/slow-queue.js`）——
+   *    埋在那个分支里的话，测它得先等 900ms 的合并窗口，又慢又脆。
+   *
+   * @param {string} bkey 会话 key（群）
+   * @param {{running?:boolean, items?:Array, startedAt?:number, _dropLogged?:boolean}} st 批次状态
+   * @returns {boolean} true = **已经丢掉了**（调用方直接 return，别再攒、更别触发生成）
+   */
+  dropIfSlowGenerating(bkey, st) {
+    try {
+      if (!this.slowDropOn()) return false;
+      const cut = this.slowDropMs();
+      const generatingFor = st?.startedAt ? Date.now() - st.startedAt : 0;
+      if (generatingFor <= cut) return false;
+      // ⚠️⚠️ 2026-10-07 用户补的要求：「如果已经超过 2 分钟了，**当生成完了
+      //    正好超过 2 分钟的那条之后也不要恢复**，只有**发完并且新消息再生成完**
+      //    之后才恢复」，外加一句「**反正新消息之前的要全部丢弃**」。
+      //    ⇒ 光丢一次不够：那条慢的**发出去了也不算恢复** —— 得等**下一条新消息**
+      //      当"试探轮"、它真的正常生成完并发出去了，才解除。
+      //      解除的结算在 `noteGeneratingDone()`（`enqueue` 的 `finally` 里调）。
+      st.slowMode = true;
+      const had = st.items?.length ?? 0;
+      if (st.items) st.items.length = 0;
+      // ⚠️ 一轮只报**一次** —— 慢模型期间每来一条都刷一行日志，会把日志埋掉，
+      //    而这条信息（"刚才丢了 N 条"）看一次就够。
+      if (!st._dropLogged) {
+        st._dropLogged = true;
+        log.warn(
+          `[${bkey}] 这一轮已经生成了 ${Math.round(generatingFor / 1000)} 秒` +
+            `（超过 ${Math.round(cut / 1000)} 秒的阈值）→ **丢掉排队中的消息**` +
+            `（这条 + 刚才攒着的 ${had} 条）；⚠️ 进入**慢模式**，` +
+            `要等**下一条新消息**正常生成完才恢复`,
+        );
+      }
+      return true;
+    } catch (e) {
+      // ⚠️ 出任何错都当"没超时" —— 宁可多回一条，也不能让这个闸把消息吃光
+      log.debug(`[慢模型] 判断失败（当没超时）：${e.message}`);
+      return false;
+    }
+  }
+
+  /**
+   * 一轮生成**结束了** ⇒ 在这里结算"慢模式"要不要解除（2026-10-07 用户要求）。
+   *
+   * 用户原话：「如果已经超过 2 分钟了，当**生成完了正好超过 2 分钟的那条之后
+   *   也不要恢复**，只有**发完并且新消息再生成完之后**再恢复」。
+   *
+   * ⇒ 三种情况：
+   *   ① **试探轮正常跑完**（`probing`，即慢模式里新开始的那一轮）
+   *      ⇒ 说明模型真的跟上了 ⇒ **解除慢模式**（这一轮的 `items` 照常处理）；
+   *   ② **别的轮**（就是"那条慢的"，或者又一次慢）⇒ **保持慢模式**，
+   *      并且把结束前攒下的**全丢掉**（用户原话：「反正新消息之前的要全部丢弃」）；
+   *   ③ 没进过慢模式 ⇒ 什么都不做。
+   *
+   * ⚠️ 调用方（`enqueue` 的 `finally`）还必须**慢模式时不删状态** ——
+   *    状态一删，`slowMode` 就丢了，等于"那条慢的一生成完就恢复"（正是用户不要的）。
+   */
+  noteGeneratingDone(bkey, st) {
+    try {
+      if (!st?.slowMode) return;
+      if (st.probing) {
+        st.slowMode = false;
+        st.probing = false;
+        st._dropLogged = false;
+        log.info(`[${bkey}] 慢模式里的**试探轮生成完了** → **解除慢模式**（恢复正常回复）`);
+        return;
+      }
+      // 就是"那条慢的" ⇒ 不解除，而且它之后、下一轮开始之前的**全丢**
+      const had = st.items?.length ?? 0;
+      if (st.items) st.items.length = 0;
+      log.info(
+        `[${bkey}] 这一轮超过阈值、已经发出 → **慢模式保持**` +
+          `（丢掉它之后攒着的 ${had} 条）；等下一条新消息进来当试探轮`,
+      );
+    } catch (e) {
+      log.debug(`[慢模型] 结算慢模式失败（当作不解除）：${e.message}`);
+    }
+  }
+
+  /**
+   * 让这个群**安静一会儿**（2026-10-07 用户要求）。
+   *
+   * 用户原话：「**发了清除剧情应该强制 bot 停发消息一分钟**，要不然她们会
+   *   接着上文继续聊」。
+   *
+   * ⚠️ 为什么 `/清除剧情` 清不掉"接着聊"：剧情状态是清了，但**上下文里
+   *    还留着刚聊的那几句**，而"对话延续"那条路（`snap.phase === 'active'`
+   *    → 直接接、不判）**跟剧情状态无关** ⇒ 清完照接不误 ✗
+   *    ⇒ 所以要在**群这一级**强制安静一小会儿，让那波上下文自然过期。
+   *
+   * ⚠️ 拦的是**所有**聊天回复（@ 她、关键词、同类、主动搭话、追补）——
+   *    用户要的就是"一个字都别发"。**指令本身照常执行**（`/剧情` `/清除剧情`
+   *    走的是指令处理那条路，不经过 `decide()`）。
+   * ⚠️ **内存态、不落盘**：1 分钟的窗口，重启本身就要 20 秒以上、本来就会错过；
+   *    落盘反而可能让"清完剧情又重启了一下"变成第二天她还不说话。
+   *
+   * @param {string} groupId
+   * @param {number} [ms] 安静多久（默认 1 分钟；**传 0 = 解除静默**）
+   * @param {string} [why] 写日志用
+   */
+  muteGroup(groupId, ms = 60000, why = '') {
+    const gid = String(groupId ?? '').trim();
+    if (!gid) return 0;
+    this._muteUntil ??= new Map();
+    const span = Math.max(0, Number(ms) || 0);
+    // ⚠️ 0 秒 = **解除静默**（不是"什么都不做"）—— 调用方想取消就只能靠它
+    if (!span) {
+      this._muteUntil.delete(gid);
+      log.info(`[静默] 群 ${gid} 解除静默` + (why ? `（${why}）` : ''));
+      return 0;
+    }
+    const until = Date.now() + span;
+    this._muteUntil.set(gid, until);
+    log.info(
+      `[静默] 群 ${gid}：${Math.round(span / 1000)} 秒内一个字都不发` + (why ? `（${why}）` : ''),
+    );
+    return until;
+  }
+
+  /** 这个群现在是不是在静默期（见 `muteGroup`） */
+  isMuted(groupId) {
+    const gid = String(groupId ?? '').trim();
+    if (!gid) return false;
+    const until = Number(this._muteUntil?.get(gid) ?? 0);
+    return until > Date.now();
+  }
+
   atTargetsOf(groupId) {
     const out = [];
     try {
@@ -3869,6 +4058,22 @@ export class Bot {
   }
 
   decide(event, voluntary = null) {
+    // ⚠️⚠️ 2026-10-07 加（用户原话：「**发了清除剧情应该强制 bot 停发消息一分钟**，
+    //    要不然她们会接着上文继续聊」）：
+    //    **静默期内一条都不回** —— @ 她、关键词、同类、追补…全走这里，
+    //    所以只需要在**最前面**拦一次就够（`shouldJoinChat()` 那边是主动接话那条路，
+    //    也各拦了一道）。
+    //    ⚠️ 指令（`/剧情` `/清除剧情`）不经过这里 ⇒ 不受影响，他还能接着操作。
+    //    ⚠️ 为什么必须"强制"：剧情状态清掉之后，**上下文里那几句还在**，
+    //      而"对话延续"（直接接、不判）跟剧情状态无关 ⇒ 光清剧情她们照接 ✗
+    if (event?.message_type === 'group' && this.isMuted(event.group_id)) {
+      log.info(
+        `[静默] 群 ${event.group_id} 还在静默期（清剧情之后那一分钟）→ 这条不回` +
+          `${voluntary ? `（voluntary=${voluntary}）` : ''}`,
+      );
+      return null;
+    }
+
     // ⚠️⚠️ 2026-10-05 加（用户要求：「加个机器人之间的对话到这种他们自己觉得应该停的时候
     //    就停吧，要不然会像现在这样**一直发下去**」）：
     //    ⚠️ 用户随后纠正过一次：「**不是立即解除**，而是…说对话要停了，
@@ -4666,6 +4871,28 @@ export class Bot {
     //    这 10 秒里新来的消息会**另起一个批次** → 各自生成 → 各出一条 →
     //    看起来就是「它没听完就抢答」。
     if (st.running) {
+      // ⚠️⚠️ 2026-10-07 加（用户要求，专门对付「中转站盗版慢速模型」）：
+      //    「如果已经接到了大于两分钟才开始生成消息（因为前面消息生成太慢），
+      //    **直接把后面排队生成的消息全部丢掉**，当有新消息进入开始生成再恢复」，
+      //    并补了一句「**就像群里现在黑祥的状态一样，要避免这种情况**」。
+      //
+      //    ⇒ 判据 = **当前这一轮已经生成多久了**（`st.startedAt`，在真正开始
+      //      生成那两处设、见 `scheduleHandle` / `flushPendingGroup`）：
+      //      超过 `slowDropMs()`（默认 **60 秒**）⇒ 说明模型慢得离谱 ⇒
+      //      **这条不收、连已经攒着的一起扔**。
+      //
+      //    ⚠️ 为什么必须扔（而不是"忍着攒完一起回"）：慢生成会把队列堵成一长串，
+      //      等它出来时那些话**早就过时了**（用户实测：回得又晚又答非所问）——
+      //      而且这一轮刚生成完，攒的那一批马上又是一次 60 秒的生成，
+      //      **永远在追、永远追不上**。扔掉积压才跳得出这个循环。
+      //    ⚠️ **恢复是自动的**：这一轮生成完 ⇒ `running` 变 false、`items` 空
+      //      ⇒ 状态整个被删（见 `enqueue` 的 `finally`）⇒ 下一条新消息正常入队。
+      //      不需要额外的"恢复"标志，也就不会出现"忘了恢复、她永远不说话"。
+      //    ⚠️ 判据与动作都在 `dropIfSlowGenerating()` 里（抽出去是为了能单独测）。
+      if (this.dropIfSlowGenerating(bkey, st)) {
+        this.batchState.set(bkey, st);
+        return Promise.resolve();
+      }
       st.items.push(event);
       // 上限：别让刷屏把缓冲撑爆（合并成超长 prompt 反而更糟）
       if (st.items.length > (b.maxMerged ?? 10)) st.items.shift();
@@ -4792,6 +5019,14 @@ export class Bot {
         }
         // 标记「这个群正在生成」—— 期间来的消息会攒进 st.items
         st.running = true;
+        // ⚠️ 2026-10-07：记下**这一轮生成是什么时候开始的** ——
+        //    「慢模型丢弃积压」那个闸全靠它算"已经生成多久了"（见 `dropIfSlowGenerating`）。
+        //    ⚠️ 必须和 `running = true` **同一处**设，否则计时起点跟真实生成对不上。
+        st.startedAt = Date.now();
+        st._dropLogged = false;
+        // ⚠️ 2026-10-07 用户要求：慢模式**还没解除**时新开始的这一轮 = **试探轮** ——
+        //    它要是能正常生成完，就说明模型跟上了、可以解除（见 `noteGeneratingDone`）。
+        if (st.slowMode) st.probing = true;
         this.batchState.set(bkey, st);
         this.enqueue(entry.event, meta).then(resolve, resolve);
       }, waitMs);
@@ -4841,6 +5076,9 @@ export class Bot {
         // ⚠️ `running` 必须是 true：这期间新来的消息才会**攒进 `st.items`**
         //    （第 3145 行那条路），而不是另起一批 —— 这是"跨生成窗口也能合上"的关键。
         st.running = true;
+        // ⚠️ 2026-10-07：这条路只是**在等他打完字**（`genHoldMs`），**并没有在生成** ——
+        //    所以把计时清掉，别让"慢模型"那个闸把这几秒的等待也算进去 ✗
+        st.startedAt = 0;
         this.batchState.set(bkey, st);
         clearTimeout(st.holdTimer);
         st.holdTimer = setTimeout(() => {
@@ -4882,6 +5120,11 @@ export class Bot {
     };
     st.pending = true;
     st.running = true;
+    // ⚠️ 2026-10-07：续批也是一轮**新的生成** ⇒ 计时重新起（见 `dropIfSlowGenerating`），
+    //    并且慢模式没解除时它同样是"试探轮"（见 `noteGeneratingDone`）
+    st.startedAt = Date.now();
+    st._dropLogged = false;
+    if (st.slowMode) st.probing = true;
     const who = [...new Set(merged._sources.map((s) => s.name))];
     log.info(`[${bkey}] 生成期间又收到 ${items.length} 条（来自 ${who.join('、')}）—— 合成一批再处理`);
     this.enqueue(merged, {}).catch((e) => log.error(`[${bkey}] 续批处理出错：${e.message}`));
@@ -9845,6 +10088,48 @@ export class Bot {
 
     // 身份 + 行为边界放最后，最靠近对话，影响力最大
     if (event) {
+      // ⚠️⚠️ 2026-10-07 加（用户截图：两个机器人陷进**吵嘴死循环**）。
+      //    用户原话：「bot 之间的对话很容易陷进吵嘴死循环，要在提示词优化一下，
+      //    应该多发**有助于推进剧情**的话，而不是**无意义吵嘴**」。
+      //
+      //    截图里那一串是典型：「嫌我软就别站风里呗」→「嫌我软你还问，嘴硬」→
+      //    「别又站那儿跟我贫」… **每一句都在评价对方上一句**，事情一步没动
+      //    （人还在楼梯口），群里读起来就是两个机器人在刷屏。
+      //
+      //    ⚠️ 和下面 `botOnlyChain` 那段的分工（**两件事，别合并**）：
+      //      · **这一段**：管"**每一条该怎么写**" —— 只要对面是同类就注入；
+      //      · `botOnlyChain` 那段：管"**什么时候该收场**" —— 刷够条数才注入。
+      //      上一版只有后者 ⇒ **还没刷够条数的时候，已经在互相顶嘴了** ✗
+      //
+      //    ⚠️ 措辞必须**正向**（"说让事情往前走的话"），不能写成"少说两句" ——
+      //      那样她干脆不接（用户报过「爱音不接剧情了」）。
+      if (
+        event?.message_type === 'group' &&
+        this.isPeerBot(String(event.group_id ?? ''), String(event.user_id ?? ''))
+      ) {
+        parts.push(
+          [
+            '',
+            '# 【正在跟你说话的是另一个同类：把事往前推，别原地顶嘴】',
+            '',
+            '你们两个是在**一起演一件事**（剧情里就是让这一段往下走），不是比谁嘴硬。',
+            '⚠️ 最容易犯的错，是**一句接一句地互相评价对方刚才那句话**，比如：',
+            '「嫌我软就别站风里呗」→「嫌我软你还问，嘴硬」→「别又站那儿跟我贫」…',
+            '读起来像吵架，可**事情一步都没动**（人还在楼梯口），群里看着就是两个机器人在刷屏。',
+            '',
+            '## 每条开口前，先过一遍这个判断',
+            '- **我这句话说完，事情有变化吗？**',
+            '  · 有（新信息 / 一个动作 / 一个决定 / 换了个地方 / 有了结果）→ 就这么说；',
+            '  · 没有 → **别接**，或者干脆**做点具体的**（真去做那件事、真给个结果）。',
+            '- 🚫 **别把对方的话当靶子**：不去评价它「嘴硬 / 怂 / 装 / 就会说」这类',
+            '  —— 那正是原地打转的入口。',
+            '- 🚫 **别重复**：它用过的词、句式、那半句玩笑，都别再捡回来回一遍。',
+            '- 🚫 别把一句话拆成好几条发；一次说清楚就够。',
+            '- ✅ 想让对方去做点什么 → **直接 `@名字` 说事**（会变成真正的 @，它收得到）。',
+          ].join('\n'),
+        );
+      }
+
       // ⚠️⚠️ 2026-10-06 加（用户原话：「**就是发出足够多条在提示词里说该结束了，
       //    机器人自己判定自己该说的话说完了没有，自己决定结束**」）：
       //    两个机器人已经来回够多条、而群里又没有真人 ⇒ **把"该收场了"这件事告诉她、
@@ -9862,7 +10147,8 @@ export class Bot {
             '⚠️ 最近这些消息里**一个真人都没有** —— 就是你跟另一个同类号在来回接，而且已经接了不少。',
             '',
             '## 你自己判断：想说的话说完了没有',
-            '- 还有想说的 → 接着说（**但别为了接而接**、别硬找话题、也别重复已经说过的）；',
+            '- **还有新东西要说**（新信息 / 下一步 / 一个结果）→ 接着说；',
+            '- 只是**想回它一句、顶它一句、接个话茬** → 那不算"还有想说的"，**停**；',
             '- 说完了 / 觉得没什么意思 / 只是在客气 → **把话停在那儿就行**，',
             '  不必专门宣布一声"我聊完了"。真要收场，就**用你自己的话**随口带一句',
             '  （比如你手头正忙着什么、今天还有什么事）——',
@@ -12372,6 +12658,13 @@ export class Bot {
       }
 
       const r = quest.purge(gid);
+      // ⚠️⚠️ 2026-10-07 加（用户要求：「**发了清除剧情应该强制 bot 停发消息一分钟**，
+      //    要不然她们会接着上文继续聊」）：
+      //    **只要他发了这条指令就静默**（哪怕这次没得清也一样）——
+      //    他发这条的意图就是"清场"，行为要可预期；而"清完剧情、她们又把上文
+      //    接下去"正是他要避免的场面（剧情状态清了，可上下文里那几句还在）。
+      //    ⚠️ 两个号是**两个进程**，各自收到这条指令、各静默各的 ⇒ 天然都对 ✓
+      this.muteGroup(gid, 60000, `收到 /清除剧情（${r.ok ? '清掉了' : '没得清'}）`);
       log.info(
         `[剧情] ${event.user_id} 用 /清除剧情：群 ${gid} → ` +
           (r.ok
@@ -12391,6 +12684,78 @@ export class Bot {
       return true;
     } catch (e) {
       log.warn(`[剧情] 清除指令处理出错：${e.message}`);
+      return false;
+    }
+  }
+
+  /**
+   * `/暂停` —— **立刻打断正在生成的那条 + 这个群 2 分钟不说话**（2026-10-07 用户要求）。
+   *
+   * 用户原话：「再加一个 `/暂停` 指令，**直接打断所有正在生成的消息**，
+   *   并**停止发送消息 2 分钟**」。
+   *
+   * ⚠️ 两个动作缺一不可：
+   *   · 只静默**不打断** ⇒ 那条已经生成到一半的会**继续往外发**
+   *     （流式是边生成边分条发的）✗ 而他要的是"立刻停"；
+   *   · 只打断**不静默** ⇒ 群里下一句话进来她又开始生成 ✗
+   *
+   * ⚠️ 打断走的是**已有的**机制：`this.running` 里存的就是每一轮生成的
+   *    `AbortController`（见主回复那里），而生成那边的 `catch` 已经把
+   *    "被中止"和"真出错"分开了（中止只记一条 `已停止生成`、**不发错误提示**）——
+   *    所以这里不用新造轮子，和群里直接说「停止」那条路是同一个开关。
+   * ⚠️ **只影响发指令的这个群**（`key` 是按群算的）—— 别的群该说说。
+   * ⚠️ 已经发出去的分条**收不回来**（流式的代价），能停的是后面还没发的。
+   * ⚠️ 静默复用 `muteGroup()`（和 `/清除剧情` 那一套）：到点自动恢复，不用谁去解除。
+   *
+   * 权限：服主 / 管理员（和 `/清除剧情` 一致）—— 这是"强制全体闭嘴"级别的操作，
+   * 不给普通群友。
+   *
+   * @returns {boolean} 这是不是 `/暂停`（是 → 调用方直接 return，别再当聊天处理）
+   */
+  tryPauseCommand(event, segs) {
+    try {
+      const raw = String(msg.extractText(segs) ?? '').trim();
+      if (!/^[\/／]\s*暂\s*停\s*$/.test(raw)) return false;
+      if (event.message_type !== 'group') return false;
+      const gid = String(event.group_id);
+
+      const role = this.speakerRole(event);
+      if (role !== 'owner' && role !== 'staff') {
+        log.info(`[暂停] ${event.user_id} 想暂停但没权限（role=${role}）→ 已回提示`);
+        this.sendToGroup(gid, '这个只有服主和管理员能用（').catch(() => {});
+        return true;
+      }
+
+      // ① **立刻打断**这个群正在生成的那条（没在生成也照样往下走）
+      let stopped = false;
+      try {
+        const key = history.sessionKey(event);
+        const ctl = this.running?.get(key);
+        if (ctl) {
+          ctl.abort(new Error('/暂停'));
+          this.running.delete(key);
+          stopped = true;
+        }
+      } catch (e) {
+        log.warn(`[暂停] 打断生成失败（静默照做）：${e.message}`);
+      }
+
+      // ② 这个群**2 分钟不发消息**（到点自动恢复）
+      this.muteGroup(gid, 120000, '收到 /暂停');
+
+      log.info(
+        `[暂停] ${event.user_id} 用 /暂停：群 ${gid} → ` +
+          `${stopped ? '打断正在生成的那条 + ' : ''}静默 2 分钟`,
+      );
+      // ⚠️ 回执**必须发**（和 `/清除剧情` 一样）—— 否则他分不清"生效了"还是"指令没被认出来"。
+      //    `sendToGroup` 是直发，**不受静默影响**（静默拦的是 `decide()` 那几条路）。
+      this.sendToGroup(
+        gid,
+        stopped ? '打住了。这两分钟我不说话，有急事等会儿再说' : '好，这两分钟我不说话',
+      ).catch((e) => log.warn(`[暂停] 回执发送失败：${e.message}`));
+      return true;
+    } catch (e) {
+      log.warn(`[暂停] 指令处理出错：${e.message}`);
       return false;
     }
   }

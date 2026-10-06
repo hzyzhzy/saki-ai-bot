@@ -196,6 +196,16 @@ export async function tick(bot, now = Date.now()) {
     }
   })();
   for (const gid of groups) {
+    // ⚠️⚠️ 2026-10-07 加（用户原话：「**发了清除剧情应该强制 bot 停发消息一分钟**，
+    //    要不然她们会接着上文继续聊」）：
+    //    这个群在静默期 ⇒ **连主动搭话 / 戳一戳也不做**。
+    //    ⚠️ 这一条不能省：`tick()` 是**定时任务**，走的是 `sendToGroup` 直发，
+    //      **不经过 `decide()`** —— 只在 `bot.decide()` 那边拦的话，
+    //      静默期里她照样会主动戳同类，那就不叫"停发消息"了。
+    if (bot.isMuted?.(gid)) {
+      log.info(`[同类] 群 ${gid} 在静默期（清剧情之后那一分钟）→ 这次主动搭话跳过`);
+      continue;
+    }
     const peers = peersOf(gid);
     if (!peers.length) continue;
     const lastMsgAt = (() => {
