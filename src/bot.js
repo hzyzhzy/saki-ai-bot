@@ -4911,16 +4911,34 @@ export class Bot {
       //    ⚠️ 只有**硬闸**（真的刷到离谱了，默认 24 条 / 10 分钟，见 `botChainHard`）
       //      才由代码直接收尾兜底 —— 否则万一她一直不肯收，两个机器人会无限刷下去。
       if (!cooling && this.botChainHard(gid0)) {
-        this.botChainClosed.set(gid0, Date.now());
         const d = this.botChainLast ?? {};
-        log.info(
-          `[同类] ⚠️ 硬闸：两个机器人已刷到 ${d.mine ?? '?'}+${d.theirs ?? '?'} 条 / ` +
-            `${Math.round((d.span ?? 0) / 1000)} 秒（真人 ${d.humans ?? 0} 条）` +
-            ' → 不等她自己收了，代码直接收尾',
-        );
-        // ⚠️ 异步发，不阻塞这条（`decide` 是同步的，这里不能 await）
-        this.sayBotFarewell(gid0).catch((e) => log.warn(`[同类] 收尾话失败：${e.message}`));
-        return null;
+        // ⚠️⚠️ 2026-10-07 改（用户：「**在剧情里结束词还有回去练琴，说明根本没走模型**」）：
+        //    **剧情进行中，代码不许收尾。**
+        //    实测：她自己那句"回去练琴"**不是写死的**（代码兜底只有四句中性话，
+        //    台词是模型生成）—— 但**触发是代码**：刷到 24 条 ⇒ 逼她说一句收尾 ✗
+        //    ⇒ 剧情里**完全不收尾**：那条线该由它自己演完（`done`）或者到硬上限 ✓
+        //    ⚠️⚠️ **而且不能只是"不收尾"就完事**（我第一版就是这么写的，踩了）：
+        //      下面原本紧跟着 `botChainClosed.set(...)` + `return null` ⇒
+        //      **剧情里照样把这条消息吞掉、还顺手冷却一分钟** ⇒ 用户看到的是
+        //      「**怎么爱音不回了**」✗（日志实证：`刷到硬闸了（8+16 条），但剧情还在演
+        //      → 不收尾`，紧接着就没回）
+        //      ⇒ 剧情里这两件事**都不做**：不设冷却、也不 return ✓
+        if (this.questLive(gid0)) {
+          log.info(
+            `[同类] ⚠️ 刷到硬闸了（${d.mine ?? '?'}+${d.theirs ?? '?'} 条），` +
+              '但**剧情还在演** → **不收尾、也不闭麦**（让它自己演完）',
+          );
+        } else {
+          this.botChainClosed.set(gid0, Date.now());
+          log.info(
+            `[同类] ⚠️ 硬闸：两个机器人已刷到 ${d.mine ?? '?'}+${d.theirs ?? '?'} 条 / ` +
+              `${Math.round((d.span ?? 0) / 1000)} 秒（真人 ${d.humans ?? 0} 条）` +
+              ' → 不等她自己收了，代码直接收尾',
+          );
+          // ⚠️ 异步发，不阻塞这条（`decide` 是同步的，这里不能 await）
+          this.sayBotFarewell(gid0).catch((e) => log.warn(`[同类] 收尾话失败：${e.message}`));
+          return null;
+        }
       }
       // ⚠️ 2026-10-07 凌晨：**真人一插话就清掉"她刚说过收尾话"的标记** ——
       //    不然她跟真人道完晚安，接下来两分钟里任何带"晚安"的话都不接了 ✗
@@ -9787,6 +9805,26 @@ export class Bot {
     //    这个是"这次要做的事"的说明，比人设细节更需要模型优先看到。
     if (solveMode) parts.push('\n' + SOLVE_GUIDE);
 
+    // ⚠️⚠️ 2026-10-07 加（用户：「**除了剧情开始和推进的转述，其他时候都不要转述，
+    //    都是在正常聊天，不要写这种转述的话**」）：
+    //    实测：她在**聊天**里写成了剧情式的旁白 ——
+    //      「说完自己也觉出这话答得太快。又蹲下来，蹲到跟她坐着齐平的高度，
+    //        膝盖顶着…抬眼看了她一下，又挪开」✗（那是**转述**，不是聊天）
+    //    ⇒ 聊天里必须**直接说话**。剧情段的转述走 quest.js 的提示词，不归这里管 ✓
+    if (event?.message_type === 'group' || event?.message_type === 'private') {
+      parts.push(
+        '\n' +
+          [
+            '⚠️⚠️ **你是在群里说话，不是在写小说、也不是在转述剧情**：',
+            '   · 🚫 别写旁白和动作叙述：「她又蹲下来」「抬眼看了她一下」「说完自己也觉出这话答得太快」；',
+            '   · 🚫 别写内心解说或点评（「她这个人，平时话不比谁少」那种是**在讲故事**）；',
+            '   · ✅ 就直接把**你要说的话**说出来 —— 像群里真人那样，一句一条，短。',
+            '   · ⚠️ 例外只有一处：**剧情开始段和推进段**（那条本来就该是转述）——',
+            '     但那不是你现在的场合，你现在是在**接话**。',
+          ].join('\n'),
+      );
+    }
+
     // ⚠️⚠️ 2026-10-07 加（用户报：「我刚才都这么写了，**她们两个还是不听写的字，
     //    连爱音自己都在找出口**」）：
     //    **正在演的那条剧情，起因要进聊天提示词。**
@@ -12931,7 +12969,7 @@ export class Bot {
     // ⚠️ 2026-09-18：「她人在哪 / 在做什么」的状态机（用户要求）——
     //    判断**不 await**（别拖住发送），而且它内部按群节流（默认 5 分钟一次）。
     this.judgeWhere(groupId, text).catch((e) => log.debug(`位置判断失败：${e.message}`));
-    const parts = splitChatText(text);
+    const parts = splitChatText(text, { maxChunks: opts.maxChunks });
     if (!parts.length) return [];
     // ⚠️ 2026-09-17 用户要求加「吃饭状态机」（原话：「有什么影响吃饭的事件会被计入，
     //    下次有人喊她，他自己就知道吃过没有了」）。这里是她**所有自己说的话**的统一出口
@@ -13004,7 +13042,66 @@ export class Bot {
         log.debug(`放进待发箱失败：${e.message}`);
       }
     }
+    // ⚠️⚠️ 2026-10-07 加（用户：「**我受不了了，这一个小时一点进展都没有，至少在剧情上**」）：
+    //    剧情段原来**只能靠他手动 `/剧情 继续`** 推 —— 他一小时里推了四次，
+    //    每次都停在第 3 段（"实践"那一段是第 4 段），**就差最后一步** ✗
+    //    ⇒ 这里挂一个**自动推进**：剧情进行中、聊够几条就自己推一段。
+    //    ⚠️ 我上一版加过又被我自己撤了（他当时说"别改"，我理解错了：
+    //      他要的正是"聊天能推动剧情"）—— 这次留着 ✓
+    //    ⚠️ fire-and-forget（不 await）：不能拖慢这条消息的发送。
+    if (!opts.force) this.maybeAutoAdvanceQuietly(groupId);
     return sent;
+  }
+
+  /**
+   * ⚠️ 2026-10-07 加（用户：「**一个小时一点进展都没有**」）：
+   * **剧情聊够了就自动往前推一段** —— 不用他手动 `/剧情 继续`。
+   *
+   * 判据（全部满足才推）：
+   *   · 这个群**正在演剧情**，而且**是我这条线**（让位方不推，免得两边各演各的）；
+   *   · 距上一条剧情段至少 **45 秒**（`quest.autoAdvanceGapMs`）—— 免得连着推；
+   *   · 这期间两个号**已经互动了 4 条**（`quest.autoAdvanceLines`）。
+   *
+   * ⚠️ 静默推进：不发「好，我接着说（」那种回执（自动的，别刷屏）✓
+   * ⚠️ 失败就不动（下一轮再试）✓
+   */
+  maybeAutoAdvanceQuietly(groupId) {
+    try {
+      const gid = String(groupId ?? '');
+      if (!gid) return;
+      const cur = quest.current(gid);
+      if (!cur || cur.endedAt) return;
+      try {
+        if (quest.leadership(gid) === 'peer') return; // 那条线不是我的
+      } catch {}
+      const gap = Math.max(0, Number(config.quest?.autoAdvanceGapMs ?? 45000) || 0);
+      this.questAutoCount ??= new Map();
+      const st = this.questAutoCount.get(gid) ?? { n: 0, at: 0 };
+      const lastAt = Math.max(Number(st.at) || 0, Number(cur.awaitingSince) || 0);
+      st.n += 1;
+      if (gap && lastAt && Date.now() - lastAt < gap) {
+        this.questAutoCount.set(gid, st);
+        return;
+      }
+      const need = Math.max(2, Number(config.quest?.autoAdvanceLines ?? 4) || 4);
+      if (st.n < need) {
+        this.questAutoCount.set(gid, st);
+        return;
+      }
+      this.questAutoCount.set(gid, { n: 0, at: Date.now() });
+      log.info(`[剧情] 群里聊够 ${need} 条还没推进 → **自动推一段**（群 ${gid}）`);
+      (async () => {
+        const r = await quest.advance(cur, { ask: this.questAsk() });
+        if (!r?.ok) {
+          log.warn(`[剧情] 自动推进失败：${r?.reason ?? '不知道为啥'}`);
+          return;
+        }
+        const sent2 = await this.sendChatLike(gid, r.text, { maxChunks: 3 });
+        for (const x of sent2) quest.rememberHerMsg(cur, x?.message_id);
+        log.info(`[剧情] 自动推进 → 群 ${gid} 第 ${cur.stageIndex} 段（发出 ${sent2.length} 条）`);
+        if (r.done) this.settleQuestEnding(gid, cur, r.ending);
+      })().catch((e) => log.warn(`[剧情] 自动推进异常：${e.message}`));
+    } catch {}
   }
 
   /**
@@ -13437,7 +13534,7 @@ export class Bot {
           await this.sendToGroup(gid, `这段没写出来：${r?.reason ?? '不知道为啥'}`).catch(() => {});
           return;
         }
-        const sent = await this.sendChatLike(gid, r.text);
+        const sent = await this.sendChatLike(gid, r.text, { maxChunks: 3 });
         for (const x of sent) quest.rememberHerMsg(q, x?.message_id);
         log.info(`[剧情] 手动推进 → 群 ${gid} 第 ${q.stageIndex} 段（发出去 ${sent.length} 条）`);
         if (r.done) this.settleQuestEnding(gid, q, r.ending);
@@ -13729,7 +13826,7 @@ export class Bot {
           await this.sendToGroup(gid, `这个开头没写出来：${r?.reason ?? '不知道为啥'}`).catch(() => {});
           return;
         }
-        const sent = await this.sendChatLike(gid, r.text);
+        const sent = await this.sendChatLike(gid, r.text, { maxChunks: 3 });
         for (const x of sent) quest.rememberHerMsg(r.quest, x?.message_id);
         log.info(`[剧情] 手动开了一条 → 群 ${gid}：${r.quest?.premise}`);
       })().catch((e) => log.warn(`[剧情] 手动开始异常：${e.message}`));
@@ -14839,6 +14936,43 @@ export function splitChatText(raw, opts = {}) {
       }
     }
     if (cur) out.push(cur);
+  }
+  // ⚠️⚠️ 2026-10-07 加（用户截图：群里冒出一条单独的 `"`、还有一条 `"。`）：
+  //    **纯标点 / 纯引号的碎片不许单独成条** —— 用户说的"越来越混乱"就是它 ✗
+  //    成因：模型写成 `"。 （回头看她）"祥祥，你背得那么熟…` 这种**引号错位**的句子，
+  //    按句末标点切完，引号自己就成了一句 ⇒ 单独发一条 ✗
+  //    ⇒ 把这种碎片**并回相邻那条**（有上一条就并上去，没有就并进下一条）✓
+  {
+    const isJunk = (s) => !/[\p{L}\p{N}]/u.test(String(s ?? ''));
+    const merged = [];
+    for (const s of out) {
+      if (isJunk(s) && merged.length) {
+        merged[merged.length - 1] += s; // 并回上一条
+        continue;
+      }
+      if (merged.length && isJunk(merged[merged.length - 1])) {
+        merged[merged.length - 1] += s; // 上一条是碎片 ⇒ 并进它
+        continue;
+      }
+      merged.push(s);
+    }
+    out.length = 0;
+    out.push(...merged);
+    // ⚠️ 整条**全是碎片**（比如模型只回了一个引号）⇒ 干脆不发（宁可少一条，
+    //    也别在群里发一条只有一个引号/句号的消息 ✗）
+    if (out.length && out.every((s) => isJunk(s))) return [];
+  }
+  // ⚠️⚠️ 2026-10-07 加（用户截图：开场被切成 6 条，问「**分句不是一直都是最多三段吗**」）：
+  //    **条数上限**。主聊天那边一直有 `chunking.maxSentenceChunks`（默认 3）——
+  //    而剧情/事件这条主动路**从来没设过上限** ⇒ 一段 6 句就发 6 条 ✗
+  //    ⇒ 给了 `opts.maxChunks` 就照它办：超出来的**并进最后一条**（不再分条）。
+  // ⚠️ `0` = **不限制**（默认）；⚠️ 别写成 `Math.max(1, ...)` ——
+  //    那样"没传上限"会被当成"最多 1 条"，把所有分条都合并掉 ✗（我踩过一次）
+  const cap = Math.max(0, Number(opts.maxChunks) || 0);
+  if (cap && out.length > cap) {
+    const tail = out.slice(cap - 1).join('');
+    out.length = cap - 1;
+    out.push(tail);
   }
   // 兜底：任何路径都不许把标记发出去
   return out.map((s) => dropDashBreak(s).trim()).filter(Boolean);

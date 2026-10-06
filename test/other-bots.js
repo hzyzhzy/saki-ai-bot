@@ -1297,6 +1297,43 @@ console.log('\n【23】★★ 剧情起因进**聊天提示词**、并且**两�
     /recentLines: recent\.lastBotLines\(gid0, \{/.test(bsrc23),
     '★★ 而且真的接进去了（不是写了没用）',
   );
+
+  // ⚠️ 2026-10-07 加（用户截图：群里冒出一条**单独的引号**、还有一条「"。」）：
+  //    模型写成 `"。 （回头看她）"祥祥…` 这种引号错位的句子，按句末标点切完，
+  //    引号自己就成了一句 ⇒ 单独发一条 ✗（用户：「越来越混乱了」）
+  const { splitChatText } = await import('../src/bot.js');
+  const junkCases = [
+    ['"。 （回头看她）"祥祥，你背得那么熟，你教教我呀', '开头的引号碎片'],
+    ['她说行。 "。 然后她又问了一遍', '中间的碎片'],
+  ];
+  for (const [src, label] of junkCases) {
+    const parts = splitChatText(src, { max: 40 });
+    check(
+      parts.length > 0 && parts.every((p) => /[\p{L}\p{N}]/u.test(p)),
+      `★★ 纯标点/引号碎片不许单独成条：${label}`,
+      JSON.stringify(parts),
+    );
+  }
+  check(
+    splitChatText('"', { max: 40 }).length === 0,
+    '★★ 整条只有引号 ⇒ **不发**（宁可少一条，也别发一条只有引号的消息）',
+  );
+  // ⚠️ 2026-10-07 加（用户截图：开场被切成 6 条，问「分句不是一直都是最多三段吗」）：
+  //    主聊天一直有 maxSentenceChunks（默认 3），而剧情/事件这条主动路从来没设过上限 ✗
+  const longText = '第一句话。第二句话。第三句话。第四句话。第五句话。第六句话。第七句话。';
+  check(
+    splitChatText(longText, { max: 8 }).length > 3,
+    '★ 不传上限时照旧（主动类保持原样）',
+  );
+  check(
+    splitChatText(longText, { max: 8, maxChunks: 3 }).length === 3,
+    '★★★ 传了 `maxChunks` 就**最多 3 条**（超出的并进最后一条）',
+  );
+  const bsrc23b = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  check(
+    (bsrc23b.match(/sendChatLike\(gid, r\.text, \{ maxChunks: 3 \}\)/g) ?? []).length === 3,
+    '★★ 剧情三条路（开场 / 手动推进 / 自动推进）**都传了** `maxChunks: 3`',
+  );
   check(
     /先在心里把它拆成几条/.test(src23),
     '★★ 开场那边明确要求：**先把他那段话拆成几条，再逐条落实**',
@@ -1449,7 +1486,10 @@ console.log('\n【24】★★ 清剧情要**连残留一起清** + 硬条件剧�
     /hardCond && done && !forceEnd && !hardStop/.test(qsrc24),
     '★★★ 起因里有"必须做到 X"⇒ **X 还没演到就不许收尾**（实测第 2 段就 done，那个坎根本没演）',
   );
-  check(/const floor = Math\.max\(4, Math\.min\(5, /.test(qsrc24), '★★ 下限抬到 4 段（next 单调递增 ⇒ 不会死循环）');
+  check(
+    /const floor = Math\.max\(3, Math\.min\(4, /.test(qsrc24),
+    '★★ 下限 3 段（原来 4 —— 用户每次推到第 3 段就停，"做掉"那段永远到不了 ✗）',
+  );
 
   // ⑤ ⚠️⚠️⚠️ 用户最后那句：「**我也不给你绕弯子了，我就直说了，要有实践**」——
   //    实测（真实模型）证明：**模型完全能写**那件事，之前不写是因为提示词
