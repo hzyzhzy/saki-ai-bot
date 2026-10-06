@@ -2202,6 +2202,20 @@ export function leadership(groupId) {
   if (!mine || mine.endedAt) return 'none';
   const p = peerPlots.get(g);
   if (!p?.firstAt) return 'self'; // 没见同类演过 ⇒ 我主导
+  // ⚠️⚠️ 2026-10-07 加（用户问：「**如果有机器人中途掉了，那顺序就乱了**」）：
+  //    **让位是有时效的** —— 对面要是**演到一半掉线**，它那条剧情就再也不动了 ✗
+  //    而 `due()` 里 `leadership() === 'peer'` ⇒ **我永远不推进** ⇒ 整条线卡死 ✗✗
+  //    ⇒ 对面最后一句剧情超过 `peerStaleMs`（默认 3 分钟）没动静 ⇒ **不再让位**（我接管）。
+  //    ⚠️ 这也顺带解决"开场时前一位掉线"以外的情况：它推了一段就没了，我能接着往下走。
+  const staleMs = Math.max(30000, Number(cfgFor(g)?.peerStaleMs ?? 180000) || 180000);
+  const silentFor = Date.now() - (Number(p.lastAt ?? 0) || 0);
+  if (silentFor > staleMs) {
+    log.info(
+      `[剧情] 同类的剧情已经 ${Math.round(silentFor / 1000)} 秒没动静（> ${Math.round(staleMs / 1000)} 秒）` +
+        ' → **不再让位**，我接着推（它可能掉线了）',
+    );
+    return 'self';
+  }
   const mineAt = Number(mine.startedAt ?? 0) || 0;
   // ⚠️⚠️ 2026-10-07 修（用户截图：**两个号都在转述剧情**，他要的是"只有 saki 转述、
   //    爱音接话"）：**几毫秒的抖动不该决定主导权** ——

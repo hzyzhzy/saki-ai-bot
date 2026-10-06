@@ -13392,6 +13392,35 @@ export class Bot {
           await this.sendToGroup(gid, `这个开头没写出来：${r?.reason ?? '不知道为啥'}`).catch(() => {});
           return;
         }
+        // ⚠️⚠️ 2026-10-07 按用户要求改成**通用公式**（用户原话：
+        //    「首先发剧情命令之后所有的机器人都会发一个接剧情的消息，这个时候停一秒
+        //     所有机器人算出加入剧情机器人的总数，然后根据固定公式算出到底哪个机器人
+        //     来开场，后面接话的顺序是什么」）：
+        //    **公式**：把"这个群的同类池 + 我自己"按 **QQ 号升序**排 ——
+        //      · **第 1 位立刻开场**；
+        //      · **第 n 位先等 `(n-1) × stepMs`**（默认 8 秒）；
+        //      · 等到自己该开口时，要是**已经看见有人在演剧情了** ⇒ **让位、不发** ✓
+        //    ⚠️ 为什么不用"停一秒互相统计"：**同类池是配置，两边都读得到** ⇒
+        //      各自算一次就得到**同一个顺序**，不需要通信、也不会算出不一致；
+        //      而且某个号不在线时，后面的号到点自己上（不会卡死）。
+        const order = [...new Set([String(config.botQQ ?? ''), ...peersFor(gid).map(String)])]
+          .filter(Boolean)
+          .sort();
+        const myIdx = Math.max(0, order.indexOf(String(config.botQQ ?? '')));
+        const stepMs = Math.max(1000, Number(config.quest?.openStepMs ?? 8000) || 8000);
+        if (myIdx > 0) {
+          const wait = myIdx * stepMs;
+          log.info(
+            `[剧情] 开场公式：本群参与 ${order.length} 个号（${order.join(' → ')}），` +
+              `我排第 ${myIdx + 1} 位 → 先等 ${Math.round(wait / 1000)} 秒`,
+          );
+          await sleep(wait);
+          const p0 = quest.__peerPlots().get(gid);
+          if (p0?.lastAt && Date.now() - p0.lastAt < stepMs) {
+            log.info('[剧情] 前一位已经在演了 → **我这条开始段不发**（按序位让位）');
+            return;
+          }
+        }
         const sent = await this.sendChatLike(gid, r.text);
         for (const x of sent) quest.rememberHerMsg(r.quest, x?.message_id);
         log.info(`[剧情] 手动开了一条 → 群 ${gid}：${r.quest?.premise}`);
