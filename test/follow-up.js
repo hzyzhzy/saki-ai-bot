@@ -451,6 +451,33 @@ async function cleanup() {
 }
 
 async function main() {
+  // ⚠️ 2026-10-07 定：**同类机器人接着聊不要固定上限**。
+  //    演变过程（别再改回去）：
+  //      ① 一开始同类被**整个排除**在 followUp 之外 ⇒ 她刚回过对方一句、
+  //         对方接着说，她也不接（用户截图报的：爱音追问照片那事，saki 不吭声）；
+  //      ② 改成"同类也走 followUp，但那条『直接接』卡链长上限（默认 2 轮）"
+  //         ⇒ **剧情聊到一半就被掐断**，用户一眼看出来；
+  //      ③ **现在**（用户原话：「**不要固定上限，她们自己想停就停**」）——
+  //         固定上限删掉，改由**她自己**判断说没说完。
+  //    ⚠️ 所以这条断言现在盯两件事：
+  //      · 固定上限**确实没了**（有的话就是退回了 ② 那个毛病）；
+  //      · 但"该收场了"的**提示词引导** + **硬闸**都还在 ——
+  //        这两道少一道，才会真的退回"两个机器人无限互刷"。
+  {
+    const { readFileSync } = await import('node:fs');
+    const { join, dirname } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+    const src = readFileSync(join(root, 'src', 'bot.js'), 'utf8');
+    check(
+      !/peerChat\?\.maxChain/.test(src),
+      '★★ 同类接着聊**没有固定链长上限**（她们自己想停就停，不会被代码掐断）',
+    );
+    check(
+      /botOnlyChain\(/.test(src) && /botChainHard\(/.test(src),
+      '★ 但"该收场了"的提示词引导 + 硬闸都还在（不会退回无限互刷）',
+    );
+  }
   await new Promise((r) => llmServer.listen(LLM_PORT, '127.0.0.1', r));
   await new Promise((r) => (wss._server.listening ? r() : wss.once('listening', r)));
   await partB();

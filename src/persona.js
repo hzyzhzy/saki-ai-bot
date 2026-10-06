@@ -25,7 +25,7 @@
  */
 import { readFileSync, existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { personaDir, personaId } from './config.js';
+import { personaDir, personaId, ROOT } from './config.js';
 import { log } from './log.js';
 
 let cache = null;
@@ -254,6 +254,58 @@ export function refImages() {
   if (refs.length) return refs;
   const avatar = pick(qq().avatar);
   return avatar ? [avatar] : [];
+}
+
+/**
+ * **指定人设包**的生图参考图（2026-10-07 加，合照要用）。
+ *
+ * 「合照」那张图里除了她自己，还有**另一个角色**（比如剧情里和她在一起的
+ * 千早爱音）—— 那个角色长什么样，得从**它自己那个人设包**里取立绘；
+ * 拿当前这个包的，画出来就是"两个祥子"✗
+ *
+ * ⚠️ 只读，**不切人设**：这里绝不调 `personaId()` 去动当前角色，
+ *    只是按 id 去那个包里取一下参考图。
+ * ⚠️ `id` 走白名单（和 `personaId()` 同一套规矩）—— 它会拼进文件路径，
+ *    不能让一个 `../` 把读取带出项目目录。
+ * ⚠️ `QQBOT_PERSONA_DIR`（测试用：把整包搬走）那种情况下只认**当前**那个包，
+ *    别的包按 `personas/<id>/` 找 —— 套件里不会走合照这条路。
+ */
+export function refImagesOf(id) {
+  const want = String(id ?? '').trim();
+  if (!/^[\w.-]+$/.test(want)) return [];
+  const dir = want === personaId() ? personaDir() : join(ROOT, 'personas', want);
+  const pick = (rel) => {
+    const safe = String(rel ?? '').replace(/[^\w.-]/g, '');
+    if (!safe || !/\.(png|jpe?g|gif|webp|bmp)$/i.test(safe)) return '';
+    const f = join(dir, safe);
+    return existsSync(f) ? f : '';
+  };
+  let idf;
+  try {
+    idf = JSON.parse(readFileSync(join(dir, 'identity.json'), 'utf8'));
+  } catch {
+    return [];
+  }
+  const refs = arr(idf?.image?.refs).map(pick).filter(Boolean);
+  if (refs.length) return refs;
+  const avatar = pick(idf?.qq?.avatar);
+  return avatar ? [avatar] : [];
+}
+
+/**
+ * **指定人设包**的显示名（合照用：提示词里要告诉模型"图2是谁"）。
+ * ⚠️ 和 `refImagesOf()` 同一套白名单规矩。
+ */
+export function nameOf(id) {
+  const want = String(id ?? '').trim();
+  if (!/^[\w.-]+$/.test(want)) return '';
+  const dir = want === personaId() ? personaDir() : join(ROOT, 'personas', want);
+  try {
+    const idf = JSON.parse(readFileSync(join(dir, 'identity.json'), 'utf8'));
+    return String(idf?.selfName ?? idf?.name ?? '').trim() || want;
+  } catch {
+    return want;
+  }
 }
 
 /**

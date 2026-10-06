@@ -2,7 +2,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { readFileSync, writeFileSync, rmSync, statSync, utimesSync } from 'node:fs';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { config, validate, ROOT, DEFAULT_LIFE, DEFAULT_QUEST, paramsFor, stateDir } from './config.js';
+import { config, validate, ROOT, DEFAULT_LIFE, DEFAULT_QUEST, paramsFor, stateDir, isMainAccount } from './config.js';
 // ⚠️ 协议端适配层：启动横幅要报它、管理能力也由它决定（换协议端只改 config.yml）
 import * as provider from './provider.js';
 import { log } from './log.js';
@@ -261,6 +261,35 @@ function authOk(provided) {
 }
 
 // ── 正向连接：机器人主动连 NapCat ─────────────────────
+/**
+ * ⚠️ 2026-10-07 加：**连接心跳**（用户报「经常漏消息，@ 了也不回」）。
+ *
+ * ## 现场（有证据）
+ *   爱音的 ws 连接**半死**：SnowLuma 日志里最近十几条群事件**一条都没推给它**
+ *   （主号照收），而它自己的日志**停在 05:23 的「连接成功」** —— 之后 9 个多小时
+ *   **既没有断连、也没有重连**。TCP 半开：对面早断了，这边以为还连着 ⇒
+ *   永远不重连、永远收不到任何消息 ✗（最迷惑人的是**什么都不报**）
+ *   ⚠️ 触发条件很常见：**协议端重启**（今晚为了配多号端口就重启了好几次）——
+ *      那种断法有时**不触发前端的 close 事件**。
+ *
+ * ## 为什么用心跳，而不是「多久没收到群消息就重连」
+ *   群里**半夜本来就可能几小时没人说话** ⇒ 那个判据会**误重连**
+ *   （半夜自己反复掉线重连，比原问题还糟）。
+ *   心跳**不管群里有没有人都准**。
+ *
+ * ## 参数（别调太急）
+ *   · 每 30 秒问一次；
+ *   · 单次 8 秒没回应算一次失败；
+ *   · **连续 2 次**才动手（最坏 ~76 秒发现，够快，也不神经质）。
+ *
+ * ⚠️ 探活用 `get_login_info` 而**不是** `get_status`：前者是所有 OneBot 实现都有的
+ *    基础 action，也在这套代码里被用过（webui 那边）；`get_status` 万一某家协议端
+ *    没实现，心跳会把**好连接误判成死的** ⇒ 变成反复重连（那就比原问题还糟）。
+ */
+const HB_MS = 30000;
+const HB_TIMEOUT_MS = 8000;
+const HB_MAX_FAIL = 2;
+
 function connectForward() {
   const url = config.onebot.url;
   // ⚠️ 2026-09-21：别再写死 NapCat —— 协议端换成 SnowLuma 之后这句是误导的
@@ -279,6 +308,7 @@ function connectForward() {
   ws.on('open', () => {
     log.info('连接成功');
     bot.attach(ws);
+    startHeartbeat();
     // ⚠️ 重连 = 可能"刚掉线恢复" → 立刻查一次月末工资单要不要补发
     //    （用户要求：「如果因为 QQ 掉线正好没发送，当恢复上线之后马上补发」）
     setTimeout(() => {
@@ -286,11 +316,56 @@ function connectForward() {
     }, 5000);
   });
 
+  // ── 心跳（见上面常量那段注释）────────────────────────────
+  let hbTimer = null;
+  let hbFails = 0;
+  let hbBusy = false;
+
+  function startHeartbeat() {
+    stopHeartbeat();
+    hbFails = 0;
+    hbTimer = setInterval(async () => {
+      if (hbBusy || ws.readyState !== WebSocket.OPEN) return;
+      hbBusy = true;
+      try {
+        const r = await Promise.race([
+          bot.call('get_login_info'),
+          new Promise((_, rej) => setTimeout(() => rej(new Error('超时')), HB_TIMEOUT_MS)),
+        ]);
+        if (r === undefined || r === null) throw new Error('没有回应');
+        hbFails = 0;
+      } catch (e) {
+        hbFails += 1;
+        log.warn(`[心跳] 协议端没回应（${hbFails}/${HB_MAX_FAIL}）：${e.message}`);
+        if (hbFails >= HB_MAX_FAIL) {
+          hbFails = 0;
+          log.error('[心跳] 连续没回应 —— 判定这条连接已经死了（TCP 半开那种），主动断开重连');
+          // ⚠️ 用 `terminate()` 而不是 `close()`：半开状态下 `close()` 的挥手
+          //    可能永远等不到对面回应 ⇒ 只能强拆。它**会**触发下面的 `close` 事件，
+          //    于是照常走"3 秒后重连"那条路。
+          try {
+            ws.terminate();
+          } catch {}
+        }
+      } finally {
+        hbBusy = false;
+      }
+    }, HB_MS);
+    hbTimer.unref?.();
+  }
+
+  function stopHeartbeat() {
+    if (hbTimer) clearInterval(hbTimer);
+    hbTimer = null;
+    hbBusy = false;
+  }
+
   ws.on('error', (err) => {
     log.warn(`连接失败: ${err.message}`);
   });
 
   ws.on('close', (code) => {
+    stopHeartbeat();
     if (stopping) return;
     bot.onClose();
     if (code === 1008 || code === 4001) {
@@ -945,6 +1020,17 @@ startOutboxTick();
         if (r?.approved) log.info(`[好友] 可疑申请扫了 ${r.total} 条 → 通过 ${r.approved} 条`);
       } catch (e) {
         log.debug(`[好友] 扫可疑申请出错：${e.message}`);
+      }
+      // ⚠️ 2026-10-07 加（用户要求：「主动私聊改了就行了」）：
+      //    主动私聊面对的是**同一批人**（主人、好感度到线的好友）——
+      //    两个号各自跑 ⇒ **同一个人会被两个号各私聊一次** ✗
+      //    ⇒ 只有**主号**主动私聊。
+      //    ⚠️ 上面那个"扫可疑好友申请"两个号都留着 —— 各自的号加各自的好友，
+      //      那是应该的（不该收成主号）。
+      //    ⚠️ `isMainAccount()` 在单号 / 还没拆分时恒为 true ⇒ 老行为一个字不变。
+      if (!isMainAccount()) {
+        log.debug('[好友] 不是主号 → 主动私聊交给主号，这次跳过');
+        return;
       }
       const pick = friend.pickForToday();
       if (!pick.userId) {

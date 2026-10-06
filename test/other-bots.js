@@ -195,12 +195,85 @@ console.log('\n【9】★ 同类池 + 昵称命中剧中人物名 ⇒ 认成「�
     /peerRoleOf\(groupId, userId, nickname\) \{[\s\S]{0,300}?isPeerBot\(groupId, userId\)/.test(botSrc9),
     '★★ 它**先查同类池** —— 不在池里的号，昵称叫素世也不算',
   );
-  check(/&& !peerRole\) \{/.test(botSrc9), '★ 那道「同类说的话一律不接」的闸给认得出角色的**放行**');
+  check(
+    // ⚠️ 2026-10-07：这个 if 变成**多行**了（加了 `!inQuest`：**正在跑剧情时也放行**），
+    //    所以不能再钉 `&& !peerRole) {` 那种单行写法 —— 这条要守的语义是
+    //    「`!peerRole` 仍在那道闸的条件里」（认得出角色 ⇒ 放行），
+    //    外加新的「这个群正在跑剧情 ⇒ 也放行」。
+    /!peerRole/.test(botSrc9) && /!inQuest/.test(botSrc9),
+    '★ 「同类说的话一律不接」那道闸：认得出角色的放行，**正在跑剧情的也放行**',
+  );
   const recentSrc9 = readFileSync(join(ROOT, 'src', 'recent.js'), 'utf8');
   check(
     /peerRole/.test(recentSrc9) && /你\*\*认识的人\*\*/.test(recentSrc9),
     '★ 上下文里会标成「你认识的人」+ 角色名',
   );
+  names.__clear();
+}
+
+console.log('\n【10】★★ 剧情里同类之间要能**互相 @**（2026-10-07 用户要求）');
+{
+  // 用户原话：「在剧情时机器人也要有**互相 @** 的能力，如果比如一个机器人想叫
+  //   另一个机器人**买东西**，就要**自己去 @ 她**」。
+  //
+  // ⚠️ 为什么必须由**代码**做：模型只会**写字** ——「@千早爱音」原样发出去
+  //    就是一串普通文字，QQ 里对方**收不到任何提醒**，也就谈不上"叫她去做事"。
+  //    所以 `sendText()` 里过了 `splitAtMentions()`，把 `@名字` 换成**真 at 段**。
+  const names = await import('../src/names.js');
+  const G10 = '9990000010';
+  const P = '10000301';
+  const HUMAN10 = '30003';
+  config.groupParams[G10] = { peers: [P] };
+  names.noteFromList(G10, [{ user_id: P, nickname: 'Anon' }]);
+
+  const ev10 = (uid, name) => ({
+    message_type: 'group',
+    group_id: G10,
+    user_id: uid,
+    sender: { card: name, nickname: name },
+  });
+
+  const t = bot.atTargetsOf(G10);
+  check(t.length === 1 && t[0].uid === P, '★ 同类池里的号 = **可以 @ 的目标**', JSON.stringify(t));
+  check(t[0]?.keys.some((k) => /Anon|爱音/.test(k)), '★ 名字认它在这个群的**名片 / 别名**');
+  check(t[0]?.keys.includes('千早爱音'), '★ 也认剧中**角色名**（提示词里优先给她这个）', JSON.stringify(t[0]?.keys));
+  check(bot.atTargetsOf('9990000011').length === 0, '没配同类池的群 → 空（不乱 @）');
+
+  const s1 = bot.splitAtMentions(ev10(HUMAN10, '路人甲'), '@千早爱音 帮我买个面包');
+  check(s1[0]?.type === 'at' && s1[0].data.qq === P, '★★ 「@千早爱音」→ **真正的 at 段**', JSON.stringify(s1));
+  check(s1[1]?.type === 'text' && s1[1].data.text === '帮我买个面包', '★ @ 后面的正文留着（顺带吞掉多余的那个空格）');
+
+  const s2 = bot.splitAtMentions(ev10(HUMAN10, '路人甲'), '行，@Anon 你等我一下');
+  check(
+    s2[0]?.type === 'text' && s2[1]?.type === 'at' && s2[2]?.type === 'text',
+    '★ 句中的 @ 也能换（前面那段正文不许丢）',
+    JSON.stringify(s2.map((s) => s.type)),
+  );
+
+  // ⚠️ **不误伤**（这几条和上面一样重要：换错了就是 @ 错人 / 把正文当 @ 吃掉）
+  const s3 = bot.splitAtMentions(ev10(HUMAN10, '路人甲'), '@爱音酱 在吗');
+  check(s3.length === 1 && s3[0].type === 'text', '★★ **不给「@爱音酱」换 @** —— 右边还有字（边界）');
+  const s4 = bot.splitAtMentions(ev10(HUMAN10, '路人甲'), '你发 123@Anon.com 就行');
+  check(s4.length === 1 && s4[0].type === 'text', '★★ 邮箱那种 `123@Anon.com` 也不换（左边是数字）');
+  const s5 = bot.splitAtMentions(ev10(HUMAN10, '路人甲'), '@路人甲 你看呢');
+  check(s5.length === 1 && s5[0].type === 'text', '★★ **群友不换 @** —— 机器人不许自己 @ 真人');
+  const s7 = bot.splitAtMentions(
+    { message_type: 'private', user_id: HUMAN10, sender: {} },
+    '@千早爱音 在吗',
+  );
+  check(s7.length === 1 && s7[0].type === 'text', '私聊 → 纯文本（私聊没有 @ 这回事）');
+
+  // 接线：光有函数不算数 —— `sendText()` 必须真的走它，提示词必须真告诉她怎么写
+  const bsrc10 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  check(
+    /sendText\(event, text[\s\S]{0,1600}?splitAtMentions\(event/.test(bsrc10),
+    '★★ `sendText()` 真的把文本过了 `splitAtMentions`（不是只写了函数没接线）',
+  );
+  check(
+    /atTargetsOf\(/.test(bsrc10) && /想叫另一个机器人做事，就 @ 它/.test(bsrc10),
+    '★ 提示词里也告诉她"能 @ 谁、名字怎么写"（对不上名字就换不成真 @）',
+  );
+
   names.__clear();
 }
 

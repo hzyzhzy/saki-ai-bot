@@ -34,6 +34,13 @@ const PROMPT = [
   '- withSelf = true  → 画面里**有她本人**（自拍，或者朋友帮她拍）',
   '- withSelf = false → 画面里**没有她**，是她**拍下来的东西或地方**（校门、街景、货架、天空、吃的东西…）',
   '',
+  '# ⚠️ 还有第三种情形：**合照**（填 togetherWith）',
+  '群友明确要她和**另一个角色一起拍**（"你俩拍张照""你们一起拍一张"）时，',
+  '把那个人写进 togetherWith —— **只能从下面给的候选名单里挑，写它的人设 id**。',
+  '⚠️ 只有**她此刻真的和那个人在一起**（同一段剧情、同一个地方）才成立；',
+  '   名单里有、但明显不在一起（一个在东京、另一个在别处）→ **不要写**。',
+  '⚠️ 拿不准就留空（= 普通单人照），宁可少一张合照。',
+  '',
   '# 硬规则（违反了这次照片就是错的）',
   '1. 「拍什么」写**一句看得见的画面**：在哪、在干什么、什么光。**不要抽象词**（"很美""很有氛围"没用）。',
   '2. 只能拍**她此刻有办法拍到的**东西 —— 她在哪，就拍那附近。她**不能**凭空出现在别的地方。',
@@ -66,7 +73,7 @@ const PROMPT = [
   '',
   '# 输出',
   '只输出一行 JSON，**不要任何别的字**：',
-  '{"withSelf":true,"what":"...","place":"","time":""}',
+  '{"withSelf":true,"what":"...","place":"","time":"","togetherWith":""}',
 ].join('\n');
 
 /** 兜底：模型没给出可用 JSON 时，就用"她自己写的意图"或最保守的解读 */
@@ -79,6 +86,7 @@ function fallback(facts = {}, marker = null) {
     time: '',
     fallback: true,
     where: facts.where || '',
+    togetherWith: '',
   };
 }
 
@@ -102,9 +110,22 @@ export async function plan(p = {}) {
     '# 她准备回的（里面的标记表示她想拍一张）',
     p.said || '（空）',
     '',
+    '# 画面里可以出现的另一个角色（合照候选，只能从这里面挑）',
+    p.mates && p.mates.length
+      ? p.mates.map((m) => `- ${m.id}（${m.name}）`).join('\n')
+      : '（现在没有可合照的角色 —— togetherWith 必须留空）',
+    '',
     '# 她自己写的意图',
     p.marker
-      ? `- 她写的是「${p.marker.raw}」（"${p.marker.withSelf ? '拍照' : '拍'}"，暗示画面里${p.marker.withSelf ? '有' : '没有'}她本人）` +
+      ? `- 她写的是「${p.marker.raw}」（${
+          // ⚠️⚠️ 2026-10-07 修（用户报「刚才拍的照不是合照」）：
+          //    这里原来只有"拍照 / 拍"两种翻译，于是一个 `[合照]` 标记被翻成"拍照"——
+          //    模型**根本不知道她要跟人合照**，`togetherWith` 永远填不出来，
+          //    最后老老实实拍了张单人照 ✗（日志：`拍照：画面里有她` 后面没有「＋合照」）。
+          p.marker.together
+            ? '**合照** —— 画面里有她**和另一个人**，所以 togetherWith 必须从候选里挑一个填上'
+            : `"${p.marker.withSelf ? '拍照' : '拍'}"，暗示画面里${p.marker.withSelf ? '有' : '没有'}她本人`
+        }）` +
         (p.marker.scene
           ? `\n- 她还写明了想拍什么：${p.marker.scene}（**尽量尊重**，除非和上面的事实矛盾）`
           : '\n- 她**没写**具体拍什么 → 就看上面的对话和你对事实的理解')
@@ -153,6 +174,20 @@ export async function plan(p = {}) {
   // ⚠️ 截到 80 字（原来 120）：官方建议中文提示词别超 300 字，
   //    而固定的画风段本来就占 ~200 字。场景写太长会让模型"信息分散、忽略细节"。
   const what = String(j.what ?? '').trim().slice(0, 80);
+  // ⚠️ 合照：**必须在候选名单里**才认 —— 模型可能瞎写一个 id，
+  //    而那个 id 会被拼进文件路径去读参考图（`persona.refImagesOf` 有白名单，
+  //    但这里也拦一道，免得日志里出现莫名其妙的 id）。
+  const mates = Array.isArray(p.mates) ? p.mates : [];
+  const wantMate = String(j.togetherWith ?? '').trim();
+  // ⚠️ 模型有时填**名字**（"爱音"）而不是 id（"anon"）—— 两种都认。
+  const hitMate = mates.find((m) => String(m?.id) === wantMate || String(m?.name) === wantMate);
+  let togetherWith = hitMate ? String(hitMate.id) : '';
+  // ⚠️⚠️ 兜底（2026-10-07 加）：她**明确写了 `[合照]`**、但模型没填（或填了个不在名单里的），
+  //    而候选**只有一个** ⇒ 就用那一个。她都说要合照了，不该因为模型漏填一次
+  //    就退化成单人照（用户花了钱、也在等那张图）。
+  if (!togetherWith && p.marker?.together && mates.length === 1) {
+    togetherWith = String(mates[0].id);
+  }
   const out = {
     // ⚠️ 标记是她自己写的，所以默认就是"要拍"；这一栏只用来挡"模型判断这根本不是在要照片"
     shoot: j.shoot !== false,
@@ -162,6 +197,7 @@ export async function plan(p = {}) {
     what: what || fallback(facts, p.marker).what,
     place: String(j.place ?? '').trim().slice(0, 40),
     time: String(j.time ?? '').trim().slice(0, 20),
+    togetherWith,
   };
   log.debug(
     `[拍照理解] withSelf=${out.withSelf} what=「${out.what}」` +

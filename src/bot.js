@@ -1,4 +1,7 @@
-import { config, ROOT, KNOWLEDGE_DIR, paramsFor, peersFor, otherBotsFor, stateDir } from './config.js';
+import { config, ROOT, KNOWLEDGE_DIR, paramsFor, peersFor, otherBotsFor, stateDir, isMainAccount } from './config.js';
+// ⚠️ 2026-10-07 加（合照）：要按同类池里的号去读它自己的 `persona.id`
+//    —— 「那个号演的是谁」。`accounts.js` 只依赖 node 内建，不成环。
+import * as accounts from './accounts.js';
 // ⚠️ 2026-09-21：她的名字 / 外号 / 怎么称呼主人，都从 `personas/<id>/identity.json` 来
 //    （见 src/persona.js）。这些东西以前散在这个文件里写死（`['saki','小祥','祥子',…]` 那种），
 //    换个角色就换不动 —— 表现出来就是"人换了、名字还是旧的"。
@@ -15,7 +18,7 @@ import { log } from './log.js';
 import { streamChat, quickAck, phrase } from './llm.js';
 import * as msg from './message.js';
 import * as history from './history.js';
-import { knowledgeText, hasKnowledge, selectFor as knowledgeSelect, mentionsAnyTerm, whoIsBrief, aliasesOf, animeLibNames, reloadKnowledge, personaText, castRoleOf } from './knowledge.js';
+import { knowledgeText, hasKnowledge, selectFor as knowledgeSelect, mentionsAnyTerm, whoIsBrief, aliasesOf, animeLibNames, reloadKnowledge, personaText, castRoleOf, castBands } from './knowledge.js';
 // ⚠️ 2026-09-20 从上游 fork 挑过来：梗库（`knowledge/memes.md`）**按需**注入 ——
 //    只有对方这句话里命中了触发词才贴上来，且自带"拿不准按字面回"的总规则（防"看什么都像梗"）。
 import { memesFor } from './memes.js';
@@ -1809,11 +1812,18 @@ export class Bot {
     //    ⇒ 排除掉之后，同类的消息会落到下面 ③.5 那道同类闸：
     //      独立概率 `peerChat.replyChance` + 独立冷却 `replyCooldownMs`
     //      ⇒ 变成"**偶尔**接一句"，而不是"每句都接"。
+    // ⚠️⚠️ 2026-10-07 再修（用户选的是「**能聊、但有上限**」）：
+    //    上一版我把同类**整个排除在 followUp 之外** —— 治好了"无限互刷"，
+    //    但**连"她刚回了对方一句、对方接着说"也不接了** ✗
+    //    （用户截图：爱音追问「照片上多出来那个人，你是真没看见，还是不想说」，
+    //      saki 明明刚回过她，却因为掉进同类闸的掷骰/冷却而不吭声。）
+    //    ⇒ 现在改回"同类**也走** followUp"，只在下面那条**「直接接」**上
+    //      给它加**链长上限**（`peerChat.maxChain`，默认 2 ⇒ 最多接着聊两轮就歇）。
     const fromPeerBot = this.isPeerBot(
       String(event?.group_id ?? ''),
       String(event?.user_id ?? ''),
     );
-    if (f.enable && !fromPeerBot && text.length >= f.minChars) {
+    if (f.enable && text.length >= f.minChars) {
       const conv = this.activeConv?.get(key);
       // ⚠️ 收紧度滑块（只对 1 档生效）：续话窗口和上限也跟着收
       //    —— 这两个是"它自己不停接话"的主要来源，光降概率治不住。
@@ -1858,6 +1868,22 @@ export class Bot {
       //    （他 9/13 的原话：「还是有抽签回答的感觉」）。0 档时**跳过它、直接说**。
       const noJudge = this.strictnessOf(event) <= 0;
       if (snap.phase === 'active' && snap.who === 'him') {
+        // ⚠️⚠️ 2026-10-07：**同类要有上限**（用户选的方案 A：能聊，但别没完没了）。
+        //    真人接着聊照旧"直接接、不判"（2026-10-03 用户定的：
+        //    「正在和小祥聊天的消息不该被掐断」）；
+        //    但**同类机器人**如果无限接下去，就是你一句我一句刷屏 ✗
+        //    ⇒ 跟同一个同类接着聊够 `peerChat.maxChain` 轮（默认 2）就停，
+        //      之后回到同类闸（掷骰 + 冷却）—— 既不会刷屏，也不会卡死。
+        // ⚠️⚠️ 2026-10-07 改（用户要求：「**不要固定上限，她们自己想停就停**」）：
+        //    这里原来有一个 `peerChat.maxChain`（固定轮数，2 轮一掐）——
+        //    剧情里她俩正聊到一半就被打断，用户一眼就看出来了 ✗
+        //    ⇒ **删掉固定上限**，改成"她**自己**说够了就停"。
+        //    ⚠️ 拿掉这一层是安全的，外面还有三道：
+        //      · `botOnlyChain()` —— 聊得够久时**往提示词里注入"该考虑收场了"**，
+        //        由**她自己**判断想说的话说完没有、自己收（2026-10-06 用户要的就是这个）；
+        //      · `botChainHard()` —— 真刷到离谱时的硬闸（阈值高得多）；
+        //      · 同类闸的**掷骰 + 独立冷却**。
+        //    ⇒ 所以不会退回"无限互刷"（那是另一个问题，由上面三道管）。
         // ⚠️⚠️ 2026-10-03（用户定）：「**正在和小祥聊天**的消息都不应该被掐断」——
         //    所以他正接着聊的那句，**不再交给 judge 复判**（那道"再说一次该不该说"
         //    正是他反复说的"抽签感"来源）。这是**对话本身**，直接接。
@@ -3015,7 +3041,11 @@ export class Bot {
     //       「【本月账】2026-09。· 花了 0.03 元。· 用了…」这一坨。
     //       **账单本来就该是多行的。**
     //    所以这里用一个**只去符号、保留换行**的轻量清洗。
-    if (text) segments.push({ type: 'text', data: { text: stripMdLite(String(text)) } });
+    // ⚠️ 2026-10-07 改：文本**不再直接压成一个 text 段** —— 里面的 `@名字`
+    //    要先过 `splitAtMentions()` 换成**真正的 @ 段**（同类之间才叫得动，
+    //    见那个函数的注释）。⚠️ 它内部照样用 `stripMdLite` 洗文本，
+    //    而且出任何问题都退回纯文本。
+    if (text) for (const seg of this.splitAtMentions(event, String(text))) segments.push(seg);
     if (faceFile) {
       // ⚠️ `sub_type: 1` 是关键 —— 它让 QQ 把这张图当**表情**发，而不是图片。
       //
@@ -3210,7 +3240,14 @@ export class Bot {
         } catch {
           /* 取不到就算了，理解那一步还有她自己的回复可看 */
         }
-        const picked = await photoPlan.plan({ text, said: String(said ?? ''), marker: photo, facts });
+        // ⚠️ 2026-10-07 加（用户要求「叫她们拍个合照」）：**能跟她一起入镜的角色**。
+        //    来源 = 这个群的**同类池**（`peers`）里配的那个号，去它自己的账号配置里读
+        //    `persona.id` —— 也就是"那个号演的是谁"，再按那个人设包取立绘。
+        //    ⚠️ 读不到（号没配、人设包没立绘）就**不列进候选** ⇒ 合照自然退化成单人照。
+        //    ⚠️ 用户定的是「**只有群友叫她拍才拍**」—— 这一层只管"能跟谁拍"，
+        //      "要不要拍"仍然由标记 + 那次理解决定，不会自己突发。
+        const mates = this.peerMates(event.group_id);
+        const picked = await photoPlan.plan({ text, said: String(said ?? ''), marker: photo, facts, mates });
         if (!picked.shoot) {
           log.info('拍照：理解那一步判断这次不用拍，跳过');
           return;
@@ -3221,16 +3258,29 @@ export class Bot {
         //    （带了就得在提示词里指认参考图里的那个女孩，否则模型自己画一张脸 ——
         //      用户报的「刚发的照片是黑发」就是这个）。
         const withSelf = picked.withSelf;
-        const refs = withSelf ? persona.refImages() : [];
+        // ⚠️ 合照：**她自己永远是图1**，被拉进来的人按顺序排后面
+        //    （`imagegen.buildPrompt` 里说的"图2/图3"就是照这个顺序）。
+        const mate =
+          withSelf && picked.togetherWith
+            ? mates.find((m) => m.id === picked.togetherWith)
+            : null;
+        const mateRefs = mate ? persona.refImagesOf(mate.id) : [];
+        // ⚠️ 那个人设包没立绘就**不带图也不写进提示词**（宁可拍成单人照，
+        //    也别让模型凭空画一张脸 —— 那只会画出一个不认识的人）。
+        const others = mate && mateRefs.length ? [{ name: mate.name }] : [];
+        const refs = withSelf ? [...persona.refImages(), ...mateRefs] : [];
         const prompt = imagegen.buildPrompt({
           what: picked.what,
           withSelf,
           time: picked.time || facts.now,
           place: picked.place || facts.where,
           hasRef: refs.length > 0,
+          others,
         });
         log.info(
-          `拍照：${withSelf ? '画面里有她' : '拍景物'}｜时间地点=${picked.time || facts.now} ${picked.place || facts.where}`,
+          `拍照：${withSelf ? '画面里有她' : '拍景物'}` +
+            `${others.length ? `＋合照（${others.map((o) => o.name).join('、')}）` : ''}` +
+            `｜时间地点=${picked.time || facts.now} ${picked.place || facts.where}`,
         );
         log.debug(`[拍照] 提示词（${prompt.length} 字）：${prompt}`);
 
@@ -3254,7 +3304,11 @@ export class Bot {
           //    ⇒ 把"我拍了什么"当**旁白**记一条（用括号，免得被当成她真说过的话）。
           //    ⚠️ 只发图、不带文字的那条 `sendText` 不会自己进上下文（文本是空的），
           //      所以这行**不能省**。
-          recent.rememberBot(event, `（我拍了张照片发出来，内容是：${picked.what}）`);
+          recent.rememberBot(
+            event,
+            `（我拍了张照片发出来，内容是：${picked.what}` +
+              `${others.length ? `；照片里还有${others.map((o) => o.name).join('、')}` : ''}）`,
+          );
           return;
         }
         log.warn(`拍照最终失败：${r.reason}（${picked.what}）`);
@@ -3328,7 +3382,12 @@ export class Bot {
   }
 
   async sayBotFarewell(gid) {
-    const FALLBACK = ['行，不跟你贫了', '那我先忙去了', '拜拜，没空陪你', '行了，到此为止'];
+    // ⚠️ 2026-10-07 改（用户报「结束语太多，不跟你贫了这段话要改一下」）：
+    //    原来那四句里有「不跟你贫了」「没空陪你」—— 那是**赶人**的语气；
+    //    更要命的是它**同时出现在提示词的例子里**（见下面 user 段），
+    //    模型十有八九照抄 ⇒ 群里反复出现同一句 ✗
+    //    ⇒ 兜底换成**中性收尾**（不那么冲，也不像吵架收场）。
+    const FALLBACK = ['那我先不聊了', '行，先这样', '我这边还有点事，回头说', '嗯，那就这样'];
     let text = '';
     try {
       const ctx = String(recent.contextText(gid) ?? '').slice(0, 1500);
@@ -3340,8 +3399,14 @@ export class Bot {
           '',
           ctx ? `【你们刚才在聊】\n${ctx}` : '',
           '',
-          '· 短（5~15 字），像「行，不跟你贫了」「那我先忙去了」「拜拜」这种；',
-          '· 可以是嫌弃的、也可以只是懒得多说，但**必须是"结束"的意思**；',
+          '· 短（5~15 字），像「那我先不聊了」「先这样」「回头再说」这种；',
+          // ⚠️ 2026-10-07 加（用户报「结束语太多，不跟你贫了这段话要改一下」）：
+          //    这里原来把「行，不跟你贫了」当**例子**写着 —— 模型会**直接照抄**，
+          //    于是群里反复出现同一句，而且还是**赶人**的语气 ✗
+          //    ⇒ 例子换掉，并**点名禁掉**那一类说法。
+          '· 🚫 **别用**「不跟你贫了」「没空陪你」「懒得理你」这种**赶人 / 贬低**的话 ——',
+          '  那听着像在吵架收场，不像日常收尾；',
+          '· 可以是淡淡的、也可以只是懒得多说，但**必须是"结束"的意思**；',
           '· ⚠️ 中文；🚫 别再抛新话题、别再问它问题（问了它又要回你）；',
           '· 🚫 别用破折号、别写金句、别提它名字。',
           '直接给那句话。',
@@ -3460,6 +3525,38 @@ export class Bot {
    * 配置：`config.yml` 的 `groupParams.<群号>.peers: ['10000010']`
    * —— 界面上在「按群设定」里，跟「能在哪些群说话」同一个样子的输入框。
    */
+  /**
+   * ⚠️ 2026-10-07 加（合照）：这个群里**能跟她一起入镜的角色**。
+   *
+   * 来源 = 这个群的**同类池**（`peers`，按群配的）里那些号 —— 去每个号自己的
+   * 账号配置里读 `persona.id`（"那个号演的是谁"），再按那个人设包取立绘。
+   *
+   * 用户定的规则（2026-10-07）：「**同类池里的号，按它自己的人设包**」——
+   * 所以以后加任何角色（黑祥、素世…），只要配进同类池、人设包里有立绘，
+   * 就自动能出现在合照里，代码一个字不用改。
+   *
+   * ⚠️ 最多两个（提示词长度 + 多人一致性都撑不住更多）。
+   * ⚠️ 没有立绘的**不列进来** —— 列进去只会让模型画出一个不像的人。
+   * ⚠️ 任何一步出错都返回空数组（合照退化成单人照，绝不让拍照整条链挂掉）。
+   */
+  peerMates(groupId) {
+    const out = [];
+    try {
+      for (const uid of peersFor(String(groupId ?? ''))) {
+        if (String(uid) === String(this.selfId ?? '')) continue;
+        const pid = String(accounts.read(uid)?.persona?.id ?? '').trim();
+        if (!pid) continue;
+        if (out.some((m) => m.id === pid)) continue;
+        if (!persona.refImagesOf(pid).length) continue;
+        out.push({ id: pid, uid: String(uid), name: persona.nameOf(pid) });
+        if (out.length >= 2) break;
+      }
+    } catch (e) {
+      log.debug(`[合照] 找同群角色失败（当作没有）：${e.message}`);
+    }
+    return out;
+  }
+
   isPeerBot(groupId, userId) {
     const uid = String(userId ?? '').trim();
     if (!uid) return false;
@@ -3511,6 +3608,135 @@ export class Bot {
     } catch (e) {
       log.debug(`[同类] 认角色失败：${e.message}`);
       return '';
+    }
+  }
+
+  /**
+   * 这个群里**她可以 @ 的同类号**（2026-10-07 用户要求）。
+   *
+   * 用户原话：「在剧情时机器人也要有**互相 @** 的能力，如果比如一个机器人想叫
+   *   另一个机器人**买东西**，就要**自己去 @ 她**」。
+   *
+   * 名单 = 这个群**同类池**（`groupParams.<群>.peers`）里的号，每个给一组
+   * **可以写的名字** —— 提示词里会照这个列给她（见 `buildSystemPrompt`），
+   * 她写出来的名字因此必然能对上，`splitAtMentions()` 才换得成真 @。
+   *
+   * 名字来源（按"最像名字"的顺序）：
+   *   ① 剧中**角色名**（`cast.md` 命中时，如「千早爱音」）+ 那个角色的**别名**
+   *      （`cast.md` 那一行里的 `keys`，如「爱音」「Anon」）；
+   *   ② 它在**这个群的名片**（`names.of`）；
+   *   ③ 它自己账号配置里的显示名（`accounts.displayName`）；
+   *   ④ `server-people.md` 里登记过的别称（`aliasesOf`）。
+   *
+   * ⚠️ **只列同类池，不放群友** —— 机器人自己 @ 真人是"喊人"级别的打扰，
+   *    而且真人名字重名/互相包含极多，误 @ 一次就是一次骚扰。
+   * ⚠️ 单字名一律丢掉（`length >= 2`）：满屏误命中，宁缺勿滥。
+   */
+  atTargetsOf(groupId) {
+    const out = [];
+    try {
+      const gid = String(groupId ?? '');
+      if (!gid) return out;
+      for (const uid of peersFor(gid)) {
+        const u = String(uid ?? '').trim();
+        if (!u || u === String(this.selfId ?? '')) continue;
+        if (out.some((t) => t.uid === u)) continue;
+
+        const card = String(names.of(u, gid) ?? '').trim();
+        const disp = String(accounts.displayName(u) ?? '').trim();
+        const role = castRoleOf(card || disp);
+
+        const pool = [];
+        if (role) {
+          pool.push(role);
+          // 这个角色在 cast.md 里登记的别名（`### 角色名` 那一段的 `keys`）
+          for (const b of castBands()) {
+            for (const m of b.members ?? []) {
+              if (String(m.name ?? '').trim() !== role) continue;
+              for (const k of m.keys ?? []) pool.push(String(k ?? '').trim());
+            }
+          }
+        }
+        for (const n of [card, disp]) if (n) pool.push(n);
+        try {
+          for (const a of aliasesOf(u, [card, disp])) pool.push(String(a ?? '').trim());
+        } catch {}
+
+        const keys = [...new Set(pool.filter((n) => n && n.length >= 2))];
+        if (!keys.length) continue;
+        out.push({ uid: u, role: role || '', name: keys[0], keys });
+      }
+    } catch (e) {
+      log.debug(`[@] 找"可以 @ 的同类"失败（当没有）：${e.message}`);
+    }
+    return out;
+  }
+
+  /**
+   * 把回复里的 `@名字` 换成**真正的 @ 段**（2026-10-07 用户要求）。
+   *
+   * 为什么必须由代码做：模型只会**写字** ——「@千早爱音」原样发出去就是
+   * **一串普通文字**，QQ 里对方**收不到任何提醒**，也就谈不上"叫她去做事"。
+   * 只有换成 `{ type:'at', data:{ qq } }` 段，QQ 才会真的把这条当成"有人 @ 你"。
+   *
+   * ⚠️ 只认 `atTargetsOf()` 给的那些名字（= 同类池里的号）；群友一律留纯文本。
+   * ⚠️ 右边必须有**边界**（后面不再跟汉字/字母/数字）—— 不然「@爱音酱」会被
+   *    当成「@爱音」+「酱」。
+   * ⚠️ **一条消息最多 @ 两个人**：防"整条全是 @"的刷屏。
+   * ⚠️ 任何异常都**退回纯文本** —— 绝不能因为解析失败把回复弄丢。
+   */
+  splitAtMentions(event, text) {
+    const mk = (t) => ({ type: 'text', data: { text: stripMdLite(t) } });
+    const raw = String(text ?? '');
+    const gid = String(event?.group_id ?? '');
+    if (!gid || !raw.includes('@')) return [mk(raw)];
+    try {
+      const hits = [];
+      for (const t of this.atTargetsOf(gid)) {
+        let best = null;
+        for (const nm of t.keys) {
+          let from = 0;
+          for (;;) {
+            const i = raw.indexOf('@' + nm, from);
+            if (i < 0) break;
+            const after = raw[i + 1 + nm.length] ?? '';
+            const before = i > 0 ? raw[i - 1] : '';
+            // ⚠️ 左边也不能是字母/数字 —— 不然 `123@Anon.com` 那种邮箱/邮箱样串
+            //    会被当成 @（右边是 `.` 反而正好过了右边那道）
+            if (!/[0-9A-Za-z\u4e00-\u9fa5]/.test(after) && !/[0-9A-Za-z]/.test(before)) {
+              if (!best || i < best.start) best = { start: i, end: i + 1 + nm.length, uid: t.uid };
+              break;
+            }
+            from = i + 1;
+          }
+        }
+        if (best) hits.push(best);
+      }
+      if (!hits.length) return [mk(raw)];
+
+      hits.sort((a, b) => a.start - b.start);
+      const out = [];
+      const done = new Set();
+      let last = 0;
+      for (const h of hits) {
+        if (done.size >= 2) break;
+        if (h.start < last || done.has(h.uid)) continue;
+        if (h.start > last) out.push(mk(raw.slice(last, h.start)));
+        out.push({ type: 'at', data: { qq: h.uid } });
+        done.add(h.uid);
+        last = h.end;
+        // ⚠️ QQ 渲染 at 段时自己会补一个空格 ⇒ 原文紧跟的那个吞掉，免得显示成两个空格
+        if (raw[last] === ' ') last++;
+      }
+      if (last < raw.length) out.push(mk(raw.slice(last)));
+
+      const clean = out.filter((s) => s.type !== 'text' || s.data.text);
+      if (!clean.length) return [mk(raw)];
+      log.info(`[@] 把 ${done.size} 个同类写成了真正的 @（${[...done].join('、')}）`);
+      return clean;
+    } catch (e) {
+      log.debug(`[@] 解析失败（当纯文本发）：${e.message}`);
+      return [mk(raw)];
     }
   }
 
@@ -3708,7 +3934,23 @@ export class Bot {
           event._peerRole = peerRole;
           log.info(`[同类] ${sender0} 的昵称是剧中角色「${peerRole}」→ 当成同世界的人放行`);
         }
-        if (!peerAtMe && !peerCallMe && !iTalkedRecently && !event?._peerSayOk && !peerRole) {
+        // ⚠️ 2026-10-07 加（用户选 A：「有剧情就让同类之间正常接」）：
+        //    这条闸原来在**剧情进行中**也照拦 —— 可剧情里她俩本来就该
+        //    你一句我一句地演对手戏（用户原话：「怎么爱音都不接剧情了」）。
+        //    日志实证：爱音那句「照片上多出来那个人，你是真没看见，还是不想说」
+        //    就是被这条拦掉的（`没 @ 她、没叫她，而且她 2 分钟内也没说过话`）。
+        //    ⇒ **这个群正在跑剧情时放行**；剧情之外照旧拦，防两个 bot 无限互刷。
+        //    ⚠️ 判据是 `quest.current(gid)`（真有正在进行的剧情才算），
+        //      不是"这个群进过事件系统"—— 后者会把日常闲聊也一起放开。
+        const inQuest = !!quest.current(String(event?.group_id ?? ''));
+        if (
+          !peerAtMe &&
+          !peerCallMe &&
+          !iTalkedRecently &&
+          !event?._peerSayOk &&
+          !peerRole &&
+          !inQuest
+        ) {
           log.info(
             `[同类] ${sender0} 说的话不接（没 @ 她、没叫她，而且她 2 分钟内也没说过话）` +
               `${voluntary ? `（voluntary=${voluntary}）` : ''}`,
@@ -8636,6 +8878,18 @@ export class Bot {
       );
       parts.push('\n# 以下是人格设定与知识库，请严格遵守\n');
       parts.push(k);
+      // ⚠️ 2026-10-07 加（用户要求：「A，但是要带上时间，不是一直觉得是刚发生的事」）：
+      //    **最近 5 条故事线，每轮都带上** —— 它原来只在
+      //      ① 推进剧情（`quest`）② 主动私聊（`friend`）时才注入，
+      //      群里日常聊天**完全不带** ⇒ 她"不记得昨天路口的事" ✗
+      //    ⚠️ 只取 5 条（不是全量 90 KB）：够她记得"刚发生过什么"，
+      //      又不会撑爆提示词，也不会让她照着流水账念。
+      //    ⚠️ 每行自带 `10/6 04:15` 时间戳，区块标题也明说了"是**过去**的事"
+      //      —— 这正是用户要的"别一直觉得是刚发生的"。
+      //    ⚠️ 私聊时 `scopeId` 是 `dm:xxx`，`bucketOf` 找不到 ⇒ 返回空串，
+      //      不会把群里的剧情串进私聊（这条别改）。
+      const sl = storyline.promptBlock(5, scopeId);
+      if (sl) parts.push('\n' + sl);
     } else {
       parts.push('\n（注意：知识库未加载成功，请只做最保守的回答，并说明自己暂时查不到资料）');
     }
@@ -8701,6 +8955,15 @@ export class Bot {
           '② **你拍下来的东西**（你不在画面里）→ 写 `[拍]`',
           '   例：`[拍:月之森学园的正门，白天下过雨，地上还有水光]`',
           '   例：`[拍:便利店里新到的草莓牛奶，冷柜的白光]`',
+          // ⚠️ 2026-10-07 加（用户要求「叫她们拍个合照」）：第三种标记。
+          //    ⚠️ 用户同时定了**触发条件**：「**只有群友叫她拍才拍**」——
+          //      合照不自己突发，所以这里写得明确。
+          //    ⚠️ 「跟谁」不由她指定：系统按**这个群的同类池**去认那个人是谁
+          //      （读那个号的 `persona.id` → 它人设包里的立绘），她只管说"要合照"。
+          '③ **合照**（画面里有你**和另一个角色**，比如剧情里跟你待在一起的那个人）→ 写 `[合照]`',
+          '   ⚠️ **只有群友明确要你俩一起拍**（"你俩拍张照""你们一起拍一张"）时才写 ——',
+          '     **你自己不会想到要跟人合照**，别自己找机会。',
+          '   谁能跟你一起入镜由系统按"这个群里跟你同世界的角色"定，你不用管。',
           '',
           '系统会按这些**现拍一张**，单独发一条，标记本身群友看不到。',
           '质感是"手机随手拍"的：① 里你是二次元的样子、而背景是真实现场；',
@@ -9600,12 +9863,46 @@ export class Bot {
             '',
             '## 你自己判断：想说的话说完了没有',
             '- 还有想说的 → 接着说（**但别为了接而接**、别硬找话题、也别重复已经说过的）；',
-            '- 说完了 / 觉得没什么意思 / 只是在客气 → **用一句话收场**，例如',
-            '  「行，不跟你贫了」「我忙去了」「先这样吧」「到此为止」——',
-            '  ⚠️ 收场就**别再抛新话题、别再追问**，说完就停。',
+            '- 说完了 / 觉得没什么意思 / 只是在客气 → **把话停在那儿就行**，',
+            '  不必专门宣布一声"我聊完了"。真要收场，就**用你自己的话**随口带一句',
+            '  （比如你手头正忙着什么、今天还有什么事）——',
+            '  ⚠️ 🚫 **不许用套话**：「不跟你贫了」「我忙去了」「先这样吧」「到此为止」',
+            '  「没空陪你」这类句子**一次都别用** —— 每次收场都是同一句，一眼就看出是机器人。',
+            '- ⚠️ 收场**不是每次必做**：没什么可说的**直接不接**也完全可以。',
             '- 🚫 不用一直陪着它刷 —— 群里没人在看你们两个来回。',
           ].join('\n'),
         );
+      }
+
+      // ⚠️ 2026-10-07 加（用户要求：「在剧情时机器人也要**互相 @** 的能力，
+      //    比如一个机器人想叫另一个机器人**买东西**，就要**自己去 @ 她**」）。
+      //    模型只会写字 ⇒ 由 `splitAtMentions()` 把 `@名字` 换成真 @ 段；
+      //    所以这里必须把**能写的名字**明确列给它 —— 名字对不上就换不成真 @，
+      //    只会显示成一串普通文字（对方收不到提醒，等于没叫动）。
+      if (event?.message_type === 'group') {
+        const ats = this.atTargetsOf(String(event.group_id ?? ''));
+        if (ats.length) {
+          parts.push(
+            [
+              '',
+              '# 【想叫另一个机器人做事，就 @ 它】',
+              '',
+              '这个群里**还有别的机器人在**（它们在故事里也是有角色的人）。',
+              '想让它注意到你、或者**叫它去做一件事**（买点东西、拿个东西、问它一件事）',
+              '→ 就在回复里写 `@名字`，**系统会把它变成真正的 @**，对方真的会收到提醒。',
+              '',
+              ...ats.map((t) => {
+                const other = t.keys.filter((k) => k !== t.name).slice(0, 3);
+                return `- \`@${t.name}\`${other.length ? `（也可以写 ${other.map((k) => `@${k}`).join(' / ')}）` : ''}`;
+              }),
+              '',
+              '- ✅ 名字**照上面抄**（写别的写法变不成真 @，只会显示成一串字）。',
+              '- ✅ 只在**真的要它做事 / 要它答话**时 @ —— 平时接着聊就直接说，别带 @。',
+              '- 🚫 **不许多余地 @、也不许一条里 @ 好几次**（那会变成刷屏）。',
+              '- 🚫 **不许 @ 群里的真人** —— 真人有事会自己找你，你 @ 他们就是打扰。',
+            ].join('\n'),
+          );
+        }
       }
 
       parts.push('\n' + this.attitudeFor(this.speakerRole(event), event));
@@ -10640,6 +10937,18 @@ export class Bot {
     );
 
     const tick = async () => {
+      // ⚠️ 2026-10-07 加（用户要求：「余额提醒只用主号一个有提醒就行了」）：
+      //    余额是**所有号共用**的（同一个 API key ⇒ 同一份余额），
+      //    而多号之后每个进程都会自己查、自己抱怨 ⇒ **同一个群里冒出两遍
+      //    一模一样的提醒** ✗
+      //    ⇒ 只有**主号**负责这件事。`isMainAccount()` 在单号 / 还没拆分的
+      //      老配置下**恒为 true**，所以老行为一个字不变。
+      //    ⚠️ 这里只跳过**定时提醒**；界面上的余额显示走另一条路
+      //      （`balanceNote()`），不受影响。
+      if (!isMainAccount()) {
+        log.debug('[工资] 不是主号 → 余额提醒交给主号，这次跳过');
+        return;
+      }
       try {
         const r = await balance.fetchBalance();
         if (!r.ok) {

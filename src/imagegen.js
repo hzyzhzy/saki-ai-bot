@@ -288,14 +288,29 @@ const STYLE_FALLBACK = '真实照片，手机随手拍，没有滤镜也没有�
  * @param {string} [p.time]     时间（一样一样按"事实在前、画风在后"排）
  * @param {string} [p.place]    地点
  * @param {boolean} [p.hasRef]  这次**真的带了参考图**吗（默认跟 `withSelf` 一致）
+ * @param {Array<{name?:string}>} [p.others] ⚠️ 2026-10-07 加（合照）：
+ *        画面里**除了她还有谁** —— 顺序必须和传进 `generate()` 的参考图一致
+ *        （她自己永远是图1，`others[0]` 是图2、`others[1]` 是图3…）。
  */
-export function buildPrompt({ what, withSelf = true, time = '', place = '', hasRef = null } = {}) {
+export function buildPrompt({ what, withSelf = true, time = '', place = '', hasRef = null, others = [] } = {}) {
+  // 「合照」里除她之外的那几个人（每个人对应一张参考图）
+  const mates = (Array.isArray(others) ? others : []).filter(Boolean);
   const body = String(what ?? '')
     .trim()
     .replace(/[。.]+$/, ''); // 免得拼出"。。"
   if (!body) return '';
   const style = config.imagegen?.style ?? {};
-  const pick = String((withSelf ? style.self : style.scene) ?? '').trim() || STYLE_FALLBACK;
+  // ⚠️⚠️ 2026-10-07 加（合照）：**多人时不能再用单人自拍那段画风** ——
+  //    它里面写着「取景框里**只有她自己**，画面里看不到手机」，而合照明明有两个人
+  //    ⇒ 两句自相矛盾，模型会只画一个人（或者把两个人叠成一个人）✗
+  //    ⇒ 多人时改用 `imagegen.style.group`；没配就从 `self` 里把那句换掉当兜底
+  //      （界面上可以显式写 `imagegen.style.group` 覆盖，见 config.example.yml）。
+  const groupStyle =
+    String(style.group ?? '').trim() ||
+    String(style.self ?? '').replace(/这是自拍[^。]*。/, '这是合照：两个人并排站着看镜头。');
+  const pick =
+    String((withSelf ? (mates.length ? groupStyle : style.self) : style.scene) ?? '').trim() ||
+    STYLE_FALLBACK;
   // ⚠️ 顺序固定为「画面 → 时间地点 → 画风」：前面是"这次是什么"，后面是"长什么样"。
   //    反过来写模型会把画风当成主体描述的一部分。
   //
@@ -332,7 +347,11 @@ export function buildPrompt({ what, withSelf = true, time = '', place = '', hasR
   //      （第一版我写了 68 字，直接把提示词顶到 339 ⇒ 被套件抓住）。
   const anchor =
     withSelf && hasRef !== false
-      ? '画面里的人是参考图1里的女孩，发色发型五官保持一致。'
+      ? mates.length
+        ? `画面里 ${mates.length + 1} 个人：图1是主角，` +
+          mates.map((o, i) => `图${i + 2}是${String(o?.name ?? '').trim() || '她的同伴'}`).join('、') +
+          '。各自照自己参考图的发色发型五官画，别混。'
+        : '画面里的人是参考图1里的女孩，发色发型五官保持一致。'
       : '';
   return [body + '。', anchor, when ? `${when}。` : '', pick].filter(Boolean).join('');
 }

@@ -559,10 +559,35 @@ console.log('\n【10】★ 接线断言（源码级 —— 这两个坑互相拉
   check(/place: picked\.place \|\| facts\.where/.test(src), '★★ 地点同理');
   check(/whereNow\(nowAt\)/.test(src), '★ 事实来源：`whereNow()`（她说的话优先，**和日程矛盾时以日程为准**）');
   check(
-    /const refs = withSelf \? persona\.refImages\(\) : \[\]/.test(src),
+    // ⚠️ 2026-10-07：合照之后这行变成了「有她时 = 自己的立绘 + 同伴的立绘」，
+    //    所以不能再钉死 `persona.refImages()` 那一种写法（一改就假红）。
+    //    **要守的语义是**：`withSelf === false` 时 refs 一定是空数组。
+    /const refs = withSelf \?[^\n]*: \[\]/.test(src),
     '★★ "拍景物"**不传参考图** —— 传了模型会硬塞一个人进去，而拍景物要的正是纯写实',
   );
   check(/expectRef: withSelf/.test(src), '★ 拍景物时**不报**"没有参考图"的假警告');
+
+  // ⚠️ 2026-10-07 加（用户要求「叫她们拍个合照」）：
+  const groupPrompt = imagegen.buildPrompt({
+    what: '教室里两个人的合照',
+    withSelf: true,
+    place: '教室',
+    others: [{ name: '爱音' }],
+  });
+  check(
+    groupPrompt.includes('图2') && groupPrompt.includes('爱音'),
+    '★★ 合照：提示词里点了"图2 是谁"（不点的话两张脸会混成一个人）',
+  );
+  check(
+    !/只有她自己/.test(groupPrompt),
+    '★★ 合照**不能再带「取景框里只有她自己」**那句 —— 和"两个人"自相矛盾，模型会只画一个',
+  );
+  check(
+    !imagegen.buildPrompt({ what: 'X', withSelf: true }).includes('图2'),
+    '★ 单人照不带"图2"（那条路一个字都不该动）',
+  );
+  // ⚠️ 官方指南：中文提示词建议不超过 300 字 —— 合照多了"图2是谁"那一段，最容易顶破
+  check(groupPrompt.length < 300, `③ 合照提示词 ${groupPrompt.length} 字（官方建议 <300）`);
   // ⚠️⚠️ 2026-09-23 实测（用户：「为什么我 @ 她让她看上一句话，她直接给我发照片了」）：
   //    他只是 @ 了一下、没打字（引子是"看看最近的消息，回他一句"），她**自己拍了一张**。
   //    而且先说了「这个点能拍出什么好看的来」**然后照样拍**，自相矛盾。
