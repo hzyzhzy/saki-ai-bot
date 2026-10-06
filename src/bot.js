@@ -2089,15 +2089,19 @@ export class Bot {
       const gid = String(event.group_id ?? '');
       this.notePeerTalking(gid); // 先把"它刚说过话"记上（时间戳 = 这一条的）
       this.notePeerLine(event); // 再把这一条暂存起来（等安静后合并用）
-      await this.waitPeerQuiet(gid);
+      const timedOut = await this.waitPeerQuiet(gid);
 
       // ⚠️⚠️ 2026-10-07 加（用户诊断：「**主要还是合并消息没用成功合并另一个机器人
       //    的分条消息**」）：安静之后**把这几条合并成一条**再处理。
       //    规则：**只有最后一条**继续走（它把前面的都并进来）——
       //    前面几条醒来时发现自己不是最后一条就**直接退出**（它们已经在最后那条里了）
       //    ⇒ 一次生成、一条回复、引用挂在最后那句上 ✓
+      // ⚠️⚠️ **但等满上限时不能这么判**（用户截图：爱音一口气发了一大堆、
+      //    saki **一条都没回**）——对方不停 ⇒ 每条醒来时后面都还有更新的
+      //    ⇒ **全都被判成"不是最后一条"⇒ 集体退出** ✗ 那就彻底哑了。
+      //    ⇒ 等满上限（`timedOut`）时，各自处理手上那批：宁可多回一条，也不能全不回。
       const lines = this.peerLines(gid);
-      if (lines.length && lines[lines.length - 1] !== event) {
+      if (!timedOut && lines.length && lines[lines.length - 1] !== event) {
         log.info(
           `[同类] 它后面还有 ${lines.length - 1 - lines.indexOf(event)} 条没处理 → 这条不单独回（并进最后那条）`,
         );
@@ -4066,21 +4070,64 @@ export class Bot {
    *
    * ⚠️ **只对同类生效** —— 真人问话一分不等（`shouldJoinChatAsync` 里判的）。
    * ⚠️ 有上限（`peerQuietMaxMs`，默认 12 秒）：万一对方一直不停，也不能把她卡死。
+   *
+   * @returns {boolean} **true = 等满了上限**（对方一直在发、根本没停）——
+   *   ⚠️ 调用方要靠它决定"还让不让最后一条独占"（见 `shouldJoinChatAsync`）：
+   *   等满上限时说明它**不会停**，这时前面那些不能一直干等 ⇒ 各自处理手上那批。
    */
   async waitPeerQuiet(groupId) {
     try {
       const c = config.peerChat ?? {};
-      const quiet = Math.max(0, Number(c.peerQuietMs ?? 4000) || 0);
-      if (!quiet) return;
-      const maxWait = Math.max(quiet, Number(c.peerQuietMaxMs ?? 12000) || 0);
+      // ⚠️⚠️ 2026-10-07 加（用户截图问：「**像这样发一大堆应该是会合并一起吧**」）：
+      //    **不一定** —— 原来只有"对方连着快发（间隔 < 4 秒）"才合得起来；
+      //    而他截图里那些消息**间隔 5~15 秒**（剧情里她要生成一段才发一条）
+      //    ⇒ saki 每两条之间都会"等到安静"⇒ **还是各回各的** ✗
+      //    ⇒ **剧情里把窗口和上限都放大**：默认 **10 秒 / 30 秒**
+      //      （剧情本来就该"等对方整段演完再一次性接"）。
+      const inQuest0 = (() => {
+        try {
+          return !!quest.current(String(groupId ?? ''));
+        } catch {
+          return false;
+        }
+      })();
+      const quiet = Math.max(
+        0,
+        Number((inQuest0 ? c.peerQuietQuestMs : c.peerQuietMs) ?? (inQuest0 ? 10000 : 4000)) || 0,
+      );
+      if (!quiet) return false;
+      // ⚠️⚠️ 2026-10-07 再改（用户报：「**怎么开剧情直接哑火了**」）：
+      //    **光"等对方安静"这条判据在"对方一直发"的场景下会永远等不到** ——
+      //    剧情里她每 5~15 秒就发一条（上一版还被我调成了 10 秒窗口 / 30 秒上限）
+      //    ⇒ 每条都要干等 30 秒 ⇒ **看起来就是哑火** ✗（我上一轮改坏的）
+      //    ⇒ 补第二条出口：**"我自己上次回同类已经够久了"也放行** ——
+      //      也就是"**回完一条 → 冷却 N 秒 → 期间攒的合并回一次**"，
+      //      最多等 `peerReplyCooldownMs`（默认 12 秒），**不可能哑火** ✓
+      const cooldown = Math.max(
+        0,
+        Number(c.peerReplyCooldownMs ?? 12000) || 0,
+      );
+      const maxWait = Math.max(
+        quiet,
+        Number(
+          (inQuest0 ? c.peerQuietQuestMaxMs : c.peerQuietMaxMs) ?? (inQuest0 ? 30000 : 12000),
+        ) || 0,
+      );
       const start = Date.now();
       for (;;) {
+        const now = Date.now();
         const at = this.lastPeerSayAt(groupId);
-        const gap = at ? Date.now() - at : Infinity;
-        if (gap >= quiet) return;
-        if (Date.now() - start >= maxWait) {
+        const gap = at ? now - at : Infinity;
+        if (gap >= quiet) return false; // ① 对方真安静了 → 回
+        const mineAt = this.lastPeerReplyAt(groupId);
+        if (cooldown > 0 && mineAt && now - mineAt >= cooldown) {
+          // ② 我上次回完已经够久了（对方还在发也照样回）——
+          //    ⚠️ 这条是**防哑火**的关键：没有它就只能等满 maxWait ✗
+          return false;
+        }
+        if (now - start >= maxWait) {
           log.info(`[同类] 等它说完等满了 ${Math.round(maxWait / 1000)} 秒 → 不再等，先回`);
-          return;
+          return true; // 兜底：等满上限
         }
         await new Promise((r) => {
           // ⚠️⚠️ **不要 `unref()`**（2026-10-07 踩了）：这个等待是**主动要等的**，
@@ -4089,6 +4136,32 @@ export class Bot {
           setTimeout(r, 300);
         });
       }
+    } catch {
+      return false;
+    }
+  }
+
+  /** **她上次回同类**是什么时候（0 = 没有）—— `waitPeerQuiet()` 的"防哑火"判据用它 */
+  lastPeerReplyAt(groupId) {
+    const gid = String(groupId ?? '').trim();
+    if (!gid) return 0;
+    return Number(this._peerReplyAt?.get(gid) ?? 0) || 0;
+  }
+
+  /**
+   * 记下"她刚回了一条同类消息"（2026-10-07 加）。
+   *
+   * ⚠️ 用途有两个，都是用户踩出来的：
+   *   ① **防哑火**：`waitPeerQuiet()` 里"我上次回完已经够久了"也放行 ——
+   *      光"等对方安静"这条判据在"对方一直发"时永远等不到 ⇒ 剧情里直接哑火 ✗；
+   *   ② **控制回话节奏**："回完一条 → 冷却 N 秒 → 期间攒的合并回一次"。
+   */
+  notePeerReply(groupId) {
+    try {
+      const gid = String(groupId ?? '').trim();
+      if (!gid) return;
+      this._peerReplyAt ??= new Map();
+      this._peerReplyAt.set(gid, Date.now());
     } catch {}
   }
 
@@ -12478,6 +12551,9 @@ export class Bot {
     //    ⚠️ **只对同类生效**：真人问话不加这个 —— 他在等答案，别拖。
     //    ⚠️ 放在**真正发出去之前**（`opts.force` 也跳过，比如指令回执）。
     if (!opts.force && this.isPeerTalking(groupId)) {
+      // ⚠️ 2026-10-07：**记下"她刚回了同类"** —— `waitPeerQuiet()` 的
+      //    "防哑火"判据要用它（"我上次回完已经够久了"也放行，不然剧情里会哑火）
+      this.notePeerReply(groupId);
       const wait = this.typingDelayFor(text);
       if (wait > 0) {
         log.debug(`[同类] 拟人打字延迟 ${wait}ms 后再发`);
