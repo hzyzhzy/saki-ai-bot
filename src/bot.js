@@ -4189,15 +4189,40 @@ export class Bot {
         ) || 0,
       );
       const start = Date.now();
+      // ⚠️ 2026-10-07 **临时诊断日志**（用户报「一个 bot 没讲完另一个就插进来」）：
+      //    把**实际生效的数值**打出来，一眼就能看出是哪一层没兜住。
+      //    ⚠️ 用户还没测完 ⇒ **先留着**，测过没问题再删（它会刷日志）。
+      log.info(
+        `[同类·等安静] quiet=${Math.round(quiet)}ms cooldown=${Math.round(cooldown)}ms ` +
+          `maxWait=${Math.round(maxWait)}ms 剧情=${inQuest0} ` +
+          `对方上次说话=${(() => {
+            const at = this.lastPeerSayAt(groupId);
+            return at ? `${Math.round(Date.now() - at)}ms 前` : '没有记录';
+          })()} 我上次回=${(() => {
+            const at = this.lastPeerReplyAt(groupId);
+            return at ? `${Math.round(Date.now() - at)}ms 前` : '没有记录';
+          })()}`,
+      );
       for (;;) {
         const now = Date.now();
         const at = this.lastPeerSayAt(groupId);
         const gap = at ? now - at : Infinity;
         if (gap >= quiet) return false; // ① 对方真安静了 → 回
         const mineAt = this.lastPeerReplyAt(groupId);
-        if (cooldown > 0 && mineAt && now - mineAt >= cooldown) {
-          // ② 我上次回完已经够久了（对方还在发也照样回）——
-          //    ⚠️ 这条是**防哑火**的关键：没有它就只能等满 maxWait ✗
+        // ⚠️⚠️ 2026-10-07 修（诊断日志抓到的真凶）：
+        //    这条"防哑火"出口**原来一满足就立刻放行** ⇒ 实测日志：
+        //      `quiet=10000ms cooldown=12000ms 对方上次说话=0ms 前 我上次回=28530ms 前`
+        //    —— 参数全对（该等 10 秒），可"我 28 秒前回过"⇒ **立刻放行** ⇒
+        //    **对方刚说的话还没说完她就插进去了** ✗（用户报的正是这个）
+        //    ⇒ 加一道：**必须先等够 `peerMinWaitMs`（默认 8 秒）**才允许用这条出口。
+        //      这样"对方一直在发"时，她至少会攒 8 秒的量再回一次（合并 ✓），
+        //      而不是秒插；同时仍然**不可能哑火**（8 秒封顶，远小于 maxWait）。
+        const minWait = Math.max(0, Number(c.peerMinWaitMs ?? 5000) || 0);
+        if (cooldown > 0 && mineAt && now - mineAt >= cooldown && now - start >= minWait) {
+          log.info(
+            `[同类] 对方还在发，但我上次回完已 ${Math.round((now - mineAt) / 1000)} 秒、` +
+              `这次也等了 ${Math.round((now - start) / 1000)} 秒 → 先回一次（把攒下的合并）`,
+          );
           return false;
         }
         if (now - start >= maxWait) {
@@ -4631,6 +4656,55 @@ export class Bot {
         //    "打字"一会儿再发（用户要求：别让两个机器人快得像刷屏；
         //    见 `typingDelayFor` / `sendChatLike`）。
         this.notePeerTalking(gid0);
+
+        // ⚠️⚠️ 2026-10-07 加（用户原话：「**主导权在对面时，只有对面转述剧情进展，
+        //    然后对面不接话，由自己这边接话，然后对面再接，这样就整齐很多**」）：
+        //    **同类之间轮流说** —— 判据就一句：**谁最后说的**。
+        //      · 对方最后说的（比我晚）⇒ **该我接** ✓
+        //      · 我最后说的（比它晚）⇒ **等它接**，我不抢 ✗
+        //    ⚠️ 加**超时**（`peerChat.peerTurnWaitMs`，默认 35 秒）：它要是不接，
+        //      我不能永远哑着 ⇒ 超时后照常说（不会变成哑火）。
+        //    ⚠️ 例外照旧：**@ 她 / 叫她的名字**不受这条限制（那是明确找她）。
+        const myLastAt = Math.max(
+          (() => {
+            try {
+              return recent.lastSelfAt(gid0);
+            } catch {
+              return 0;
+            }
+          })(),
+          Number(this._lastSelfSayAt?.get(gid0) ?? 0) || 0,
+        );
+        const peerLastAt = this.lastPeerSayAt(gid0);
+        // ⚠️⚠️ 2026-10-07 加**最小间隔**（用户截图：「**还是都发了**」，
+        //    日志显示那次 `剧情=false` ⇒ 是剧情之外的闲聊）：
+        //    "轮流"只判"谁最后说"**不够** —— 她说完之后，对方**还在生成**
+        //    （等安静 10 秒 + 打字延迟），这期间她又收到对方**更早发的**那一条 ⇒
+        //    以为"该我接" ⇒ **两人就混上了** ✗
+        //    ⇒ 加一道下限：**我这次说完之后至少隔 `peerTurnMinGapMs`（默认 10 秒）**
+        //      才允许再接同类的话（给对方留出生成 + 发出的时间）。
+        //    ⚠️ 不影响"@ 她 / 叫她的名字"（那是明确找她）。
+        const myGapMs = Math.max(0, Number(config.peerChat?.peerTurnMinGapMs ?? 10000) || 0);
+        if (
+          !peerAtMe &&
+          !peerCallMe &&
+          myLastAt > 0 &&
+          Date.now() - myLastAt < myGapMs
+        ) {
+          log.info(
+            `[同类] 我 ${Math.round((Date.now() - myLastAt) / 1000)} 秒前才说过 → ` +
+              `先歇着（给对方生成的时间）`,
+          );
+          return null;
+        }
+        const turnWaitMs = Math.max(0, Number(config.peerChat?.peerTurnWaitMs ?? 35000) || 0);
+        if (!peerAtMe && !peerCallMe && myLastAt > peerLastAt && Date.now() - myLastAt < turnWaitMs) {
+          log.info(
+            `[同类] **该它说**（我 ${Math.round((Date.now() - myLastAt) / 1000)} 秒前说的、它还没接）` +
+              ' → 我不抢话（轮流）',
+          );
+          return null;
+        }
 
         // ⚠️⚠️ 2026-10-07 加（用户截图：「**还是有这种无意义循环**」）：
         //    她俩在「去吧 / 一会儿见 / 回见 / 走啦」上来回刷了三个来回。

@@ -350,8 +350,8 @@ console.log('\n【11】★★ 同类的**纯告辞**不接（用户截图：去�
   const iFarewell11 = bsrc11.indexOf('this.isFarewellLine(peerText0)');
   const iPeerBlock11 = bsrc11.indexOf('if (peers0.has(sender0)) {');
   check(
-    // ⚠️ 窗口放宽到 1400：那一段后来又加了"记下同类正在说话"（打字延迟用）几行
-    iPeerBlock11 > 0 && iFarewell11 > iPeerBlock11 && iFarewell11 - iPeerBlock11 < 1400,
+    // ⚠️ 窗口放宽到 4500：那一段后来又加了"最小间隔"（她说完 10 秒内不再接）
+    iPeerBlock11 > 0 && iFarewell11 > iPeerBlock11 && iFarewell11 - iPeerBlock11 < 4500,
     '★ 这条闸就在 `if (peers0.has(sender0))` 块内 ⇒ **只对同类生效**（群友完全不受影响）',
   );
 
