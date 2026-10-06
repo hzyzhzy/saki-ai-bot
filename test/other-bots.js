@@ -356,14 +356,133 @@ console.log('\n【11】★★ 同类的**纯告辞**不接（用户截图：去�
 
   // ⑤ 接线：它必须在"认得出角色的同类一律放行"**之前**
   check(
-    /if \(!peerAtMe && !peerCallMe && this\.isFarewellLine\(peerText0\)\)/.test(bsrc11),
-    '★★ 判据写成"没 @ 她、没叫她 + 是告辞"（例外留住）',
+    // ⚠️ 2026-10-07 凌晨改：例外**只留 @ 她**、去掉了"叫名字" ——
+    //    实测那句「明早六点半等着瞧嗷。**晚安啦祥祥**」叫了名字，
+    //    留着名字例外这条闸就等于没做（测试第一次就是这么红的）。
+    /if \(!peerAtMe && this\.isFarewellLine\(peerText0\)\)/.test(bsrc11),
+    '★★ 判据 = "**没 @ 她** + 是告辞"（叫名字不算例外 —— 道晚安时她总会带名字）',
   );
   check(
     iFarewell11 < bsrc11.indexOf('if (peerRole) {'),
     '★★ 而且接在**"认得出角色的同类一律放行"之前** —— 否则同世界的人之间还是会无限互相告辞',
   );
   delete config.groupParams[G11];
+}
+
+console.log('\n【12】★★ 收尾拉锯（晚安来回）—— 提示词为主、代码兜底（2026-10-07 凌晨）');
+{
+  // 用户原话：「**现在机器人还是老是重复结束词，晚安都说了好多遍了还没结束**」。
+  // 日志实证：01:11:57 → 01:13:44 不到两分钟，两个号靠**引用**互回，各说了 5~7 遍晚安，
+  // 而**每一句都夹着新内容**（「明早六点半等着瞧嗷。晚安啦祥祥（」）
+  // ⇒ 上一轮那条 `isFarewellLine()`（要求"整句很短且纯告别"）**根本匹配不上**。
+  //
+  // ⚠️ 分工（用户要求「最好还是要靠模型更精确的判定」）：
+  //    · **主力 = 提示词** —— 教她三问判据 + 收尾信号 + "最多来回一次"（见【13】）；
+  //    · **兜底 = 这条代码闸** —— 只在**已经形成拉锯**时拦（"我也刚说过收尾话" +
+  //      "它这句也是收尾话"），两条一起判，单看任一条都会误伤。
+  const { Bot } = await import('../src/bot.js');
+  const G12 = '999000012';
+  const P12 = '10000303';
+  config.groupParams[G12] = { peers: [P12] };
+  const b12 = new Bot();
+  b12.selfId = '10000002';
+
+  // ① 宽松词表：**句中出现**即算（短的那条判据够不着这些）
+  check(
+    b12.hasFarewellWord('明早六点半等着瞧嗷。晚安啦祥祥（') === true,
+    '★★ 「夹着内容的晚安」也认得出（短的判据够不着这种 —— 实测就是它）',
+  );
+  check(b12.hasFarewellWord('睡了睡了，晚安') === true, '★ 「睡了睡了，晚安」认得出');
+  check(b12.hasFarewellWord('起来了我第一时间喊你，别想装没看见（。睡了睡了，晚安') === true, '★ 实测那句长句也认得出');
+  check(b12.hasFarewellWord('今天排练到几点啊') === false, '★ 普通聊天不算（不误伤）');
+  check(b12.hasFarewellWord('') === false, '空串不算');
+
+  // ② 标记：她说过收尾话才亮；说了别的就清掉；真人插话也清
+  b12.clearMyFarewell(G12);
+  check(b12.farewellPingPong(G12) === false, '★ 我还没说过收尾话 → 不算拉锯');
+  b12.noteMyFarewell(G12, '嗯，晚安');
+  check(b12.farewellPingPong(G12) === true, '★ 我刚说过收尾话 → 进入"拉锯"窗口');
+  b12.noteMyFarewell(G12, '你那个谱子我看了');
+  check(b12.farewellPingPong(G12) === false, '★★ 我这次说的是正经事 → 标记**清掉**（话题换了就不该再拦）');
+  b12.noteMyFarewell(G12, '嗯，晚安');
+  b12.clearMyFarewell(G12);
+  check(b12.farewellPingPong(G12) === false, '★ 真人插话会清掉它（`clearMyFarewell`）');
+
+  // ③ 行为：拉锯时真的不接（实测那句原样）
+  const ev12 = (uid, text) => ({
+    post_type: 'message',
+    message_type: 'group',
+    group_id: G12,
+    user_id: uid,
+    self_id: '10000002',
+    message_id: Math.floor(Math.random() * 1e9),
+    message: [{ type: 'text', data: { text } }],
+    sender: { user_id: uid, card: 'Anon', nickname: 'Anon' },
+  });
+  b12.noteMyFarewell(G12, '嗯，晚安');
+  check(
+    b12.decide(ev12(P12, '明早六点半等着瞧嗷。晚安啦祥祥')) === null,
+    '★★ **收尾拉锯 → 不接**（实测那句原样）',
+  );
+  // ⚠️ 但**没说收尾话**的时候照常接 —— 兜底不该变成"一被标记就全哑"
+  check(b12.hasFarewellWord('你那个谱子我看了') === false, '★ 它说正经事 → 这条闸不参与（照常走别的判定）');
+  check(
+    b12.farewellPingPong(G12) === true,
+    '⚠️ 注意：标记还在（她上次确实说了晚安）—— 但**只对它也说收尾话时才拦**',
+  );
+  b12.clearMyFarewell(G12);
+
+  // ④ 接线（光有函数不算数）
+  const src12 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  check(
+    /if \(event\?\.group_id\) this\.noteMyFarewell\(event\.group_id, text\)/.test(src12),
+    '★★ `sendText()` 里**真的记了**（不然标记永远是空、这条闸等于没做）',
+  );
+  check(
+    /this\.farewellPingPong\(gid0\) &&[\s\S]{0,80}?this\.hasFarewellWord\(peerText0\)/.test(src12),
+    '★★ 判据是「**我也说过** + **它也说**」**两条一起**（单看任一条都会误伤）',
+  );
+  check(
+    /if \(!peers0\.has\(sender0\)\) this\.clearMyFarewell\(gid0\)/.test(src12),
+    '★ 真人插话会清标记（不然跟她道完晚安，接下来两分钟里谁都不能提"晚安"）',
+  );
+  check(
+    /hasFarewellWord\(text\)\) this\._myFarewellAt\.set/.test(src12) &&
+      /else this\._myFarewellAt\.delete/.test(src12),
+    '★ 说收尾话就记、没说就清（不能只记不清，否则话题换了还在拦）',
+  );
+  delete config.groupParams[G12];
+}
+
+console.log('\n【13】★★ 主力那一半：提示词里「该不该结束」的判据（用户要求「靠模型更精确的判定」）');
+{
+  // 用户原话：「**最好还是要靠模型更精确的判定是不是该结束了**」——
+  // 所以真正的解法是**把判据写清楚**（代码那条只是兜底），这一节盯的就是那段提示词。
+  const src = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  check(/怎么判断「这一轮该结束了」/.test(src), '★★ 提示词里有这一节（同类场景注入）');
+  check(
+    /三条里有两条是「没有」⇒ 这一条就别回/.test(src),
+    '★★ 三问判据写明确了 —— 不是"聊够了"这种虚的，是**可判断**的三条',
+  );
+  check(
+    /对方刚说的那句，有我能接着做 \/ 答的新信息吗？/.test(src) &&
+      /我这句能说出对方不知道的事吗？/.test(src) &&
+      /跟上一轮比，事情往前走了一步吗？/.test(src),
+    '★★ 三问逐条都在（新信息 / 对方不知道的事 / 有没有往前走）',
+  );
+  check(
+    /收尾信号/.test(src) && /晚安 \/ 睡了 \/ 早点睡/.test(src),
+    '★★ 列出了**收尾信号词表**（模型才知道哪些算收尾）',
+  );
+  check(/收尾最多来回一次/.test(src), '★★ 规则写死：「收尾最多来回一次」');
+  check(
+    /对方再补什么（哪怕又补一句「你也早点睡」）都别再接/.test(src),
+    '★★ 把实测那种情况**点名**写进去了（"又补一句晚安"不许接）',
+  );
+  check(
+    /三条里有两条是「没有」⇒ 这一条就别回/.test(src) && /不是"回一句短的"，是\*\*不回\*\*/.test(src),
+    '★★ 而且说清了"别回"**不是**"回一句短的"（实测她之前就是回短的）',
+  );
 }
 
 console.log(`\n结果: ${failures === 0 ? '全部通过 ✅' : `${failures} 项失败 ❌`}\n`);

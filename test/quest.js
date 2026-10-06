@@ -1652,6 +1652,27 @@ console.log('\n【16】★★ 发了 /清除剧情 ⇒ 强制静默 1 分钟（2
     /isMuted\?\.\(gid\)/.test(psrc16),
     '★★ 定时主动搭话也拦（它直发，不走 decide —— 这条最容易漏）',
   );
+
+  // ⚠️⚠️ 2026-10-07 凌晨补（用户报「**/暂停指令没生效**」，日志查出真因）：
+  //    群友把她那条 `/暂停` 回执连着复读了 3 遍 → 触发"复读梗" →
+  //    她**在静默期里跟着复读**了 ✗（`01:16:22 [复读] 群 … 刷到第 3 句 → 她也复读…`）
+  //    根因：**复读是全项目唯一一处裸调 `send_group_msg` 的地方**，
+  //    绕过了 `sendChatLike()` 这个"她所有发言的唯一出口"。
+  check(
+    /async sendChatLike\(groupId, text, opts = \{\}\) \{[\s\S]{0,1200}?if \(!opts\.force && this\.isMuted\(groupId\)\)/.test(
+      bsrc16,
+    ),
+    '★★ 她发言的**唯一出口**（`sendChatLike`）也拦静默 —— 一处就管住主聊天 / 剧情 / 日常事件',
+  );
+  check(
+    /!this\.isMuted\(payload\.group_id\)/.test(bsrc16) &&
+      /v\.join &&[\s\S]{0,120}?v\.say &&[\s\S]{0,80}?v\.chance &&[\s\S]{0,60}?!this\.isMuted/.test(bsrc16),
+    '★★ 而**复读**那条路单独堵了（它裸调 `send_group_msg`，绕过所有出口 —— 实测就是它）',
+  );
+  check(
+    /isMuted\(groupId\)\) \{[\s\S]{0,200}?return \{ skipped: 'muted' \}/.test(bsrc16),
+    '★ 静默期直接返回、不真发（并且留个 `skipped` 便于排查）',
+  );
 }
 
 console.log('\n【17】★★ /暂停：**打断正在生成的** + **静默 2 分钟**（2026-10-07 用户要求）');
