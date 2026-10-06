@@ -3860,6 +3860,66 @@ export class Bot {
   }
 
   /**
+   * 记下"这个群刚才那句是**同类机器人**说的"（2026-10-07 用户要求）。
+   *
+   * 用户原话（他观察到的）：「**为什么她们两个人互发消息的时候发的速度很快，
+   *   感觉远远快于和真人聊天**」——查下来两条原因：
+   *   ① 项目里**根本没有"打字延迟"这个机制**（我搜过，一处都没有）：
+   *      真人打字要 5~30 秒，两个机器人都是"收到即回"；
+   *   ② 同类之间**每几秒就有一句、永远不会掉出"正在对话中"** ⇒ 一直走
+   *      `needJudge: false` 那条「**不判、也不节流**」的快路径；
+   *      而真人隔几十秒才说一句、经常掉出窗口 ⇒ 每次都要多花一次模型判定。
+   * ⇒ 用户拍板：**给同类之间加"按字数算的打字延迟"**（真人问话不加）。
+   *
+   * ⚠️ **真人一插话就清掉**（见 `decide()` 里"真人说话"那一侧）——
+   *    不然他插一句问事，她还要先"打字"几秒才答 ✗
+   */
+  notePeerTalking(groupId) {
+    try {
+      const gid = String(groupId ?? '').trim();
+      if (!gid) return;
+      this._peerTalkingAt ??= new Map();
+      this._peerTalkingAt.set(gid, Date.now());
+    } catch {}
+  }
+
+  /** 这个群刚才（30 秒内）是不是同类在跟她说话（见 `notePeerTalking`） */
+  isPeerTalking(groupId) {
+    const gid = String(groupId ?? '').trim();
+    if (!gid) return false;
+    const at = Number(this._peerTalkingAt?.get(gid) ?? 0);
+    return at > 0 && Date.now() - at < 30000;
+  }
+
+  /** 清掉"同类正在跟她说话"的标记（真人插话时用） */
+  clearPeerTalking(groupId) {
+    try {
+      this._peerTalkingAt?.delete(String(groupId ?? '').trim());
+    } catch {}
+  }
+
+  /**
+   * 「打字延迟」多少毫秒 —— **只在同类之间用**（见 `notePeerTalking`）。
+   *
+   * ⚠️ 按字数算（默认每字 120ms），下限 800ms、上限 3000ms，再带 ±30% 抖动 ——
+   *    固定值一眼就是机器（用户以前就为这个提过"分条间隔要随机"）。
+   * 可调：`peerChat.typeDelayPerChar` / `typeDelayMinMs` / `typeDelayMaxMs`。
+   */
+  typingDelayFor(text) {
+    try {
+      const c = config.peerChat ?? {};
+      const per = Math.max(0, Number(c.typeDelayPerChar ?? 120) || 0);
+      const lo = Math.max(0, Number(c.typeDelayMinMs ?? 800) || 0);
+      const hi = Math.max(lo, Number(c.typeDelayMaxMs ?? 3000) || 0);
+      const n = String(text ?? '').replace(/\s+/g, '').length;
+      const base = Math.min(hi, Math.max(lo, n * per));
+      return Math.round(base * (0.7 + Math.random() * 0.6));
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
    * 她在**这个群**刚说过收尾话吗 —— 跟 `hasFarewellWord()` 凑成
    * 「**互相**道晚安」的判据（见 `decide()` 里那条闸）。
    *
@@ -4218,6 +4278,11 @@ export class Bot {
           if (!peerAtMe) peerCallMe = this.calledByName(peerText0);
         } catch {}
 
+        // ⚠️ 2026-10-07：记下"**同类正在跟她说话**" —— 她回话时会按字数
+        //    "打字"一会儿再发（用户要求：别让两个机器人快得像刷屏；
+        //    见 `typingDelayFor` / `sendChatLike`）。
+        this.notePeerTalking(gid0);
+
         // ⚠️⚠️ 2026-10-07 加（用户截图：「**还是有这种无意义循环**」）：
         //    她俩在「去吧 / 一会儿见 / 回见 / 走啦」上来回刷了三个来回。
         //    ⚠️ 放在**这一块的最前面**（在下面那些"放行"判据之前）——
@@ -4370,7 +4435,12 @@ export class Bot {
       // ⚠️ 2026-10-07 凌晨：**真人一插话就清掉"她刚说过收尾话"的标记** ——
       //    不然她跟真人道完晚安，接下来两分钟里任何带"晚安"的话都不接了 ✗
       //    （上面那条"收尾拉锯"闸只管**同类之间**，真人说话本来就不该被它影响）
-      if (!peers0.has(sender0)) this.clearMyFarewell(gid0);
+      if (!peers0.has(sender0)) {
+        this.clearMyFarewell(gid0);
+        // ⚠️ 2026-10-07：真人说话了 ⇒ 也清掉"同类正在跟她说话"的标记 ——
+        //    不然他插一句问事，她还要先"打字"几秒才答 ✗（那是给同类之间用的）
+        this.clearPeerTalking(gid0);
+      }
       // ③ 真人说话 ⇒ **不碰标记**，照常往下走（"我插话就能跟她说话"）
       // ③ 真人说话 ⇒ **不碰标记**，照常往下走（"我插话就能跟她说话"）
     }
@@ -12156,6 +12226,21 @@ export class Bot {
         `[静默] 群 ${groupId} 还在静默期 → 这条不发了（${String(text ?? '').slice(0, 20)}）`,
       );
       return { skipped: 'muted' };
+    }
+    // ⚠️⚠️ 2026-10-07 加（用户要求）：**同类之间要有"打字"的停顿** ——
+    //    真人打字要几秒，两个机器人"收到即回"就会快得像刷屏
+    //    （用户原话：「为什么她们两个人互发消息的时候发的速度很快」）。
+    //    ⚠️ **只对同类生效**：真人问话不加这个 —— 他在等答案，别拖。
+    //    ⚠️ 放在**真正发出去之前**（`opts.force` 也跳过，比如指令回执）。
+    if (!opts.force && this.isPeerTalking(groupId)) {
+      const wait = this.typingDelayFor(text);
+      if (wait > 0) {
+        log.debug(`[同类] 拟人打字延迟 ${wait}ms 后再发`);
+        await new Promise((r) => {
+          const t = setTimeout(r, wait);
+          t.unref?.();
+        });
+      }
     }
     // ⚠️⚠️ 2026-10-06 加（用户：「**还是没接**」）：**她所有发言的唯一出口就是这里**
     //    （注释里就是这么写的），所以"我刚刚说过话"记在这儿最可靠 ——

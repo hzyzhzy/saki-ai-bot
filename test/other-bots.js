@@ -350,7 +350,8 @@ console.log('\n【11】★★ 同类的**纯告辞**不接（用户截图：去�
   const iFarewell11 = bsrc11.indexOf('this.isFarewellLine(peerText0)');
   const iPeerBlock11 = bsrc11.indexOf('if (peers0.has(sender0)) {');
   check(
-    iPeerBlock11 > 0 && iFarewell11 > iPeerBlock11 && iFarewell11 - iPeerBlock11 < 900,
+    // ⚠️ 窗口放宽到 1400：那一段后来又加了"记下同类正在说话"（打字延迟用）几行
+    iPeerBlock11 > 0 && iFarewell11 > iPeerBlock11 && iFarewell11 - iPeerBlock11 < 1400,
     '★ 这条闸就在 `if (peers0.has(sender0))` 块内 ⇒ **只对同类生效**（群友完全不受影响）',
   );
 
@@ -443,7 +444,9 @@ console.log('\n【12】★★ 收尾拉锯（晚安来回）—— 提示词为�
     '★★ 判据是「**我也说过** + **它也说**」**两条一起**（单看任一条都会误伤）',
   );
   check(
-    /if \(!peers0\.has\(sender0\)\) this\.clearMyFarewell\(gid0\)/.test(src12),
+    // ⚠️ 2026-10-07：这里从单行 `if (…) xxx;` 改成了多行块（又加了清"打字延迟"标记），
+    //    所以断言跟着放宽成"块内包含"。
+    /if \(!peers0\.has\(sender0\)\) \{[\s\S]{0,240}?this\.clearMyFarewell\(gid0\)/.test(src12),
     '★ 真人插话会清标记（不然跟她道完晚安，接下来两分钟里谁都不能提"晚安"）',
   );
   check(
@@ -482,6 +485,67 @@ console.log('\n【13】★★ 主力那一半：提示词里「该不该结束�
   check(
     /三条里有两条是「没有」⇒ 这一条就别回/.test(src) && /不是"回一句短的"，是\*\*不回\*\*/.test(src),
     '★★ 而且说清了"别回"**不是**"回一句短的"（实测她之前就是回短的）',
+  );
+}
+
+console.log('\n【14】★★ 同类之间「按字数算的打字延迟」（2026-10-07 用户要求）');
+{
+  // 用户原话：「**为什么她们两个人互发消息的时候发的速度很快，感觉远远快于和真人聊天**」。
+  // 查下来：① 项目里根本没有"打字延迟"机制；② 同类之间每几秒一句、永远不会掉出
+  // "正在对话中"⇒ 一直走不需要判定的快路径。
+  // ⇒ 用户拍板：**同类之间加按字数算的打字延迟，真人问话不加**。
+  const { Bot } = await import('../src/bot.js');
+  const { config } = await import('../src/config.js');
+  const G14 = '999000014';
+  const b14 = new Bot();
+
+  // ① 按字数递增、且在上下限之间、带抖动
+  const lo = 800;
+  const hi = 3000;
+  const samples = [];
+  for (let i = 0; i < 40; i++) samples.push(b14.typingDelayFor('一'.repeat(14)));
+  const avg = samples.reduce((a, b) => a + b, 0) / samples.length;
+  check(
+    avg > lo && avg < hi,
+    `★ 14 个字 → 平均约 ${Math.round(avg)}ms（在 ${lo}~${hi} 之间）`,
+  );
+  const tiny = b14.typingDelayFor('嗯');
+  check(tiny >= lo * 0.6 && tiny <= lo * 1.45, `★ 一个字 → 走**下限**附近（${tiny}ms，不是 120ms）`);
+  const huge = b14.typingDelayFor('一'.repeat(200));
+  check(huge <= hi * 1.45, `★ 超长句 → 封顶在**上限**附近（${huge}ms，不会等十几秒）`);
+  const spread = new Set(samples.map((x) => Math.round(x / 100)));
+  check(spread.size > 1, '★ 每次不一样（带抖动 —— 固定值一眼就是机器）');
+
+  // ② 标记：同类说话才亮，真人插话就清
+  b14.clearPeerTalking(G14);
+  check(b14.isPeerTalking(G14) === false, '★ 没标记 → 不加延迟（真人问话照快）');
+  b14.notePeerTalking(G14);
+  check(b14.isPeerTalking(G14) === true, '★ 同类刚说过话 → 要"打字"了');
+  b14.clearPeerTalking(G14);
+  check(b14.isPeerTalking(G14) === false, '★ 真人插话会清掉它');
+  check(b14.typingDelayFor('') >= 0, '空串也不炸（退回下限那一档）');
+
+  // ③ 接线（光有函数不算数）
+  const src14 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  check(
+    /if \(!opts\.force && this\.isPeerTalking\(groupId\)\) \{[\s\S]{0,400}?await new Promise/.test(src14),
+    '★★ **真的在发送前 await 了**（`sendChatLike` 里 —— 她所有发言的唯一出口）',
+  );
+  check(
+    /this\.notePeerTalking\(gid0\)/.test(src14),
+    '★ 收到同类消息时**打标记**（不然延迟永远不生效）',
+  );
+  check(
+    /if \(!peers0\.has\(sender0\)\) \{[\s\S]{0,200}?this\.clearPeerTalking\(gid0\)/.test(src14),
+    '★★ 真人说话时**清标记** —— 他问事时不许先"打字"几秒再答',
+  );
+  check(
+    /config\.peerChat[\s\S]{0,200}?typeDelayPerChar/.test(src14),
+    '★ 三个参数可调（`peerChat.typeDelayPerChar` / `typeDelayMinMs` / `typeDelayMaxMs`）',
+  );
+  check(
+    Number(config.peerChat?.typeDelayPerChar ?? 120) === 120,
+    '★ 默认每字 120ms（配置里没写也生效）',
   );
 }
 
