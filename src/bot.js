@@ -11328,6 +11328,19 @@ export class Bot {
     //    那种情况不引用是真的看不出在回谁。
     const gid = String(event?.group_id ?? '');
     if (event?.message_type !== 'group') return false;
+    // ⚠️⚠️ 2026-10-07 加（用户报「**现在全是引用**，看看为什么会这样」）：
+    //    **同类发来的消息不引用**（`wantReply` / `alwaysQuote` 那些明确要求仍然优先，
+    //    它们在上面已经返回了）。
+    //    ⚠️ 根因：她俩现在**等对方说完 + 合并**才回，等待那几秒里对方还在发 ⇒
+    //      等她要回时，那条**已经被刷下好几条** ⇒ 下面 `buried >= 4` 命中 ⇒
+    //      **每条回复都挂引用框** ✗ 而她们本来就是一对一在聊，谁都知道在回谁，
+    //      引用框只会让对话看着更乱。
+    //    （⚠️ 顺带澄清：`quoteThisReply` 里 `lateMs > 0 → 强制引用` 那条是
+    //      **补看**专用的，跟这次无关 —— 别照着那个去改。）
+    if (this.isPeerBot(gid, String(event.user_id ?? ''))) {
+      log.debug('[同类] 对方是同类 → 不引用（她们一对一在聊，引用只会更乱）');
+      return false;
+    }
     const buried = recent.messagesAfterMe(gid, event?.message_id);
     // 被刷得很远 → 直接引用（这条不看"她上次说话隔了几条"）
     if (buried >= 4) return true;
