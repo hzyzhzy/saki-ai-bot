@@ -2077,6 +2077,18 @@ export class Bot {
    * 用户要求：「只回机器人真正想回、而且容易得出高质量回答的才要回」。
    */
   async shouldJoinChatAsync(event, opts = {}) {
+    // ⚠️⚠️ 2026-10-07 加（用户原话：「不是不要引用了，是通过类似**如果对面没有
+    //    回完话自己就先不生成发送消息**的那种闸」）：
+    //    **同类发来的消息，先等它把话说完**（见 `waitPeerQuiet`）——
+    //    两个机器人几秒一条、而且各自的一次回复**会拆成好几条**发，
+    //    谁先抢着回，引用框就挂到"已经过去的那句"上 ⇒ 对话看着乱 ✗
+    //    ⚠️ 放在**最前面**（连 `shouldJoinChat` 都还没跑）：不接的话本来就不该等，
+    //      但"要不要等"和"要不要接"是两件事 —— 这里只负责等它安静。
+    //    ⚠️ **只对同类**：真人问话一分不等。
+    if (this.isPeerBot(String(event?.group_id ?? ''), String(event?.user_id ?? ''))) {
+      this.notePeerTalking(event.group_id); // 先把"它刚说过话"记上（时间戳 = 这一条的）
+      await this.waitPeerQuiet(event.group_id);
+    }
     const join = this.shouldJoinChat(event, opts);
     if (!join) return null;
 
@@ -3963,6 +3975,53 @@ export class Bot {
     if (!gid) return false;
     const at = Number(this._peerTalkingAt?.get(gid) ?? 0);
     return at > 0 && Date.now() - at < 30000;
+  }
+
+  /** **最后一条同类消息**是什么时候（0 = 没有）—— `waitPeerQuiet()` 靠它算"它安静了没有" */
+  lastPeerSayAt(groupId) {
+    const gid = String(groupId ?? '').trim();
+    if (!gid) return 0;
+    return Number(this._peerTalkingAt?.get(gid) ?? 0) || 0;
+  }
+
+  /**
+   * 等这个群**安静下来**（同类不再连着发）—— 2026-10-07 用户要求。
+   *
+   * 用户原话：「不是不要引用了，是通过类似**如果对面没有回完话自己就先不生成
+   *   发送消息**的那种闸」。
+   *
+   * ⚠️ 要解决的现象：两个机器人几秒一条，而且**各自的一次回复会拆成好几条**发；
+   *    谁先抢着回，引用框就挂到"**已经过去的那句**"上 ⇒ 对话看着乱 ✗
+   * ⇒ 同类发的消息**先别处理**：等 `peerChat.peerQuietMs`（默认 4 秒）内没有
+   *    新的同类消息，才真正往下走；**这期间它又发了一条 ⇒ 重新等** ✓
+   *    （实现是"轮询最后一条同类消息的时间"，所以新消息天然会把等待续上。）
+   *
+   * ⚠️ **只对同类生效** —— 真人问话一分不等（`shouldJoinChatAsync` 里判的）。
+   * ⚠️ 有上限（`peerQuietMaxMs`，默认 12 秒）：万一对方一直不停，也不能把她卡死。
+   */
+  async waitPeerQuiet(groupId) {
+    try {
+      const c = config.peerChat ?? {};
+      const quiet = Math.max(0, Number(c.peerQuietMs ?? 4000) || 0);
+      if (!quiet) return;
+      const maxWait = Math.max(quiet, Number(c.peerQuietMaxMs ?? 12000) || 0);
+      const start = Date.now();
+      for (;;) {
+        const at = this.lastPeerSayAt(groupId);
+        const gap = at ? Date.now() - at : Infinity;
+        if (gap >= quiet) return;
+        if (Date.now() - start >= maxWait) {
+          log.info(`[同类] 等它说完等满了 ${Math.round(maxWait / 1000)} 秒 → 不再等，先回`);
+          return;
+        }
+        await new Promise((r) => {
+          // ⚠️⚠️ **不要 `unref()`**（2026-10-07 踩了）：这个等待是**主动要等的**，
+          //    一旦 unref，事件循环空了（比如测试进程里没有别的句柄）时
+          //    **这个 await 永远不 settle** ⇒ 测试卡在 "unsettled top-level await" ✗
+          setTimeout(r, 300);
+        });
+      }
+    } catch {}
   }
 
   /** 清掉"同类正在跟她说话"的标记（真人插话时用） */
@@ -12350,8 +12409,9 @@ export class Bot {
       if (wait > 0) {
         log.debug(`[同类] 拟人打字延迟 ${wait}ms 后再发`);
         await new Promise((r) => {
-          const t = setTimeout(r, wait);
-          t.unref?.();
+          // ⚠️⚠️ 同上：**不要 `unref()`** —— 这是"要等的"，unref 之后
+          //    事件循环一空就会永远不 settle ✗
+          setTimeout(r, wait);
         });
       }
     }

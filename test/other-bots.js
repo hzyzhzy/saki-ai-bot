@@ -625,5 +625,68 @@ console.log('\n【15】★★ 真人起的话头 ⇒ 尽早收场（2026-10-07 �
   );
 }
 
+console.log('\n【16】★★ 同类「话没说完就先别生成」（2026-10-07 用户要求）');
+{
+  // 用户原话：「**不是不要引用了，是通过类似如果对面没有回完话自己就先不生成
+  //   发送消息的那种闸**」。
+  // ⚠️ 要解决的现象：两个机器人几秒一条，而且**各自的一次回复会拆成好几条**发；
+  //    谁先抢着回，引用框就挂到"已经过去的那句"上 ⇒ 对话看着乱。
+  const { Bot } = await import('../src/bot.js');
+  const { config } = await import('../src/config.js');
+  const G16 = '999000016';
+  const b16 = new Bot();
+
+  // 阈值调小，免得测试真等 4 秒
+  config.peerChat = { ...(config.peerChat ?? {}), peerQuietMs: 200, peerQuietMaxMs: 2000 };
+
+  b16.clearPeerTalking(G16);
+  const t0 = Date.now();
+  await b16.waitPeerQuiet(G16);
+  check(Date.now() - t0 < 120, '★ 没有同类消息 → **不等**（真人那条路一分不等）');
+
+  b16.notePeerTalking(G16);
+  const t1 = Date.now();
+  await b16.waitPeerQuiet(G16);
+  const waited = Date.now() - t1;
+  check(waited >= 150, `★★ 同类刚说过话 → **等它安静**（实测等了 ${waited}ms）`);
+
+  // ⚠️ 核心：等到一半它又发一条 ⇒ **重新等**（"它没回完"就是这个意思）
+  b16.clearPeerTalking(G16);
+  b16.notePeerTalking(G16);
+  const t2 = Date.now();
+  const p = b16.waitPeerQuiet(G16);
+  setTimeout(() => b16.notePeerTalking(G16), 100);
+  await p;
+  const waited2 = Date.now() - t2;
+  check(waited2 >= 250, `★★ 等到一半它又发一条 ⇒ **重新等**（实测 ${waited2}ms > 200ms 的阈值）`);
+
+  // ⚠️ 上限：对方一直不停也不能把她卡死
+  config.peerChat.peerQuietMaxMs = 600;
+  b16.notePeerTalking(G16);
+  const t3 = Date.now();
+  const timer = setInterval(() => b16.notePeerTalking(G16), 50);
+  await b16.waitPeerQuiet(G16);
+  clearInterval(timer);
+  const waited3 = Date.now() - t3;
+  check(waited3 < 2500, `★★ 有上限：对方一直不停也只等约 ${waited3}ms，不会把她卡死`);
+
+  const src16 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  check(
+    /async shouldJoinChatAsync\(event, opts = \{\}\) \{[\s\S]{0,1200}?await this\.waitPeerQuiet/.test(src16),
+    '★★ 接在同类消息处理的**最前面**（连"要不要接"都还没判就先等）',
+  );
+  check(
+    // ⚠️ `??` 在正则里是"懒惰量词"，要匹配字面的两个问号必须转义成 `\?\?`
+    /isPeerBot\(String\(event\?\.group_id \?\? ''\), String\(event\?\.user_id \?\? ''\)\)\) \{[\s\S]{0,160}?notePeerTalking/.test(
+      src16,
+    ),
+    '★ 等之前先把"它刚说过话"记上（时间戳 = 这一条）',
+  );
+  check(
+    /ws\.on\('message', \(data\) => this\.onRaw\(data\)\)/.test(src16),
+    '⚠️ 顺带钉住：`onRaw` **不是串行 await** —— 否则这个等待会把所有群的消息一起堵住',
+  );
+}
+
 console.log(`\n结果: ${failures === 0 ? '全部通过 ✅' : `${failures} 项失败 ❌`}\n`);
 process.exit(failures === 0 ? 0 : 1);
