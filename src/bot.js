@@ -3664,13 +3664,50 @@ export class Bot {
    */
   botChainHard(groupId) {
     try {
-      const hardMin = Math.max(4, Number(config.chat?.botChainHardMin) || 24);
-      const hardSpan = Math.max(0, Number(config.chat?.botChainHardSpanMs) || 600000);
+      const gid = String(groupId ?? '');
+      // ⚠️⚠️ 2026-10-07 加（用户：「**她们就是在一直接话，现在还在接，而且源头就是
+      //    真人群友**」）：**真人起头时，硬闸也要降下来** ——
+      //    原来只给 `botOnlyChain`（软提醒）降了阈值，**硬闸还是 24 条 / 10 分钟**，
+      //    而软提醒**全靠模型自觉** ⇒ 它不听话就一直聊 ✗（实测就是这样）
+      //    ⇒ 真人起头时硬闸用 `botChainHardFromHuman`（默认 **6 条 / 2 分钟**）：
+      //      到了就**不再等她自觉**，代码直接让她说一句收场 + 冷却（`sayBotFarewell`）。
+      // 剧情例外照旧：剧情里本来就该一句接一句地演（见上面 `botOnlyChain`）。
+      const inQuest0 = (() => {
+        try {
+          return !!quest.current(gid);
+        } catch {
+          return false;
+        }
+      })();
+      const fromHuman = !inQuest0 && this.isHumanOrigin(gid);
+      const hardMin = fromHuman
+        ? Math.max(3, Number(config.chat?.botChainHardFromHuman) || 6)
+        : Math.max(4, Number(config.chat?.botChainHardMin) || 24);
+      const hardSpan = fromHuman
+        ? Math.max(0, Number(config.chat?.botChainHardSpanFromHumanMs) || 120000)
+        : Math.max(0, Number(config.chat?.botChainHardSpanMs) || 600000);
       const win = Math.max(hardMin, Number(config.chat?.botChainWindow) || 14);
-      const d = this.botChainStats(groupId, win);
-      if (d.humans > 0) return false;
+      const d = this.botChainStats(gid, win);
       if (!d.mine || !d.theirs) return false;
-      return d.mine + d.theirs >= hardMin || (hardSpan > 0 && d.span >= hardSpan);
+      if (fromHuman) {
+        // ⚠️ 同 `botOnlyChain`：真人**还在窗口里说话**不算"只剩两个机器人"
+        const humanAt = this.lastHumanAt(gid);
+        const sinceHuman = humanAt ? Date.now() - humanAt : Infinity;
+        if (sinceHuman <= Math.max(0, Number(config.chat?.botChainHumanQuietMs) || 30000)) {
+          return false;
+        }
+      } else if (d.humans > 0) {
+        return false;
+      }
+      const hit = d.mine + d.theirs >= hardMin || (hardSpan > 0 && d.span >= hardSpan);
+      if (hit && fromHuman) {
+        log.info(
+          `[同类] ⚠️ **真人起头**的两个机器人已刷到 ${d.mine}+${d.theirs} 条 / ` +
+            `${Math.round((d.span ?? 0) / 1000)} 秒（他 ${Math.round(sinceHuman / 1000)} 秒没吭声）` +
+            ' → 代码直接收尾（别打断真人的聊天）',
+        );
+      }
+      return hit;
     } catch (e) {
       return false;
     }
@@ -10740,6 +10777,11 @@ export class Bot {
       if (event?.message_type === 'group' && this.botOnlyChain(String(event.group_id ?? ''))) {
         // ⚠️ 2026-10-07：分两种口吻 —— **真人起的话头**（要早收）和**纯机器人互刷**。
         const fromHuman0 = this.isHumanOrigin(String(event.group_id ?? ''));
+        // ⚠️ 2026-10-07 补**日志**（用户报「**她们就是在一直接话，现在还在接**」时
+        //    我查不到这条闸有没有命中 —— 它原来只在提示词里体现，一行日志都没有）。
+        log.info(
+          `[同类] 「只剩两个机器人」软提醒命中 → 已注入提示词（${fromHuman0 ? '真人起头' : '纯机器人互刷'}）`,
+        );
         parts.push(
           [
             '',
