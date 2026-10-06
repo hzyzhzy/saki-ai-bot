@@ -1173,19 +1173,17 @@ console.log('\n【22】★★ 开场**轮流**（2026-10-07 用户问「为什�
     `${Date.now() - t22}ms`,
   );
 
-  // 上次是我开的（`starts` 里最后一条是刚才）⇒ 这次我排到最后，先让对面
-  quest22.__set({
-    byGroup: {
-      [G22]: {
-        current: null,
-        recent: [],
-        // ⚠️ 证据在 `starts`（`begin` 时 push 的），**不是** `recent` ——
-        //    用户常「先 /清除剧情 再开新的」，`recent` 会被清掉，`starts` 不会。
-        starts: [Date.now() - 60000],
-      },
-    },
-  });
-  check(quest22.lastOwnStartAt(G22) > 0, '★ 读得到"我上一次开的"时间（`starts` 最后一条）');
+  // 上次是我开的 ⇒ 这次我排到最后，先让对面
+  // ⚠️⚠️ 判据是**共享文件里的 `by`**（两个进程读同一份 ⇒ 结论必然一致）。
+  //    以前用「我 starts 的时间 vs 我看到同类剧情首条的时间」——
+  //    两边**都**认为自己才是上次的开场者 ⇒ 各自第 3 位 ⇒ 都在等、群里没反应 ✗
+  //    （用户 05:12 实测：「**这次完全没反应了**」）
+  quest22.__set({ byGroup: {} });
+  check(
+    quest22.noteSharedPremise(G22, { premise: '上一条的起因', by: meNum22 }) === true,
+    '★ 上一条线的开场者记在共享文件里（`by`）',
+  );
+  check(quest22.sharedOpener(G22) === meNum22, '★★ 读得回来 —— **两个进程读到的是同一份** ⇒ 不会各算各的');
   t22 = Date.now();
   const y2 = await b22.questTurnYield(G22, { since: Date.now(), where: '自检', rotate: true });
   const waited22 = Date.now() - t22;
@@ -1193,21 +1191,8 @@ console.log('\n【22】★★ 开场**轮流**（2026-10-07 用户问「为什�
   check(waited22 >= 500, `★★ 但**先让了对面一轮**才上（等了 ${waited22}ms，不是立刻开）`);
 
   // 上次是**对面**开的 ⇒ 这次我优先
-  quest22.__set({
-    byGroup: {
-      [G22]: {
-        current: null,
-        recent: [],
-        starts: [Date.now() - 600000],
-      },
-    },
-  });
+  quest22.noteSharedPremise(G22, { premise: '上一条的起因', by: BIG22 });
   quest22.__peerPlots().delete(G22);
-  quest22.notePeerPlot(G22, {
-    uid: BIG22,
-    text: '她把手搭在门把上，没回头，说这扇门认的不是敲没敲过。',
-    at: Date.now() - 60000,
-  });
   t22 = Date.now();
   const y4 = await b22.questTurnYield(G22, { since: Date.now(), where: '自检', rotate: true });
   check(
@@ -1215,9 +1200,14 @@ console.log('\n【22】★★ 开场**轮流**（2026-10-07 用户问「为什�
     '★★ 上次是**对面**开的 ⇒ 这次**轮到我直接开**（真的在轮流）',
     `${Date.now() - t22}ms`,
   );
+  quest22.clearSharedPremise(G22);
 
   const src22 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
   check(/where: '开场', rotate: true/.test(src22), '★★ 开场那一路传了 `rotate: true`');
+  check(
+    /const lastOpener = quest\.sharedOpener\(gid\);/.test(src22),
+    '★★★ 轮换判据用**共享文件里的 `by`**（不是各自比时间 —— 那版让两边都以为"上次是我"）',
+  );
   check(
     !/where: '推进', rotate/.test(src22),
     '★★ 推进**不轮换**（同一个人把一条线演连贯，只按号序让位）',
@@ -1383,6 +1373,158 @@ console.log('\n【23】★★ 剧情起因进**聊天提示词**、并且**两�
   check(
     /别主动提那个房间 \/ 门 \/ 柜子/.test(bsrc23),
     '★★ 而且点名了"柜子出房间"这类接法（用户看到的就是这个）',
+  );
+}
+
+console.log('\n【24】★★ 清剧情要**连残留一起清** + 硬条件剧情**不许提前收尾**（2026-10-07 用户报）');
+{
+  // ## 用户报的两件事
+  //   ① 「清除剧情之后她们还在说推柜子出房间」「甚至还记住了之前柜子烂了，现在变成板子了」
+  //      ⇒ 查过了：`state/recent.json` 里带"柜子"的 **31 条**、
+  //        `state/storyline.json` 里还有几条**没有 questId** 的条目 ⇒ `/清除剧情` 一条没碰 ✗
+  //   ② 「现在我只想先把房子的规则真正落实」
+  //      ⇒ 真实模型跑出来：**第 2 段就 done 了**，门板上那件事一个字没演就收场 ✗
+  const recent24 = await import('../src/recent.js');
+  const story24 = await import('../src/storyline.js');
+  const quest24 = await import('../src/quest.js');
+  const src24 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  const qsrc24 = readFileSync(join(ROOT, 'src', 'quest.js'), 'utf8');
+
+  // ① 上下文：只抹窗口内、指定号说的
+  const G24 = '999000024';
+  const store = recent24.__storeForTest();
+  store.set(G24, [
+    { time: 1000, userId: '10000024', text: '窗口前的' },
+    { time: 2000, userId: '10000024', text: '要抹掉的' },
+    { time: 2500, userId: '30003', text: '真人说的（留着）' },
+    { time: 9000, userId: '10000024', text: '窗口后的' },
+  ]);
+  const dropped24 = recent24.dropWindow(G24, { from: 1500, to: 3000, uids: ['10000024'] });
+  check(dropped24 === 1, `★★ 只抹窗口内、而且只抹那个号说的（抹了 ${dropped24} 条）`);
+  const left24 = store.get(G24) ?? [];
+  check(
+    left24.length === 3 && left24.some((m) => m.text === '真人说的（留着）'),
+    '★★ 真人发言**一条都不动**（不能把群友的聊天也抹了）',
+  );
+  store.delete(G24);
+
+  // ② 故事线：按时间窗口删（那条"Anon说：…柜子…"就是没 questId 的那种）
+  story24.note({ tier: 1, imp: 3, text: '剧情期间的（要删）', at: 5000, groupId: G24 });
+  story24.note({ tier: 1, imp: 3, text: '别的时段（留着）', at: 999999999999 });
+  const storyDropped24 = story24.removeWindow(G24, { from: 4000, to: 6000 });
+  check(storyDropped24 === 1, `★★ 故事线按**时间窗口**删（删了 ${storyDropped24} 条）—— 没有 questId 的那几条也跑不掉`);
+  check(
+    (story24.recent(20, G24) ?? []).every((e) => !String(e.text).includes('剧情期间的')),
+    '★ 而且真的删掉了',
+  );
+  story24.__clear(G24);
+
+  // ③ 清剧情时**顺手**清这两处
+  check(
+    /recent\.dropWindow\(gid, \{ from, to, uids \}\)/.test(src24),
+    '★★★ `/清除剧情` 顺手抹掉上下文里那段台词（不用用户额外操作）',
+  );
+  check(
+    /storyline\.removeWindow\(gid, \{ from, to \}\)/.test(src24),
+    '★★★ 故事线里没有 questId 的那几条也一起清',
+  );
+
+  // ④ 硬条件剧情的最低段数
+  check(
+    /hardCond && done && !forceEnd && !hardStop/.test(qsrc24),
+    '★★★ 起因里有"必须做到 X"⇒ **X 还没演到就不许收尾**（实测第 2 段就 done，那个坎根本没演）',
+  );
+  check(/const floor = Math\.max\(4, Math\.min\(5, /.test(qsrc24), '★★ 下限抬到 4 段（next 单调递增 ⇒ 不会死循环）');
+
+  // ⑤ ⚠️⚠️⚠️ 用户最后那句：「**我也不给你绕弯子了，我就直说了，要有实践**」——
+  //    实测（真实模型）证明：**模型完全能写**那件事，之前不写是因为提示词
+  //    **从来没直接命令过它**（只写了"不许绕开"，它照样可以每段只挪一点点）。
+  check(
+    /function hardCondHint\(next, premise, planned\)/.test(qsrc24),
+    '★★★ 有硬条件的剧情：**分两档**给指令（前面走"追问 + 细节"，到下限那段才真的发生）',
+  );
+  check(
+    /这一段就是"那件事真的发生"的那一段/.test(qsrc24),
+    '★★★ 最后那一段明说"就是那件事发生的那一段"',
+  );
+  check(
+    /hardCondHint\(next, quest\.premise, quest\.plannedStages\)/.test(qsrc24),
+    '★★ 真的接进了 `advance` 的提示词（不是写了没人调）',
+  );
+  check(
+    /必须落在「祥子追问、爱音守不住」这条线上/.test(qsrc24),
+    '★★★ 前面几段**要的是过程**（用户纠正过：不要一步到位，要有追问爱音的过程）',
+  );
+  check(
+    /不许用"她犹豫了一下""气氛暧昧起来"这种\*\*模糊话\*\*带过/.test(qsrc24),
+    '★★ 而且点名禁止模糊话（用户原话：「太模糊了」）',
+  );
+  check(
+    /唯一不许碰的只有「违禁词」/.test(qsrc24),
+    '★ 授权写清楚了：细节、身体反应、气氛都可以写，只有违禁词不许碰',
+  );
+  // ⑥ ⚠️⚠️⚠️ 实测（真实模型、完整路径）第 3 段写的是：
+  //    `我走过去把她按在墙上，跟她说，我知道是你。她没躲。然后门就开了。`
+  //    —— 提示词明令禁止这个句式，它照样写 ⇒ 只有代码兜得住。
+  check(
+    /function needsRewriteDeed\(j, premise, next\)/.test(qsrc24),
+    '★★★ 有代码兜底：**结果句出现、正文却什么都没发生** ⇒ 重写一次',
+  );
+  check(
+    /needsRewriteDeed\(j0, quest\.premise, next\)/.test(qsrc24),
+    '★★ 真的接进了 `advance`（不是写了没人调）',
+  );
+  check(/REWRITE_DEED_HINT/.test(qsrc24), '★ 重写时明确告诉它"门不是自己开的"');
+  if (typeof quest24.needsRewriteDeed === 'function') {
+    const HINT26 = '门板上写着必须做到亲密才能出去';
+    check(
+      quest24.needsRewriteDeed({ text: '她没躲。然后门就开了。' }, HINT26, 3) === true,
+      '★★ 命中：门开了、可正文里什么都没发生',
+    );
+    check(
+      quest24.needsRewriteDeed({ text: '她吻了她，两个人贴在一起，门开了。' }, HINT26, 3) === false,
+      '★ 有实质内容就放行（不误伤）',
+    );
+    check(
+      quest24.needsRewriteDeed({ text: '她没躲。然后门就开了。' }, HINT26, 2) === false,
+      '★ 铺垫段（第 2 段）不管 —— 第 3 段起才要求"做掉"',
+    );
+    check(
+      quest24.needsRewriteDeed({ text: '她没躲。然后门就开了。' }, '今天天气不错', 3) === false,
+      '★ 起因里没有硬条件时不管（别的剧情不受影响）',
+    );
+  }
+}
+
+console.log('\n【25】★★ 剧情里**不许用"睡觉 / 晚安"收场**（2026-10-07 用户截图）');
+{
+  // 截图：那条"必须做到 X 才能出去"的线还在演，她俩聊着聊着互相道晚安 ——
+  //   「行，眯会儿吧，我这边先不聊了」「那我先眯了，晚安」⇒ 剧情烂尾 ✗
+  //   用户原话：「**睡着在其他地方都可以，在剧情里睡着肯定不行**」
+  const { Bot } = await import('../src/bot.js');
+  const b25 = new Bot();
+  check(
+    b25.isSleepEndInQuest('行，眯会儿吧，我这边先不聊了') === true,
+    '★★ 截图上那句要拦',
+  );
+  check(b25.isSleepEndInQuest('那我先眯了，晚安') === true, '★★ 道晚安也要拦');
+  check(b25.isSleepEndInQuest('我先睡了') === true, '★ "睡了"也算');
+  check(b25.isSleepEndInQuest('早') === false, '★ 短的问候不误拦');
+  check(
+    b25.isSleepEndInQuest(
+      '她闭上眼睛没说话，手指还扣在门缝边上，一点一点往里探过去，像是不甘心似的又停下来',
+    ) === false,
+    '★★ **长的剧情叙述不误拦**（超过 30 字就不看关键词了）',
+  );
+  const src25 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  const qsrc25 = readFileSync(join(ROOT, 'src', 'quest.js'), 'utf8');
+  check(
+    /this\.questLive\(groupId\) && this\.isSleepEndInQuest\(text\)/.test(src25),
+    '★★★ 兜底接在 `sendChatLike`（她所有发言的**唯一出口**，拦一处就够）',
+  );
+  check(
+    /等于把这条剧情丢掉/.test(qsrc25),
+    '★★ 聊天提示词里也明说了（剧情里不许睡觉收场）',
   );
 }
 

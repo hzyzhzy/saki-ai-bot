@@ -1636,7 +1636,7 @@ console.log('\n【16】★★ 发了 /清除剧情 ⇒ 强制静默 1 分钟（2
   // 接线（光有函数不算数）
   const bsrc16 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
   check(
-    /const r = quest\.purge\(gid\);[\s\S]{0,900}?muteGroup\(gid, 60000/.test(bsrc16),
+    /const r = quest\.purge\(gid\);[\s\S]{0,2200}?muteGroup\(gid, 60000/.test(bsrc16),
     '★★ `/清除剧情` 那条路真的调了「静默 60 秒」',
   );
   check(

@@ -4214,29 +4214,30 @@ export class Bot {
       //    **不一定** —— 原来只有"对方连着快发（间隔 < 4 秒）"才合得起来；
       //    而他截图里那些消息**间隔 5~15 秒**（剧情里她要生成一段才发一条）
       //    ⇒ saki 每两条之间都会"等到安静"⇒ **还是各回各的** ✗
-      //    ⇒ **剧情里把窗口和上限都放大**：默认 **10 秒 / 30 秒**
-      //      （剧情本来就该"等对方整段演完再一次性接"）。
+      //    ⇒ **剧情里把窗口和上限都放大**：原来是 **10 秒 / 30 秒**
+      //      ⚠️⚠️ 2026-10-07 收短（用户：「**为什么感觉回复速度变慢了，间隔时间可以调短一点**」）：
+      //        **3.5 秒 / 10 秒** —— 她俩发的分条间隔不到 1 秒，3.5 秒足够判断"说完了"；
+      //        原来那些 10/30 秒是照"对方每 5~15 秒发一条"估的，**估得太保守** ✗
       const inQuest0 = this.questLive(String(groupId ?? ''));
       const quiet = Math.max(
         0,
-        Number((inQuest0 ? c.peerQuietQuestMs : c.peerQuietMs) ?? (inQuest0 ? 10000 : 4000)) || 0,
+        Number((inQuest0 ? c.peerQuietQuestMs : c.peerQuietMs) ?? (inQuest0 ? 3500 : 2500)) || 0,
       );
       if (!quiet) return false;
       // ⚠️⚠️ 2026-10-07 再改（用户报：「**怎么开剧情直接哑火了**」）：
       //    **光"等对方安静"这条判据在"对方一直发"的场景下会永远等不到** ——
-      //    剧情里她每 5~15 秒就发一条（上一版还被我调成了 10 秒窗口 / 30 秒上限）
-      //    ⇒ 每条都要干等 30 秒 ⇒ **看起来就是哑火** ✗（我上一轮改坏的）
       //    ⇒ 补第二条出口：**"我自己上次回同类已经够久了"也放行** ——
       //      也就是"**回完一条 → 冷却 N 秒 → 期间攒的合并回一次**"，
-      //      最多等 `peerReplyCooldownMs`（默认 12 秒），**不可能哑火** ✓
+      //      最多等 `peerReplyCooldownMs`，**不可能哑火** ✓
+      //    ⚠️ 同样收短：12 秒 → **6 秒**（用户要求"间隔短一点"）
       const cooldown = Math.max(
         0,
-        Number(c.peerReplyCooldownMs ?? 12000) || 0,
+        Number(c.peerReplyCooldownMs ?? 6000) || 0,
       );
       const maxWait = Math.max(
         quiet,
         Number(
-          (inQuest0 ? c.peerQuietQuestMaxMs : c.peerQuietMaxMs) ?? (inQuest0 ? 30000 : 12000),
+          (inQuest0 ? c.peerQuietQuestMaxMs : c.peerQuietMaxMs) ?? (inQuest0 ? 10000 : 6000),
         ) || 0,
       );
       const start = Date.now();
@@ -4713,7 +4714,7 @@ export class Bot {
         //    **同类之间轮流说** —— 判据就一句：**谁最后说的**。
         //      · 对方最后说的（比我晚）⇒ **该我接** ✓
         //      · 我最后说的（比它晚）⇒ **等它接**，我不抢 ✗
-        //    ⚠️ 加**超时**（`peerChat.peerTurnWaitMs`，默认 35 秒）：它要是不接，
+        //    ⚠️ 加**超时**（`peerChat.peerTurnWaitMs`，默认 20 秒）：它要是不接，
         //      我不能永远哑着 ⇒ 超时后照常说（不会变成哑火）。
         //    ⚠️ 例外照旧：**@ 她 / 叫她的名字**不受这条限制（那是明确找她）。
         const myLastAt = Math.max(
@@ -4732,10 +4733,10 @@ export class Bot {
         //    "轮流"只判"谁最后说"**不够** —— 她说完之后，对方**还在生成**
         //    （等安静 10 秒 + 打字延迟），这期间她又收到对方**更早发的**那一条 ⇒
         //    以为"该我接" ⇒ **两人就混上了** ✗
-        //    ⇒ 加一道下限：**我这次说完之后至少隔 `peerTurnMinGapMs`（默认 10 秒）**
+        //    ⇒ 加一道下限：**我这次说完之后至少隔 `peerTurnMinGapMs`（默认 3.5 秒）**
         //      才允许再接同类的话（给对方留出生成 + 发出的时间）。
         //    ⚠️ 不影响"@ 她 / 叫她的名字"（那是明确找她）。
-        const myGapMs = Math.max(0, Number(config.peerChat?.peerTurnMinGapMs ?? 10000) || 0);
+        const myGapMs = Math.max(0, Number(config.peerChat?.peerTurnMinGapMs ?? 3500) || 0);
         if (
           !peerAtMe &&
           !peerCallMe &&
@@ -4748,7 +4749,7 @@ export class Bot {
           );
           return null;
         }
-        const turnWaitMs = Math.max(0, Number(config.peerChat?.peerTurnWaitMs ?? 35000) || 0);
+        const turnWaitMs = Math.max(0, Number(config.peerChat?.peerTurnWaitMs ?? 20000) || 0);
         if (!peerAtMe && !peerCallMe && myLastAt > peerLastAt && Date.now() - myLastAt < turnWaitMs) {
           log.info(
             `[同类] **该它说**（我 ${Math.round((Date.now() - myLastAt) / 1000)} 秒前说的、它还没接）` +
@@ -12860,6 +12861,21 @@ export class Bot {
       //      空数组对它们无害。
       return [];
     }
+    // ⚠️⚠️ 2026-10-07 加（用户：「**睡着在其他地方都可以，在剧情里睡着肯定不行**」）：
+    //    剧情进行中 ⇒ **不许用"眯会儿 / 晚安 / 睡了"把这一晚带过去**。
+    //    实测（用户截图）：那条"必须做到 X 才能出去"的线还在演，她俩聊着聊着互相道晚安 ——
+    //      「行，眯会儿吧，我这边先不聊了」「那我先眯了，晚安」⇒ 剧情就这么烂尾 ✗
+    //      门还没开，两个人先睡了 ✗
+    //    ⚠️ 提示词那边（`chatBrief`）已经明说了，这里是**兜底**：命中就不发。
+    //    ⚠️ 只在**剧情进行中**拦；平时聊天、日常事件里说晚安照旧 ✓
+    //    ⚠️ 只认**短的纯收尾话**（≤30 字）：长的多半是在演剧情，不拦。
+    if (!opts.force && this.questLive(groupId) && this.isSleepEndInQuest(text)) {
+      log.info(
+        `[剧情] 剧情还在演，这条是"睡觉收尾"（${String(text ?? '').slice(0, 18)}）→ **不发**` +
+          '（用户要求：剧情里不许睡着收场）',
+      );
+      return [];
+    }
     // ⚠️⚠️ 2026-10-07 加（用户要求）：**同类之间要有"打字"的停顿** ——
     //    真人打字要几秒，两个机器人"收到即回"就会快得像刷屏
     //    （用户原话：「为什么她们两个人互发消息的时候发的速度很快」）。
@@ -13251,14 +13267,16 @@ export class Bot {
       //    ⚠️ 都没记录（这个群还没演过）⇒ 按号序，行为不变 ✓
       //    ⚠️ **只对开场生效**（`rotate`）：推进那一路要"同一个人把这条线演连贯"，
       //      不能也轮着来 —— 所以推进仍然只按号序让位。
-      const myAt = quest.lastOwnStartAt(gid);
-      const peerPlot0 = quest.__peerPlots().get(String(gid));
-      const peerAt = Number(peerPlot0?.firstAt ?? 0) || 0;
+      // ⚠️⚠️ 2026-10-07 修（用户报「**这次完全没反应了**」）：轮换判据改用
+      //    **共享文件里的 `by`**（= 上一条线是谁开的，两个进程读到同一份 ⇒ 结论一致）。
+      //    原来用「我 starts 的时间 vs 我看到同类剧情首条的时间」比大小 ——
+      //    两边**都**认为自己才是上次的开场者 ⇒ 各自把对方排第一、自己排最后
+      //    ⇒ **两边都第 3 位** ⇒ 都在等 ⇒ 群里一点反应都没有 ✗✗
+      //    （`peerPlots.firstAt` 是"很久以前那条线的首条"，不随新剧情刷新。）
       let ord = order;
       let rotatedFrom = '';
       if (rotate) {
-        const lastOpener =
-          myAt > peerAt ? me : peerAt > myAt ? String(peerPlot0?.uid ?? '') : '';
+        const lastOpener = quest.sharedOpener(gid);
         if (lastOpener && order.includes(lastOpener)) {
           ord = [...order.filter((x) => x !== lastOpener), lastOpener];
           rotatedFrom = lastOpener;
@@ -13315,6 +13333,43 @@ export class Bot {
    *    不然手动推到大结局会"剧情完了但没人加分、也没有播报" ✗
    * ⚠️ 防刷：同一个群默认 30 秒只能手动推一段（`config.quest.manualAdvanceCooldownMs`）。
    */
+  /**
+   * ⚠️ 2026-10-07 加（用户截图：**两个号都回了一句「刚开过一条，等 23 秒（」**）：
+   *    **指令回执只由名单里第一个号发。**
+   *    两个进程都会收到同一条 `/剧情`，各回一句就是群里两条一模一样的消息 ✗
+   *    ⚠️ 判据用 `quest.orderFor()` 的第一位 —— 两个进程算出来是**同一个名单**，
+   *      所以只有一个人会回 ✓（名单只有一个人时照常回）
+   * @returns {boolean} 这次到底发了没有
+   */
+  replyOnceToGroup(groupId, text) {
+    const gid = String(groupId ?? '');
+    if (!gid) return false;
+    try {
+      const order = quest.orderFor(gid);
+      const me = String(config.botQQ ?? '');
+      if (order.length > 1 && order[0] !== me) return false; // 不是名单第一位 ⇒ 让别人回
+    } catch {}
+    this.sendToGroup(gid, text).catch(() => {});
+    return true;
+  }
+
+  /**
+   * ⚠️ 2026-10-07 加（用户：「**睡着在其他地方都可以，在剧情里睡着肯定不行**」）：
+   * 这条是不是"**用睡觉把这一晚带过去**"的收尾话（只在剧情里拦）。
+   *
+   * 实测截图（那条"必须做到 X 才能出去"的线还在演）：
+   *   「行，眯会儿吧，我这边先不聊了」/「那我先眯了，晚安」⇒ 剧情烂尾 ✗
+   *
+   * ⚠️ 判据要窄：只认**短的纯收尾话**（≤30 字且命中睡觉/晚安那类词）——
+   *    长句多半是在正经演剧情（比如"她闭上眼睛没说话"），不能误拦 ✓
+   */
+  isSleepEndInQuest(text) {
+    const t = String(text ?? '').trim();
+    if (!t) return false;
+    if (t.length > 30) return false;
+    return /睡|晚安|眯|上床|关灯|熄灯|明天(再|见)|先不聊|不聊了|歇了|躺下/.test(t);
+  }
+
   questControl(event, gid, hint, forceEnd = null) {
     try {
       this.lastQuestAdvanceAt ??= {};
@@ -13322,7 +13377,7 @@ export class Bot {
       const left = gap - (Date.now() - (this.lastQuestAdvanceAt[gid] ?? 0));
       if (left > 0) {
         log.info(`[剧情] 手动推进冷却中（群 ${gid}，还有 ${Math.round(left / 1000)}s）`);
-        this.sendToGroup(gid, `刚推过一段，等 ${Math.ceil(left / 1000)} 秒（`).catch(() => {});
+        this.replyOnceToGroup(gid, `刚推过一段，等 ${Math.ceil(left / 1000)} 秒（`);
         return true;
       }
       this.lastQuestAdvanceAt[gid] = Date.now();
@@ -13490,7 +13545,7 @@ export class Bot {
       const role = this.speakerRole(event);
       if (role !== 'owner' && role !== 'staff' && role !== 'admin') {
         log.info(`[记忆] ${event.user_id} 想撤回记忆但没权限（role=${role}）→ 已回提示`);
-        this.sendToGroup(gid, '这个只有服主和管理员能用（').catch(() => {});
+        this.replyOnceToGroup(gid, '这个只有服主和管理员能用（');
         return true;
       }
 
@@ -13564,8 +13619,26 @@ export class Bot {
       const role = this.speakerRole(event);
       if (role !== 'owner' && role !== 'staff') {
         log.info(`[剧情] ${event.user_id} 想开剧情但没权限（role=${role}）→ 已回提示`);
-        this.sendToGroup(gid, '这个只有服主和管理员能用（').catch(() => {});
+        this.replyOnceToGroup(gid, '这个只有服主和管理员能用（');
         return true;
+      }
+      // ⚠️⚠️ 2026-10-07 加（用户实测踩到的，日志实证）：
+      //    **没有在跑的剧情时发 `/剧情 继续`** —— 它原来被当成"新剧情的起因"
+      //    （`[手动开始] …：继续`）⇒ 模型没东西可依，就把旧场景捡回来自由发挥 ⇒
+      //    用户看到的是「还在找出口」「剧情里还能睡着」✗✗
+      //    ⇒ 这类**控制词**（继续 / 接着 / 往下 / 推进…）在没有剧情时**明确拒绝**，
+      //      绝不当成背景。⚠️ 判断必须在下面那个 `!hint` 分支**之前**（那时 hint 还有值）。
+      {
+        const CONTROL = /^(继续|接着|往下|推进|继续推进|接着演|往下走|来|走|continue)$/i;
+        const cur0 = quest.current(gid);
+        const running0 = !!(cur0 && !cur0.endedAt);
+        if (hint && !running0 && CONTROL.test(hint)) {
+          this.replyOnceToGroup(gid, '现在没有在跑的剧情（要开新的就发 /剧情 加一句背景）');
+          log.info(
+            `[剧情] 群 ${gid} 没有在跑的剧情，却发了控制词「${hint}」→ 拒绝（不当成背景）`,
+          );
+          return true;
+        }
       }
       if (!hint && !endingWord && !(quest.current(gid) && !quest.current(gid).endedAt)) {
         this.sendToGroup(
@@ -13588,9 +13661,7 @@ export class Bot {
         //    别把它当成"开新剧情的背景"（那样会开出一条叫"好结局"的线）✗
         if (endingWord) {
           log.info(`[剧情] 群 ${gid} 没有在跑的剧情，却发了收结局命令（${endingWord}）`);
-          this.sendToGroup(gid, '现在没有在跑的剧情（要开新的就发 /剧情 加一句背景）').catch(
-            () => {},
-          );
+          this.replyOnceToGroup(gid, '现在没有在跑的剧情（要开新的就发 /剧情 加一句背景）');
           return true;
         }
       }
@@ -13598,7 +13669,7 @@ export class Bot {
       const can = quest.canStart(Date.now(), { manual: true, groupId: gid });
       if (!can.ok) {
         log.info(`[剧情] 手动开被拒（群 ${gid}）：${can.reason}`);
-        this.sendToGroup(gid, `这会儿开不了：${can.reason}`).catch(() => {});
+        this.replyOnceToGroup(gid, `这会儿开不了：${can.reason}`);
         return true;
       }
       // ── 防刷：同一个群 60 秒内只能手动开一条（不然有人会连着刷）──
@@ -13607,7 +13678,7 @@ export class Bot {
       const left = gap - (Date.now() - (this.lastManualQuestAt[gid] ?? 0));
       if (left > 0) {
         log.info(`[剧情] 手动开冷却中（群 ${gid}，还有 ${Math.round(left / 1000)}s）`);
-        this.sendToGroup(gid, `刚开过一条，等 ${Math.ceil(left / 1000)} 秒（`).catch(() => {});
+        this.replyOnceToGroup(gid, `刚开过一条，等 ${Math.ceil(left / 1000)} 秒（`);
         return true;
       }
       this.lastManualQuestAt[gid] = Date.now();
@@ -13700,7 +13771,7 @@ export class Bot {
       const role = this.speakerRole(event);
       if (role !== 'owner' && role !== 'staff') {
         log.info(`[剧情] ${event.user_id} 想清除剧情但没权限（role=${role}）→ 已回提示`);
-        this.sendToGroup(gid, '这个只有服主和管理员能用（').catch(() => {});
+        this.replyOnceToGroup(gid, '这个只有服主和管理员能用（');
         return true;
       }
 
@@ -13740,6 +13811,39 @@ export class Bot {
       }
 
       const r = quest.purge(gid);
+      // ⚠️⚠️ 2026-10-07 加（用户报：「**清除剧情之后她们还在说推柜子出房间**」、
+      //    「**甚至还记住了之前柜子烂了，现在变成板子了**」）：
+      //    只清剧情状态**远远不够** —— 查过了，那一下 `state/recent.json` 里
+      //    带"柜子"的有 **31 条**、`state/storyline.json` 里还有几条**没有 questId**
+      //    的条目（"Anon说：…我踩着柜子去够墙…"）⇒ `/清除剧情` 一条都没碰它们 ✗
+      //    结果就是：剧情状态没了，可她们**上下文里还看得见、故事线里还记着**，
+      //    于是接着演，还会"越想越具体"（柜子烂了 → 变成板子了）✗✗
+      //    ⇒ 顺手把「这条剧情期间**这两个号**说的话」从上下文和故事线里抹掉。
+      //    ⚠️ 只抹**这两个号**说的（真人发言保留）✓ 窗口 = 这条剧情的开始到现在。
+      if (r.ok && r.quest) {
+        const from = Number(r.quest.startedAt ?? 0) || 0;
+        const to = Date.now();
+        const uids = [
+          String(this.selfId ?? config.botQQ ?? ''),
+          ...peersFor(gid).map(String),
+        ].filter(Boolean);
+        let dropped = 0;
+        let storyDropped = 0;
+        try {
+          dropped = recent.dropWindow(gid, { from, to, uids });
+        } catch (e) {
+          log.warn(`[剧情] 清上下文残留失败：${e.message}`);
+        }
+        try {
+          storyDropped = storyline.removeWindow(gid, { from, to });
+        } catch (e) {
+          log.warn(`[剧情] 清故事线残留失败：${e.message}`);
+        }
+        log.info(
+          `[剧情] 清剧情 → 顺手抹掉上下文 ${dropped} 条 / 故事线 ${storyDropped} 条` +
+            '（这条剧情期间她们说的话，免得接着演、越想越具体）',
+        );
+      }
       // ⚠️⚠️ 2026-10-07 加（用户要求：「**发了清除剧情应该强制 bot 停发消息一分钟**，
       //    要不然她们会接着上文继续聊」）：
       //    **只要他发了这条指令就静默**（哪怕这次没得清也一样）——
@@ -13804,7 +13908,7 @@ export class Bot {
       const role = this.speakerRole(event);
       if (role !== 'owner' && role !== 'staff') {
         log.info(`[暂停] ${event.user_id} 想暂停但没权限（role=${role}）→ 已回提示`);
-        this.sendToGroup(gid, '这个只有服主和管理员能用（').catch(() => {});
+        this.replyOnceToGroup(gid, '这个只有服主和管理员能用（');
         return true;
       }
 

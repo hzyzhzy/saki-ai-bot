@@ -791,8 +791,34 @@ export function removeQuest(questId, groupId = undefined) {
   return n;
 }
 
-/** 配置热重载后调一下（重读阈值等） */
-export function reload() {
+/**
+ * ⚠️ 2026-10-07 加（`/清除剧情` 用）：按**时间窗口**删条目。
+ *
+ * 为什么不能只靠 `removeQuest()`：它只认 `questId`，而实测有几条
+ * 「Anon说：…我踩着柜子去够墙…」「她说：柜子散架剩的呗」**压根没有 questId**
+ * （它们是"群友发言 / 插曲"那条路写进去的）⇒ 清剧情时**漏掉** ⇒
+ * 她们过一会儿又想起来了 ✗（用户报：「**甚至还记住了之前柜子烂了**」）
+ *
+ * @param {string} groupId
+ * @param {{from?:number, to?:number}} opts 时间窗口（毫秒）
+ * @returns {number} 删掉几条
+ */
+export function removeWindow(groupId, { from = 0, to = 0 } = {}) {
+  const b = bucketOf(groupId);
+  if (!b?.entries?.length) return 0;
+  const f = Number(from) || 0;
+  const t = Number(to) || Date.now();
+  const before = b.entries.length;
+  b.entries = b.entries.filter((e) => {
+    const at = Number(e?.at ?? 0) || 0;
+    return at < f || at > t; // 窗口外 ⇒ 留着
+  });
+  const n = before - b.entries.length;
+  if (n) save();
+  return n;
+}
+
+/** 配置热重载后调一下（重读阈值等） */export function reload() {
   load();
 }
 

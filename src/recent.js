@@ -893,6 +893,39 @@ export function clear(groupId) {  store.delete(String(groupId));  tone.delete(St
 }
 
 /**
+ * ⚠️ 2026-10-07 加（`/清除剧情` 用）：把**某一段时间里、某几个人说的话**从上下文里抹掉。
+ *
+ * 用户报：「**清除剧情之后她们还在说推柜子出房间**」——
+ * 光清剧情状态不够：**上下文里那些台词还在**（500 条窗口里留着），
+ * 她们顺着上文接着演 ✗ 实测那一下 `recent` 里带"柜子"的有 **31 条**。
+ *
+ * @param {string} groupId
+ * @param {{from?:number, to?:number, uids?:string[]}} opts
+ *   `uids` 为空 = 窗口内**所有**人的消息都抹；给了就只抹这几个号说的（真人发言保留）
+ * @returns {number} 抹掉几条
+ */
+export function dropWindow(groupId, { from = 0, to = 0, uids = [] } = {}) {
+  const g = String(groupId ?? '');
+  const arr = store.get(g);
+  if (!Array.isArray(arr) || !arr.length) return 0;
+  const set = new Set((uids ?? []).map(String).filter(Boolean));
+  const f = Number(from) || 0;
+  const t = Number(to) || Date.now();
+  const keep = arr.filter((m) => {
+    const at = Number(m?.time ?? 0) || 0;
+    if (at < f || at > t) return true; // 窗口外 ⇒ 留着
+    if (set.size && !set.has(String(m?.userId ?? ''))) return true; // 不是这几个号 ⇒ 留着
+    return false; // 命中 ⇒ 抹掉
+  });
+  const n = arr.length - keep.length;
+  if (n) {
+    store.set(g, keep);
+    scheduleSave();
+  }
+  return n;
+}
+
+/**
  * 这个群最近见过这条消息吗（按 `message_id`）。
  *
  * ⚠️ 用途（2026-09-15）：**掉线补看要去重**。
