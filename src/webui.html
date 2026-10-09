@@ -5911,6 +5911,21 @@ async function personaSaveIdentity() {
 
 async function personaSwitch() {
   const id = $('p-pick').value;
+  // ⚠️⚠️ 2026-10-09 加：**二次确认**。
+  //
+  //    踩到的（用户报「主号怎么变成别人的人设了，**不是我改的**」）：日志查出来是
+  //    界面上点了一下「切到这个」⇒ 当场热重载、人格就换了，**没有任何确认**。
+  //    而人设页和「编辑知识文件」在一个页面里，误点的成本极高。
+  //
+  //    ⚠️ 更要紧的是**它只改当前这个号**：`persona` 不在 `SHARED_SECTIONS` 里，
+  //    `splitPatch()` 把它写进 `accounts/<当前号>.yml`，`config.yml` **一个字不动**
+  //    ⇒ 别的号不受影响，但界面上过去只回一句「已切到 xxx」，看不出这个范围。
+  if (!confirm(
+    `把当前这个号切换成人设「${id}」？\n\n` +
+    `· 只影响**当前正在控制的这个号**（写进它自己的账号配置，别的号不变）\n` +
+    `· 会顺手把 QQ 昵称 / 头像换成这个人设声明的那份\n` +
+    `· 当场生效，不用重启机器人`
+  )) return;
   // ⚠️ 反馈要显示在**这张卡片里**（`msg-p-switch`）——
   //    原来用的 `msg-p` 在下面「新建人设」那张卡片里，用户点了按钮**什么都看不见**，
   //    于是报「这个好像切不动」（2026-09-22 真踩了）。
@@ -5925,7 +5940,10 @@ async function personaSwitch() {
     let tail = '';
     if (q.nickname || q.avatar) tail = `，QQ 昵称头像也换成了「${q.nickname || '—'}」/「${q.avatar || '—'}」`;
     if (q.problems && q.problems.length) tail += `（⚠️ QQ 资料没全换上：${q.problems.join('；')}）`;
-    pjShow($('msg-p-switch'), true, `✅ 已经切到「${id}」，立刻生效（没重启机器人）${tail}`);
+    // ⚠️ 说清"只改了哪个号、写进了哪个文件" —— 不然用户会以为整个机器人换了人设。
+    const scope = r.account ? `，**只改了号 ${r.account}**` : '';
+    const wrote = r.wrote ? `（写进 ${r.wrote}）` : '';
+    pjShow($('msg-p-switch'), true, `✅ 已经切到「${id}」，立刻生效（没重启机器人）${scope}${wrote}${tail}`);
     await personaRefresh();
     await reloadAll();
     await loadKnowledgeList(true);

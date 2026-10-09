@@ -357,6 +357,15 @@ function isolatedStateEnv(name) {
     //    哪怕只是"新建一个测试账号"写进去也是污染。指到 logs/ 下的临时目录，
     //    想怎么写都行（`accounts.js` 读 env，见那边的 `ACCOUNTS_DIR`）。
     QQBOT_ACCOUNTS_DIR: `logs/__accounts-${safe}`,
+    // ⚠️⚠️ 2026-10-09 加：**日志文件也要隔离**。
+    //    上面那句"不动 QQBOT_CONFIG"是有意的（见 298 行），但代价是：套件里
+    //    `spawn(node, [src/index.js])` 起的真机器人用**真实 config.yml 名** ⇒
+    //    `src/log.js` 那条"配置名含 test 才隔离"的判据不成立 ⇒ 假号的日志
+    //    全灌进真实的 `logs/bot-<日期>.log`。
+    //    实测后果：用户报「主号人设被改了」那一轮，我查日志时满屏重复九次的
+    //    「不回复的机器人名单」，**差点判成机器人在崩溃重启循环**。
+    //    ⇒ 显式给每个套件一个文件（`src/log.js` 优先认这个 env）。
+    QQBOT_LOG_FILE: `logs/__run-${safe}.log`,
   };
 }
 

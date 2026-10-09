@@ -433,6 +433,30 @@ export function due(now = Date.now()) {
   return st.items.filter((x) => !x.sentAt && x.at <= now).sort((a, b) => a.at - b.at);
 }
 
+/**
+ * **早就过了、还一直没发出去的**（该直接丢掉，别再重试）。
+ *
+ * ⚠️⚠️⚠️ 2026-10-08 加（用户看着那 12 条 9 月的提醒问：
+ *    「**真人的都是已经过去的事情，为什么不会自动删除**」）。
+ *
+ * 根因在 `index.js` 那个 tick 里：它靠一个**内存** Map 记"试了多久"
+ * （`fails: id → {n, since}`）+ `giveUpMs`（默认 2 小时）决定什么时候放弃。
+ * 可内存态**一重启就归零** —— 机器人本来就每天都要重启几次
+ * （2026-10-07 那晚我自己就重启了十几次）⇒ 那 2 小时**永远等不到**
+ * ⇒ 发不出去的提醒**永远挂在那儿** ✗✗（9 月定的一直躺到 10 月）
+ *
+ * ⇒ 换一条**跟重启无关**的判据：**看提醒自己到点多久了**。
+ *    到点超过 `staleMs`（默认 24 小时）还没发出去 ⇒ 直接当"已经没意义了"丢掉 ✓
+ *    —— 提醒的价值全在"到点说出来"，隔了一天的提醒发出去反而是打扰。
+ *
+ * @param {number} before 到点早于这个时刻的就算过期
+ */
+export function stale(before = Date.now()) {
+  return st.items
+    .filter((x) => !x.sentAt && Number(x.at) > 0 && Number(x.at) <= before)
+    .sort((a, b) => a.at - b.at);
+}
+
 /** 标成"发过了" */
 export function markSent(id, at = Date.now()) {
   const it = st.items.find((x) => x.id === Number(id));

@@ -144,7 +144,7 @@ async function logicTests() {
   console.log('\n[A4.5] @ 的是别人 → 不接（shouldJoinChat 和 decide 都要守住）');
   const atOther = (extra = []) => ({
     ...ev(' 现在怎么样'),
-    message: [{ type: 'at', data: { qq: '3878812039' } }, ...extra],
+    message: [{ type: 'at', data: { qq: '10000013' } }, ...extra],
   });
   const T = (t) => ({ type: 'text', data: { text: t } });
 
@@ -157,7 +157,7 @@ async function logicTests() {
   );
   check(
     bot.decide({ ...ev(' 你俩看'), message: [
-      { type: 'at', data: { qq: '3878812039' } },
+      { type: 'at', data: { qq: '10000013' } },
       { type: 'at', data: { qq: '123456' } },
       T(' 你俩看'),
     ] }, null) === null,
@@ -168,7 +168,7 @@ async function logicTests() {
   check(
     !!bot.decide({ ...ev(' 大家看下'), message: [
       { type: 'at', data: { qq: BOT_QQ } },
-      { type: 'at', data: { qq: '3878812039' } },
+      { type: 'at', data: { qq: '10000013' } },
       T(' 大家看下'),
     ] }, null),
     'decide：@我 + @别人（群发）仍然要接',
@@ -202,8 +202,14 @@ async function logicTests() {
 
   console.log('\n[A7] 禁止照抄原文的规则在人设里');
   const persona = bot.buildSystemPrompt('', ev('test'), null);
-  check(persona.includes('绝对不要照抄资料原文'), '人设里有禁止照抄的章节');
-  check(persona.includes('判断标准'), '给了「像说明书就是抄的」的判断标准');
+  // ⚠️ 2026-10-09：原来查的是**节标题**「绝对不要照抄资料原文」——
+  //    而人设合并时那一节被并进「不许编」了（内容还在，标题没了）✗
+  //    ⇒ 改成查**内容特征**，不再绑标题 ✓
+  check(
+    persona.includes('照抄资料原文') || persona.includes('照抄原文'),
+    '人设里有禁止照抄原文的规则',
+  );
+  check(persona.includes('判断标准') || persona.includes('就是抄的'), '给了「像说明书就是抄的」的判断标准');
   check(persona.includes('你是真的小祥') || persona.includes('你就是小祥'), '人设强调身份');
 
   console.log('\n[A11] 情绪识别：该切温柔小祥的时候要切');

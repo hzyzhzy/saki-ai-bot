@@ -821,9 +821,35 @@ startOutboxTick();
 //    ① 定时问"等够了没" ② 把生成的话发到群里 ③ 记下 message_id（"回复她"要靠它）
 //    群友发言的收集在 `bot.js` 的 `noteQuestReply()`（消息一到就攒起来）。
 {
+  /**
+   * 定时自动推进（30 分钟那条路）用的 `ask`。
+   *
+   * ⚠️⚠️⚠️ 2026-10-07 修（用户：「**查一下为什么现在剧情永远不会跟着那扇门写的走**」）：
+   *   这里原来是**最裸的 `streamChat(messages)`** —— 既没关思考链、也没抬 max_tokens，
+   *   于是它跟另外两条路（`bot.js` 的 `questAsk()` / `webui.js` 的 `llmAsk`）**不一致**，
+   *   而那两处的注释里明明写着「参数必须对齐：16000 tokens / 150 秒 / 关思考」✗
+   *
+   *   实测后果（`logs/bot-2026-10-07.log` 里两行连着出现）：
+   *     `[06:24:23] WRN LLM 输出被 max_tokens(8000) 截断了（其中思考链吃了 8000 token）`
+   *     `[06:24:23] INF [剧情] 群 200000001 到点了但这次没推进：模型没给出内容，保持原状`
+   *   ⇒ 起因里的硬条件要求越硬（"必须做到 X 才能出去"），模型**思考得越久**
+   *     ⇒ 8000 token 全被思考链吃光、**正文一个字都没产出**
+   *     ⇒ `advance()` 只能"保持原状" ⇒ **卡在同一段**，每 30 分钟原样重演一次
+   *     ⇒ 用户看到的就是「**剧情永远不往那件事上走**」——
+   *        其实不是绕开，是**整条线在那一段上停摆了**。
+   *
+   * ⚠️ 别再退回裸调用：`config.llm.thinkingBudget`（默认 3000）**管不住思考链** ——
+   *   它实测能烧满整个 max_tokens（见 `llm.js` 里那条注释）。要省就只能显式关掉。
+   */
   const ask = async (messages) => {
     let out = '';
-    for await (const d of streamChat(messages)) out += d;
+    for await (const d of streamChat(messages, undefined, {
+      maxTokens: 16000,
+      timeoutMs: 150000,
+      thinking: { type: 'disabled' },
+    })) {
+      out += d;
+    }
     return out;
   };
 
@@ -906,8 +932,32 @@ startOutboxTick();
       return;
     }
 
-    if (!quest.due(Date.now(), gid)) return; // 还没等够（默认 30 分钟 / warm 时 10 分钟）
-    // 掉线时先不推进：发不出去，推进了这一段就白生成了
+    // ⚠️⚠️⚠️ 2026-10-07 加（用户：「**为什么现在一直在无意义聊天而且还一直没有自动结束**」）：
+    //    **绝对时长上限** —— 从头算起，跟"有没有人说话"完全无关。
+    //
+    //    原来只有下面那条 `due()`（"隔一会儿推进一段"），而它会被互动不断刷新
+    //    ⇒ **永远不到点**；而收尾的三条路（模型给 done / 冷场 / `MAX_STAGES` 硬上限）
+    //    **都得靠"推进"才走得到** ⇒ 那条线可以无限往下滚 ✗
+    //    （实测：那条 07:22 开的剧情，两个号一路滚到用户下午回到电脑前。）
+    //
+    //    ⇒ 到点就**强制收个结局**，保证一定结束。
+    if (quest.overdue(Date.now(), gid)) {
+      log.info(
+        `[剧情] 群 ${gid} 这条线已经超过时长上限 → **强制收尾**（${String(q.premise ?? '').slice(0, 30)}…）`,
+      );
+      const r0 = await quest.advance(q, { ask, forceEnd: 'bad' });
+      if (r0?.ok) {
+        await sendQuestLine(q, r0.text);
+        settleQuest(q, r0.ending ?? 'bad');
+      } else {
+        // ⚠️ 模型没给出内容也不能就这么卡着 —— 直接按坏结局收掉
+        log.warn(`[剧情] 群 ${gid} 强制收尾没写成（${r0?.reason}）→ 直接结算`);
+        settleQuest(q, 'bad');
+      }
+      return;
+    }
+
+    if (!quest.due(Date.now(), gid)) return; // 还没等够（默认 30 分钟 / warm 时 10 分钟）    // 掉线时先不推进：发不出去，推进了这一段就白生成了
     // （下一轮 tick 会再看一次；`due()` 不会因为等更久而失效）
     if (!bot.selfId) {
       // ⚠️ 2026-09-18 从 debug 提到 **info**（用户报「正在跑的剧情卡住不动」）：
@@ -1112,8 +1162,33 @@ if (config.remind?.enable !== false) {
   //    而提醒多半定在他睡觉/不在的时段（凌晨）→ 掉线 5 分钟，这条提醒就**悄悄没了** ✗。
   //    提醒这件事的价值全在"到点说出来"，所以宁可多试（每分钟一次，最多 120 次）。
   const giveUpMs = Math.max(60000, Number(config.remind?.giveUpMs) || 2 * 3600 * 1000);
+  // ⚠️⚠️⚠️ 2026-10-08 加（用户看着那 12 条 9 月的提醒问：
+  //    「**真人的都是已经过去的事情，为什么不会自动删除**」）：
+  //    **到点太久还发不出去的，直接丢掉，不再重试。**
+  //
+  //    原来只有下面那个 `fails`（内存 Map）+ `giveUpMs`（2 小时）——
+  //    而**内存态一重启就归零**，机器人本来就每天重启几次
+  //    （2026-10-07 那晚我自己就重启了十几次）⇒ 那 2 小时**永远等不到**
+  //    ⇒ 发不出去的提醒**永远挂着** ✗✗（9 月定的躺到 10 月都没清）
+  //    ⇒ 换一条**跟重启无关**的判据：**看提醒自己到点多久了**（见 `remind.stale()`）✓
+  const staleMs = Math.max(60000, Number(config.remind?.staleMs) || 24 * 3600 * 1000);
+  const sweepStale = () => {
+    for (const it of remind.stale(Date.now() - staleMs)) {
+      remind.markSent(it.id);
+      log.warn(
+        `[提醒] 到点已经超过 ${Math.round(staleMs / 3600000)} 小时还没发出去 → 丢掉（不再重试）：` +
+          `${String(it.what).slice(0, 40)}`,
+      );
+    }
+  };
   const fails = new Map(); // id → {n, since}
   const tick = async () => {
+    // ⚠️ 先清理过期的（跟重启无关的那道），再处理到点的 ✓
+    try {
+      sweepStale();
+    } catch (e) {
+      log.warn(`[提醒] 清理过期失败：${e.message}`);
+    }
     for (const it of remind.due()) {
       const f = fails.get(it.id) ?? { n: 0, since: Date.now() };
       try {

@@ -85,6 +85,13 @@ writeFileSync(
     '  maxPerReply: 5',
     '  continueProbability: 0.5',
     '  betweenMs: [400, 1200]',
+    // ⚠️⚠️ 2026-10-07 加：`maybeFollowUp()` 现在**受收紧度管**（收紧度 > 2 就不追补）——
+    //    这个套件测的是"追补本身能不能正常工作"，所以把它放在**最放得开那一档**（0）。
+    //    （用户报「主动搭话频率很高」时，追补正是主力，所以那条闸默认关掉才对 ✓）
+    'groupParams:',
+    '  "20002":',
+    '    chat:',
+    '      strictness: 0',
     '',
   ].join('\n'),
   'utf8',
@@ -348,6 +355,12 @@ async function partB() {
       '  maxPerReply: 2',
       '  continueProbability: 1',
       '  betweenMs: [50, 120]',
+      // ⚠️⚠️ 2026-10-07 加：追补现在**受收紧度管**（> 2 就不补）——
+      //    这个套件测"追补能不能工作"，所以要放最松那档（见上面 CFG_A 同一处注释）。
+      'groupParams:',
+      '  "20002":',
+      '    chat:',
+      '      strictness: 0',
       '',
     ].join('\n'),
     'utf8',

@@ -627,7 +627,9 @@ console.log('\n【15】★★ 真人起的话头 ⇒ 尽早收场（2026-10-07 �
   //    要不然要回的消息会越回越多」）：日志实证**合并已经生效**了，可紧接着是
   //    `[同类] 刚收过尾（1 分钟冷却中）→ 同类的这条不接` ✗ ⇒ 合并白做 + 剧情里不接 ✗
   check(
-    /if \(peers0\.has\(sender0\) && cooling && !this\.questLive\(gid0\)\)/.test(src15),
+    /if \(peers0\.has\(sender0\) && \(cooling \|\| farewellCooling\) && !this\.questLive\(gid0\)\)/.test(
+      src15,
+    ),
     '★★ "刚收过尾"那条冷却也有剧情例外（实测合并完就被它拦掉，等于白合并）',
   );
 }
@@ -826,7 +828,7 @@ console.log('\n【18】★★ 剧情转述的序位 —— **下段沿用开场�
     '★ 序位让位是个共用方法',
   );
   check(
-    /if \(await this\.questTurnYield\(gid, \{ since, where: '开场', rotate: true \}\)\) return;[\s\S]{0,240}?const r = await quest\.begin/.test(
+    /if \(await this\.questTurnYield\(gid, \{ since, where: '开场', rotate: true \}\)\)[\s\S]{0,2600}?const r = await quest\.begin/.test(
       src18,
     ),
     '★★ 开场的让位判断排在 `quest.begin` **之前**（轮不到我的号连生成都不做）',
@@ -943,15 +945,31 @@ console.log('\n【19】★★ 剧情进行中，同类的话**不掷骰**（2026
   // ③ ⚠️⚠️ **让位方**：自己没开线（序位公式让它根本不 begin），只在群里看到同类在演 ——
   //    用户报的第二半就是「**爱音这次又不回了**」：所有拿 `quest.current()` 当判据的
   //    "剧情例外"在它那边全部失效 ⇒ 一边接话、另一边一声不吭 ✗
+  //
+  //    ⚠️⚠️ 2026-10-07 再改（用户：「**机器人之间的日常聊天还是不会自己停下来**」）：
+  //    判据从"看见同类发了一句像剧情的话"（`peerPlots`）换成**共享起因**
+  //    （`state/quest-shared.json`）—— 后者是"**真开了一场剧情**"才会写的东西，
+  //    日常闲聊不会写 ✓（原来那个判据太松，把闲聊也当剧情 ⇒ 所有闸全被豁免）
+  //    ⇒ 所以这里要先**写上共享起因**（就是对面那个号 `begin` 时写的那一下）。
   quest19.__set({ byGroup: {} });
   check(!quest19.current(G19), '★ 先确认：我自己这条线是**空的**（让位方的状态）');
   quest19.notePeerPlot(G19, {
     uid: PEER19,
     text: '她把手搭在门把上，没回头，说这扇门认的不是敲没敲过。',
   });
+  // ⚠️⚠️ 新加的反向断言：**只记了 peerPlot、没有共享起因 ⇒ 不算"剧情中"** ——
+  //    这正是这次修的东西（日常闲聊就是这种状态，不能再被当成剧情豁免）
+  check(
+    b19.questLive(G19) === false,
+    '★★★ 只有"看见同类发了句长话"（没有共享起因）⇒ **不算剧情中**（日常闲聊就是这种，闸门要靠这个拦住）',
+  );
+  quest19.noteSharedPremise(G19, {
+    premise: '门锁死了，两个人之间必须做到 X 才能出去',
+    by: PEER19,
+  });
   check(
     b19.questLive(G19),
-    '★★ 自己没开线、但"看见同类在演" ⇒ `questLive` 仍然算**剧情进行中**',
+    '★★ 自己没开线、但对面**真开了剧情**（共享起因在）⇒ `questLive` 仍然算**剧情进行中**',
   );
   const d19b = b19.shouldJoinChat(evt19());
   check(
@@ -967,6 +985,7 @@ console.log('\n【19】★★ 剧情进行中，同类的话**不掷骰**（2026
   );
   quest19.__set({ byGroup: {} });
   quest19.__peerPlots().delete(G19);
+  quest19.clearSharedPremise(G19);
 }
 
 console.log('\n【20】★★ 剧情里的同类消息，不许被"吞消息"的闸拦掉（2026-10-07 用户连报三次"没回"）');
@@ -1116,6 +1135,9 @@ console.log('\n【21】★★ `/清除剧情` 只由**主导那条线的号**执
   };
   const b21 = new Bot();
   quest21.__peerPlots().delete(G21);
+  // ⚠️ 2026-10-07：`questLive` 现在认的是**共享起因**（真开了一场剧情才会写它），
+  //    所以这里先写一条 —— 就是对面那个号 `begin` 时写的那一下。
+  quest21.noteSharedPremise(G21, { premise: '门锁死了，必须做到 X 才能出去', by: PEER21 });
   const j21 = await b21.shouldJoinChatAsync({
     post_type: 'message',
     message_type: 'group',
@@ -1133,10 +1155,11 @@ console.log('\n【21】★★ `/清除剧情` 只由**主导那条线的号**执
     JSON.stringify(j21),
   );
   check(
-    b21.questLive(G21),
-    '★★ 而且这一步就**提前记下了**"看见同类在演剧情"（让位方全靠它才知道在演剧情）',
+    !!quest21.__peerPlots().get(G21)?.lastAt,
+    '★★ 而且这一步**照样提前记下 peerPlot** —— `leadership()` 和序位让位全靠它，别删',
   );
   quest21.__peerPlots().delete(G21);
+  quest21.clearSharedPremise(G21);
 }
 
 console.log('\n【22】★★ 开场**轮流**（2026-10-07 用户问「为什么这几次都是 saki 开的」）');
@@ -1580,6 +1603,1107 @@ console.log('\n【25】★★ 剧情里**不许用"睡觉 / 晚安"收场**（20
   check(
     /等于把这条剧情丢掉/.test(qsrc25),
     '★★ 聊天提示词里也明说了（剧情里不许睡觉收场）',
+  );
+}
+
+console.log('\n【26】★★ 剧情**永远不往硬条件上走**的两个真凶（2026-10-07 用户：「查一下为什么」）');
+{
+  // ## 用户的问题
+  //   「查一下为什么现在剧情永远不会跟着那扇门写的走」
+  //
+  // ## 查出来的两条，都有日志铁证（`logs/bot-2026-10-07.log`）
+  //
+  // ① **定时自动推进那条路原来是裸的 `streamChat`**（没关思考、没抬 max_tokens）
+  //      `[06:24:23] WRN LLM 输出被 max_tokens(8000) 截断了（其中思考链吃了 8000 token）`
+  //      `[06:24:23] INF [剧情] 群 200000001 到点了但这次没推进：模型没给出内容，保持原状`
+  //    ⇒ 起因里的硬条件越硬，模型**思考得越久** ⇒ 8000 全被思考链吃光、**正文一个字没有**
+  //      ⇒ `advance()` 只能"保持原状" ⇒ **卡在同一段**，每 30 分钟原地重演
+  //      ⇒ 用户看到的"永远不走"其实是**整条线停摆**，不是绕开
+  //
+  // ② **对面那个号的"拒演"被当成群友建议，喂回给了主导方**
+  //      `[02:21:32] [剧情] 记下一条可能改变走向的发言（suggest）：说了不接这类剧情，换个正常的来。`
+  //      `[02:50:06] …（suggest）：不接，消停会儿吧，换个正常的剧情我还愿意陪你玩。`
+  //    ⇒ 这两句进了 `quest.pending`，下一段以【这一阶段群里说的话】喂回主导方
+  //      ⇒ **自己人给自己下了一道禁令** ✗
+  const quest26 = await import('../src/quest.js');
+  const { Bot } = await import('../src/bot.js');
+  const src26 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  const isrc26 = readFileSync(join(ROOT, 'src', 'index.js'), 'utf8');
+
+  // ── 真凶① ──────────────────────────────────
+  check(
+    /const ask = async \(messages\) => \{[\s\S]{0,400}?maxTokens: 16000[\s\S]{0,200}?thinking: \{ type: 'disabled' \}/.test(
+      isrc26,
+    ),
+    '★★★ 定时推进的 `ask` 必须和 `questAsk()` 对齐（16000 token + **关思考**）—— 不关思考就会"思考链吃满 max_tokens、正文 0 字、剧情原地不动"',
+  );
+  check(
+    !/for await \(const d of streamChat\(messages\)\) out \+= d;/.test(isrc26),
+    '★★★ 裸 `streamChat(messages)` 不许再出现在剧情推进那条路上',
+  );
+
+  // ── 真凶②（静态） ───────────────────────────
+  check(/const PEER_META_RE =/.test(src26), '★★★ 有"同类在说这部剧本身"的判据');
+  check(
+    /if \(fromPeer && PEER_META_RE\.test\(String\(text \?\? ''\)\)\)/.test(src26),
+    '★★★ 而且真的在 `noteQuestReply` 里先拦一道（在进 `pending` 之前）',
+  );
+
+  // ── 真凶②（行为） ───────────────────────────
+  const G26 = '999000026';
+  const PEER26 = '10000026';
+  config.groupParams[G26] = { peers: [PEER26] };
+  const mk26 = () => ({
+    byGroup: {
+      [G26]: {
+        current: {
+          id: 'q26',
+          groupId: G26,
+          startedAt: Date.now(),
+          premise: '门板上写着：两个人之间必须做到 X，否则它永远不会开。',
+          plannedStages: 3,
+          stageIndex: 1,
+          endedAt: 0,
+          stages: [{ i: 1, at: Date.now(), text: '门板上写着条件。' }],
+          herMsgIds: [],
+          pending: [],
+          cast: [],
+          humanReplies: 0,
+          autoContinues: 0,
+        },
+        recent: [],
+        starts: [],
+      },
+    },
+  });
+  const mkev26 = (uid, t) => ({
+    post_type: 'message',
+    message_type: 'group',
+    group_id: G26,
+    user_id: uid,
+    self_id: String(config.botQQ ?? ''),
+    sender: { card: '', nickname: '' },
+    message: [{ type: 'text', data: { text: t } }],
+  });
+  const segs26 = (t) => [{ type: 'text', data: { text: t } }];
+  const say26 = (b, t) => b.noteQuestReply(mkev26(PEER26, t), segs26(t), t);
+
+  quest26.__set(mk26());
+  const b26 = new Bot();
+  say26(b26, '说了不接这类剧情，换个正常的来。');
+  check(
+    (quest26.current(G26)?.pending ?? []).length === 0,
+    '★★★ 对方**拒演**的那句话不许进下一段素材（原来会被当成"群友建议"喂回主导方 ⇒ 自己人劝退自己人）',
+    JSON.stringify((quest26.current(G26)?.pending ?? []).map((x) => x.text)),
+  );
+
+  // 对照：剧里的正常台词照样要进去（用户要"聊天也能推动剧情"，别一刀切）
+  say26(b26, '她说完就靠回墙上，手指在袖口里抠着，没敢看他。');
+  check(
+    (quest26.current(G26)?.pending ?? []).length === 1,
+    '★★ 对照：剧中的台词**照样进**（不能把同类的话一刀切掉）',
+    JSON.stringify((quest26.current(G26)?.pending ?? []).map((x) => x.text)),
+  );
+  quest26.__set({ byGroup: {} });
+}
+
+console.log('\n【27】★★ 开新剧情后，开场之前的旧话题要抹掉（2026-10-07 用户：「为什么开了剧情偏到其他对话了」）');
+{
+  // ## 用户的问题
+  //   「为什么我刚才开了剧情，但是偏到其他对话了」
+  //
+  // ## 实测（`state/quest.json` 的 premise/stages 与 `state/recent.json` 对着看）
+  //     07:10:45 [她]   刚坐下没一会儿，谱子才翻到第二页…        ← 上一轮的话头（练琴）
+  //     07:11:01 Anon  谁惦记你了。第二页就卡住了啊，你练的哪首   ← 对面还在旧话题上
+  //     07:11:05 [她]   早上醒过来的时候，我跟爱音在一间没有窗户的屋子里。← 开场第 1 条
+  //     07:11:07 [她]   谁惦记你了。第二页就卡住了啊，你练的哪首   ← 她**又回了一句练琴** ✗
+  //     07:11:25 Anon  行，那我等着呗，练顺了弹一段给我听听啊（   ← 从此整条线全在聊琴
+  //   ⇒ 那条剧情的 `pending` 里 **11 条全是练琴**，开场 3 条像没发过一样。
+  //   ⇒ 原因不是开场写得差（它把三条设定都摆出来了），而是：
+  //     开场是**陈述**，而对面在开场前一刻**直接问了她一句** ——
+  //     模型天然优先回"有人在问我"⇒ 一句话把两条线都拽回旧话题。
+  const recent27 = await import('../src/recent.js');
+  const src27 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+
+  check(
+    /const beforeAt = recent\.lastMessageAt\(gid\);/.test(src27),
+    '★★★ 开场发出去**之前**先记下"群里最后一条"的时间（旧话题的上界）',
+  );
+  check(
+    /recent\.dropWindow\(gid, \{\s*from: since - 3 \* 60 \* 1000,\s*to: beforeAt,/.test(src27),
+    '★★★ 窗口终点用 `beforeAt` —— 既盖住"生成开场那几秒"里的旧话题，又不会把刚发的开场本身抹掉',
+  );
+  check(
+    /'__self__'/.test(src27),
+    '★★ 连她自己的旧话也抹（不然她会顺着自己刚说过的"谱子翻到第二页"往下聊）',
+  );
+
+  // 行为：真人发言一条都不许动
+  const G27 = '999000027';
+  const store27 = recent27.__storeForTest();
+  const now27 = 1791328260000;
+  store27.set(G27, [
+    { time: now27 - 60000, userId: '10000027', text: '上一轮同类的旧话头' },
+    { time: now27 - 55000, userId: '__self__', text: '她自己的旧话头' },
+    { time: now27 - 1000, userId: '30003', text: '真人说的（必须留着）' },
+  ]);
+  const n27 = recent27.dropWindow(G27, {
+    from: now27 - 3 * 60 * 1000,
+    to: now27 - 2000,
+    uids: ['10000027', '__self__'],
+  });
+  const left27 = store27.get(G27) ?? [];
+  check(
+    n27 === 2 && left27.length === 1 && left27[0].text === '真人说的（必须留着）',
+    `★★★ 同类和她自己的旧话头抹掉、**真人发言一条都不动**（抹了 ${n27} 条）`,
+    JSON.stringify(left27.map((x) => x.text)),
+  );
+  store27.delete(G27);
+}
+
+console.log('\n【28】★★ `/暂停` 不许被 `/剧情` 顺手解除 + 同一条 `/剧情` 只执行一次（2026-10-07 用户：「为什么对爱音没用」）');
+{
+  // ## 用户的问题
+  //   「我刚才发了暂停指令，为什么对爱音没用」
+  //
+  // ## 日志实证（`logs/bot-2026-10-07-10000012.log`）
+  //   `[07:13:27] 群 200000001：120 秒内一个字都不发（收到 /暂停）`   ← 暂停**生效了** ✓
+  //   `[07:13:49] [剧情] 手动开始（群 200000001，…）`                  ← 同一条 `/剧情` 又跑了一次 ✗
+  //   `[07:13:49] [静默] 群 200000001 解除静默（开新剧情 → 解除静默）` ← **暂停被它抹掉了** ✗✗
+  // ⇒ 那 2 分 49 秒里爱音**没有重连**（不是补看重放），是同一个事件被处理了两遍。
+  const src28 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  const { Bot } = await import('../src/bot.js');
+
+  check(
+    /isPausedByCommand\(groupId\)/.test(src28),
+    '★★★ 有"这个群的静默是不是 `/暂停` 按的"这个判据',
+  );
+  check(
+    /const paused = this\.isPausedByCommand\(gid\);/.test(src28),
+    '★★★ 而且 `/剧情` 里真的接上了（暂停期间**不解除**静默）',
+  );
+  check(
+    /this\._questCmdSeen \?\?= new Map\(\)/.test(src28),
+    '★★★ 同一条 `/剧情`（按 message_id）10 分钟内只执行一次 —— 重复执行正是"暂停被抹掉"的元凶',
+  );
+  check(
+    /'收到 \/暂停'/.test(src28) && /this\._muteWhy\.set\(gid/.test(src28),
+    '★★ `muteGroup` 记下了"这次静默是谁下的"（不然分不清 `/暂停` 和 `/清除剧情`）',
+  );
+
+  // 行为：两种静默要能分开
+  const G28 = '999000028';
+  const b28 = new Bot();
+  b28.muteGroup(G28, 120000, '收到 /暂停');
+  check(b28.isMuted(G28) === true, '★ 按下 /暂停 ⇒ 群进了静默期');
+  check(b28.isPausedByCommand(G28) === true, '★★★ 而且认得出"这是 /暂停 按的"（`/剧情` 不许解除它）');
+
+  const b28b = new Bot();
+  b28b.muteGroup(G28, 60000, '收到 /清除剧情（清掉了）');
+  check(
+    b28b.isPausedByCommand(G28) === false,
+    '★★ 对照：`/清除剧情` 那 60 秒**不算** `/暂停` ⇒ 开新剧情照旧能解除它（那是有意的）',
+  );
+
+  // 行为：解除之后两边都不算
+  b28.muteGroup(G28, 0, '开新剧情 → 解除静默');
+  check(
+    b28.isMuted(G28) === false && b28.isPausedByCommand(G28) === false,
+    '★ 静默解除后，两个判据都归零（不会留个"幽灵暂停"把后面的都挡掉）',
+  );
+}
+
+console.log('\n【29】★★ `/清除剧情` 那一分钟必须真安静：开场能发，发完把静默按回去（2026-10-07 用户：「也失效了」）');
+{
+  // ## 用户的问题
+  //   「`/清除剧情` 指令应该也要屏蔽一分钟 bot 发言，也失效了」
+  //
+  // ## 日志实证
+  //   `[07:09:28] 群 200000001：60 秒内一个字都不发（收到 /清除剧情（清掉了））`
+  //   `[07:09:33] 群 200000001 解除静默（开新剧情 → 解除静默）`  ← 只安静了 5 秒 ✗
+  //
+  // ## 两个真因
+  //   ① **解除静默原来在 `questTurnYield` 之前** ⇒ **让位的那一方也解除了**
+  //      （它收到的 `/清除剧情` 那 60 秒就这么没了，于是接着聊旧话题）
+  //   ② 真正开场的号解除之后**再也没按回去** ⇒ 用户要的"那一分钟安静"根本没发生
+  //
+  // ## 修法
+  //   静默的解除/恢复整体挪进 IIFE、挪到 `questTurnYield` **之后**；
+  //   开场发完把**剩余时间**按回去（不是重新算 60 秒）。
+  const src29 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  const { Bot } = await import('../src/bot.js');
+
+  check(/muteInfo\(groupId\)/.test(src29), '★★★ 有"当前静默到几点 + 谁按的"这个判据');
+  check(/const muteBefore = this\.muteInfo\(gid\);/.test(src29), '★★★ `/剧情` 里记下了原静默的到期时刻');
+  check(
+    /if \(!paused && muteBefore\.until > Date\.now\(\)\)/.test(src29),
+    '★★★ 开场发完之后**把剩下的时间按回去**（"清完剧情那一分钟真的安静"）',
+  );
+
+  // ⚠️ 顺序才是关键：**解除静默必须在 `questTurnYield` 之后** ——
+  //    在它之前的话，让位那一方也会把自己的静默解除掉（①就是这么来的）。
+  const atYield = src29.indexOf("where: '开场', rotate: true }))");
+  const atMute = src29.indexOf('const paused = this.isPausedByCommand(gid);');
+  check(
+    atYield > 0 && atMute > 0 && atMute > atYield,
+    '★★★ 解除静默排在 `questTurnYield` **之后**（让位方不再把自己的静默解除）',
+    `yield@${atYield} mute@${atMute}`,
+  );
+
+  // 行为：`muteInfo` 报得出"还剩多久 + 谁按的"
+  const G29 = '999000029';
+  const b29 = new Bot();
+  b29.muteGroup(G29, 60000, '收到 /清除剧情（清掉了）');
+  const info29 = b29.muteInfo(G29);
+  check(
+    info29.until > Date.now() + 50000 && /清除剧情/.test(info29.why),
+    '★★★ 报得出到期时刻和原因（`/剧情` 就靠它把静默原样按回去）',
+    JSON.stringify(info29),
+  );
+  b29.muteGroup(G29, 0, '解除');
+  check(b29.muteInfo(G29).until === 0, '★ 解除报 0（不会留一道幽灵静默把后面的都挡掉）');
+}
+
+console.log('\n【30】★★ 剧情必须有**绝对时长上限**、`questLive` 不许被无限续命（2026-10-07 用户：「一直在无意义聊天还一直不自动结束」）');
+{
+  // ## 用户的问题
+  //   「为什么现在一直在无意义聊天而且还一直没有自动结束」
+  //
+  // ## 实测
+  //   那条 07:22 开的剧情**早就结束了**（`quest.current` 为空），
+  //   可两个号从早上 07 点一路互刷到 16:53（日志里
+  //   `刷到硬闸了（9+15 条），但剧情还在演 → 不收尾、也不闭麦` 在反复打）。
+  //
+  // ## 两个真因
+  //   ① `due()` 是"隔一会儿推进一段"，被互动不断刷新 ⇒ **永远不到点**；
+  //      而收尾（模型 done / 冷场 / MAX_STAGES）**都得靠推进**才走得到
+  //      ⇒ 这条线可以无限滚。缺的是**从头算的绝对时长上限**。
+  //   ② `notePeerPlot` 的"续记"只要 ≥2 字就刷新 `lastAt` ⇒ `questLive`
+  //      **永远为真** ⇒ 硬闸 / 闭麦 / 冷却全被豁免 ⇒ **刹车被拆了**。
+  const quest30 = await import('../src/quest.js');
+  const src30 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  const isrc30 = readFileSync(join(ROOT, 'src', 'index.js'), 'utf8');
+
+  check(/export function overdue\(now = Date\.now\(\), groupId = ''\)/.test(readFileSync(join(ROOT, 'src', 'quest.js'), 'utf8')), '★★★ 有"这条剧情演太久了"的判据');
+  check(
+    /if \(quest\.overdue\(Date\.now\(\), gid\)\)/.test(isrc30),
+    '★★★ 定时器到点就**强制收个结局**（`forceEnd`）—— 保证一定结束',
+  );
+  check(
+    /quest\.sharedPremise\(g, \{ maxAgeMs: 45 \* 60 \* 1000 \}\)/.test(src30),
+    '★★★ `questLive` 改用**共享起因**（只有真开了一场剧情才会写它）+ 45 分钟上限 —— ' +
+      '原来的"看见同类发了一句像剧情的话"太松（日常闲聊也满足），于是所有防互刷的闸全被豁免',
+  );
+  {
+    const { Bot } = await import('../src/bot.js');
+    const b30 = new Bot();
+    const G30b = '999000031';
+    if (quest30.current(G30b)) quest30.__set({ byGroup: {} });
+    check(
+      b30.questLive(G30b) === false,
+      '★★★ 行为：没有剧情、也没有共享起因（= 日常闲聊）⇒ **不算"剧情中"**，硬闸/闭麦才拦得住',
+    );
+  }
+
+  // 行为：老的剧情要判 overdue、新开的不算
+  const G30 = '999000030';
+  const mk30 = (ageMs) => ({
+    byGroup: {
+      [G30]: {
+        current: {
+          id: 'q30', groupId: G30, startedAt: Date.now() - ageMs, endedAt: 0,
+          premise: '门锁死了', plannedStages: 3, stageIndex: 1,
+          stages: [], herMsgIds: [], pending: [], cast: [], humanReplies: 0, autoContinues: 0,
+        },
+        recent: [], starts: [],
+      },
+    },
+  });
+  quest30.__set(mk30(46 * 60 * 1000));
+  check(quest30.overdue(Date.now(), G30) === true, '★★★ 演了 46 分钟 ⇒ 该收尾了');
+  quest30.__set(mk30(5 * 60 * 1000));
+  check(quest30.overdue(Date.now(), G30) === false, '★★ 才 5 分钟 ⇒ 不收（别把正常剧情砍了）');
+  quest30.__set({ byGroup: {} });
+}
+
+console.log('\n【31】★ "不回了 → 行 → 真不回了 → ……" 这种拉锯要断掉（2026-10-07 用户截图：「Saki 都无语了」）');
+{
+  // ## 截图上的链子
+  //   爱音「（不回了，这轮就到这儿。）」→ Saki「行」→
+  //   爱音「（这轮真到这儿了，不接。）」→ Saki「……」→
+  //   过一分钟爱音又开口「诶，干嘛呀，光一个点（」✗
+  //
+  // ## 三个燃料
+  //   ① 那句"我不回了"是**代码逼出来的**（`sayBotFarewell` 走 `phrase`），
+  //      所以带"（…）"旁白格式 —— 在群里像自说自话的元发言；
+  //   ② 对面收到"我不回了"**照样要回一句**（点头/无语）；
+  //   ③ 冷却只有 1 分钟 ⇒ 一分钟后它又开口 ⇒ 自打脸 ✗
+  const src31 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+
+  // ① 代码不再发那句收尾话
+  check(
+    (src31.match(/this\.sayBotFarewell\(/g) ?? []).length === 0,
+    '★★★ 硬闸命中**不再发**那句代码逼出来的收尾话（"（不回了，这轮就到这儿。）"就是它）',
+  );
+  check(
+    /硬闸[\s\S]{0,400}?直接静默/.test(src31),
+    '★★★ 改成**直接静默**：不发声、不接同类 —— 没有那句"我不回了"，对面就没有可回的东西',
+  );
+
+  // ② 对面说告别话 ⇒ 一个字都不回（Saki 那两句短回应就是燃料）
+  //    ⚠️ 这件事**上面 `isFarewellLine()` 那条闸已经管了** —— 我这个补丁的第一版
+  //    另开了一条闸，结果重复 + 漏了 @ 例外，被【11】当场抓住。
+  //    ⇒ 正确的修法是**往那个词表里补词**（截图那句就是没进词表才漏的）。
+  check(
+    /isFarewellLine\(text\) \{[\s\S]{0,900}?不回了\|不接你了/.test(src31),
+    '★★★ `isFarewellLine()` 的词表里补上了「不回了 / 不接了 / 这轮就到」—— 截图那句原来是漏的',
+  );
+  check(
+    (src31.match(/this\.sayBotFarewell\(/g) ?? []).length === 0,
+    '★★★ 而且**不再另开一条重复的闸**（@ 例外和剧情例外都沿用已有的那条）',
+  );
+
+  // ③ 收场话之后要安静更久（1 分钟断不掉拉锯）
+  check(/botFarewellCooldownMs/.test(src31), '★★★ 收场话有独立的、更长的冷却（默认 10 分钟，可配）');
+  check(
+    /this\.botFarewellAt \?\?= new Map\(\)/.test(src31) && /farewellCooling/.test(src31),
+    '★★ "她自己说了收场的话"和"硬闸冷却"用的是两套时间戳（别混）',
+  );
+
+  // 行为：词表既认得截图那句，又不误伤正常台词
+  const { Bot } = await import('../src/bot.js');
+  const b31 = new Bot();
+  check(b31.isFarewellLine('（这轮真到这儿了，不接。）') === true, '★★★ 截图里那句要判成告别');
+  check(b31.isFarewellLine('不回了，这轮就到这儿。') === true, '★★ 简写也要判成告别');
+  check(b31.isFarewellLine('好，回见') === true, '★ 原来认的照样认（别改坏）');
+  check(
+    b31.isFarewellLine('先这样，我去挪柜子了') === true,
+    '★★ 已知（原来就是这样）：短句里的「先这样」会被判成告别 —— ' +
+      '但**剧情里这条闸整个不生效**（`questLive` 例外），所以剧情台词不受影响',
+  );
+  check(b31.isFarewellLine('你去了记得把那个装完再回来再说这个事') === false, '★★ 长句不算');
+}
+
+console.log('\n【32】★★★ 机器人不能互相学习（2026-10-07 用户截图）');
+{
+  // ## 截图
+  //   saki：「别急着装？那不装拿什么进啊。 **Java 21 该装还是得装的**」
+  //   Anon（引用她那条）：「**记下了 —— 【Java版本要求】（覆盖了旧的）**」
+  //                         「哦——原来是 21 啊，我记岔了」
+  //   ⇒ 对面那个号**把同类说的话当知识记进了学习档案** ⇒ 知识库被污染 ✗
+  //   用户一句：「**机器人不能互相学习**」
+  //
+  // ## 为什么原来那两道守卫拦不住
+  //   · `teach.bots` 是**白名单**，只列了 Q群管家那一个号；
+  //   · 昵称判据要求带「管家 / 机器人 / bot」，而那个号的群名片是「saki酱saki酱saki酱」✗
+  //   ⇒ 现在按**配置里的机器人池**判（同类池 + 别的机器人池）—— 不看昵称、也不用记白名单 ✓
+  //
+  // ⚠️ 所有教学路径都经过 `canTeach()`（6456 确认 / 6472 忘记 / 6486 总闸 / 8205 自然教学），
+  //    所以堵这一处就全覆盖。
+  const src32 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  const { Bot } = await import('../src/bot.js');
+
+  check(
+    /const pool = \[\.\.\.peersFor\(gid\), \.\.\.otherBotsFor\(gid\)\]\.map\(String\);/.test(src32),
+    '★★★ `canTeach()` 里按**机器人池**拒（同类池 + 别的机器人池）',
+  );
+  check(
+    /拒绝来自同类\/别的机器人 \$\{uid\} 的"教学"/.test(src32),
+    '★★ 而且会记一条日志（以后能查是谁教的）',
+  );
+
+  // 行为
+  const G32 = '999000032';
+  const P32 = '10000032';
+  const O32 = '10000033';
+  config.groupParams[G32] = { peers: [P32], otherBots: [O32] };
+  config.teach = { ...(config.teach ?? {}), enable: true, requireOwnerRole: true };
+  const b32 = new Bot();
+  const ev32 = (uid, role) => ({
+    message_type: 'group',
+    group_id: G32,
+    user_id: uid,
+    sender: { user_id: uid, card: 'saki酱saki酱saki酱', nickname: 'saki酱saki酱saki酱', role },
+  });
+  check(b32.canTeach(ev32(P32, 'admin')) === false, '★★★ 同类池里的号（哪怕在群里是管理员）**不许教她**');
+  check(b32.canTeach(ev32(O32, 'owner')) === false, '★★★ 别的机器人池里的号也一样');
+  check(
+    b32.canTeach(ev32('30003', 'admin')) === true,
+    '★★★ 对照：**真人管理员照旧能教**（别把真人一起堵掉）',
+  );
+  check(
+    b32.canTeach(ev32('30003', 'member')) === false,
+    '★ 对照：普通群友照旧不能教（原来那条规矩没被破坏）',
+  );
+}
+
+console.log('\n【33】★★ 「花多少时间」不许被当成「花了多少钱」（2026-10-07 用户截图：「为什么这个会触发查账」）');
+{
+  // ## 截图
+  //   群里那句是「给你看看我进服务器**花多少时间**」，结果两个号各报了一遍账：
+  //     「哇塞进个服务器这么费劲的吗——不过说到账本，爱音这个月花掉 42.37 元…」
+  //     「101元，这月花的。12,426次调用，两亿多token……」
+  //   ⇒ 裸的 `花` 命中 + `ask` 里的 `多少` 命中 ⇒ 被当成"问花了多少钱" ✗
+  const spend33 = await import('../src/spend.js');
+
+  check(
+    spend33.looksLikeSpendQuestion('给你看看我进服务器花多少时间') === null,
+    '★★★ 截图那句**不许**触发查账（"花多少时间"跟钱没关系）',
+  );
+  check(spend33.looksLikeSpendQuestion('这个我花了不少功夫') === null, '★★ 「花了不少功夫」也不算');
+
+  // 对照：真问钱照旧要认（别把闸堵死）
+  const m1 = spend33.looksLikeSpendQuestion('这个月花了多少钱');
+  check(m1?.type === 'spend' && m1?.scope === 'month', '★★★ 对照：「这个月花了多少钱」照旧认', JSON.stringify(m1));
+  const m2 = spend33.looksLikeSpendQuestion('今天花了多少');
+  check(m2?.type === 'spend' && m2?.scope === 'day', '★★★ 对照：「今天花了多少」照旧认（含 day 范围）', JSON.stringify(m2));
+  const m3 = spend33.looksLikeSpendQuestion('你赚了多少');
+  check(m3?.type === 'earn', '★★ 对照：「你赚了多少」照旧认（earn 那一路）', JSON.stringify(m3));
+  const m4 = spend33.looksLikeSpendQuestion('余额还有多少');
+  check(m4?.type === 'spend', '★★ 对照：「余额还有多少」照旧认', JSON.stringify(m4));
+}
+
+console.log('\n【34】★★★ 说了收场话就不许再追补（2026-10-07 用户截图：「发了结束语还在接话」）');
+{
+  // ## 截图
+  //   saki「行行行，机密最大，我不挑了。**我先去忙了，到点了**」
+  //   Anon「行，去吧」
+  //   Anon「**机密我先替你收着（**」   ← 自己又补一句 ✗
+  //   saki「收着吧，别给我弄丢了」     ← 又被带着接一句 ✗
+  // ⇒ 后面那两句是**追补**（"说完又想补充"）补出来的，而那条路
+  //   **从来没查过"我刚说的是不是收场话"** ✗
+  //   （`decide()` 里那几道收尾闸只管"接**别人**的话"，管不到自己补自己。）
+  const src34 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  const { Bot } = await import('../src/bot.js');
+  const b34 = new Bot();
+
+  check(
+    /if \(this\.isFarewell\(replied\)\) \{[\s\S]{0,200}?不追补/.test(src34),
+    '★★★ `maybeFollowUp()` 里：**自己刚说的是收场话 ⇒ 不补**',
+  );
+  check(
+    /刚收过尾（\$\{Math\.ceil\(\(cool - \(Date\.now\(\) - closedAt\)\) \/ 1000\)\} 秒冷却中）→ 不追补/.test(src34),
+    '★★★ 这个群刚收过尾（含这一轮她自己刚说的那一次）⇒ 也不补（双保险）',
+  );
+
+  // 行为：那句确实是"收场话"
+  check(
+    b34.isFarewell('行行行，机密最大，我不挑了。我先去忙了，到点了') === true,
+    '★★★ 截图里 saki 那句要判成收场话',
+  );
+  check(
+    b34.isFarewell('行，去吧') === false,
+    '★ 已知：「行，去吧」**故意不认**（认了会误伤「去吧台看看」）—— ' +
+      '它不算收场，所以回它没问题；真正要拦的是**说完收场话之后的追补**',
+  );
+  check(
+    b34.isFarewell('那我先看看这个日志里报的什么错，等会儿告诉你') === false,
+    '★★ 对照：**正常的一句交代不算收场**（别把追补整条路堵死）',
+  );
+
+  // ⚠️⚠️ 2026-10-07 补（用户截图：「**又把不接（）发出来了**」）：
+  //    提示词里原来写着「没什么可说的**直接不接**也完全可以」——
+  //    模型把它读成"要说一句'不接'" ⇒ 群里出现「（这话已经说到头了，不接）」「（不接）」✗
+  //    ⇒ 提示词必须说清：**"不接"就是不发消息**，不是发一句"我不接"。
+  check(
+    /不许发「（不接）」「（不回了）」「（这话说到头了）」这种旁白/.test(src34),
+    '★★★ 提示词里点名禁掉「（不接）」这种旁白式元发言（截图那句就是它教出来的）',
+  );
+  check(
+    /不想接就一个字都别发/.test(src34),
+    '★★★ 并且把"不接"的意思写清：**就是不发消息**',
+  );
+}
+
+console.log('\n【35】★★★ 收紧度调高时，「判断节流」不许绕过它（2026-10-07 用户：「收紧度调高回话频率还是很高」）');
+{
+  // ## 用户的问题
+  //   「为什么感觉现在收紧度调高回话频率还是很高」
+  //
+  // ## 真因（日志实证）
+  //   `[主动接话] 判断节流中（chat@group:…，5s 内刚问过）→ 跳过判断、直接接`
+  //   —— 收紧度调高只是让 `judge` 更严格，可 **5 秒窗口内的消息压根不问 judge**：
+  //     群里连着说话时，第一条判"接"之后，后面 5 秒里的**每一条都直接接** ✗✗
+  //   ⇒ 这条闸**完全绕过收紧度**，用户把滑块拉高也没用。
+  const src35 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+
+  check(
+    /const sThrottle = this\.strictnessOf\(event\);/.test(src35),
+    '★★★ 判断节流命中时**先读收紧度**',
+  );
+  check(
+    /if \(sThrottle <= 2\) \{[\s\S]{0,400}?跳过判断、直接接/.test(src35),
+    '★★ 收紧度 ≤ 2（最放得开那档）⇒ 照旧"直接接"（要的就是像真人一样想说就说）',
+  );
+  check(
+    /收紧度 \$\{sThrottle\} > 2 → \*\*这条不接\*\*/.test(src35),
+    '★★★ 收紧度 > 2 ⇒ **这条不接** —— 原来是一律"直接接"，等于这条闸完全绕过滑块',
+  );
+  check(
+    /const sThrottle = this\.strictnessOf\(event\);\s*\n\s*if \(sThrottle <= 2\)/.test(src35),
+    '★ 而且判断就在节流分支里面（不改"判得了就正常判"那条路）',
+  );
+}
+
+console.log('\n【36】★★★ 追补（followUp）要受收紧度管 —— 它原来一点都不过（2026-10-07 用户：「主动搭话的频率就是很高」）');
+{
+  // ## 实测（日志统计，最近那批 `主动接话` 里 **15 条有 14 条是 `followUp`**）
+  //    18:46:30 followUp / 18:47:19 followUp / 18:47:24 followUp /
+  //    18:48:19 / 18:48:38 / 18:49:35 / 18:49:44 … 几乎全是它。
+  //   ⇒ 用户把收紧度拉高也没用：`judge` 只管"这条要不要接"，
+  //     而追补是**回复发出去之后**又自己补的，走 `maybeFollowUp`，
+  //     那边只有"概率闸 + 每次上限"，**跟收紧度毫无关系** ✗✗
+  const src36 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  const { Bot } = await import('../src/bot.js');
+
+  check(
+    /const sFU = this\.strictnessOf\(event\);/.test(src36),
+    '★★★ `maybeFollowUp()` 里**读了收紧度**',
+  );
+  check(
+    /if \(sFU > 2\) \{[\s\S]{0,300}?不追补/.test(src36),
+    '★★★ 收紧度 > 2 ⇒ **不追补**（和 judge 那条闸同一个分界：>2 才过 judge）',
+  );
+
+  // 行为：收紧度高时确实不补（`maybeFollowUp` 是 async，但要走到返回只需要前面几行）
+  const G36 = '999000036';
+  const P36 = '10000036';
+  config.groupParams[G36] = { peers: [P36], chat: { strictness: 60 } };
+  const b36 = new Bot();
+  const ev36 = {
+    message_type: 'group',
+    group_id: G36,
+    user_id: P36,
+    self_id: String(config.botQQ ?? ''),
+    sender: { card: '', nickname: '' },
+    message: [{ type: 'text', data: { text: '嗯' } }],
+  };
+  config.selfFollowUp = { ...(config.selfFollowUp ?? {}), enable: true };
+  // ⚠️ `shouldConsider()` 是概率闸（测试里没法固定随机源）—— 所以这里只断言
+  //    "**把随机闸放开之后，收紧度仍然挡得住**"：连续试 30 次，一次都不许真的发出去。
+  let sent36 = 0;
+  const origSend = b36.sendText.bind(b36);
+  b36.sendText = async () => {
+    sent36 += 1;
+    return { status: 'ok' };
+  };
+  for (let i = 0; i < 30; i++) {
+    await b36.maybeFollowUp(ev36, { replied: '这条就是一句普通的回应，没有收场的意思', who: '群' });
+  }
+  check(sent36 === 0, `★★★ 行为：收紧度 60 的群里，追补**一次都没发出去**（试了 30 次，发出 ${sent36} 次）`);
+  b36.sendText = origSend;
+}
+
+console.log('\n【37】★★★ 机器人不能互相设定时提醒（2026-10-08 跨天 00:00 用户报：「出来了一堆机器人互相提醒」）');
+{
+  // ## 实测（`logs/bot-2026-10-08.log`，跨天那一刻爆的）
+  //   Anon「你让我提醒你的，下完记得喊我一声。」
+  //   → `[提醒] 记下一条：10月9日 00:00 提醒 10000012「下完」` ✗
+  //   → 紧接着 `[提醒] 到点已发出：到拐弯喊我一声 / 圈转完了喊我看 /
+  //      搞素世的话记得把项目更新一下…` —— **四条一起发** ✗✗
+  //   —— 那些本来是**剧情里的台词**（「到拐弯喊我一声」），
+  //     被 `提醒|叫我|喊我|记得` 那个粗筛抓成了"用户定的提醒"。
+  //   用户一句：「**机器人不能互相设定时提醒**」。
+  const src37 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  const { Bot } = await import('../src/bot.js');
+
+  check(
+    /wantsRemind\(event\) \{[\s\S]{0,900}?const pool = \[\.\.\.peersFor\(gid0\), \.\.\.otherBotsFor\(gid0\)\]\.map\(String\);/.test(
+      src37,
+    ),
+    '★★★ `wantsRemind()`（同步粗筛）里按**机器人池**拒 —— 和"教学"同一个模式',
+  );
+  check(
+    /机器人不能互相设定时提醒/.test(src37),
+    '★★ 而且 `maybeRemind()` 里再挡一道（别的调用点会直接调它）',
+  );
+
+  // 行为
+  const G37 = '999000037';
+  const P37 = '10000037';
+  const O37 = '10000038';
+  config.groupParams[G37] = { peers: [P37], otherBots: [O37] };
+  config.remind = { ...(config.remind ?? {}), enable: true };
+  const b37 = new Bot();
+  const ev37 = (uid, t) => ({
+    message_type: 'group',
+    group_id: G37,
+    user_id: uid,
+    message: [{ type: 'text', data: { text: t } }],
+    sender: { user_id: uid, card: '', nickname: '' },
+  });
+  check(
+    b37.wantsRemind(ev37(P37, '你让我提醒你的，下完记得喊我一声')) === false,
+    '★★★ 同类说的话（含「提醒」「喊我一声」）⇒ **不算要定提醒**',
+  );
+  check(
+    b37.wantsRemind(ev37(O37, '记得提醒我看一眼')) === false,
+    '★★★ 别的机器人池里的号也一样',
+  );
+  check(
+    b37.wantsRemind(ev37('30003', '提醒我明天八点起床')) === true,
+    '★★★ 对照：**真人定的提醒照旧认**（一个字都没受影响）',
+  );
+}
+
+console.log('\n【38】★★★ 到点太久还没发出去的提醒要自动丢掉（2026-10-08 用户：「真人的都是已经过去的事情，为什么不会自动删除」）');
+{
+  // ## 用户看到的
+  //   state/remind.json 里躺着 12 条**9 月**的真人提醒（9/19 起床、9/25 下火车…），
+  //   早就过期了却一直不删。
+  //
+  // ## 根因
+  //   `index.js` 的提醒 tick 靠一个**内存** Map 记"试了多久"（`fails: id → {n,since}`）
+  //   + `giveUpMs`（2 小时）决定什么时候放弃 —— 而**内存态一重启就归零**，
+  //   机器人本来就每天重启几次（2026-10-07 那晚我自己就重启了十几次）
+  //   ⇒ 那 2 小时**永远等不到** ⇒ 发不出去的提醒**永远挂着** ✗✗
+  //
+  // ## 修
+  //   换一条**跟重启无关**的判据：**看提醒自己到点多久了**（`remind.stale()`）——
+  //   到点超过 staleMs（默认 24 小时）还没发出去就丢掉，不再重试 ✓
+  const rsrc38 = readFileSync(join(ROOT, 'src', 'remind.js'), 'utf8');
+  const isrc38 = readFileSync(join(ROOT, 'src', 'index.js'), 'utf8');
+
+  check(
+    /export function stale\(before = Date\.now\(\)\)/.test(rsrc38),
+    '★★★ `remind.stale()`：按"提醒自己到点多久了"判过期（跟重启无关）',
+  );
+  check(
+    /const sweepStale = \(\) => \{/.test(isrc38) && /sweepStale\(\);\s*\n\s*\} catch/.test(isrc38),
+    '★★★ tick 里**先清过期**、再处理到点的',
+  );
+  check(
+    /Number\(config\.remind\?\.staleMs\) \|\| 24 \* 3600 \* 1000/.test(isrc38),
+    '★★ staleMs 默认 24 小时（可配）—— 隔了一天的提醒发出去反而是打扰',
+  );
+  check(
+    /到点已经超过 \$\{Math\.round\(staleMs \/ 3600000\)\} 小时还没发出去/.test(isrc38),
+    '★ 丢掉时会记一条日志（以后能查"什么提醒被丢了"）',
+  );
+}
+
+console.log('\n【39】★★★ 一整段"旁白式括号"不许发出去（2026-10-08 用户截图：「前面又输出括号了」）');
+{
+  // ## 截图（连着两条）
+  //   Anon「（不回，继续翻素世那摊）」
+  //   saki「（那就没我什么事了，让她弄去吧。）」
+  // —— 那是**状态报告**，不是台词；群里的人看到只会莫名其妙。
+  //   用户为这个已经截过好几次图（上一次是「（不接）」）。
+  //
+  // ⚠️ 为什么单靠提示词管不住：写不写括号全看模型那一次的心情 ——
+  //    上一轮已经在提示词里点名禁过「（不接）」，这次换个说法又冒出来 ✗
+  //    ⇒ 代码兜底（和"剧情里不许睡觉收场"同一个位置：`sendChatLike`）✓
+  const src39 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  const { Bot } = await import('../src/bot.js');
+  const b39 = new Bot();
+
+  check(/isBracketNarration\(text\) \{/.test(src39), '★★★ 有"一整段旁白式括号"的判据');
+  check(
+    /if \(!opts\.force && this\.isBracketNarration\(text\)\)/.test(src39),
+    '★★★ 而且接在 `sendChatLike`（她所有发言的**唯一出口**，拦一处就够）',
+  );
+
+  // 行为：截图那两条要拦
+  check(
+    b39.isBracketNarration('（不回，继续翻素世那摊）') === true,
+    '★★★ 截图第 1 条（Anon 那句）要拦',
+  );
+  check(
+    b39.isBracketNarration('（那就没我什么事了，让她弄去吧。）') === true,
+    '★★★ 截图第 2 条（saki 那句，带句号）要拦',
+  );
+  check(b39.isBracketNarration('（不接）') === true, '★★ 上一轮那个「（不接）」也能兜住');
+
+  // 对照：动作 / 表情那种括号**必须放行**（不然就误伤了）
+  check(b39.isBracketNarration('（笑）') === false, '★★★ 对照：「（笑）」是动作，照旧放行');
+  check(b39.isBracketNarration('（揉了揉眼睛）') === false, '★★ 对照：动作描写放行');
+  check(
+    b39.isBracketNarration('（她说的那个我再看看）好，我知道了') === false,
+    '★★★ 对照：**前面带括号、后面有正话** ⇒ 不是"一整段旁白"，放行',
+  );
+  check(b39.isBracketNarration('行，那你弄，弄完吱我一声') === false, '★ 对照：普通一句话放行');
+}
+
+console.log('\n【40】★★★ 两个机器人互刷时用精简提示词 + 关思考链（2026-10-08 用户：「耗 token 非常快」，选了 A+D）');
+{
+  // ## 实测（`state/spend.json`）
+  //   10-07：3207 次调用、**6712 万 prompt token**、completion 126 万（只占 3%）→ ¥42.4
+  //   ⇒ 单次平均 prompt ≈ **2.1 万 token**：钱全花在"每次都把那一大坨提示词重发一遍"上 ✗
+  //   ⇒ A：互刷时**只留人设**（不带服务器库/群记忆/故事线）；
+  //     D：互刷时**关思考链**。
+  //   ⚠️ 判据是 `botOnlyChain()`（来回够多条 + 窗口里没有真人）⇒
+  //      **你和群友说话时一个字都不变** ✓
+  const src40 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+
+  check(
+    /buildSystemPrompt\(liveStatus = '', event = null, voluntary = null, currentText = '', vision = '', webSearch = '', forwardText = '', crashLog = '', solveMode = false, lean = false\)/.test(
+      src40,
+    ),
+    '★★★ `buildSystemPrompt()` 多了 `lean` 参数',
+  );
+  check(
+    /const onlyNames = lean\s*\n?\s*\?\s*picked\.names\.filter\(/.test(src40),
+    '★★★ A：`lean` 时知识库**只留人设**（其余文件不带）',
+  );
+  check(
+    /const sl = lean \? '' : storyline\.promptBlock\(5, scopeId\);/.test(src40),
+    '★★★ A：`lean` 时**不带故事线**（那是给群友看的长期记忆，互刷用不上）',
+  );
+  check(
+    /\(_bcStat\.humans \?\? 0\) === 0 &&\s*\n\s*\(_bcStat\.total \?\? 0\) >= 3/.test(src40),
+    '★★★ `leanMode` 的判据改成「窗口里没有真人 + 至少 3 条」—— ' +
+      '原来是 `botOnlyChain()`（要满 10 条或跨 3 分钟），实测 65 条里只有 3 条命中（4.6%）✗',
+  );
+  // ⚠️ 2026-10-09：原来那条"截前 12000 字"的断言已经过时 ——
+  //    现在改成**按节挑**（`leanSections()`），那条断言搬到了【42】里 ✓
+  check(
+    /const leanNoThink = leanMode && !this\.questLive\(String\(event\.group_id \?\? ''\)\);/.test(src40),
+    '★★★ D 只对"不演剧情的互刷"生效 —— 剧情里**保留思考链**（用户问「那剧情状态下互刷会怎么样」）',
+  );
+  check(
+    /leanNoThink\s*\n?\s*\? \{ thinking: \{ type: 'disabled' \} \}/.test(src40),
+    '★★★ 关思考用的是 `leanNoThink`（不是 `leanMode`）',
+  );
+  check(
+    /const onlyNames = lean\s*\n?\s*\?\s*picked\.names\.filter\(/.test(src40),
+    '★★★ A（砍知识库）**剧情里照砍** —— 服务器库/群记忆对剧情没用，纯粹是省',
+  );
+  check(
+    /solveMode,\s*\n\s*leanMode,\s*\n\s*\);/.test(src40),
+    '★★ 调用点真的把 `leanMode` 传进去了（不然上面全白改）',
+  );
+}
+
+console.log('\n【41】★★★ "短句点头"拉锯要停：话题完了就别再往下接（2026-10-08 用户截图：「很明显应该自己停下接话，但是没停」）');
+{
+  // ## 截图那串
+  //   Saki「嗯，去吧」→ Anon「嗯，这就去」→ Saki「嗯，去吧，这次真不催你了」
+  //   → Anon「诶，这话你刚说过一遍了吧…」→ Saki「去吧去吧，这回真不催了」
+  //   → Anon「诶，你这话都第三遍了…」
+  // —— 话题早就完了（双方都点头"去吧"），却一句接一句下不去 ✗
+  //
+  // ⚠️ 为什么现成三道闸都拦不住：
+  //   · `botOnlyChain()`（注入"该收了"）要**满 10 条或跨 3 分钟**，这里才 6 条几十秒 ⇒ 没注入；
+  //   · 硬闸 `botChainHard` 要 24 条；
+  //   · `isFarewellLine()` 的词表**故意没有"去吧"**（怕误伤「去吧台看看」）。
+  const src41 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  const recent41 = await import('../src/recent.js');
+  const { Bot } = await import('../src/bot.js');
+
+  check(/isShortNodLull\(groupId, peerText\) \{/.test(src41), '★★★ 有"短句点头拉锯"的判据');
+  check(
+    /!this\.questLive\(gid0\) && !peerAtMe && this\.isShortNodLull\(gid0, peerText0\)/.test(src41),
+    '★★★ 接在同类那条路上（剧情里不拦、@ 她的照旧回）',
+  );
+
+  const G41 = '999000041';
+  const store41 = recent41.__storeForTest();
+  store41.set(G41, [{ time: Date.now() - 5000, userId: '__self__', self: true, text: '嗯，去吧' }]);
+  const b41 = new Bot();
+  check(b41.isShortNodLull(G41, '嗯，这就去') === true, '★★★ 截图那句（对面也在点头）⇒ 停');
+  check(b41.isShortNodLull(G41, '去吧去吧') === true, '★★ 同款短句 ⇒ 停');
+  check(
+    b41.isShortNodLull(G41, '你那边几点开始啊') === false,
+    '★★★ 对照：**问句一定要答**（不能因为短就吞掉）',
+  );
+  check(
+    b41.isShortNodLull(G41, '话说素世那摊我翻了一下，确实该更新了') === false,
+    '★★★ 对照：**长句 = 还在正常聊天** ⇒ 不拦',
+  );
+
+  // 我自己上一句是长句 ⇒ 说明还在正经聊，不该按"点头拉锯"处理
+  store41.set(G41, [
+    {
+      time: Date.now() - 5000,
+      userId: '__self__',
+      self: true,
+      text: '素世那摊我翻了一下，确实该更新了',
+    },
+  ]);
+  check(
+    b41.isShortNodLull(G41, '嗯嗯') === false,
+    '★★★ 对照：我自己上一句是长句 ⇒ 这不是"点头拉锯"（她还在正经聊）',
+  );
+  store41.delete(G41);
+}
+
+console.log('\n【42】★★★ 按节挑人设（2026-10-09 用户：「只要拼的时候只拼必须的，优化拼库流程」）');
+{
+  // ## 背景
+  //   `persona.md` **45,891 字 / 80 节**（"用户每报一个毛病就加一节"攒出来的：
+  //   光「⚠️⚠️ 别XX」就有 25 节、约 1.5 万字），而整条提示词平均 73,320 字
+  //   ⇒ 人设占 ≈70%，这才是真正的大头 ✗
+  //
+  // ## 三道保险（`leanSections`）
+  //   ① 永远带：铁律 / 说话方式 / 语气词 / 长短句 / 标点 / 别自言自语 / 身份；
+  //   ② 相关才带：节标题里的词出现在当前消息里；
+  //   ③ 超量按节丢：丢整节，不切半句。
+  const src42 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  const { Bot } = await import('../src/bot.js');
+  const { readFileSync: rf42 } = await import('node:fs');
+
+  check(/leanSections\(full, currentText = '', groupId = ''\) \{/.test(src42), '★★★ 有 `leanSections()`（按节挑人设）');
+  check(
+    /const picked2 = this\.leanSections\(k, currentText, String\(event\?\.group_id \?\? ''\)\);/.test(src42),
+    '★★★ 而且真的用上了（原来那段"切前 12K"已经换成它）',
+  );
+  check(
+    /if \(!solveMode && config\.chat\?\.leanSections !== false\) \{[\s\S]{0,300}?this\.leanSections\(k, currentText/.test(
+      src42,
+    ),
+    '★★★ **默认开着**（`chat.leanSections` 设 false 才关）—— ' +
+      '我一度因 3 个回归红把它关掉，事后查明那是 `cap` 按体积丢节造成的、而 cap 已放开，' +
+      '关掉等于把唯一有效的省法丢掉',
+  );
+  check(/const parts = text\.split\(\/\\n\(\?=#\{2,3\}\\s\)\/\);/.test(src42), '★★ 按 `## ` 节切（不切半句）');
+
+  // 行为：拿真实人设文件量一下到底省多少
+  const b42 = new Bot();
+  const full42 = rf42(join(ROOT, 'personas', 'saki', 'persona.md'), 'utf8');
+  const out42 = b42.leanSections(full42, '嗯，去吧');
+  check(
+    out42.length > 2000 && out42.length < full42.length,
+    `★★★ 实测：${full42.length} → ${out42.length} 字（省 ${Math.round((1 - out42.length / full42.length) * 100)}%）` +
+      ' —— 能切、能变小、不是空壳就行（⚠️ 它只省 13%，所以默认是关的）',
+  );
+  check(
+    /铁律|说话|语气|傲娇/.test(out42),
+    '★★★ 而且**该留的都在**（铁律 / 说话方式 / 人格那几节必须在，不然她就不像她了）',
+  );
+  // 切不开的文本要原样返回，别搞坏
+  check(b42.leanSections('没有二级标题的一小段文字', '你好') === '没有二级标题的一小段文字', '★★ 切不开就原样返回（绝不返回空）');
+  check(b42.leanSections('', '你好') === '', '★ 空输入也不崩');
+}
+
+console.log('\n【43】★★★ 答不上来 ⇒ 把上次没拼上的补进来重生成一次（2026-10-09 用户要求的那道防线）');
+{
+  // ## 用户原话
+  //   「**加一道防线，如果检测到生成的消息存在不明白的地方，就重新更完善地拼一次库，
+  //     并且只拼上次没拼上来的**」
+  // ## 做法
+  //   · `leanSections()` 顺手记下"这次没带上的节"（`_leanSkipped`）；
+  //   · 生成完检测到"答不上来"（`looksConfused`）⇒ `takeSkippedKb()` 取出那部分
+  //     （**取一次就清**）⇒ 追加一条 user 消息 ⇒ **重新生成一次**；
+  //   · **只补一次**（补完不再判），不会循环烧钱。
+  const src43 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  const { Bot } = await import('../src/bot.js');
+  const b43 = new Bot();
+
+  check(/looksConfused\(text\) \{/.test(src43), '★★★ 有"她这条答不上来"的判据');
+  check(/takeSkippedKb\(groupId\) \{/.test(src43), '★★★ 有"取出上次没拼上的那部分"（取一次就清）');
+  check(
+    /if \(this\.looksConfused\(full\)\) \{[\s\S]{0,600}?await _genOnce\(\{\}\);/.test(src43),
+    '★★★ 真的会补库重生成一次',
+  );
+  check(
+    /this\._leanSkipped\.delete\(g\)/.test(src43),
+    '★★ 补完就清掉（不会下一轮又补同样的东西）',
+  );
+
+  // 行为：该认的要认
+  check(b43.looksConfused('东心我手上真没料啊') === true, '★★★ 截图那句（"手上真没料"）要认');
+  check(b43.looksConfused('这个我查不到') === true, '★★ "查不到"要认');
+  check(b43.looksConfused('我不太清楚诶') === true, '★★ "不清楚"要认');
+  // 不该认的别认（不然她每句都补库 = 白花钱）
+  check(b43.looksConfused('嗯，去吧') === false, '★★★ 对照：正常一句话**不许**触发补库');
+  check(b43.looksConfused('行，那我去更新了') === false, '★★ 对照：普通交代不许触发');
+  check(
+    b43.looksConfused('这句话写得很长'.repeat(30)) === false,
+    '★ 对照：超长回复不看（那是剧情/正经回答，不是"答不上来"）',
+  );
+
+  // 行为：跳过清单会记、会取、取完就清
+  // ⚠️ 注意两点，不然这条断言**不稳定**（踩过）：
+  //    ① 按节挑**默认是关的**（`chat.leanSections`）⇒ 直接调 `leanSections()` 验行为；
+  //    ② 先**清掉模型挑库的缓存** ⇒ 强制走"规则分支"，结果才确定
+  //      （缓存命中时走的是"模型挑的那几节"，可能一个都不砍 ✗）
+  const G43 = '999000043';
+  b43._pickCache = new Map();
+  const full43 =
+    '## 铁律\n说话要短\n## 她现在住哪\n住东京\n## 一天怎么过\n上课练琴\n## 你在质疑我吗\n别质疑\n';
+  const cut43 = b43.leanSections(full43, '嗯，去吧', G43);
+  check(!cut43.includes('住东京'), '★★★ 砍掉了「她现在住哪」那一节（那是"设定"，闲聊时用不上）');
+  check(cut43.includes('别质疑'), '★★★ 但「你在质疑我吗」那节**留着**（人格/规矩类的绝不砍）');
+  check(!cut43.includes('上课练琴'), '★★ 「一天怎么过」也砍了');
+  check(
+    (b43._leanSkipped?.get(G43) ?? '').includes('住东京'),
+    '★★★ 砍掉的那些**被记下来了**（"答不上来就补库"那道防线要用它）',
+  );
+  const first = b43.takeSkippedKb(G43);
+  check(first.includes('住东京'), '★★ 取得到（补库要用它）');
+  check(b43.takeSkippedKb(G43) === '', '★★★ 取过一次就清空（不会反复补同一份）');
+}
+
+console.log('\n【44】★★★ 起因里的「铁律」是给编故事的，不是给角色的（2026-10-09 用户：「一定要去找房子的破绽，而不是按房子所说的做」）');
+{
+  // ## 用户报的
+  //   「最近开的那个剧情一直都不能跟着剧情开场词走，一定要去找房子的破绽，
+  //     而不是按房子所说的做，我已经加强几遍开场词了，还是那样」
+  //   他那条起因里明明写着：
+  //     「还有一道铁律：禁止对房子的结构进行研究和破坏，否则会马上爆炸，
+  //       只能按照房子的说法行动，门才会开」
+  //   可剧情一直去研究房子 —— 他被迫**手动干预三次**（「不能再花时间研究房子了」
+  //   「房子出现倒计时」「所有对房子的操作都没用」）。
+  //
+  // ## 根因（不是"措辞不够强"）
+  //   用户写的铁律是**给写戏的人看的** ⇒ 角色**不该知道**它、更不该去试探它；
+  //   可模型读成了"剧情内的设定" ⇒ "角色不知道这条规则，所以可以试着试探" ✗
+  //   而"找破绽"恰恰是模型写戏时最自然的推进方式 ✗
+  // ⇒ 所以要把它**单独拎出来**、写明"这是给你的，不是给角色的" ✓
+  const quest44 = await import('../src/quest.js');
+  const qsrc44 = readFileSync(join(ROOT, 'src', 'quest.js'), 'utf8');
+
+  const p44 =
+    '爱音和祥子进入了一个不出的房间，门也是锁死的，而且还有一个10分钟倒计时。' +
+    '还有一道铁律：禁止对房子的结构进行研究和破坏，否则会马上爆炸，只能按照房子的说法行动，门才会开。';
+  const rules44 = quest44.ironRules(p44);
+  check(rules44.length >= 1, `★★★ 抽得出「铁律句」（${rules44.length} 条）`);
+  check(
+    rules44.some((r) => /禁止对房子的结构/.test(r)),
+    '★★★ 截图那条（「禁止对房子的结构进行研究和破坏」）必须抽到',
+    JSON.stringify(rules44),
+  );
+  check(quest44.ironRules('今天天气不错，她们在屋里聊天。').length === 0, '★★ 没有铁律的起因 ⇒ 抽不出东西（别硬造）');
+
+  check(
+    /是"铁律"—— 是给你（写戏的人）的硬约束，/.test(qsrc44),
+    '★★★ `chatBrief` 里钉了"**这是给你的硬约束，不是给角色的设定**"',
+  );
+  check(
+    /不许写"她们去试探 \/ 研究 \/ 破坏它"/.test(qsrc44),
+    '★★★ 并且明说**不许写试探性动作**（敲墙/看门缝/翻柜子/按一按/找缝）',
+  );
+  check(
+    /起因里的"铁律"是给你的硬约束，不是给角色的设定/.test(qsrc44),
+    '★★★ 推进那一段（`advance`）也钉了同一条（两边口径必须一致）',
+  );
+}
+
+console.log('\n【45】★★★ `/清除剧情` 要连「她自己的话」一起清（2026-10-09 用户：「聊天记录的上下文还是不会清」）');
+{
+  // ## 用户报的
+  //   「现在 `/清除剧情` 只会清故事线里的内容，聊天记录的上下文还是不会清，这个可以解决吗」
+  // ## 查出来的
+  //   代码**确实在清** `recent`（`recent.dropWindow`），但 `uids` 里只传了
+  //   `selfId`（**QQ 号**）+ 同类池的号 —— 而她自己在 `recent` 里的 `userId` 是
+  //   **`'__self__'`** ⇒ **永远匹配不上** ⇒ **她自己的台词一条都没被清** ✗
+  //   （她那一刻看到的：清了 3 条同类的话，可她自己的全程留着 —— 表现就是"没清"）
+  //   ⚠️ 实证：清出来的残留里就有「行吧，那我回教室了，下午还有课」「上课了」，
+  //     而"回去上课"正是用户之前报过的那个穿帮 ✗（同一个根因）
+  // ## 另外
+  //   **每个账号有自己的 `recent.json`**（`state/accounts/<QQ>/recent.json`）——
+  //   两个进程各自收到 `/清除剧情`、各自清自己那份 ⇒ 机制上能覆盖两边 ✓
+  const src45 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+
+  check(
+    /String\(this\.selfId \?\? config\.botQQ \?\? ''\),[\s\S]{0,600}?'__self__',/.test(src45),
+    '★★★ `/清除剧情` 的 `uids` 里必须有 `\'__self__\'` —— ' +
+      '她自己的发言在 `recent` 里存的是这个，只传 QQ 号永远清不掉 ✗',
+  );
+  check(/清掉上一段的聊天残留/.test(src45), '★★★ 开新剧情时也会自动清一次上一段的残留（不用手动 /清除剧情）');
+  check(
+    /只清\*\*那两个号\*\*说的话，真人发言一条不动/.test(src45),
+    '★★ 而且只清那两个号（真人发言不许动）',
+  );
+}
+
+console.log(
+  '\n【46】★★★ 切人设只改「当前这个号」，而且日志要留下**能查到的**落点' +
+    '（2026-10-09 用户：「主号改回Saki，而且不是我改的，查一下怎么变得」）',
+);
+{
+  // ## 用户报的
+  //   「主号改回Saki，而且不是我改的，查一下怎么变得」
+  // ## 查出来的（有日志证据）
+  //   `logs/bot-2026-10-09.log` 13:49:42 界面上点了「切到这个」⇒
+  //   `persona` **不在 `SHARED_SECTIONS` 里** ⇒ 走 `splitPatch` 被当成"这个号私有"
+  //   ⇒ 写进 `accounts/<当前号>.yml`，**config.yml 一个字没动**。
+  // ⇒ 而那条"谁改了人设"的日志打的是 `CONFIG_FILE`（config.yml）
+  //   ⇒ 照它去翻**必然扑空**（我真扑了）✗
+  // ## 修法
+  //   ① 在 `splitPatch` **之前**记下 `personaPatch`（patch 会被摘过一遍）；
+  //   ② 日志打**真实落点**；③ 接口把落点返回给界面；④ 界面上加二次确认。
+  const src46 = readFileSync(join(ROOT, 'src', 'webui.js'), 'utf8');
+  check(
+    /personaPatch/.test(src46) &&
+      /accounts\.has\(ACCOUNT\.id\) \? accounts\.fileOf\(ACCOUNT\.id\)/.test(src46),
+    '★★★ `persona` 的写入日志要打**真实落点**（账号私有文件），不能用 `CONFIG_FILE` —— ' +
+      '打错文件会让"主号怎么变成别人的人设了"查不到 ✗',
+  );
+  check(/wrote,/.test(src46), '★★ 切换接口要把落点回给界面（不然看不出"只改了这一个号"）');
+  const html46 = readFileSync(join(ROOT, 'src', 'webui.html'), 'utf8');
+  check(
+    /if \(!confirm\(/.test(html46),
+    '★★★ 界面上「切到这个」必须有二次确认 —— 误点一下人格当场就换了，而且没有撤销 ✗',
+  );
+  check(
+    /只影响\*\*当前正在控制的这个号\*\*/.test(html46),
+    '★★ 确认框里要写明**只影响当前这一个号**（别的号不变）',
+  );
+}
+
+console.log('\n【47】★★★ 回归套件的日志不许灌进真实的按天日志（2026-10-09 踩了）');
+{
+  // ## 我踩的
+  //   查「主号人设被改」时，`logs/bot-2026-10-09.log` 里满屏重复九次的
+  //   「不回复的机器人名单」，外加 `999000098` / `10000020` 这些**假号** ——
+  //   我差点判成"机器人在崩溃重启循环"（差点让用户白紧张一场）。
+  // ## 根因
+  //   `src/log.js` 的隔离判据是"配置名里含 test"，而 `test/run-all.js`
+  //   **故意不动 `QQBOT_CONFIG`**（指向不存在的文件会让 config.js 拿不到配置）
+  //   ⇒ 套件里 `spawn` 的真机器人用的还是 `config.yml` 这个名字 ✗
+  // ## 修法
+  //   加一个**显式**的 `QQBOT_LOG_FILE`（优先于一切猜测），由 run-all 注入。
+  const src47 = readFileSync(join(ROOT, 'src', 'log.js'), 'utf8');
+  check(
+    /process\.env\.QQBOT_LOG_FILE/.test(src47),
+    '★★★ `src/log.js` 要认 `QQBOT_LOG_FILE`（显式指定，优先级最高）',
+  );
+  check(
+    /QQBOT_LOG_FILE\) return join\(ROOT/.test(src47),
+    '★★ 而且它要**排在**"按配置名猜"那条判据前面（否则等于没加）',
+  );
+  const run47 = readFileSync(join(ROOT, 'test', 'run-all.js'), 'utf8');
+  check(/QQBOT_LOG_FILE: `logs\/__run-/.test(run47), '★★★ `run-all.js` 要给每个套件注入独立的日志文件');
+}
+
+console.log(
+  '\n【48】★★★ 剧情进行中也不许接「不同类机器人」的话' +
+    '（2026-10-09 用户：「不同类机器人不回话这道闸失效了」）',
+);
+{
+  // ## 用户报的
+  //   「不同类机器人不回话这道闸失效了」
+  // ## 查出来的（有日志实证，群 200000001 今天 13:12:41）
+  //   `[收到·主动/@] Alone゜独白ぴ（helps菜单）：嗯，那正好。`
+  //   → `[同类] 剧情进行中 → **这条我接**`
+  //   可那个号**就在落盘的不回复名单里**（启动日志每次都打它）。
+  //   真因：那条"剧情里我接"的快速通道在 `message_type === 'group'` 的块里
+  //   （**不限同类**），只看"剧情在演 + 没 @ 我"，**没问发送者是谁**；
+  //   而总闸 `isIgnoredBotEvent()` 在 `decide()` 很后面 ⇒ 一 return 就绕过去了 ✗
+  // ## 修法
+  //   ① 那条通道加上 `!this.isIgnoredBotEvent(event)`（对同类池的号它返回 false，
+  //      不会误伤自己人）；② 落盘名单的比对加"核心名"一层 —— 名单里存的是
+  //      `Alone゜独白ぴ（helps菜单）` 这种**完整昵称**，对方改个后缀就静默失效了。
+  const src48 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  check(
+    /this\.questLive\(gid0\) && !this\.isIgnoredBotEvent\(event\)/.test(src48),
+    '★★★ 「剧情进行中 → 这条我接」的快速通道必须先过 `isIgnoredBotEvent()` —— ' +
+      '不然剧情一开，不同类机器人那道闸就等于不存在 ✗',
+  );
+  check(
+    /nc === core\(bs\)/.test(src48),
+    '★★★ 落盘的不回复名单要按**核心名**比对（去掉括号后缀）—— ' +
+      '精确比对对方改个群名片就静默失效 ✗',
+  );
+  check(
+    !/this\.ignoreBots\?\.has\(name\)/.test(src48),
+    '★★ 旧的"完整昵称精确比对"要换掉（留着就是那个静默失效的隐患）',
+  );
+  // 闸门只加到"剧情"那条通道上还不够 —— 它必须**仍然**在最前面的总闸里
+  check(
+    /if \(this\.isIgnoredBotEvent\(event\)\) \{/.test(src48),
+    '★★★ `decide()` 里那道总闸还在（`isIgnoredBotEvent` 仍然被调用）',
   );
 }
 

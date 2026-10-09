@@ -444,6 +444,16 @@ function saveConfig(patch) {
   //    整个重新序列化一遍（注释全丢、格式全变），而且多号并发时还有互相覆盖的风险。
   //    实测是 `test/accounts.js`【8】抓出来的（它盯着共用文件有没有被动过）。
   const touchedLife = !!patch?.life;
+  // ⚠️⚠️ 2026-10-09 加：**`splitPatch` 之前**先把 `persona` 记下来。
+  //
+  //    为什么必须记在这里：`persona` **不在 `SHARED_SECTIONS` 里** ⇒
+  //    `splitPatch()` 会把它当成"这个号私有"的段、**从返回值里摘掉**
+  //    （写进 `accounts/<当前号>.yml`）⇒ 下面那句 `put('persona', patch.persona)`
+  //    和 `if (patch.persona)` **永远不成立** ⇒ 日志那行"谁改了人设"
+  //    **一次都不会打**。实测：`logs/bot-2026-10-09.log` 里那次切人设
+  //    （13:49:42）**没有**「配置写入 persona.id」这行，只有
+  //    「配置写入账号私有文件（号 …）：persona → accounts/<QQ>.yml」。
+  const personaPatch = patch?.persona;
   patch = splitPatch(patch);
   if (Object.keys(patch).length === 0) {
     reloadConfig();
@@ -517,9 +527,18 @@ function saveConfig(patch) {
   put('persona', patch.persona);
   // ⚠️ 2026-09-22 加：**谁在改人设**要留下痕迹。
   //    查"config.yml 被莫名改成别的人设"时，就是靠这行定位到是哪个套件干的。
-  //    带上 CONFIG_FILE 一眼能看出改的是**真实配置**还是套件的临时配置。
-  if (patch.persona) {
-    log.info(`配置写入 persona.id → ${JSON.stringify(patch.persona?.id ?? '')}（文件：${CONFIG_FILE}）`);
+  //    带上文件名一眼能看出改的是**真实配置**还是套件的临时配置。
+  //
+  // ⚠️⚠️ 2026-10-09 修：**原来这里打的是 `CONFIG_FILE`（config.yml），而真实落点是
+  //    `accounts/<当前号>.yml`** —— `persona` 不在 `SHARED_SECTIONS` 里，走 `splitPatch`
+  //    就成了"这个号私有"。当天用户问「主号怎么变成别人的人设了、不是我改的」，
+  //    我照这行日志去翻 `config.yml`，**整个扑空**（那份文件确实一个字没动）。
+  //    ⇒ 打**真实落点**，并且判据用 `personaPatch`（patch 已被 splitPatch 摘过一遍，
+  //      原来的 `patch.persona` 在私有段这条路上恒为 undefined）。
+  if (personaPatch || patch.persona) {
+    const pId = (personaPatch ?? patch.persona)?.id ?? '';
+    const where = ACCOUNT.id && accounts.has(ACCOUNT.id) ? accounts.fileOf(ACCOUNT.id) : CONFIG_FILE;
+    log.info(`配置写入 persona.id → ${JSON.stringify(pId)}（文件：${where}）`);
   }
   // ⚠️ 分群参数（2026-09-15）——和 configForUi 里那一行是**一对**，别只加一个
   put('groupParams', patch.groupParams);
@@ -2913,12 +2932,19 @@ const routes = {
         );
       }
       if (qqApply.problems.length) log.warn(`QQ 资料没全换上：${qqApply.problems.join('；')}`);
+      // ⚠️ 2026-10-09 加：把**真实落点**告诉界面。
+      //    切人设只改**当前这个号**（`accounts/<QQ>.yml`），界面上过去只说
+      //    "已切到 xxx"，看不出"别的号没变" ⇒ 用户会以为整个机器人换了人设。
+      const wrote =
+        ACCOUNT.id && accounts.has(ACCOUNT.id) ? accounts.fileOf(ACCOUNT.id) : CONFIG_FILE;
       send(res, 200, {
         ok: true,
         current: personaId(),
         status: persona.status(),
         knowledge,
         qqApply,
+        wrote,
+        account: ACCOUNT.id || '',
         problems: validate(),
       });
     } catch (e) {
