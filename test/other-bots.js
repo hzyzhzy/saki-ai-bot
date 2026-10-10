@@ -685,8 +685,15 @@ console.log('\n【16】★★ 同类「话没说完就先别生成」（2026-10-
 
   const src16 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
   check(
-    /async shouldJoinChatAsync\(event, opts = \{\}\) \{[\s\S]{0,2200}?await this\.waitPeerQuiet/.test(src16),
+    // ⚠️ 2026-10-10：窗口 2200 → 6000 —— 函数开头又插了一段（「不回复的机器人」闸 +
+    //    那段说明注释），2200 字装不下了。这条钉的是**接线在不在**，不是距离 ✓
+    /async shouldJoinChatAsync\(event, opts = \{\}\) \{[\s\S]{0,6000}?await this\.waitPeerQuiet/.test(src16),
     '★★ 接在同类消息处理的**最前面**（连"要不要接"都还没判就先等）',
+  );
+  check(
+    /async shouldJoinChatAsync\(event, opts = \{\}\) \{[\s\S]{0,1200}?this\.isIgnoredBotEvent\(event\)/.test(src16),
+    '★★★ 「不回复的机器人」（`otherBots`）的闸也提到这条路上 —— ' +
+      '主动接话原来**绕过**它 ⇒ 两个号会一起回黑祥（用户报的"都回相同几条"就是这个）✗',
   );
   check(
     // ⚠️ `??` 在正则里是"懒惰量词"，要匹配字面的两个问号必须转义成 `\?\?`
@@ -3134,6 +3141,17 @@ console.log(
     '★★ 神态描写同样剥掉（截图里那两句就是这两种）',
   );
   check(stripBracketAct('（笑）') === '', '★★ 整条只剩旁白 ⇒ 空串（调用方据此**不发**）');
+  check(
+    stripBracketAct('（那是在回大豆，不用我应）') === '',
+    '★★★ **整条就是一句旁白 ⇒ 不发**（用户截图：黑祥把内部判定说出来了 —— ' +
+      '上一版会把它剥成"那是在回大豆，不用我应"，括号一去看着就像台词了 ✗✗）',
+  );
+  check(stripBracketAct('（她问的是大豆，跟我没关系）') === '', '★★ 同上（另一句）');
+  check(
+    stripBracketAct('（顿了顿）。祥祥，你先说，那个人的消息我可不管') ===
+      '祥祥，你先说，那个人的消息我可不管',
+    '★ 括号在前、后面有正文 ⇒ **剥括号留正文**（这条别被上一条弄坏）',
+  );
   check(stripBracketAct('我这儿正忙着呢') === '我这儿正忙着呢', '★ 没括号 ⇒ 原样返回（不动正常话）');
   check(stripBracketAct('（这是口癖') === '这是口癖', '★ 不成对的半括号也清掉（有人拿「（」当口癖）');
   const bsrc59 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
@@ -3226,6 +3244,42 @@ console.log(
   check(
     /\.\.\.solveOpts,\s*\n\s*report: solveReport,/.test(bsrc61),
     '★★ 重跑用 `solveOpts`（主模型该带 thinking）—— 不是 `genOpts`（那个把 thinking 删了）',
+  );
+}
+
+console.log(
+  '\n【62】★★★ 同一条**真人**消息只让一个号接' +
+    '（2026-10-10 用户拍板选 C —— 大豆说「你啥时候回来」，两个号都引用它回）',
+);
+{
+  const { pickPeerIndex } = await import('../src/bot.js');
+  const bsrc62 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  check(/export function pickPeerIndex\(text, n\)/.test(bsrc62), '★★★ 有确定性选号的公式');
+  check(
+    pickPeerIndex('999000907|10000001|你啥时候回来', 2) ===
+      pickPeerIndex('999000907|10000001|你啥时候回来', 2),
+    '★★★ 同一条消息 ⇒ **永远同一个结果**（两台机器各算一次必须一样）',
+  );
+  const many = new Set();
+  for (let i = 0; i < 50; i++) many.add(pickPeerIndex(`999000907|10000001|消息${i}`, 2));
+  check(many.size === 2, '★★ 不同消息能分到两边（不会永远只让同一个号接、另一个变哑巴）');
+  check(
+    /pick !== idx/.test(bsrc62) && /轮到 .* 先接/.test(bsrc62),
+    '★★ 没轮到的那个**让位**（`return null`），轮到的正常接',
+  );
+  check(
+    /if \(this\.peersHeadsToHuman\(event\)\) \{\s*\n\s*log\.info\('\[让位\]/.test(bsrc62),
+    '★★ @ 的是别人 ⇒ **这条路上也不接**（那个判据原来只挂在剧情路）',
+  );
+  check(
+    !/Math\.random\(\)[\s\S]{0,120}?pickPeerIndex/.test(bsrc62),
+    '★ 公式里**不许出现随机** —— 两台机器要算出同一个（随机就会一起抢或一起哑）',
+  );
+  check(
+    /recent\.messagesSinceBotLast\(String\(event\?\.group_id \?\? ''\)\)/.test(bsrc62) &&
+      /if \(sinceBot > 1\)/.test(bsrc62),
+    '★★★ **"中间还夹着别人"就不算对话延续**（用户：「这哪是对话延续，就是突然接的」）—— ' +
+      '原判据只看 isSamePerson + 他刚说话，完全没管有人插过话 ✗',
   );
 }
 
