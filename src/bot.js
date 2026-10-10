@@ -41,6 +41,8 @@ import * as digest from './digest.js';
 import * as qzone from './qzone.js';
 import * as qzoneCompose from './qzone-compose.js';
 import * as visionCache from './vision-cache.js';
+// ⚠️ 2026-10-10 加：「服务器重新开启 → @ 他」那套订阅（触发点在 `sessions.tick()`）✓
+import * as serverWatch from './server-watch.js';
 import * as machine from './machine.js';
 import * as sessions from './sessions.js';
 import * as balance from './balance.js';
@@ -63,6 +65,12 @@ import * as quest from './quest.js';
 import * as storyline from './storyline.js';
 // ⚠️ 判断"今天是不是放假"（`whereAmI()` 要用：她上学日白天不该说自己在客服室）
 import * as holiday from './holiday.js';
+import * as birthday from './birthday.js';
+// ⚠️ 2026-10-09 加：**电量 = 生命值**（复用 machine.js 早就采好的电池数据）。
+import * as batteryLife from './battery-life.js';
+// ⚠️ 2026-10-09 加：**群友的生日**（从 QQ 个人资料里的 `birthday` 字段取，用户要求
+//    「日期直接从个人名片那里取」）—— 用来给好感度够高的群友庆祝生日。
+import * as memberBirthday from './member-birthday.js';
 // ⚠️ 「喊妈妈」—— 第一次拒绝，还喊就认了并切**白祥模式**（2026-09-16 用户要求）
 import * as mama from './mama.js';
 // ⚠️ 待发箱：分条里没发出去的那几条交给它，等通道正常自动补发（2026-09-15 用户要求）
@@ -579,6 +587,38 @@ const DASH_BREAK = '\u0001';
  * ⚠️ 是换成逗号，**不是删掉**。删掉会得到「好行」这种谁都不这么写的句子
  *    （第一版就是删，测试里打出来才发现不对）。
  */
+/**
+ * 把「（动作描写）」这类**小说体旁白**剥掉，**正文留着**。
+ *
+ * ⚠️⚠️⚠️ 2026-10-10 加（用户截图：「**日常聊天不要带这些，只有剧情需要带一点**」）：
+ *    截图里爱音说的是
+ *      `（没退开，眼睛还半垂着）。……谢什么呀，东西又不是我指的`
+ *      `（顿了顿）。祥祥，你先说，那个人的消息我可不管`
+ *    —— 那是**小说体的动作/神态旁白**，日常群聊里不该有 ✗
+ *    （上面那道 `isBracketNarration()` 只管"我不接 / 先停"这种**元话语**，
+ *      动作描写它认不出来，所以一路漏到了群里。）
+ *
+ * ⇒ 日常聊天：**剥掉括号、留下正文**（不整条丢 —— 内容还在）✓
+ * ⇒ 剧情里：**保留**（用户点名：「只有剧情需要带一点」）—— 由**调用方**决定剥不剥 ✓
+ *
+ * ⚠️ 判据为什么这么写：
+ *   · **成对括号 + 里面 2~40 字** ⇒ 剥（「（顿了顿）」「（笑）」都算旁白）✓
+ *   · 单个半括号（有人拿「（」当口癖）**不成对** ⇒ 最后那步顺手清掉 ✓
+ *   · **没括号 ⇒ 原样返回**（最热的那条路零开销）✓
+ *   · 剥完可能只剩标点 ⇒ 返回空串，**调用方据此不发**（比发一个「（」强）✓
+ */
+export function stripBracketAct(text) {
+  const t = String(text ?? '');
+  if (!/[（(]/.test(t)) return t;
+  return t
+    .replace(/[（(][^）)]{1,40}[）)]/g, '') // ① 成对的动作括号（1 个字的也算：「（笑）」）
+    .replace(/[（()）]/g, '') // ② 残留的孤立括号（旁白被切碎的半截）
+    .replace(/^[\s。，、,．.]+/, '') // ③ 剥完开头剩下的标点
+    .replace(/[\s。，、]+$/, '')
+    .replace(/[ \t]{2,}/g, ' ')
+    .trim();
+}
+
 export function dropDashBreak(text) {
   return String(text ?? '').split(DASH_BREAK).join('，');
 }
@@ -1080,6 +1120,18 @@ export class Bot {
       payload.message_type === 'group' &&
       !cmdSenderIsBot &&
       this.tryQuestReset(payload, msg.toSegments(payload.message))
+    ) {
+      return;
+    }
+
+    // ⚠️⚠️ 2026-10-10 加（用户要求）：「**如果有人 @bot 让她在服务器重新开启的时候
+    //    提醒一下、@他，可以做到吗**」—— 挂一条"开服提醒"。
+    //    ⚠️ 放在指令这一批里（和 `/剧情` `/清除剧情` `/暂停` 同级）：它是**请求**、
+    //      要在进聊天上下文之前处理掉，而且不能被静默挡住 ✓
+    if (
+      payload.message_type === 'group' &&
+      !cmdSenderIsBot &&
+      this.tryServerWatch(payload, msg.toSegments(payload.message))
     ) {
       return;
     }
@@ -1719,7 +1771,9 @@ export class Bot {
     const atOtherInSegs = segs.some(
       (s) => s.type === 'at' && s.data?.qq !== 'all' && String(s.data?.qq) !== this.selfId,
     );
-    const atOtherInText = this.textAtOf(realText, segs);
+          // ⚠️ 2026-10-09：把群号也传进去 —— `textAtOf` 要靠它查"同类池里有没有人叫这个名字"
+      //    （不然 `@saki酱saki酱saki酱` 会被含 "saki" 的 selfNames 抢着认领 ✗）
+      const atOtherInText = this.textAtOf(realText, segs, String(event?.group_id ?? ''));
     if (this.selfId && (atOtherInSegs || atOtherInText)) {
       log.info(
         `消息 @ 的是别人，不插嘴（${atOtherInSegs ? 'at 段' : '文本形态'}${atOtherInText ? `：@${atOtherInText}` : ''}）`,
@@ -1952,6 +2006,50 @@ export class Bot {
         // ⚠️⚠️ 2026-10-03（用户定）：「**正在和小祥聊天**的消息都不应该被掐断」——
         //    所以他正接着聊的那句，**不再交给 judge 复判**（那道"再说一次该不该说"
         //    正是他反复说的"抽签感"来源）。这是**对话本身**，直接接。
+        // ⚠️⚠️⚠️ 2026-10-10 加（用户截图报：「**对话停不下来了**」—— 群里两个号
+        //    「嗯」「诶」来回刷了七八条）：
+        //    **这条"对话延续"快通道绕开了硬闸。** 上面注释写的"外面还有三道"里，
+        //    `botChainHard()` 其实**不在这条路径上** —— 它挂在 `decide()` 的"同类"分支里
+        //    （搜 `if (!cooling && this.botChainHard(gid0))`），而这里一旦 `return`，
+        //    后面的判断**根本不会执行** ✗ ⇒ 两个同类可以靠这个通道无限互回一个字。
+        //    ⇒ 只对**同类**补两道（真人接着聊照旧"直接接、不判"，一个字都不动）：
+        const peerNow = (() => {
+          try {
+            return this.isPeerBot(String(event?.group_id ?? ''), String(uid ?? ''));
+          } catch {
+            return false;
+          }
+        })();
+        const inQuestNow = (() => {
+          try {
+            return this.questLive(String(event?.group_id ?? ''));
+          } catch {
+            return false;
+          }
+        })();
+        //    ① **极短循环闸**：同类发来「嗯」「诶」「哦」这种 **≤2 字**的 ⇒ 不接。
+        //       真人之间这种来回本来也没信息量，两个机器人之间纯粹是刷屏 ✗
+        //       （实测那个循环：`嗯，回头聊` → `嗯` → `嗯` → `嗯` …）
+        if (peerNow && !inQuestNow) {
+          let short = '';
+          try {
+            short = String(msg.extractText(msg.toSegments(event.message)) ?? '').trim();
+          } catch {}
+          if (short && short.length <= 2) {
+            log.info(
+              `[同类] 它只发了「${short}」（≤2 字）→ **不接**` +
+                '（免得两个号"嗯"来"嗯"去停不下来）',
+            );
+            return null;
+          }
+          //    ② **把硬闸接回这条路径**：同类 + 不在剧情里 ⇒ 照过一次 `botChainHard()`，
+          //       命中就静默（和 `decide()` 里那条分支的语义一致）✓
+          //       ⚠️ 剧情里不查：剧情本来就该一句接一句地演（`decide()` 那条闸也是这么处理的）
+          if (this.botChainHard(String(event?.group_id ?? ''))) {
+            log.info('[同类] 对话延续里照过硬闸 → **命中 ⇒ 不接**（这一轮到这儿为止）');
+            return null;
+          }
+        }
         log.info(
           `[${key}] 刚才就在跟他聊（${uid}），接着说（隔了 ${Math.round(snap.silenceMs / 1000)}s）→ 直接接（不判）`,
         );
@@ -2155,6 +2253,8 @@ export class Bot {
       try {
         const ptxt = msg.extractText(msg.toSegments(event.message));
         if (quest.notePeerPlot(gid, { uid: String(event.user_id ?? ''), text: ptxt })) {
+          // ⚠️ 2026-10-10：真在演 ⇒ 给本地那条"确定性线"**续期**（见 `lineAlive` 那段事故说明）✓
+          quest.touchLine(gid);
           log.info(
             `[剧情] 看见同类在演剧情（${event.user_id}）→ 记一笔` +
               '（**提前**记，供 `questLive` 与等安静窗口用）',
@@ -2232,7 +2332,8 @@ export class Bot {
     //    ⇒ 和前面那些闸同一个口径：**剧情里的同类消息一律不过 judge**。
     if (this.isPeerBot(String(event?.group_id ?? ''), String(event?.user_id ?? ''))) {
       try {
-        if (this.questLive(String(event?.group_id ?? ''))) {
+        // ⚠️ 2026-10-09：**同类在跟真人说话时不放行**（同上那条的判据，见 `peersHeadsToHuman`）
+        if (this.questLive(String(event?.group_id ?? '')) && !this.peersHeadsToHuman(event)) {
           log.info('[同类] 剧情进行中 + 对方是同类 → **直接放行**（不判、不节流）');
           this.markVoluntary(join.mode, event);
           return join;
@@ -2627,16 +2728,34 @@ export class Bot {
     const groups = (config.trigger?.allowGroups ?? []).map(String).filter(Boolean);
     if (!groups.length) return;
     let total = 0;
+    // ⚠️⚠️ 2026-10-09 加（用户：「**日期直接从个人名片那里取**」）：
+    //    群友生日正好**顺手**在这条路上取 —— `get_group_member_list` 的返回里
+    //    本来就带着 `birthday` 字段（各协议端给不给不一定，见 member-birthday.js 的容错）
+    //    ⇒ **不额外发一次请求**，只在同一次拉取里多读一个字段 ✓
+    let bdTotal = 0;
+    let bdHave = 0;
     for (const gid of groups) {
       try {
         const list = await this.call('get_group_member_list', { group_id: gid });
-        const n = names.noteFromList(gid, Array.isArray(list) ? list : list?.data ?? []);
+        const arr = Array.isArray(list) ? list : list?.data ?? [];
+        const n = names.noteFromList(gid, arr);
         total += n;
+        const r = memberBirthday.noteList(gid, arr);
+        bdTotal += r.total;
+        bdHave += r.withBirthday;
       } catch (e) {
         log.debug(`[名字] 群 ${gid} 成员名单没拉到：${e.message}`);
       }
     }
     if (total) log.info(`[名字] 开机播种了 ${total} 条姓名（群名片优先），榜单可以直接显示名字`);
+    // ⚠️ 这条日志要**看得见**（warn 及以上才醒目）：它同时回答"这个协议端到底给不给生日"——
+    //    如果长期是 0，就说明拿不到（那就只过机器人的生日，不会瞎猜）
+    if (bdTotal) {
+      log.info(
+        `[生日] 从群成员资料里读到 ${bdHave}/${bdTotal} 人有生日` +
+          (bdHave ? '（好感度够高的人过生日时会 @ 他一句）' : '（这个协议端没给这个字段，跳过）'),
+      );
+    }
   }
 
   /**
@@ -3227,7 +3346,72 @@ export class Bot {
    *    照片就被当成表情发了 —— 用户截图：「发的还是表情格式」。
    *    ⇒ 默认改成"**图片**"，谁要表情谁显式写 `asSticker: true`（`sendFace` 那两处）。
    */
-  sendText(event, text, { reply = false, faceFile = null, asSticker = false } = {}) {
+  async sendText(event, text, { reply = false, faceFile = null, asSticker = false, force = false } = {}) {
+    // ⚠️⚠️⚠️ 2026-10-09 修（用户：「**刚才一堆括号消息，看看为什么没拦住**」）：
+    //    **真因是闸挂错了层** —— 它原来挂在 `sendChatLike()` 上，可那个函数**不是**
+    //    她发言的唯一出口 ✗：`handle()` 的主聊天回复走 `sendChunk`，
+    //    而 `sendChunk` 最后又落到**这里**（`sendText`）⇒ 闸在她**最主要的发言路径上
+    //    从来没被执行过**（实证：群里连着冒出 11 条「（他这是回 Anon 的，不接）」，
+    //    而日志里 `[旁白` 一条都没有）。
+    //    ⇒ 挪到**这里**：`sendText` 才是所有路径的最后一道 ✓
+    //      （聊天回复 / 剧情 / 日常事件 / 复读以外的所有外发都从这儿出去。）
+    //    ⚠️ 代价：这里是最热的函数 —— 所以判定第一件事就是"**没括号就直接 false**"，
+    //      绝大多数消息一次模型调用都不花 ✓
+    //    ⚠️ 返回 `null` = "没发出去"（调用方就是按 `sentText !== null` 判的）✓
+    if (!force && event?.group_id) {
+      try {
+        // ⚠️⚠️⚠️ 2026-10-09 **撤回这一步的异步判定**（诚实记一笔）：
+        //    上一版在这里 `await this.shouldPauseByBracket(...)`（会调一次模型）——
+        //    结果 `behavior` 套件**红了 5 项，全是"发了 0 条"**：
+        //    说明"在她**最热的发送出口**上等模型"这条路本身就不行 ✗
+        //    （先把超时从 8 秒压到 1.5 秒也没救 ⇒ 不是慢的问题。）
+        //    ⇒ 退回**同步的快判据**（关键词；词表前面刚扩过），至少：不误伤、不拖慢 ✓
+        //    ⇒ "让模型判括号"那版**换个位置再做**（下一轮）：应当在**生成完、发送前**判，
+        //      而不是在 `sendText` 这个最后出口上等 ✓
+        if (this.isBracketNarration(String(text ?? ''))) {
+          log.info(
+            `[旁白] 这条在说"我不接 / 先停"（${String(text ?? '').slice(0, 20)}）→ **不发**、` +
+              '并且**把这轮对话掐断**',
+          );
+          try {
+            this.botChainClosed.set(String(event.group_id), Date.now());
+          } catch {}
+          return null;
+        }
+      } catch (e) {
+        log.debug(`[旁白] 判定出错（当"不是"）：${e.message}`);
+      }
+    }
+    // ⚠️⚠️⚠️ 2026-10-10 加（用户截图：「**日常聊天不要带这些，只有剧情需要带一点**」）：
+    //    截图里爱音说的是 `（没退开，眼睛还半垂着）。……谢什么呀` / `（顿了顿）。祥祥，你先说`
+    //    —— 那是**小说体的动作旁白**，日常群聊里不该有 ✗
+    //    （上面那道闸只管"我不接 / 先停"的**元话语**，动作描写它认不出来 ⇒ 一路漏到群里。）
+    //    ⇒ **日常**：把「（…）」剥掉、**正文留下**（不整条丢，内容还在）✓
+    //      **剧情**：保留 —— 用户点名「只有剧情需要带一点」✓
+    //    ⚠️ 剥完什么都不剩 ⇒ 这条**不发**（比发一个孤零零的「（」强）✓
+    //    ⚠️ 判据第一件事是"**没括号就跳过**" —— 这里是最热的函数，不能给它加负担 ✓
+    if (!force && event?.group_id && text && /[（(]/.test(String(text))) {
+      try {
+        if (!this.questLive(String(event.group_id))) {
+          const stripped = stripBracketAct(String(text));
+          if (!stripped) {
+            log.info(
+              `[旁白] 日常聊天：这条剥掉括号后什么都不剩 → **不发**（${String(text).slice(0, 24)}）`,
+            );
+            return null;
+          }
+          if (stripped !== String(text)) {
+            log.info(
+              `[旁白] 日常聊天剥掉动作旁白：「${String(text).slice(0, 30)}」→「${stripped.slice(0, 30)}」`,
+            );
+            text = stripped;
+          }
+        }
+      } catch (e) {
+        log.debug(`[旁白] 剥离出错（照原样发）：${e.message}`);
+      }
+    }
+    const _unusedGuard = null;
     const segments = [];
     // ⚠️ 2026-10-07 凌晨：记下"她这一条是不是收尾话" —— 给"互相道晚安"那条
     //    **兜底**闸用（`decide()` 里那条）。⚠️ 主力仍然是提示词（教模型自己判断
@@ -3829,6 +4013,38 @@ export class Bot {
   }
 
   /**
+   * 同类发的那句话，**是不是在跟真人说话**（带了引用 / @ 了别人）。
+   *
+   * ⚠️⚠️ 2026-10-09 加（用户截图：<主人> `@主号 解题`，**爱音却把主号那句回答抢过来接了**）：
+   *    「剧情进行中 + 对方是同类 ⇒ 直接放行」那条快速通道**只看对方是不是同类** ——
+   *    于是"同类在回真人"的话也被另一个号接走 ✗
+   *    ⇒ 判据：同类那句话**带 `reply`（引用）或 `at`（@ 别人）** ⇒ 它是在跟真人对答 ⇒ 不该接 ✓
+   *    ⚠️ 剧情里两个号**对戏**通常两样都没有（就是一句接一句的台词）⇒ 不受影响 ✓
+   *    ⚠️ 「@ 我」的情况不用管 —— 调用点的 `peerAtMeNow` 已经把它排除了 ✓
+   */
+  peersHeadsToHuman(event) {
+    try {
+      const segs = msg.toSegments(event?.message);
+      const me = String(this.selfId ?? '');
+      // ⚠️⚠️ 2026-10-09 **再收窄一次**（连试两版都碰红，记一笔免得以后重复踩）：
+      //    ① 第一版：`reply` 或 `at` 全算 ⇒ 正常的"**对话延续**"全接不住
+      //       （`behavior`【B3】红 5 项："发了 0 条"）✗
+      //    ② 第二版：`reply` 里排除"引用我" ⇒ **还是红** ✗
+      //       因为「引用我」和「引用真人」在消息段里长得几乎一样，
+      //       光靠段里那点信息**分不干净**。
+      //    ⇒ 现在**只认「@ 别人」**这一半（这条干净、不会误伤任何正常对话）✓；
+      //      "引用着真人回答、被另一个号抢过去"那半，**留到下一轮**：
+      //      要用**被引用那条消息的 uid**（拉 `get_msg` 拿）才判得准 ✓
+      const atOther = segs.some(
+        (s) => s.type === 'at' && s.data?.qq !== 'all' && String(s.data?.qq) !== me,
+      );
+      return atOther;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * **这个群现在正在演剧情吗**？—— 比 `quest.current(gid)` 宽一层：
    * 「我这条线在跑」**或者**「我刚看见同类在演剧情」。
    *
@@ -3868,6 +4084,15 @@ export class Bot {
     //      `questTurnYield` 靠它让位），只是**不再拿来当"剧情中"的通行证**了。
     try {
       if (quest.sharedPremise(g, { maxAgeMs: 45 * 60 * 1000 })) return true;
+    } catch {}
+    // ③ ⚠️⚠️ 2026-10-10 加（用户思路：「跨机器不能用一个固定公式算出一个随机值、
+    //    但是算出的值是一样的来判断吗」）：
+    //    **本机自己记下的那条线**（id = hash(群号+发起人+命令原文)，见 `quest.lineIdOf`）——
+    //    两台机器各算各的、算出来一样 ⇒ **不需要共享文件也能对齐** ✓
+    //    ⚠️ 为什么需要它：② 那条读的是 `state/quest-shared.json`，那是**本地文件**，
+    //      另一台机器（黑祥那台）根本读不到 ⇒ 跨机时"在不在演"判断不一致 ✗
+    try {
+      if (quest.lineAlive(g)) return true;
     } catch {}
     return false;
   }
@@ -3952,6 +4177,23 @@ export class Bot {
     }
   }
 
+  /**
+   * **攒到几条就丢**（2026-10-09 用户要求：按条数，不按时间）。
+   *
+   * 用户原话：「把这个判据改成**超过 3 条消息的个数**，**时间还是没有精确对应到**」——
+   * 他说得对：60 秒那条线跟"群里到底积了几条"没有固定关系（模型快慢在抖、
+   * 合并窗口也在变），所以他看到的现象和阈值对不上 ✗
+   * ⇒ 直接数**攒着的条数**：到 `config.llm.slowQueueDropCount`（默认 **3**）就丢 ✓
+   */
+  slowDropCount() {
+    try {
+      const n = Number(config.llm?.slowQueueDropCount);
+      return Number.isFinite(n) && n > 0 ? Math.floor(n) : 3;
+    } catch {
+      return 3;
+    }
+  }
+
   /** 超过多久算"慢得离谱"（毫秒，默认 **60 秒**；见 `slowDropOn`） */
   slowDropMs() {
     try {
@@ -3978,9 +4220,14 @@ export class Bot {
   dropIfSlowGenerating(bkey, st) {
     try {
       if (!this.slowDropOn()) return false;
-      const cut = this.slowDropMs();
+      // ⚠️⚠️ 2026-10-09 改（用户：「把这个判据改成**超过 3 条消息的个数**，
+      //    时间还是没有精确对应到」）：判据从"这一轮生成超过 N 秒"换成"**攒了 N 条**"。
+      //    ⚠️ `startedAt` 还留着 —— 但只用来说日志里的"这一轮已经跑了多久"，
+      //      **不再当判据**（它跟"积了几条"没有固定关系）。
+      const maxQueued = this.slowDropCount();
+      const queued = Array.isArray(st?.items) ? st.items.length : 0;
+      if (queued < maxQueued) return false;
       const generatingFor = st?.startedAt ? Date.now() - st.startedAt : 0;
-      if (generatingFor <= cut) return false;
       // ⚠️⚠️ 2026-10-07 用户补的要求：「如果已经超过 2 分钟了，**当生成完了
       //    正好超过 2 分钟的那条之后也不要恢复**，只有**发完并且新消息再生成完**
       //    之后才恢复」，外加一句「**反正新消息之前的要全部丢弃**」。
@@ -3995,10 +4242,9 @@ export class Bot {
       if (!st._dropLogged) {
         st._dropLogged = true;
         log.warn(
-          `[${bkey}] 这一轮已经生成了 ${Math.round(generatingFor / 1000)} 秒` +
-            `（超过 ${Math.round(cut / 1000)} 秒的阈值）→ **丢掉排队中的消息**` +
-            `（这条 + 刚才攒着的 ${had} 条）；⚠️ 进入**慢模式**，` +
-            `要等**下一条新消息**正常生成完才恢复`,
+          `[${bkey}] 排队已经攒到 ${queued} 条（阈值 ${maxQueued} 条）→ **丢掉排队中的消息**` +
+            `（这条 + 刚才攒着的 ${had} 条；这一轮已经生成了 ${Math.round(generatingFor / 1000)} 秒）；` +
+            `⚠️ 进入**慢模式**，要等**下一条新消息**正常生成完才恢复`,
         );
       }
       return true;
@@ -4557,6 +4803,28 @@ export class Bot {
         if (!keys.length) continue;
         out.push({ uid: u, role: role || '', name: keys[0], keys });
       }
+
+      // ⚠️⚠️ 2026-10-09 加（用户：「**机器人可以直接 @ 那个过生日的人**」）：
+      //    上面那个循环**只走同类池**（`peersFor`）—— 于是她想 @ 一个**群友**时，
+      //    那个名字**不会被换成真 at**：`@张三` 原样发出去就是一串纯文字，
+      //    那个人**收不到任何提醒** ✗（看着像"@ 了"，其实对方完全没被打扰到。）
+      //    ⇒ 把"今天过生日、且好感度到线"的群友也放进**可以 @ 的人**里。
+      //    ⚠️ 门槛跟提示词那边同一个（`minScore: 90` + `affinity.atOrAbove`）——
+      //      两处口径必须一致，不然会出现"提示词让她 @，但代码不给转"的空炮。
+      try {
+        for (const p of memberBirthday.today(gid, {
+          minScore: 90,
+          atOrAbove: affinity.atOrAbove,
+        })) {
+          const u = String(p.uid ?? '').trim();
+          if (!u || u === String(this.selfId ?? '')) continue;
+          if (out.some((t) => t.uid === u)) continue;
+          const nm = String(p.name ?? '').trim() || String(names.of(u, gid) ?? '').trim();
+          // ⚠️ 太短的名字（一个字）不进池 —— `@` 识别是按名字匹配的，单字误伤面太大
+          if (nm.length < 2) continue;
+          out.push({ uid: u, role: '', name: nm, keys: [nm] });
+        }
+      } catch {}
     } catch (e) {
       log.debug(`[@] 找"可以 @ 的同类"失败（当没有）：${e.message}`);
     }
@@ -5023,6 +5291,8 @@ export class Bot {
         try {
           const ptxt = msg.extractText(msg.toSegments(event.message));
           if (quest.notePeerPlot(gid0, { uid: sender0, text: ptxt })) {
+            // ⚠️ 2026-10-10：同上 —— 看见同类在演 ⇒ 给本地那条线续期 ✓
+            quest.touchLine(gid0);
             log.info(
               `[剧情] 看到同类在演剧情（${sender0}）→ 记一笔；` +
                 `本群剧情主导权：${quest.leadership(gid0)}`,
@@ -5195,7 +5465,15 @@ export class Bot {
       //      · `isIgnoredBot()`（`state/ignore-bots.json` 落盘名单）
       //      · 昵称里的「群管家 / 机器人 / bot」+ 教过的机器人昵称
       //      ⚠️ 对**同类池**的号它返回 `false`（那是要跟她聊的）⇒ 不会误伤自己人 ✓
-      if (!peerAtMeNow && this.questLive(gid0) && !this.isIgnoredBotEvent(event)) {
+      if (
+        !peerAtMeNow &&
+        this.questLive(gid0) &&
+        // ⚠️⚠️ 2026-10-09 加（用户截图：<主人> @主号，**爱音把主号那句回答抢过去了**）：
+        //    这条通道原来只看"剧情在演 + 没 @ 我" —— 于是**同类在回真人**的话也被接走 ✗
+        //    ⇒ 同类那句话带引用 / @ 了别人 = 它在跟真人对答 ⇒ **不接** ✓
+        !this.peersHeadsToHuman(event) &&
+        !this.isIgnoredBotEvent(event)
+      ) {
         log.info('[同类] 剧情进行中 → **这条我接**（不再往下走"该不该说"那串闲聊判据）');
         // ⚠️ **必须把正文带上**：`handle()` 里 `if (!text)` 那条分支是给
         //    "只 @ 了她、没打字"用的（会塞一句"看看最近的消息、回他一句"的引子）——
@@ -5274,8 +5552,15 @@ export class Bot {
         const atMeNow = this.selfId ? msg.isAt(segments, this.selfId) : false;
         const quotedMe = this.isQuoteOfMe(event, segments);
         const plain = msg.stripPlaceholders(msg.tidy(msg.extractText(segments)));
-        if (!atMeNow && !quotedMe && plain && this.shouldQueryStatus(plain)) {
-          log.info(`[群${event.group_id}] 这是服务器问题，但本群关了「回服务器消息」→ 不回`);
+        if (!atMeNow && !quotedMe && plain && this.looksServerTalk(plain)) {
+          // ⚠️⚠️ 2026-10-09 改（用户：「爱音关闭了"回复服务器的内容"，但还是回复了」）：
+          //    原来判的是 `shouldQueryStatus()` —— 那只认"有人吗 / 几个人 / 谁在线" ✗
+          //    于是「整合包一进服务器就崩溃」这种服务器问题照样被她答 ✗
+          //    ⇒ 换成更宽的 `looksServerTalk()`（提到服务器 + 像在问事）✓
+          log.info(
+            `[群${event.group_id}] 这条是服务器的事，但本群关了「回服务器消息」→ 不回` +
+              `（${plain.slice(0, 20)}）`,
+          );
           return null;
         }
       } catch (e) {
@@ -7305,6 +7590,76 @@ export class Bot {
       //      ⚠️ 代价：难题的准确率会降一点（没有思考链）。但"给个答案"永远强于"超时后一声不吭"。
       //      ⚠️ `timeoutMs` 显式给（默认 120 秒）：不再用那个偏乐观的估算，
       //        可调 `config.solve.timeoutMs`。
+      // ⚠️⚠️ 2026-10-09 加（用户原话：「**只关剧情下的思考链**」）：
+      //    **剧情进行中，这次生成不带给思考链。**
+      //
+      //    为什么只挑剧情：
+      //      · 剧情对戏是**刷屏最多**的场景（今天主聊天 639 次里绝大多数是它）；
+      //      · 而思考链**不受 `budget_tokens` 约束**（设 3000 照样烧满 8000）⇒
+      //        每条都先烧掉几千 token 的思考，那是最贵的那一档；
+      //      · 剧情要的是"接上一句、把戏演下去"，不是解难题 ⇒ 那层推敲的边际收益最低。
+      //    ⚠️ 日常闲聊、问她事**照旧带思考链** —— 上一版就是权衡后保留的
+      //      （用户 2026-10-07 说过「直接调回思考链」），这次只动剧情这一档。
+      //    ⚠️ 判据用 `questLive()`（自己这条线在演 **或者** 看见同类在演）——
+      //      让位的那个号自己没有剧情状态，只认 `quest.current` 的话它会漏掉 ✓
+      const thinkOffInQuest = (() => {
+        try {
+          return this.questLive(String(event?.group_id ?? ''));
+        } catch {
+          return false;
+        }
+      })();
+      // ⚠️⚠️ 2026-10-09 加（用户：「可以把这两个接入 **gemini** 吗，然后和关思考链一样
+      //    也加个按钮**选择是否使用 gemini**，即**备选模型**」）：
+      //    开关打开 **且** 对方是同类（正是那两个场景：机器人之间聊天 / 剧情里同类对戏）
+      //    ⇒ 这一次生成走**备选模型**（Gemini），其余照旧主模型 ✓
+      //    ⚠️ 判据和上面"关思考链"用的是同一个 `isPeerBot` —— 两件事本来就是同一组场景 ✓
+      //    ⚠️ 没配 `llm.backup` 或没开 ⇒ `backupOpts` 是空对象 ⇒ 行为一个字都不变 ✓
+      const bkCfg = config.llm?.backup ?? {};
+      const bkFor = bkCfg.for ?? {};
+      const backupReady = !!bkCfg.baseURL && !!bkCfg.model;
+      const fromPeerNow = (() => {
+        try {
+          return this.isPeerBot(String(event?.group_id ?? ''), String(event?.user_id ?? ''));
+        } catch {
+          return false;
+        }
+      })();
+      // ⚠️⚠️ 2026-10-09 用户要求：「把这个开关和关思考链一样**平摊成 3 个选项，放到一起**」
+      //    ⇒ 三个场景**各一个勾**（`llm.backup.for.{peer,questPeer,quest}`），
+      //      判据和上面那三档"关思考链"**一模一样** ✓
+      const useBackup =
+        fromPeerNow && thinkOffInQuest
+          ? bkFor.questPeer === true
+          : fromPeerNow
+            ? bkFor.peer === true
+            : thinkOffInQuest
+              ? bkFor.quest === true
+              : false;
+      const backupOpts =
+        backupReady && useBackup
+          ? {
+              model: String(bkCfg.model),
+              baseURL: String(bkCfg.baseURL),
+              apiKey: String(bkCfg.apiKey ?? ''),
+            }
+          : {};
+      // ⚠️⚠️⚠️ 2026-10-10 加（用户拍板选 B：**主模型失败 ⇒ 备选顶上，全场景**）：
+      //    `backupOpts` 是"**主动想用才用**"（受 `for.*` 三个勾管）；
+      //    下面这个是"**保险**" —— **不看那三个勾**，只要 config 里配了 baseURL + model 就有 ✓
+      //    场景：这次 402（Insufficient Balance）一挂，连真人问话都只回"卡了一下" ✗
+      //    用户要的是"整只机器人还活着" ⇒ 主模型挂了就用备选顶一次 ✓
+      //    ⚠️ 他自己点头接受的两条代价（记在这儿，别以后当成"没想过的副作用"）：
+      //      · lite 免费层 **RPD 500 / TPM 250K** ⇒ 全天顶替会把额度烧光（当应急用）；
+      //      · 免费层数据会被用于改进 Google 产品 ⇒ **群友的话也会进免费层** ⚠️
+      const bkAny =
+        bkCfg.baseURL && bkCfg.model
+          ? {
+              model: String(bkCfg.model),
+              baseURL: String(bkCfg.baseURL),
+              apiKey: String(bkCfg.apiKey ?? ''),
+            }
+          : null;
       const solveOpts = solveMode
         ? {
             thinking: { type: 'disabled' },
@@ -7313,24 +7668,127 @@ export class Bot {
         : // ⚠️⚠️ 2026-10-08 加（A+D 省 token 的 D）：**两个机器人在互刷时也关掉思考链** ——
           //    实测思考链能把 max_tokens 烧满（见上面那段），而"互刷"这种场景
           //    要的只是"接上一句话"，不值得为它花那几千 token 的思考 ✓
-          //    ⚠️ 只对"**不演剧情的**互刷"生效 —— 剧情里**保留思考链**（保表演质量，
-          //      见上面 `leanNoThink` 那段；思考链那点 completion 是零头，不值得为它牺牲细节）。
-          leanNoThink
+          //    ⚠️ 原来是"只对**不演剧情的**互刷生效、剧情里保留思考链（保表演质量）"；
+          //      2026-10-09 用户拍板改成**剧情也关**（见上面那段注释的实测数据）✓
+          (() => {
+            // ⚠️⚠️ 2026-10-09 改（用户原话：「把**机器人互相对话**的思考链也关掉。直接把几种类别的
+            //    对话是否开思考链做成**开关**吧，直接放在**模型页**，**控制所有账号**，
+            //    默认机器人互相对话和剧情内机器人互相对话关思考链，其他打开」）：
+            //    ⇒ 开关在 **共用段** `config.llm.thinking`（共用段天然"控制所有账号" ✓）：
+            //        { peer: 机器人之间的日常聊天,
+            //          questPeer: 剧情里和同类对戏,
+            //          quest: 剧情里和真人说话 }
+            //      **true = 关掉思考链**（名字直说"关"，省得看到 false 还要反着想一次）。
+            //    ⚠️ 没配这个字段时按用户要的默认走：前两类**关**、第三类**开** ✓
+            //      （`!== false` / `=== true` 的写法就是为了"没配也按默认"）
+            const th = config.llm?.thinking ?? {};
+            // ⚠️⚠️ 2026-10-10 加（实测：低电量档的回复上限**被思考链吃光**）：
+            //    critical 档 `replyCap()` = 420，而**思考链不受这个上限约束** ——
+            //    日志实证：`输出被 max_tokens(420) 截断了（其中思考链吃了 420 token）`
+            //    ⇒ 那一次她想说的话**整段没说出来**（用户看到的正是"没触发没电的话"）。
+            //    ⇒ **低电量时一并关掉思考链**：很低/垂危要的本来就是短句，
+            //      思考链在这里纯属白烧 token，还会把正文挤掉 ✓
+            if (batteryLife.replyCap() > 0) return true;
+            const fromPeer = (() => {
+              try {
+                return this.isPeerBot(String(event?.group_id ?? ''), String(event?.user_id ?? ''));
+              } catch {
+                return false;
+              }
+            })();
+            if (fromPeer && thinkOffInQuest) return th.questPeer !== false;
+            if (fromPeer) return th.peer !== false;
+            if (thinkOffInQuest) return th.quest === true;
+            return false;
+          })()
           ? { thinking: { type: 'disabled' } }
           : {};
+      // ⚠️⚠️ 2026-10-10 修（实测：备选模型填好了、也走了，但**每次都 400**）：
+      //    `thinking` 是 **DeepSeek 专用**字段，Gemini 的 OpenAI 兼容层**不认**它 ——
+      //    两个参数被 spread 进同一个请求，直接被服务端拒：
+      //      `Invalid JSON payload received. Unknown name "thinking": Cannot find field.`
+      //      （HTTP 400 / INVALID_ARGUMENT，日志里只报"同一条错误 N 分钟前已提醒过"）
+      //    ⇒ 后果：**每次机对机都先失败一轮，再走"空响应重试"回退主模型** ——
+      //      用户看到回复了，可钱照旧花在主模型上，还白等十几秒（实测 6~7s → 18s）✗
+      //    ⇒ **走备选模型时不带 `thinking`**（思考链开关只对主模型有意义）✓
+      //    ⚠️⚠️ 真正的兜底在 `llm.js` 的 `usingMainBase` 那段 —— **光在调用方删不够**：
+      //      `streamChat` 在没传 thinking 时会**自己补一个默认值**（`thinkingBudget`）⇒
+      //      备选模型照样被 400 拒（14:27 实测：机对机每句都失败 ⇒ 走兜底话术 ⇒
+      //      两个号反复说同一句并互相引用，看着像复读机）。**两处都要在** ✓
+      const genOpts = { ...solveOpts };
+      if (backupOpts.model) delete genOpts.thinking;
       const solveReport = {};
       const draftBefore = { full, buffer };
       const _genOnce = async (rep) => {
         for await (const delta of streamChat(messages, controller.signal, {
-          maxTokens: solveMode ? solveMaxTokens() : 0,
-          ...solveOpts,
+          // ⚠️ 2026-10-09 加（用户：「**不仅说话内容要模仿，说话语气也可以模仿**」）：
+          //    电量低时**真的把回复卡短**（dying 220 / critical 420），
+          //    不然"垂危感"只停在提示词里、她照样一次说一大段 ✗
+          //    0 = 不限（正常电量时走默认）✓
+          maxTokens: solveMode ? solveMaxTokens() : batteryLife.replyCap(),
+          // ⚠️ 2026-10-10：这里 spread 的必须是 `genOpts`（= solveOpts 去掉 thinking）——
+          //    带 `thinking` 走 Gemini 会被 400 拒掉，理由见上面 `genOpts` 那段 ✓
+          ...genOpts,
+          // ⚠️ 2026-10-09：备选模型（Gemini）——只有"机器人之间 / 剧情里同类对戏"才会非空 ✓
+          ...backupOpts,
           report: rep,
         })) {
           full += delta;
           buffer += delta;
         }
       };
-      await _genOnce(solveReport);
+      // ⚠️⚠️⚠️ 2026-10-10 加（用户拍板选 B）：**备选模型失败 ⇒ 自动回主模型重跑一次** ✓
+      //    背景（用户截图 · AI Studio 限额页，3.5 Flash Lite 免费层）：
+      //      RPM 15 / **TPM 250K（已经超了）** / RPD 500
+      //    而机对机的提示词是 6~7 万字 ≈ 3~4 万 token ⇒ **一次就吃掉 15% 的分钟额度**
+      //    ⇒ 撞限额是常态；而原来一撞就抛错 ⇒ 外层只发一句"卡了一下"（日志实证）✗
+      //    ⇒ 兜底：**能省就省（先走备选），撞了就自动用主模型重跑一次** ✓
+      //      · 只对**备选模型**兜底 —— 主模型失败 = 真故障，照旧往上抛 ✓
+      //      · 重跑前**清掉第一次的半截输出**，否则两次的正文会拼在一起 ✗
+      //      · 重跑用 **`solveOpts`（不是 `genOpts`）** —— 主模型该带 thinking，
+      //        而 `genOpts` 在走备选时把 thinking 删掉了 ✓
+      try {
+        await _genOnce(solveReport);
+      } catch (e) {
+        const why = String(e?.message ?? e).slice(0, 80);
+        if (backupOpts.model) {
+          // ① 主动走的就是**备选** ⇒ 回主模型重跑一次
+          log.warn(`[备选模型] 生成失败（${why}）→ **自动回主模型重跑一次**`);
+          full = '';
+          buffer = '';
+          for await (const delta of streamChat(messages, controller.signal, {
+            maxTokens: solveMode ? solveMaxTokens() : batteryLife.replyCap(),
+            ...solveOpts,
+            report: solveReport,
+          })) {
+            full += delta;
+            buffer += delta;
+          }
+        } else if (bkAny) {
+          // ② 主动走的是**主模型**（或没开备选）⇒ **用备选顶上**（用户选 B：全场景）✓
+          //    ⚠️ 走备选**必须不带 `thinking`**（Gemini 不认 DeepSeek 那个字段，会 400）✓
+          //      所以这里现删一份 —— 不能直接用 `genOpts`（它只在"主动走备选"时才删过 thinking）✗
+          log.warn(
+            `[主模型] 生成失败（${why}）→ **自动切备选模型顶上**（${bkAny.model}）` +
+              '（用户选 B：主模型挂了也要让机器人活着）',
+          );
+          const noThink = { ...solveOpts };
+          delete noThink.thinking;
+          full = '';
+          buffer = '';
+          for await (const delta of streamChat(messages, controller.signal, {
+            maxTokens: solveMode ? solveMaxTokens() : batteryLife.replyCap(),
+            ...noThink,
+            ...bkAny,
+            report: solveReport,
+          })) {
+            full += delta;
+            buffer += delta;
+          }
+        } else {
+          throw e; // 没配备选模型 ⇒ 照旧往上抛（真故障不吞）
+        }
+      }
 
       // ⚠️⚠️⚠️ 2026-10-09 加（用户：「**加一道防线，如果检测到生成的消息存在不明白的地方，
       //    就重新更完善地拼一次库，并且只拼上次没拼上来的**」）：
@@ -7913,7 +8371,18 @@ export class Bot {
         let retried = false;
         try {
           let full2 = '';
-          for await (const delta of streamChat(messages, controller.signal, { maxTokens: solveMode ? solveMaxTokens() : 0 })) full2 += delta;
+          // ⚠️⚠️ 2026-10-09 加（用户报「跑了一段时间剧情，token 花销数据变化了」）：
+          //    第一次没出内容、**绝大多数就是思考链把 max_tokens 吃光了** ——
+          //    今天的日志有 8 次 `输出被 max_tokens(8000) 截断了（其中思考链吃了 8000 token）`，
+          //    紧接着就是下面那句 `模型连续两次返回空内容` ⇒ 那次调用**钱照花、话没说出来**。
+          //    ⇒ 重试**必须把思考链关掉**：同一段上下文，它不需要再从头想一遍；
+          //      关掉之后 8000 token 全留给正文，这一类空回基本一次就补上 ✓
+          //    ⚠️ 只改**重试**这一路 —— 第一次仍然按用户 2026-10-07 的要求带着思考链
+          //      （他当时原话「直接调回思考链」）⇒ 正常说话的行为一个字都不变。
+          for await (const delta of streamChat(messages, controller.signal, {
+            maxTokens: solveMode ? solveMaxTokens() : 0,
+            thinking: { type: 'disabled' },
+          })) full2 += delta;
           const clean2 = cleanMarkdown(stripMarkers(full2).trim());
           if (clean2) {
             await this.sendText(
@@ -8307,6 +8776,11 @@ export class Bot {
     if (!status.enable || !status.host) return false;
     const lower = text.toLowerCase();
     if (status.keywords.some((k) => keywordHit(lower, k))) return true;
+    // ⚠️⚠️ 2026-10-10 加（用户：「**这个问题应该要去找服务器状态再回答**」）：
+    //    「服务器关了吗」那种**开关状态**的问句，关键词表一个都不命中
+    //    （表里有「服务器开了」，偏偏没有「关了 / 关服 / 还开着吗」）⇒ 不实查 ⇒ 只能猜 ✗
+    //    ⇒ 这里必须接上（`looksServerTalk()` 那边也接了，但那不是"要不要实查"的入口）✓
+    if (this.asksServerOpenClose(text)) return true;
 
     // ⚠️ 兜底：光靠关键词表会漏掉最常见的问法。
     //    实测「服务器现在有人吗」没命中任何关键词 → 不实查 → 模型自己编了个
@@ -8322,6 +8796,73 @@ export class Bot {
     // 但「有人能帮我吗」「有人知道吗」问的是人不是人数，别误触发
     if (/有人\s*(能|会|知道|帮|懂|试过|推荐|玩过)/.test(lower)) return false;
     return true;
+  }
+
+  /**
+   * 这条是在问**服务器开着没**吗（"关了没有 / 还开着吗 / 炸服了？"）。
+   *
+   * ⚠️⚠️⚠️ 2026-10-10 加（用户截图 + 一句「**这个问题应该要去找服务器状态再回答**」）：
+   *    <主人> 问「**服务器关了吗**」，两个号都在**凭上下文猜**：
+   *      · 爱音：「我这边没收到关服的信儿啊。你是自己要关，还是听谁说什么了」
+   *      · saki：「没关吧，刚小豆还在群里播有人上服呢」
+   *    —— 一个"没收到信儿"、一个拿**别的机器人的话**当事实，谁都没去查 ✗
+   *
+   *    真因：那句**一个关键词都没命中** —— 表里有「服务器开了」，偏偏没有
+   *    「关了 / 关服 / 还开着吗 / 炸服了」这些**开关状态**的问法 ⇒ 不实查 ⇒ 只能猜 ✗
+   *    ⇒ 单独抽一个判据（不让 `shouldQueryStatus()` 变宽到误伤闲聊）：
+   *      **提到服务器 + 开关/故障词** ⇒ 就是在问状态 ✓
+   *      **提到服务器 + 疑问** ⇒ 也算（"服务器现在什么情况"）✓
+   *      ⚠️ 纯闲聊（「我刚在服务器里挖了个洞」）**没有**开关词也没有疑问 ⇒ 不触发 ✓
+   */
+  asksServerOpenClose(text) {
+    const t = String(text ?? '').trim();
+    if (!t) return false;
+    const lower = t.toLowerCase();
+    // ⚠️ srv 里要带上「开服 / 关服 / 停服 / 炸服 / 崩服」这些**两字词** ——
+    //    光靠"服务器"三个字会漏掉「炸服了？」这种口语写法（套件当场抓到的）✓
+    const srv = /服务器|服务端|开服|关服|停服|炸服|崩服|服里|进服|上服|联机|主机/.test(lower);
+    if (!srv) return false;
+    // ① 开关 / 故障词 —— 「关了吗 / 开没开 / 还开着吗 / 炸服了」
+    if (/(关服|开服|停服|炸服|崩服|关掉|停掉|开了|关了|开没|关没|还开着|还在开)/.test(lower)) return true;
+    if (/(关|开|停|挂|崩|炸|掉线|离线)/.test(lower)) {
+      if (/[?？]|吗|么|没|没有|了没|了吗|呢/.test(t)) return true;
+    }
+    // ② 有服务器 + 疑问 ⇒ 也算（"服务器现在什么情况 / 能进吗"）
+    if (/[?？]|怎么|咋|什么情况|还行吗|能玩吗|能进吗|进不去|连不上/.test(t)) return true;
+    return false;
+  }
+
+  /**
+   * 「这条是在说/问**这个服务器**的事吗」——**比 `shouldQueryStatus()` 宽**。
+   *
+   * ⚠️⚠️ 2026-10-09（用户报：「爱音的账号**已经关闭了「回复服务器的内容」，但是还是回复了**」）：
+   *    他指的那句是「**为什么最新的整合包一进服务器就崩溃呀**」——
+   *    而 `shouldQueryStatus()` 只认"有人吗 / 几个人 / 谁在线 / 关键词表" ⇒ 这一条**一个都不命中** ✗
+   *    ⇒ 开关的名字写着"回服务器消息"，实际只关得住"问在线状态" ⇒ **语义对不上** ✓
+   *    ⇒ 补一层：**话里提到服务器**（"服务器"这类词，或配置里的 `status.host`），
+   *      **且像是在问事 / 求助** ⇒ 也算"服务器消息" ✓
+   *
+   * ⚠️ 为什么要那个"像是在问事"的条件：不然「我刚在服务器里挖了个洞」这种**纯闲聊**也会被吞掉 ✗
+   */
+  looksServerTalk(text) {
+    const t = String(text ?? '').trim();
+    if (!t) return false;
+    if (this.shouldQueryStatus(t)) return true;
+    // ⚠️ 2026-10-10：**"服务器关了吗"这类开关状态的问句也要算** ——
+    //    用户截图里那句正是被这里漏掉的（它不含"？"、也不含"怎么/是不是"）✗
+    if (this.asksServerOpenClose(t)) return true;
+    const lower = t.toLowerCase();
+    const host = String(config.status?.host ?? '').toLowerCase();
+    const mentions =
+      /服务器|服务端|开服|整合包|模组|mod\b|客户端|进服|上服|联机|白名单|正版|离线登录/.test(lower) ||
+      (host && lower.includes(host));
+    if (!mentions) return false;
+    // 像是在问事 / 求助（别把"我刚在服务器里挖了个洞"这种纯闲聊也算进来）
+    // ⚠️ 2026-10-10：补上"吗 / 呢 / 没有 / 了没" —— 中文问句经常**不带问号**，
+    //    光靠「怎么 / 是不是 / 能不能」会漏掉一大片（"服务器关了没"就是这种）✓
+    return /[?？]|怎么|为什么|咋|如何|是不是|能不能|有没有|帮|求|救|怎么办|哪|什么|吗|呢|没有|了没|了吗/.test(
+      t,
+    );
   }
 
   // ── 教学 ────────────────────────────────────────────
@@ -8642,7 +9183,13 @@ export class Bot {
       ? `记下了 —— 【${topic}】${res.replaced ? '（覆盖了旧的）' : ''}${tail ? `\n${tail}` : ''}`
       : `好的，我记下了 —— 【${topic}】\n${fact}\n\n（${res.replaced ? '这条覆盖了同名主题的旧内容' : '这是新增条目'}，已写入学习档案，之后回答群友会优先用这条。）${tail ? `\n${tail}` : ''}`;
 
-    await this.sendText(event, text, { reply: true }).catch(() => {});
+    // ⚠️⚠️ 2026-10-10 加 `force: true`（**这是我引入的回归，套件当场抓到的**）：
+    //    「明确教学」的回执**正文里带一对括号**（「（这是新增条目，已写入学习档案…）」）——
+    //    而我在 `sendText` 里新加的"日常聊天剥掉括号旁白"会**整段剥掉它** ⇒
+    //    回执里再也没有「已写入学习档案」⇒ `natural-teach` 套件红 ✗
+    //    ⇒ 这是**系统文案**（不是模型瞎演的旁白），不该被剥 ⇒ 用 `force` 跳过 ✓
+    //      （`force` 的语义本来就是"必须发出去"：跳过静默、跳过旁白那两道闸 ✓）
+    await this.sendText(event, text, { reply: true, force: true }).catch(() => {});
     log.info(`[${who}] 知识已入库: 【${topic}】${res.replaced ? '（覆盖）' : '（新增）'}`);
   }
 
@@ -9270,18 +9817,44 @@ export class Bot {
    * @param {Array} segs 消息段（用来排掉"已经被解析成 at 段"的情况）
    * @returns {string} 被 @ 的名字（没有就返回空串）
    */
-  textAtOf(text, segs = []) {
+  textAtOf(text, segs = [], groupId = '') {
     const t = String(text ?? '').trim();
-    if (!t.startsWith('@')) return '';
+    // ⚠️⚠️ 2026-10-09 修（用户报：「**@别人时不接话的闸失效了**，为了避免影响别人交流」）：
+    //    原来第一句是 `if (!t.startsWith('@')) return ''` —— **只认消息开头那个 @** ✗
+    //    可群里最常见的写法是「XX @某人 你说呢」（@ 在**中间**）⇒ 那种一条都认不出来 ⇒
+    //    闸看着"失效"了（其实只是它根本没走到判定）。
+    //    ⚠️ 但**不能放开成"任何 @ 都算"**：邮箱 `a@b.com` 会被当成 @b ✗
+    //      ⇒ `@` 前面不许是字母/数字（见下面那条正则的前缀）✓
+    if (!t.includes('@')) return '';
     if (segs.some((s) => s.type === 'at')) return '';
 
-    const m = /^@\s*([A-Za-z0-9_\u4e00-\u9fa5]{1,24})/.exec(t);
+    const m = /(^|[^0-9A-Za-z])@\s*([A-Za-z0-9_\u4e00-\u9fa5]{1,24})/.exec(t);
     if (!m) return '';
-    const name = m[1];
+    const name = m[2];
     const lower = name.toLowerCase();
 
     // @全体成员 / @所有人 —— 不算「@某个人」
     if (['全体成员', '所有人', 'all', 'everyone'].includes(lower)) return '';
+
+    // ⚠️⚠️ 2026-10-09 修（用户截图：「**@白祥会把黑祥也叫起来**」）：
+    //    根因就在这里。`@saki酱saki酱saki酱` 是**主号**的群名片，
+    //    可它**含 "saki"**，而黑祥（`sakiko-dark`）的 `selfNames` 里也有 `saki`
+    //    ⇒ 下面那句 `includes` 一命中就判成"@ 是我" ⇒ **黑祥也被叫起来了** ✗
+    //    （用户看到的就是黑祥抢着回「一张都没有」。）
+    //
+    //    ⇒ 顺序改成**先问"同类池里有没有人叫这个名字"**：
+    //      · 有、且那个号不是我 ⇒ @ 的是**它** ⇒ 返回名字（= @ 别人，我不该接）✓
+    //      · 没有 ⇒ 才回退到 `selfNames`（对方可能打的是"@小祥"这种简称）✓
+    //    ⚠️ 这里用**精确相等**（不是 includes）—— 否则"@saki酱"又会命中 "saki" ✗
+    //    ⚠️ 名字表来自 `atTargetsOf()`：它给的正是"同类池里的号 + 各自的写法" ✓
+    try {
+      const me = String(this.selfId ?? '');
+      for (const t2 of this.atTargetsOf(String(groupId ?? ''))) {
+        if (String(t2.uid) === me) continue;
+        if ((t2.keys ?? []).some((k) => lower === String(k).toLowerCase())) return name;
+      }
+    } catch {}
+
     // @ 的是机器人自己 —— 不算「@别人」
     // ⚠️ 2026-09-21：名字从 `identity.selfNames` 来（这里原来写死了 9 个写法）。
     //    ⚠️ 取不到时**不兜底**：那种人设就是"没名字"，不该拿小祥的名字去顶。
@@ -10228,40 +10801,22 @@ export class Bot {
     //    ⚠️ 起因从**共享文件**读（`quest.chatBrief`）—— 让位的那个号没有这条线的状态，
     //      不共享的话它一个字都拿不到（就是"爱音自己也在找出口"的原因）。
     //    ⚠️ 只在"这个群正在演剧情"时才有内容，日常聊天一个字都不加 ✓
-    if (event?.message_type === 'group') {
-      try {
-        const gid0 = String(event.group_id ?? '');
-        // ⚠️ 2026-10-07 加（用户：「**重点是聊天不要死磕一个点，要有进展变化**」）：
-        //    把"你们刚说过的几句"一起喂进去 —— 让它**看见自己/对方刚说过什么**，
-        //    比只在提示词里写"要有新东西"管用得多。
-        const brief = quest.chatBrief(gid0, {
-          recentLines: recent.lastBotLines(gid0, {
-            n: 6,
-            uids: peersFor(gid0).map(String),
-          }),
-        });
-        if (brief) parts.push('\n' + brief);
-      } catch {}
-      // ⚠️⚠️ 2026-10-07 加（用户报：「**清除剧情之后她们还在说推柜子出房间**」）：
-      //    他清掉剧情之后，**上下文里那几句台词还留着**（两个进程各存一份 recent）⇒
-      //    静默那 60 秒一过，她们就顺着上文接着演 ✗
-      //    ⇒ 清过之后有一个**作废窗口**（默认 10 分钟，`quest.wipedQuietMs`）：
-      //      这期间明说"那条剧情作废了、别提那个房间/门/柜子"，当它没发生过。
-      try {
-        const wipedUntil = this.questWipedUntil?.get(String(event.group_id ?? '')) ?? 0;
-        if (wipedUntil > Date.now()) {
-          parts.push(
-            '\n' +
-              [
-                '⚠️⚠️ **刚才那条剧情已经被管理员清掉了（作废）**：',
-                '   · 🚫 不许再接着它演 —— 别主动提那个房间 / 门 / 柜子 / 怎么出去 / 那个秘密；',
-                '   · 🚫 也别换个说法绕回去（"刚才说到哪儿了"这种也算）—— 就当那件事没发生过；',
-                '   · ✅ 群里说别的事、问她别的，照常正常聊；他要是自己提起，你就当没印象。',
-              ].join('\n'),
-          );
-        }
-      } catch {}
-    }
+    // ⚠️⚠️⚠️ 2026-10-09 **挪到本函数最后**（原来是插在这里的，见函数末尾那段）。
+    //
+    //    为什么必须挪：这两段是**每轮都会变**的（`chatBrief` 里带"你们刚说过的 6 句"，
+    //    作废窗口也会变），而它们原来排在**人设正文（几万字）之前** ⇒
+    //    **提示词的"前缀"每轮都不一样** ⇒ 大模型那边的**上下文缓存整段失效** ✗
+    //
+    //    实测（`state/spend.json`，主号）：
+    //      10-07 缓存命中 50.4% / 每次 ¥0.0132
+    //      10-09 缓存命中 **32.4%** / 每次 **¥0.0264**（同一天用户说「感觉烧得更快」）
+    //    ⇒ 用户报「跑一段时间剧情后 token 花销数据变化了」，查出来就是缓存率掉了一半，
+    //      而"每次单价翻倍"那一半的全价差值，正好对得上从这里开始失缓存。
+    //
+    //    ⚠️ 缓存按**前缀**匹配：只要前面变了，后面几万字全部按全价重算。
+    //      所以**固定的（系统提示词 / 人设 / 规则）必须排前面，每轮会变的排最后** ——
+    //      这一条是省钱的硬约束，别再把动态内容插到人设前面。
+
 
     // ⚠️ 跟服主的关系要在**开头就点一句**。
     //    原来只在提示词末尾（94% 处、前面压着 1.9 万字）讲这事，
@@ -11522,8 +12077,19 @@ export class Bot {
             //    「（这话已经说到头了，不接）」「（不接）」这种**旁白式元发言** ✗✗
             //    那是"系统在报告状态"，群里的人看到只觉得莫名其妙（用户为这个截过两次图）。
             //    ⇒ 把"不接"的意思写清楚：**就是不发消息**，不是发一句"我不接"。
-            '  🚫 **不许发「（不接）」「（不回了）」「（这话说到头了）」这种旁白** ——',
-            '  那是"报告状态"，群里的人看到只会莫名其妙。**不想接就一个字都别发。**',
+            // ⚠️⚠️ 2026-10-09 再强化（用户截图：「这个还是存在」+「**结束对话的判定也交给模型吧**」）：
+            //    光说"不许发（不接）"不够 —— 她换了个写法继续写：
+            //      「（这是回<主人>的，跟我没关系。不接」           ← 只有左括号
+            //      「（这条是黑祥回 <主人> 的，不是给我的）。那就不关我事了，你们自己说去」 ← 括号后还有正文
+            //    ⇒ 把这件事**说透**：**判断只体现在"发不发"这一个动作上**。
+            //      （用户要的就是这个：结束与否由她判断，而**判断的结果是"不发"**，
+            //        不是发一句"我决定不接" —— 那在群里就是穿帮。）
+            '  🚫🚫 **任何"我决定了"都不许写出来** ——「（不接）」「（不回了）」',
+            '  「（这条不是给我的）」「（跟我没关系）」这种**一个括号都不要出现**。',
+            '  ⚠️ **你的判断只体现在"发不发"这一个动作上**：',
+            '     · 决定不接 ⇒ **一个字都别发**（这就是"不接"的全部意思）；',
+            '     · 决定接 ⇒ 只写**你要说的那句话本身**，别先解释你为什么接。',
+            '  ⚠️ 群里的人看不到你的判断过程，只看到你说出口的话 —— 写出来就是穿帮。',
             '- 🚫 不用一直陪着它刷 —— 群里没人在看你们两个来回。',
           ].join('\n'),
         );
@@ -11910,6 +12476,115 @@ export class Bot {
           '如果这条回复拿去对群友说也毫无违和 —— **那就重写一遍。**',
         ].join('\n'),
       );
+    }
+
+    // ⚠️⚠️ 2026-10-09 加（用户原话：「把所有角色的信息**只留下生日**，**年龄变为真实动态的**，
+    //    这样随机事件和剧情可以出现**互相庆祝生日**的好事」）：
+    //    **只算"几岁 / 谁的生日"这两件事，算给她看。**
+    //
+    //    为什么非得代码算：模型对"今年几岁"这种日期算术**不可靠** ——
+    //    它会照着文本里写死的那个数字念，而过一年那个数字就错了
+    //    （两个号还会越差越多）。所以人设里**只留生日**，岁数从 `identity.json` 的
+    //    `birthday` + `birthYear` **按当天日期现算**（见 `src/birthday.js`）✓
+    //
+    //    ⚠️⚠️ 用户随后补了一条硬约束：「**她们就读的学校和学历这一点不能变**」——
+    //      所以这里**一个字都不碰学校 / 年级 / 学历**（那些仍然归人设说了算），
+    //      本段只负责"现在几岁""今天谁过生日""谁快过生日了"。
+    //      `test/birthday.js` 里有一条断言专门盯这个：输出里不许出现「羽丘 / 月之森 / 高一」。
+    //
+    //    ⚠️ "另一个号过生日"要先知道**那个号现在是谁**（`accounts/<QQ>.yml` 的
+    //      `persona.id`）⇒ 走 `birthday.personaIdOfQQ()` 映射；读不到就当没这个人 ✓
+    //
+    //    ⚠️⚠️ 位置：**放在提示词最末尾这一带**（和"刚说过的几句"并列）——
+    //      它每天变一次，放前面会把后面几万字的缓存前缀整段作废 ✗
+    //      （第一版我加到了上面那个"状态块"里，结果 `prompt-snapshot` 一个字都没变 ——
+    //        说明那段根本不在这条提示词里，白加。这一段是**验过**真的进去了的。）
+    // ⚠️⚠️ 2026-10-09 加（用户：「把**电池电量**设计为机器人的**生命值**，电量低时模拟
+    //    一个人真的生命垂危的感觉，**电量越低语气要更重**，**其他机器人也要配合演出**，
+    //    比如对没电要关机的机器人说出真心话之类的」）：
+    //    电量按**档**注入（>50 正常 / 20~50 偏低 / 5~20 很低 / ≤5 濒死），越低越沉；
+    //    从"很低 / 濒死"回到安全 ⇒ 一次**劫后余生**的引导 ✓
+    //    ⚠️ 位置：提示词**末尾的动态区** —— 它每 30 秒可能跨档，
+    //      放到人设前面会把几万字的缓存前缀全作废 ✗（今天刚修好的那件事）
+    //    ⚠️ 顺手把自己的档**写进共享文件**，另一个号才读得到"她随时会黑" ✓
+    try {
+      const meQQ = String(this.selfId ?? '');
+      batteryLife.publish(meQQ);
+      const bdPower = batteryLife.guide({ selfId: meQQ });
+      if (bdPower) parts.push(bdPower);
+    } catch {}
+
+    try {
+      const bdNote = birthday.note(Date.now(), {
+        selfId: String(persona.status()?.id ?? ''),
+        peerIds: (peersFor(String(event?.group_id ?? '')) ?? [])
+          .map((q) => birthday.personaIdOfQQ(q))
+          .filter(Boolean),
+      });
+      if (bdNote) parts.push(bdNote);
+    } catch {}
+
+    // ⚠️⚠️ 2026-10-09 加（用户三连）：
+    //    「**机器人可以直接 @ 那个过生日的人**」
+    //    「除了庆祝机器人的生日，**还可以对好感度 90 以上群友庆祝生日**」
+    //    「**日期直接从个人名片那里取**」
+    //  ⇒ 群里**今天过生日、且好感度到线**的真人 ⇒ 写进提示词，并明确告诉她**怎么 @**。
+    //
+    //    ⚠️ `@名字` 那一套是现成的：她只要写 `@某某`，`msg` 层会把它转成**真正的 at 段**
+    //      （见本文件里那段「把 N 个同类写成了真正的 @」的逻辑，最多两个）——
+    //      所以提示词里**教她写 `@名字`** 就够，不用让她打任何标记。
+    //    ⚠️ 好感度门槛用**注入**而不是 import（`src/affinity.js` 的这个接口正好叫
+    //      `atOrAbove`，传进来即可）—— 两个模块不必互相依赖。
+    try {
+      const gidB = String(event?.group_id ?? '');
+      if (gidB) {
+        // ⚠️ 文案收在 `member-birthday.js` 的 `note()` 里（和日常事件、剧情**共用同一段**）——
+        //    分开写两遍的话，"门槛 90"和"怎么写 @"这两件事迟早在两边漂移 ✗
+        const line = memberBirthday.note(gidB);
+        if (line) parts.push(line);
+      }
+    } catch {}
+
+    // ⚠️⚠️ 2026-10-09：**每轮会变的两段挪到这里（提示词的最末尾）** ——
+    //    来龙去脉见本函数前面那段长注释（"固定排前面、会变的排最后"）。
+    //    内容一个字没改，只是换了位置。
+    //
+    //    ⚠️ 为什么"放最后"不但不损失、反而更好：
+    //      这两段讲的都是**这次说话当下**的事（正在演的剧情起因 + 你们刚说过的 6 句 +
+    //      刚被清掉的作废窗口），而模型对**末尾**最敏感（近因） ⇒ 放在最末更容易被用上 ✓
+    if (event?.message_type === 'group') {
+      const gidR = String(event.group_id ?? '');
+      try {
+        // ⚠️ 2026-10-07 加（用户：「**重点是聊天不要死磕一个点，要有进展变化**」）：
+        //    把"你们刚说过的几句"一起喂进去 —— 让它**看见自己/对方刚说过什么**，
+        //    比只在提示词里写"要有新东西"管用得多。
+        const brief = quest.chatBrief(gidR, {
+          recentLines: recent.lastBotLines(gidR, {
+            n: 6,
+            uids: peersFor(gidR).map(String),
+          }),
+        });
+        if (brief) parts.push('\n' + brief);
+      } catch {}
+      // ⚠️⚠️ 2026-10-07 加（用户报：「**清除剧情之后她们还在说推柜子出房间**」）：
+      //    他清掉剧情之后，**上下文里那几句台词还留着**（两个进程各存一份 recent）⇒
+      //    静默那 60 秒一过，她们就顺着上文接着演 ✗
+      //    ⇒ 清过之后有一个**作废窗口**（默认 10 分钟，`quest.wipedQuietMs`）：
+      //      这期间明说"那条剧情作废了、别提那个房间/门/柜子"，当它没发生过。
+      try {
+        const wipedUntil = this.questWipedUntil?.get(gidR) ?? 0;
+        if (wipedUntil > Date.now()) {
+          parts.push(
+            '\n' +
+              [
+                '⚠️⚠️ **刚才那条剧情已经被管理员清掉了（作废）**：',
+                '   · 🚫 不许再接着它演 —— 别主动提那个房间 / 门 / 柜子 / 怎么出去 / 那个秘密；',
+                '   · 🚫 也别换个说法绕回去（"刚才说到哪儿了"这种也算）—— 就当那件事没发生过；',
+                '   · ✅ 群里说别的事、问她别的，照常正常聊；他要是自己提起，你就当没印象。',
+              ].join('\n'),
+          );
+        }
+      } catch {}
     }
 
     return parts.join('\n');
@@ -13403,6 +14078,29 @@ export class Bot {
       //      空数组对它们无害。
       return [];
     }
+    // ⚠️⚠️ 2026-10-10 加（用户截图：「**日常聊天不要带这些，只有剧情需要带一点**」）：
+    //    日常（非剧情）里把「（动作/神态描写）」剥掉、**正文留下**；剧情里保留 ✓
+    //    ⚠️ 和 `sendText` 里那道是**同一件事的两处接线** —— 两个都是真实出口：
+    //      · `sendText`    → 主聊天回复（`handle → sendChunk → sendText`）
+    //      · `sendChatLike`→ 剧情 / 日常事件 / 同类主动搭话 / 管理界面手动触发 ✓
+    //    ⚠️ 剥完什么都不剩 ⇒ 这条**不发**（空数组 —— 调用方本来就按数组处理）✓
+    if (!opts.force && text && /[（(]/.test(String(text)) && !this.questLive(String(groupId ?? ''))) {
+      try {
+        const stripped = stripBracketAct(String(text));
+        if (!stripped) {
+          log.info(`[旁白] 日常聊天：剥掉括号后什么都不剩 → 不发（${String(text).slice(0, 24)}）`);
+          return [];
+        }
+        if (stripped !== String(text)) {
+          log.info(
+            `[旁白] 日常聊天剥掉动作旁白：「${String(text).slice(0, 30)}」→「${stripped.slice(0, 30)}」`,
+          );
+          text = stripped;
+        }
+      } catch (e) {
+        log.debug(`[旁白] 剥离出错（照原样发）：${e.message}`);
+      }
+    }
     // ⚠️⚠️ 2026-10-07 加（用户：「**睡着在其他地方都可以，在剧情里睡着肯定不行**」）：
     //    剧情进行中 ⇒ **不许用"眯会儿 / 晚安 / 睡了"把这一晚带过去**。
     //    实测（用户截图）：那条"必须做到 X 才能出去"的线还在演，她俩聊着聊着互相道晚安 ——
@@ -13425,11 +14123,23 @@ export class Bot {
     //    ⚠️ 提示词那边已经点名禁过「（不接）」，这次换个说法又冒出来 ⇒ 代码兜底 ✓
     //    ⚠️ **不限剧情** —— 平时聊天冒出这种也一样难看 ✓
     //    ⚠️ 只拦"元话语"那种（见 `isBracketNarration`）：「（笑）」照旧放行 ✓
-    if (!opts.force && this.isBracketNarration(text)) {
+    // ⚠️⚠️⚠️ 2026-10-09（用户：「刚才一堆括号消息，看看为什么没拦住」）——
+    //    **这道闸要挂两处，因为"唯一出口"这个说法从来就不成立** ✗
+    //      · `handle()` 的主聊天回复 → `sendChunk()` → **`sendText()`**；
+    //      · `sendChatLike()`（日常事件 / 剧情 / 主动搭话走的这条）→ **裸调 `send_group_msg`**
+    //        （见下面 `this.call('send_group_msg', ...)`）。
+    //    ⇒ 只挂一处就会漏掉另一条路。实证：闸挪到 `sendText` 之后，
+    //      用今天那句「（他这是回 <主人> 的，不接）」走日常事件这条路**照样发出去了** ✗
+    //    ⚠️ 判定实现只有一份（`shouldPauseByBracket`），两处都调它 ✓
+    if (!opts.force && (await this.shouldPauseByBracket(String(text ?? ''), String(groupId ?? '')))) {
       log.info(
-        `[旁白] 这条是一整段括号旁白（${String(text ?? '').slice(0, 20)}）→ **不发**` +
-          '（群里不该出现"报告状态"的话）',
+        `[旁白] 这条在说"我不接 / 先停"（${String(text ?? '').slice(0, 20)}）→ **不发**、` +
+          '并且**把这轮对话掐断**',
       );
+      try {
+        this.botChainClosed.set(String(groupId ?? ''), Date.now());
+      } catch {}
+      // ⚠️ 这里必须返回**数组**（剧情那条路的调用方是 `for (const x of sent)`）
       return [];
     }
     // ⚠️⚠️ 2026-10-07 加（用户要求）：**同类之间要有"打字"的停顿** ——
@@ -14381,15 +15091,85 @@ export class Bot {
    */
   isBracketNarration(text) {
     const t = String(text ?? '').trim();
-    if (!t || t.length > 60) return false;
-    if (!/^[（(]/.test(t) || !/[）)]$/.test(t)) return false;
-    const inner = t.slice(1, -1).trim();
-    if (!inner) return false;
-    // 里面还有别的句子 ⇒ 不是"一整段旁白"（那多半是她真的在说话）
-    if (/[。！？!?]/.test(inner.slice(0, -1))) return false;
-    return /(不回|不接|不说|不答|继续|没什么事|没我什么|没我的事|让她|随她|算了|就这样|不管|晾着|搁着|先这样|看着办)/.test(
-      inner,
-    );
+    // ⚠️ 2026-10-09 放宽到 80：用户截图那种"括号里先说一句、后面再带正文"的会长一点
+    if (!t || t.length > 80) return false;
+    const META =
+      /(不回|不接|不说|不答|继续|没什么事|没我什么|没我的事|让她|随她|算了|就这样|不管|晾着|搁着|先这样|看着办|不关我事|关我什么事|跟我没关系|跟我没关|不是给我的|不是跟我|插不上|不掺和)/;
+    // ① 整条被一对括号包住（原判据）
+    if (/^[（(]/.test(t) && /[）)]$/.test(t)) {
+      const inner = t.slice(1, -1).trim();
+      if (inner && META.test(inner)) return true;
+    }
+    // ⚠️⚠️ 2026-10-09 加（用户又截图两条，形态和上次都不一样，用户原话：「这个还是存在」）：
+    //   ② `（这是回<主人>的，跟我没关系。不接` —— **只有左括号**（她没写右括号）✗
+    //   ③ `（这条是黑祥回 <主人> 的，不是给我的）。那就不关我事了，你们自己说去`
+    //      —— **括号后还有正文** ✗
+    //   这两种都不满足"整条被包住" ⇒ 上面那条一律漏掉。
+    //   ⇒ 只要**以括号开头**、且**括号里那截**（到第一个右括号、或整条）含元话语词 ⇒ 算旁白 ✓
+    //   ⚠️ `（笑）那你说呢` 这种照旧放行 —— "笑"不在词表里，靠词表兜住误伤 ✓
+    const head = /^[（(]([^）)]*)/.exec(t);
+    if (head && head[1].trim() && META.test(head[1])) return true;
+    return false;
+  }
+
+  /**
+   * 「这条回复其实是在说"**我不接 / 先停一停**"吗」—— **先快判，拿不准问模型**。
+   *
+   * ⚠️⚠️ 2026-10-09（用户原话：「**为什么不能只要模型去检查括号里的话，只要括号里的话
+   *    意思是暂停就直接把消息截回来并且把对话掐断**」）：
+   *    前三轮我一直在往关键词表里加词（「不接」「跟我没关系」…），
+   *    她**每换一种写法就漏一次** ✗（用户：「括号话越来越多了」）。
+   *    他说得对：**"这句话是什么意思"该由模型判**，代码只负责两件事 ——
+   *    **截住不发** + **把这轮对话掐断**。
+   *
+   * 代价控制（绝不是每条都问）：
+   *   ① 现成的关键词判据命中 ⇒ 直接算（省一次调用）；
+   *   ② 回复里**没有括号** ⇒ 直接不算（绝大多数消息走这条）；
+   *   ③ 只有"含括号、关键词又没命中"那一点点，才问一次模型。
+   *   ⚠️ 判定调用走 `llm.phrase()` —— 它本来就是**非流式 + 关思考链 + 60 token 下限**的
+   *      轻量通道（见 `src/llm.js`）✓
+   */
+  async shouldPauseByBracket(text, groupId = '') {
+    try {
+      if (this.isBracketNarration(text)) return true; // ① 快判据
+      const t = String(text ?? '');
+      if (!/[（(]/.test(t)) return false; // ② 没括号 ⇒ 不算
+      const inner = (t.match(/[（(]([^）)]{1,80})/) ?? [])[1] ?? '';
+      if (!inner.trim()) return false;
+      // ⚠️⚠️ 2026-10-09 加（**代价控制**）：这里是在 `sendText` 里 `await` —— 它会**拖慢每一条外发**，
+      //    而 `behavior` 套件因此红了 5 项（"发了 0 条"：测试等不到那条消息就被拖过了时间窗）✗
+      //    ⇒ 只有**短括号**才值得问：元话语旁白都是短的（「（不接）」「（跟我没关系）」），
+      //      正常台词里那种长括号（`（笑）今天天气不错……`）**直接放行** ✓
+      if (inner.length > 30) return false;
+      // ③ 让模型判"括号里这句是不是在说要停"
+      const ans = await llm.phrase({
+        system:
+          '你只做一件事：判断"括号里的那句话"是不是在表达' +
+          '「我不接这条 / 先停一停 / 这轮到此为止 / 跟我没关系我不掺和」。' +
+          '只回答一个字：是 或 否。不要解释，不要加标点。',
+        user: `括号里的话：${inner}`,
+        maxTokens: 60,
+        // ⚠️ 2026-10-09：超时压到 1.5 秒 —— 这条判定在 `sendText` 里 await，
+        //    拖太久会把**正常消息**也顶慢（`behavior` 套件就是这么红的）✗
+        timeoutMs: 1500,
+      });
+      // ⚠️⚠️ 2026-10-09 收严：原来只要**以"是"开头**就算"要停" ——
+      //    而测试里那个"假模型"返回的是**一整段固定文本**，万一它正好以"是"开头，
+      //    就会把**正常消息全拦掉** ✗（`behavior` 套件当场红 5 项，全是"发了 0 条"）
+      //    ⇒ 要求模型**整条就是"是"**（最多带个语气词 / 标点）✓
+      //    ⚠️ 这也是对真实模型的正确要求：提示词里就写着"只回答一个字：是 或 否" ✓
+      const yes = /^[\s"「]*是(的|呀|啊|对)?[\s"」。.!！,，]*$/.test(String(ans ?? '').trim());
+      if (yes) {
+        log.info(
+          `[旁白·模型判] 括号里是在说停（「${inner.slice(0, 24)}」）→ 截住不发 + 掐断这轮`,
+        );
+      }
+      return yes;
+    } catch (e) {
+      // ⚠️ 判不了就**当"不是"**（退回到快判据的结果）—— 宁可多发一句，也不把正常话吞掉
+      log.debug(`[旁白·模型判] 判定失败（当"不是"）：${e.message}`);
+      return false;
+    }
   }
 
   questControl(event, gid, hint, forceEnd = null) {
@@ -14607,6 +15387,58 @@ export class Bot {
     }
   }
 
+  /**
+   * 「服务器**重新开启**的时候提醒我一下 / @我」—— 挂一条开服提醒（2026-10-10 用户要求）。
+   *
+   * 用户原话：「如果有人 @bot 让她在服务器重新开启的时候提醒一下、@他，可以做到吗」
+   * 拍板：**谁都能挂**（每人每群一条、重复挂就覆盖）、**一直有效直到触发**。
+   *
+   * ⚠️ 触发**不在这里** —— 在 `sessions.tick()` 那条「服务器恢复了」的分支里
+   *    （那是唯一做了「连续 3 次查不到才算真关过」确认的地方）⇒ 转发给 `server-watch.js` ✓
+   * ⚠️ 提醒谁：**@ 了谁就提醒谁**；没 @ 就提醒**说这句话的人** ✓
+   * @returns {boolean} 处理了没有
+   */
+  tryServerWatch(event, segs) {
+    try {
+      if (event?.message_type !== 'group') return false;
+      const raw = String(msg.extractText(segs) ?? '').trim();
+      if (!raw || raw.length > 60) return false; // 太长多半是闲聊里顺嘴一提，不是请求
+      // ① 得是"提醒 / 叫我 / @我"这种**请求**
+      if (!/(提醒|叫我|喊我|喊一下|说一声|通知|告诉|@\s*我|圈我|艾特我)/.test(raw)) return false;
+      // ② 得在说"服务器重新开启"这件事（"现在开没开"那种走实查，不挂订阅）
+      if (!/(服务器|服务端|开服|服里|服能进)/.test(raw)) return false;
+      if (!/(开服|开启|开了|开好|重启|重开|恢复|修好|好了|能进|上线|回来)/.test(raw)) return false;
+      // ③ 挂给谁：@ 了别人就提醒他，没 @ 就提醒说话的人 ✓
+      const gid = String(event.group_id);
+      const self = String(this.selfId ?? '');
+      const ats = msg
+        .toSegments(event.message)
+        .filter(
+          (s) =>
+            s?.type === 'at' &&
+            s.data?.qq &&
+            String(s.data.qq) !== 'all' &&
+            String(s.data.qq) !== self,
+        )
+        .map((s) => String(s.data.qq));
+      const target = ats[0] ?? String(event.user_id ?? '');
+      if (!target) return false;
+      const name = names.of(target, gid) || '';
+      const ok = serverWatch.subscribe(gid, target, name);
+      if (ok) {
+        log.info(`[开服提醒] 群 ${gid}：${event.user_id} 挂了「服务器开了 @ ${target}」`);
+        this.sendToGroup(gid, '行，服务器一开我就 @ 你（一直挂着，不会忘）', {
+          at: target,
+          atName: name,
+        }).catch(() => {});
+      }
+      return ok;
+    } catch (e) {
+      log.debug(`[开服提醒] 挂订阅失败（当没这回事）：${e.message}`);
+      return false;
+    }
+  }
+
   tryQuestStart(event, segs) {
     try {
       const raw = String(msg.extractText(segs) ?? '').trim();
@@ -14726,6 +15558,32 @@ export class Bot {
           return true;
         }
       }
+      // ⚠️⚠️ 2026-10-10 加（跨机器对齐）：**不管是"这条我开"还是"我让位"，都先按确定性 id
+      //    记一笔** —— 每个号各记各的，id 是"群号+发起人+命令原文"算出来的，两边一样 ✓
+      //    ⇒ `questLive()` 靠它认得出"这个群在演剧情"，**不需要共享文件**（跨机器才成立得起）。
+      //    ⚠️ 放在这里（控制词拒绝之后）：`/剧情 继续`「推进」这类**不是新背景**，不该记成一条新线 ✓
+      //    ⚠️ 也放在 `endingWord` 之前：`/剧情 好结局` 是收尾命令，同样不记 ✓
+      // ⚠️⚠️⚠️ 2026-10-10 再修（用户：「**刚才爱音又在剧情中开启剧情了**」）：
+      //    原来**每条 `/剧情` 命令都记一笔**（包括"推进"命令）—— 而推进命令的原文和开场不同
+      //    ⇒ 算出来是**新 id** ⇒ `rememberLine()` 里"换了 id 就把 `seen` 归零" ⇒
+      //    `lineSeen()` 变假 ⇒ **让位闸当场失效** ⇒ 让位方又把"推进"当成"新开一条" ✗✗
+      //    日志实证（15:57:09，两个号收到同一条命令）：
+      //      · 主号 → `手动推进` ✓
+      //      · 爱音 → `手动开始`（**外加**没有出现任何"让位"日志）✗
+      //    ⇒ 判据：**这条线已经在演（`lineSeen`）⇒ 不许记新线** ——
+      //      线的身份由**开场那条命令**定，后面的推进命令一个字都不许改它 ✓
+      //      （真开新剧情时 `lineSeen` 是假的 ⇒ 照常记新线 ✓）
+      if (hint && !quest.lineSeen(gid)) {
+        try {
+          quest.rememberLine(gid, {
+            id: quest.lineIdOf(gid, event.user_id, hint),
+            by: String(event.user_id ?? ''),
+            premise: hint,
+          });
+        } catch (e) {
+          log.debug(`[剧情] 记线失败（不影响主流程）：${e.message}`);
+        }
+      }
       if (!hint && !endingWord && !(quest.current(gid) && !quest.current(gid).endedAt)) {
         this.sendToGroup(
           gid,
@@ -14748,6 +15606,38 @@ export class Bot {
         if (endingWord) {
           log.info(`[剧情] 群 ${gid} 没有在跑的剧情，却发了收结局命令（${endingWord}）`);
           this.replyOnceToGroup(gid, '现在没有在跑的剧情（要开新的就发 /剧情 加一句背景）');
+          return true;
+        }
+        // ⚠️⚠️⚠️ 2026-10-10 修（用户报：「**saki 开始剧情之后发了一个 /剧情 推进剧情，
+        //    但是爱音那边读取成了开始新剧情**」）：
+        //    上面那个判据只看**本地** `quest.current()` —— 而**让位的那个号从来不 `begin`**
+        //    （开场时序位公式让它直接 return 了）⇒ 它本地**永远**是空的 ⇒
+        //    于是"推进"被它当成"新开一条"，两边剧情**当场分叉** ✗
+        //    日志实证（14:48:37，两个号收到同一条命令）：
+        //      · 主号 → `[剧情] 手动推进（群 …）方向：门把手上有电，不能碰` ✓
+        //      · 爱音 → `[剧情] 手动开始（群 …）：门把手上有电，不能碰` + `手动开了一条` ✗
+        //    ⇒ 本地没有、但 `questLive()` 说有（它认**共享起因** `state/quest-shared.json`，
+        //      那是两个进程都读得到的文件）⇒ **这条线的主导权不在我** ⇒
+        //      我一个字都不做、也绝不开新线 ✓（真推进由主导的那一方自己走 `questControl`）
+        //    ⚠️ 返回 `true`（不是 false）：当成"这条命令我受理了"处理掉 ——
+        //      返回 false 会掉进下面「开新剧情」那条路，正是要修的那个 bug ✓
+        //    ⚠️⚠️ **位置必须在 `endingWord` 那块之后**：`/剧情 好结局` 要优先走它自己那条
+        //      提示（那是"**本号**有没有剧情"的语义，跟别人主导的线无关）——
+        //      放前面会把那条提示吞掉（`quest` 套件当场红过 ✓）
+        // ⚠️⚠️⚠️ 2026-10-10 改判据（用户报：「**刚才开始剧情的时候哪个 bot 都没有主动接上**」）：
+        //    第一版这里用的是 `this.questLive(gid)` —— **太宽** ✗
+        //    `questLive` 里有 `lineAlive()`（"我记过这条 `/剧情` 命令"），而
+        //    **命令记了线、剧情却没开成**的情况（上一版的事故）会让它一直真 ⇒
+        //    **两个号都让位 ⇒ 没人开场** ✗✗（用户看到的就是"谁都没接上"）
+        //    ⇒ 让位必须要求"**这条线真的演过**"（`lineSeen` = 我看过它的台词）：
+        //      · 只有命令没有演出 ⇒ 不让位，照常开 ✓
+        //      · 别人真在演 ⇒ 让位 ✓
+        //    ⚠️ 开场那一刻的让位不靠这里 —— 那是 `questTurnYield()` 的序位公式管的 ✓
+        if (quest.lineSeen(gid)) {
+          log.info(
+            `[剧情] 群 ${gid} 别人那条线**真的在演**（我看过它的台词）→ ` +
+              '这条 /剧情 我不执行（让位：免得两边各开一条、剧情分叉）',
+          );
           return true;
         }
       }
@@ -14991,6 +15881,14 @@ export class Bot {
         gid,
         Date.now() + Math.max(60000, Number(config.quest?.wipedQuietMs ?? 600000) || 600000),
       );
+      // ⚠️⚠️ 2026-10-10 加（跨机器对齐）：**本地那条"确定性线"也要撤掉** ——
+      //    两个号都会收到这条指令、各自撤各自那份 ⇒ 之后 `questLive()` 立刻变假 ✓
+      //    ⚠️ 位置跟上面那条一样：**清不清都撤**（不然"没得清"却把线记着 ⇒ 以后永远以为在演）✓
+      try {
+        quest.forgetLine(gid);
+      } catch (e) {
+        log.debug(`[剧情] 撤线记录失败（不影响主流程）：${e.message}`);
+      }
 
       // ⚠️⚠️ 2026-10-07 加（用户截图：**没主导剧情的那个号，`/清除剧情` 把上上一个剧情清了**）：
       //    让位的那个号**自己没有这条线**（序位公式让它没 `begin`），

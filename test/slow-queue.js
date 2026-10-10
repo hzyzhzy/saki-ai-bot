@@ -58,65 +58,76 @@ const setCfg = (o) => {
   config.llm = { ...(config.llm ?? {}), ...o };
 };
 
-console.log('\n【1】默认是**开着**的，阈值默认 60 秒');
+console.log('\n【1】默认是**开着**的，阈值默认 **3 条**');
 {
   config.llm = { ...(config.llm ?? {}) };
   delete config.llm.slowQueueDrop;
-  delete config.llm.slowQueueDropMs;
+  delete config.llm.slowQueueDropCount;
   check(b.slowDropOn() === true, '★ 配置里没写也当**开**（用户要求：默认开启）');
-  check(b.slowDropMs() === 60000, '★ 默认阈值 = **60000ms（60 秒）**');
+  check(b.slowDropCount() === 3, '★ 默认阈值 = **3 条**（2026-10-09 用户：按条数，不按时间）');
 }
 
-console.log('\n【2】★★ 这一轮生成超过阈值 ⇒ 排队的一律丢掉');
+console.log('\n【2】★★ 排队攒到阈值 ⇒ 一律丢掉');
 {
-  setCfg({ slowQueueDrop: true, slowQueueDropMs: 300 });
-  const s = st({ agoMs: 500, items: [{ _tag: '老消息' }] });
+  setCfg({ slowQueueDrop: true, slowQueueDropCount: 3 });
+  const s = st({ items: [{ _tag: 'a' }, { _tag: 'b' }, { _tag: 'c' }] });
   const dropped = b.dropIfSlowGenerating(KEY, s);
-  check(dropped === true, '★★ 已经生成 500ms（> 300ms 阈值）→ **丢**');
-  check(s.items.length === 0, '★★ 而且**原来攒着的那条也一起扔了**', `items=${s.items.length}`);
+  check(dropped === true, '★★ 攒到 3 条（= 阈值）→ **丢**');
+  check(s.items.length === 0, '★★ 而且**原来攒着的那几条也一起扔了**', `items=${s.items.length}`);
   check(s.running === true, '★ 状态还是"生成中"（那一轮仍在跑，等它自己结束）');
   check(s._dropLogged === true, '★ 记了"已报过一次"（免得慢模型期间每来一条刷一行日志）');
-  // ⚠️ 这就是"这条没被攒下"的等价形式：调用方拿到 true 就直接 return（见【7】的接线断言）
 }
 
-console.log('\n【3】没超阈值 ⇒ 不许丢（不误伤正常速度）');
+console.log('\n【3】没攒够 ⇒ 不许丢（不误伤正常速度）');
 {
-  setCfg({ slowQueueDrop: true, slowQueueDropMs: 300 });
-  const s = st({ agoMs: 100 });
-  check(b.dropIfSlowGenerating(KEY, s) === false, '★ 才生成 100ms（< 300ms）→ 不丢，照常攒');
-  const s2 = st({ agoMs: 300 });
-  check(b.dropIfSlowGenerating(KEY, s2) === false, '★ 正好等于阈值 → 也不丢（判据是"**超过**"）');
+  setCfg({ slowQueueDrop: true, slowQueueDropCount: 3 });
+  check(b.dropIfSlowGenerating(KEY, st({ items: [{ _tag: 'a' }] })) === false, '★ 才 1 条 → 不丢，照常攒');
+  check(
+    b.dropIfSlowGenerating(KEY, st({ items: [{ _tag: 'a' }, { _tag: 'b' }] })) === false,
+    '★ 2 条（差一条）→ 也不丢',
+  );
+  // ⚠️ **时间不再当判据**：攒得再久、条数不够也照样不丢 ✓
+  check(
+    b.dropIfSlowGenerating(KEY, st({ agoMs: 600000, items: [{ _tag: 'a' }] })) === false,
+    '★★ 攒了 10 分钟但只有 1 条 → 不丢 —— 判据只认**条数**（用户：「时间还是没有精确对应到」）',
+  );
 }
 
-console.log('\n【4】关掉开关 ⇒ 再慢也不丢（回到老行为）');
+console.log('\n【4】关掉开关 ⇒ 攒再多也不丢（回到老行为）');
 {
-  setCfg({ slowQueueDrop: false, slowQueueDropMs: 300 });
+  setCfg({ slowQueueDrop: false, slowQueueDropCount: 3 });
   check(b.slowDropOn() === false, '★ 开关读到的是"关"');
-  const s = st({ agoMs: 60000, items: [{ _tag: '老消息' }] });
-  check(b.dropIfSlowGenerating(KEY, s) === false, '★★ 已经生成一分钟了也不丢');
-  check(s.items.length === 1, '★ 攒着的那条还留着');
+  const s = st({ items: [{ _tag: 'a' }, { _tag: 'b' }, { _tag: 'c' }, { _tag: 'd' }] });
+  check(b.dropIfSlowGenerating(KEY, s) === false, '★★ 攒到 4 条了也不丢');
+  check(s.items.length === 4, '★ 攒着的都还留着');
 }
 
-console.log('\n【5】阈值可调（界面上那个秒数）+ 非法值兜底');
+console.log('\n【5】阈值可调（界面上那个条数）+ 非法值兜底');
 {
-  setCfg({ slowQueueDrop: true, slowQueueDropMs: 60000 });
-  check(b.slowDropMs() === 60000, '★ 读的是配置里的值');
-  check(b.dropIfSlowGenerating(KEY, st({ agoMs: 5000 })) === false, '★ 阈值 60 秒 → 5 秒不算慢');
-  check(b.dropIfSlowGenerating(KEY, st({ agoMs: 61000 })) === true, '★ 61 秒 → 超了，丢');
+  setCfg({ slowQueueDrop: true, slowQueueDropCount: 5 });
+  check(b.slowDropCount() === 5, '★ 读的是配置里的值');
+  check(
+    b.dropIfSlowGenerating(KEY, st({ items: [{ _tag: 'a' }, { _tag: 'b' }] })) === false,
+    '★ 阈值 5 条 → 才 2 条，不算多',
+  );
+  check(
+    b.dropIfSlowGenerating(KEY, st({ items: [1, 2, 3, 4, 5].map((i) => ({ _tag: i })) })) === true,
+    '★ 5 条 → 到阈值，丢',
+  );
 
-  setCfg({ slowQueueDrop: true, slowQueueDropMs: 0 });
-  check(b.slowDropMs() === 60000, '★ 写成 0 → 退回默认 **60 秒**（**不能变成"永远在丢"**）');
-  setCfg({ slowQueueDrop: true, slowQueueDropMs: 'abc' });
-  check(b.slowDropMs() === 60000, '★ 写成非数字 → 同样退回默认');
-  setCfg({ slowQueueDrop: true, slowQueueDropMs: -5 });
-  check(b.slowDropMs() === 60000, '★ 写成负数 → 同样退回默认');
+  setCfg({ slowQueueDrop: true, slowQueueDropCount: 0 });
+  check(b.slowDropCount() === 3, '★ 写成 0 → 退回默认 **3 条**（**不能变成"永远在丢"**）');
+  setCfg({ slowQueueDrop: true, slowQueueDropCount: 'abc' });
+  check(b.slowDropCount() === 3, '★ 写成非数字 → 同样退回默认');
+  setCfg({ slowQueueDrop: true, slowQueueDropCount: -5 });
+  check(b.slowDropCount() === 3, '★ 写成负数 → 同样退回默认');
 }
 
 console.log('\n【6】★★ 那条慢的发出后**不算恢复**；要等"试探轮"成功才算');
 {
-  setCfg({ slowQueueDrop: true, slowQueueDropMs: 300 });
-  const s = st({ agoMs: 500, items: [{ _tag: '老消息' }] });
-  check(b.dropIfSlowGenerating(KEY, s) === true, '超阈值 → 丢');
+  setCfg({ slowQueueDrop: true, slowQueueDropCount: 3 });
+  const s = st({ items: [1, 2, 3].map((i) => ({ _tag: i })) });
+  check(b.dropIfSlowGenerating(KEY, s) === true, '攒到阈值 → 丢');
   check(s.slowMode === true, '★★ 并且**进入慢模式**');
 
   // ① 那条慢的生成完了（它不是"试探轮"）
@@ -150,14 +161,14 @@ console.log('\n【7】接线：默认值 / 界面控件 / 真的接在那条路�
 {
   const cfgSrc = readFileSync(join(ROOT, 'src', 'config.js'), 'utf8');
   check(
-    /slowQueueDrop: true/.test(cfgSrc) && /slowQueueDropMs: 60000/.test(cfgSrc),
-    '★ `config.js` 的默认值 = **开** + 60000ms（60 秒）',
+    /slowQueueDrop: true/.test(cfgSrc) && /slowQueueDropCount: 3/.test(cfgSrc),
+    '★ `config.js` 的默认值 = **开** + **3 条**（2026-10-09 起按条数，不按时间）',
   );
 
   const html = readFileSync(join(ROOT, 'src', 'webui.html'), 'utf8');
   check(
-    /id="llm-slowDrop"/.test(html) && /id="llm-slowDropMs"/.test(html),
-    '★ 界面上有这两个控件（「模型 → 大模型」卡片里）',
+    /id="llm-slowDrop"/.test(html) && /id="llm-slowDropCount"/.test(html),
+    '★ 界面上有这两个控件（「模型 → 大模型」卡片里，单位是**条**）',
   );
   check(
     /slowQueueDrop: !!\$\('llm-slowDrop'\)\.checked/.test(html),
@@ -167,8 +178,12 @@ console.log('\n【7】接线：默认值 / 界面控件 / 真的接在那条路�
     /\$\('llm-slowDrop'\)\.checked = c\.llm\.slowQueueDrop !== false/.test(html),
     '★ 读回来也是"只有明确写 false 才算关"（默认开）',
   );
-  check(/slowQueueDropMs:[\s\S]{0,140}\* 1000/.test(html), '★ 界面填**秒**、存**毫秒**');
-  check(/\?\? 60000\)/.test(html), '★ 界面上读回来的兜底默认也是 **60 秒**');
+  // ⚠️ 2026-10-09 改：判据从"秒"换成"**条**" ⇒ 界面填**条**、存**条**
+  check(
+    /slowQueueDropCount: Math\.max\(1,[\s\S]{0,80}?llm-slowDropCount/.test(html),
+    '★ 界面填**条**、存**条**（不再是"填秒存毫秒"）',
+  );
+  check(/\?\? 3\)/.test(html), '★ 界面上读回来的兜底默认也是 **3 条**');
 
   const bsrc = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
   check(/slowQueueDrop !== false/.test(bsrc), '★ 后端也按"默认开"判（`!== false`）');

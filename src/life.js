@@ -39,6 +39,11 @@ import { log } from './log.js';
 import { phrase } from './llm.js';
 import * as storyline from './storyline.js';
 import * as holiday from './holiday.js';
+// ⚠️ 2026-10-09 加：生日（用户要「随机事件和剧情里能出现**互相庆祝生日**的好事」）。
+import * as birthday from './birthday.js';
+// ⚠️ 2026-10-09 加：**群友**的生日（好感度 90 以上才祝贺）—— 用户：「还可以对好感度 90
+//    以上群友庆祝生日，日期直接从个人名片那里取」。
+import * as memberBirthday from './member-birthday.js';
 import { personaText, castBlock, personaDataFile } from './knowledge.js';
 import * as persona from './persona.js';
 // ⚠️ 2026-10-04：套话句式（「谁也没喊谁」）的二次改写 —— 见 `src/rewrite.js` 顶部
@@ -163,7 +168,7 @@ export async function preview(now = Date.now(), groupId = '') {
   const tpl = pickFrom(pool, Math.random);
   let text = '';
   try {
-    text = await compose({ template: tpl, slot: slot.name, off, holidayEvents });
+    text = await compose({ template: tpl, slot: slot.name, off, holidayEvents, groupId: gid });
   } catch (e) {
     log.debug(`预览润色失败：${e.message}`);
   }
@@ -529,6 +534,12 @@ export function plan(now = Date.now(), rng = Math.random, groupId = '') {
 export async function compose(planObj, extra = {}) {
   const tpl = planObj?.template;
   if (!tpl) return '';
+  // ⚠️⚠️ 2026-10-09：**群号要从这两个地方拿** —— 生日那段要按群查"今天谁生日"，
+  //    而我第一版直接写了 `groupId`：`compose()` 的作用域里**根本没有这个变量** ⇒
+  //    `ReferenceError` 被下面那个 `catch {}` 吞掉 ⇒ 生日段永远为空，
+  //    表现是"预览出来还是别的小事"（查了两轮才找到）✗
+  //    `plan()` 的返回值里本来就带 `groupId`（见它 `fire: true` 那个 return）✓
+  const gidBd = String(extra?.groupId ?? planObj?.groupId ?? '');
   const related = relatedPast(tpl, 4);
 
   // ⚠️ 2026-09-15：事件里点名了谁，就把谁那一段设定补进提示词。
@@ -595,9 +606,30 @@ export async function compose(planObj, extra = {}) {
     .map(([k, arr]) => `${k}：${arr[Math.floor(Math.random() * arr.length)]}`)
     .join('；');
 
+  // ⚠️⚠️ 2026-10-09（用户要的是「**随机事件**和剧情可以出现**互相庆祝生日**的好事」）：
+  //    光把"今天谁生日"塞进去**不够** —— 实测预览两次，出来的还是"电车上小孩盯我屏幕"
+  //    「去月之森送东西」这种跟生日八竿子打不着的小事：**事件模板那句更具体，模型就跟着它走了** ✗
+  //    ⇒ 生日当天改成**由生日主导**：下面"今天发生的事"那句直接换成生日方向，
+  //      并把模板降级成"不用跟着走"。这样那天至少有一条日常事件是过生日 ✓
+  let bdLine = '';
+  try {
+    bdLine =
+      birthday.lifeNote(Date.now(), { selfId: String(config.persona?.id ?? '') }) +
+      memberBirthday.note(gidBd);
+    if (bdLine) {
+      bdLine +=
+        '\n⚠️ **今天这条就围绕生日写**（挑礼物 / 被叫去对方家里 / 顺路买个蛋糕 /' +
+        '路上碰见说一句）—— 今天最特别的就是这件事，别写成别的小事。';
+    }
+  } catch {}
+
   const lines = [
     todayLine ? `今天是：${todayLine}` : '',
-    `今天发生的事（**只是个方向，不是逐字剧本**）：${tpl.text}`,
+    bdLine,
+    bdLine
+      ? `今天发生的事（**只是个方向**）：**今天有人过生日**（见上面那段）——` +
+        `具体写哪一下你自己定，**不用跟着「${tpl.text}」走**。`
+      : `今天发生的事（**只是个方向，不是逐字剧本**）：${tpl.text}`,
     '⚠️⚠️ 上面那句**别原样复述** —— 具体那一下到底怎么样（在哪儿、旁边有没有人、你心里怎么想）',
     '   **完全由你自己定**，也可以换成同一类的别的小事。',
     '   ⚠️ **每次都写出不一样的那一下** —— 别像在填模板，也别用「谁也没…」这种套话开头。',

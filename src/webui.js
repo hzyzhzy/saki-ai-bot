@@ -23,7 +23,8 @@ import * as accounts from './accounts.js';
 //    见 `src/pools.js` 顶部那段说明。
 import * as pools from './pools.js';
 import { log } from './log.js';
-import { ping } from './llm.js';
+// ⚠️ 2026-10-09：`llmFetch` 一起引进来 —— "拉取模型列表"要**走代理**（见下面 `/api/models` 那段）
+import { ping, llmFetch } from './llm.js';
 // 生图（群里说的「拍个照」）—— 界面上的「测试生图」用它，见下面 /api/imagegen/test
 import * as imagegen from './imagegen.js';
 // 「这次拍什么」—— 单独跑一次模型理解（见 src/photo-plan.js 文件头）
@@ -1045,7 +1046,12 @@ const routes = {
     if (!baseURL) return send(res, 200, { ok: false, error: 'baseURL 是空的' });
 
     try {
-      const r = await fetch(`${baseURL}/models`, {
+      // ⚠️⚠️ 2026-10-09 修（用户：「**为什么拉取失败了**」）：
+      //    这里原来是**裸 `fetch`** —— 它**不走项目那套代理逻辑**（`llmFetch` 才有：
+      //    "走代理，代理失败自动换直连"）⇒ 换成 Gemini（`generativelanguage.googleapis.com`）
+      //    这种**国内必须走代理**的地址，裸 fetch 必然 `fetch failed` ✗
+      //    ⇒ 换成 `llmFetch`（和真正聊天用的是同一条网络出口 ✓）
+      const r = await llmFetch(`${baseURL}/models`, {
         headers: { Authorization: `Bearer ${apiKey}` },
         signal: AbortSignal.timeout(20000),
       });
@@ -1106,7 +1112,7 @@ const routes = {
     let error = '';
     if (baseURL && apiKey) {
       try {
-        const r = await fetch(`${baseURL}/models`, {
+        const r = await llmFetch(`${baseURL}/models`, {
           headers: { Authorization: `Bearer ${apiKey}` },
           signal: AbortSignal.timeout(15000),
         });

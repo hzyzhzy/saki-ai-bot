@@ -2,7 +2,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { readFileSync, writeFileSync, rmSync, statSync, utimesSync } from 'node:fs';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { config, validate, ROOT, DEFAULT_LIFE, DEFAULT_QUEST, paramsFor, stateDir, isMainAccount } from './config.js';
+import { config, validate, ROOT, DEFAULT_LIFE, DEFAULT_QUEST, paramsFor, stateDir, isMainAccount, watchConfigFile } from './config.js';
 // ⚠️ 协议端适配层：启动横幅要报它、管理能力也由它决定（换协议端只改 config.yml）
 import * as provider from './provider.js';
 import { log } from './log.js';
@@ -29,6 +29,8 @@ import * as machine from './machine.js';
 import * as cleanup from './cleanup.js';
 import * as providerWatch from './provider-watch.js';
 import * as sessions from './sessions.js';
+// ⚠️ 2026-10-10 加：「服务器重新开启 → @ 他」那套订阅（触发点在 `sessions.tick()`）✓
+import * as serverWatch from './server-watch.js';
 import * as qzoneComment from './qzone-comment.js';
 
 const bot = new Bot();
@@ -44,8 +46,23 @@ if (problems.length) {
   process.exit(1);
 }
 
-// ── 单例锁（2026-09-21 加）─────────────────────────────
-// ⚠️⚠️ 为什么必须有：**重复实例会造出最难查的那类症状** ——
+// ── config.yml 变动监听（2026-10-10 加）─────────────────
+// ⚠️⚠️ 用户要求：「**能不能模型界面两个界面是同时保存的**」。
+//    多账号**共享同一份** `config.yml`，而 `reloadConfig()` 原来只在"点保存的那个进程"
+//    里跑（`webui.js` 的保存路由调的）⇒ 在 A 号界面改了开关，B 号内存里还是旧值
+//    （实测：改一次备选模型开关，得在**两个界面各点一次**才全生效）✗
+//    ⇒ 挂文件监听：谁写了文件，**每个进程各自重载** ✓ 一次保存、全账号生效 ✓
+//    ⚠️ 顺带治好另一个坑：**我直接改 config.yml 也立刻生效**（以前必须重启一次 ——
+//      今天为此白重启过两回）✓
+//    ⚠️ 日志只能在这里打：`config.js` 不能 import `log`（`log.js` 反过来 import 它，会成环）✓
+//    ⚠️ 边界：只有启动时才读的项（协议端 url / 管理界面端口 / 账号文件）仍然要重启 ——
+//      `reloadConfig()` 是整段替换、不会去重连，界面保存本来也是这个边界。
+watchConfigFile((fresh, err) => {
+  if (err) return log.warn(`config.yml 变动后重载失败（继续用旧的）：${err.message}`);
+  log.info('config.yml 被改动 → 已重载（多账号共享这一份配置，各自生效）');
+});
+
+// ── 单例锁（2026-09-21 加）─────────────────────────────// ⚠️⚠️ 为什么必须有：**重复实例会造出最难查的那类症状** ——
 //    两套定时器 ⇒ 主动接话 / 说说 / 剧情**重复发**（AGENTS 里记的
 //    「同一个梗连发三遍到 QQ 空间」就是这个）；协议端要是允许多个 WS 客户端，
 //    还会**每条消息回两次**（有人克隆仓库后报的「接一句回两句」就是它）。
@@ -514,8 +531,28 @@ try {
   log.debug(`在线时长跟踪启动失败（不影响其他功能）：${e.message}`);
 }
 
-// 网络可达性探测（2026-09-12 加，用户要求）
-// 群里老有人问「你能上油管吗 / 能不能翻墙」—— 这个后台每 5 分钟探一次，
+// ⚠️⚠️ 2026-10-10 加（用户要求：「**如果有人 @bot 让她在服务器重新开启的时候提醒一下、
+//    @他，可以做到吗**」）：
+//    **触发点**在 `sessions.tick()` 那条「服务器恢复了」的分支里 ——
+//    那是唯一做了「**连续 3 次查不到才算真关过**」确认的地方 ✓
+//    这里只负责：**取走订阅 + 逐条 @ 出去**（`server-watch.js` 只管存，
+//    发消息是 bot 的事 —— 所以接线挂在这儿，不挂在 sessions 里）✓
+sessions.setOnServerBack(async (players) => {
+  const pending = serverWatch.takeAll();
+  for (const s of pending) {
+    try {
+      await bot.sendToGroup(s.gid, serverWatch.textFor(s, players), {
+        at: s.uid,
+        atName: s.name,
+      });
+      log.info(`[开服提醒] 已 @ ${s.uid}（群 ${s.gid}）：${serverWatch.textFor(s, players)}`);
+    } catch (e) {
+      log.warn(`[开服提醒] 给 ${s.uid}（群 ${s.gid}）发失败：${e.message}`);
+    }
+  }
+});
+
+// 网络可达性探测（2026-09-12 加，用户要求）// 群里老有人问「你能上油管吗 / 能不能翻墙」—— 这个后台每 5 分钟探一次，
 // 结果会拼进「电脑状态」那段提示词，让她能如实回答而不是含糊其辞。
 try {
   machine.startNetworkProbe();

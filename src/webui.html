@@ -785,11 +785,56 @@
           生成太慢时，丢掉排队等着的消息
         </label>
         <div style="display:flex;align-items:center;gap:6px">
-          <span class="hint" style="margin:0">超过</span>
-          <input type="number" id="llm-slowDropMs" style="width:84px" min="1" step="10">
-          <span class="hint" style="margin:0">秒还没生成完 → 后面排队的先不回（等它生成完、有新消息进来就自动恢复）</span>
+          <span class="hint" style="margin:0">排队攒到</span>
+          <input type="number" id="llm-slowDropCount" style="width:84px" min="1" step="1">
+          <span class="hint" style="margin:0">条 → 后面排队的先不回（⚠️ 按**条数**算，不按时间：时间那条线跟"到底积了几条"对不上）</span>
         </div>
       </div>
+      <!-- ⚠️⚠️ 2026-10-09 加（用户要求）：**哪几类对话关掉思考链**。
+           ⚠️ 这三个开关属于**共用段**（`llm`）⇒ 改一次**所有账号一起生效**
+           （模型页本来就是所有号共用那一份配置 ✓）。
+           勾上 = 这一类**不带给思考链**（省 token，也不容易被思考链吃满 8000）。 -->
+      <!-- ⚠️⚠️ 2026-10-09 用户要求：「把这个开关和关思考链一样**平摊成 3 个选项**，**放到一起**」
+           ⇒ 每个场景一行，**左边勾 = 不带思考链 / 右边勾 = 改用备选模型（Gemini）** ✓ -->
+      <div style="margin-top:12px;font-weight:600">机器人之间的这三类对话，怎么处理</div>
+      <div class="hint" style="margin:4px 0 8px">左勾 = 这一类**不带思考链**；右勾 = 这一类**改用下面的备选模型**（比如 Gemini）</div>
+      <label style="display:flex;align-items:center;gap:8px;margin:6px 0">
+        <input type="checkbox" id="llm-thinkPeer" style="width:auto;margin:0">
+        <input type="checkbox" id="llm-bkPeer" style="width:auto;margin:0">
+        机器人之间的日常聊天（思考链默认<b>关</b>）
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;margin:6px 0">
+        <input type="checkbox" id="llm-thinkQuestPeer" style="width:auto;margin:0">
+        <input type="checkbox" id="llm-bkQuestPeer" style="width:auto;margin:0">
+        剧情里和同类对戏（思考链默认<b>关</b>）
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;margin:6px 0">
+        <input type="checkbox" id="llm-thinkQuest" style="width:auto;margin:0">
+        <input type="checkbox" id="llm-bkQuest" style="width:auto;margin:0">
+        剧情里和真人说话（思考链默认<b>开</b>）
+      </label>
+      <div style="margin-top:14px;font-weight:600">备选模型（上面勾了"右勾"的那几类走它）</div>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <label style="margin:0">备选 baseURL</label>
+        <input type="text" id="llm-bkBase" list="bk-base-list" style="flex:1;min-width:220px" placeholder="https://generativelanguage.googleapis.com/v1beta/openai">
+        <datalist id="bk-base-list">
+          <option value="https://generativelanguage.googleapis.com/v1beta/openai"></option>
+          <option value="https://api.deepseek.com/v1"></option>
+          <option value="https://api.openai.com/v1"></option>
+        </datalist>
+        <!-- ⚠️ 2026-10-09 用户要求：「**要能点击自动填充**」⇒ 一键把 Gemini 那套填进去 ✓ -->
+        <button class="ghost" onclick="bkFillGemini()" style="white-space:nowrap;padding:8px 12px">一键填 Gemini</button>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <label style="margin:0">备选模型名</label>
+        <!-- ⚠️ 用 `datalist` 而不是 `<select>`：**既能从拉取的列表里选、也能直接手打** ✓
+             （纯下拉的话，拉取失败或者想填一个没列出来的名字就没辙了 ✗） -->
+        <input type="text" id="llm-bkModel" list="bk-model-list" style="flex:1;min-width:200px" placeholder="gemini-2.5-flash">
+        <datalist id="bk-model-list"></datalist>
+        <button class="ghost" onclick="bkLoadModels()" id="btn-bk-models" style="white-space:nowrap;padding:8px 12px">从 API 拉取</button>
+      </div>
+      <div><label>备选 API Key</label><input type="password" id="llm-bkKey" placeholder="（Gemini 的 key）"></div>
+      <div class="hint" id="bk-hint" style="margin:4px 0"></div>
       <div class="btns">
         <button class="act" onclick="saveModel()">保存</button>
         <button class="ghost" onclick="testLLM()">测试连通性</button>
@@ -2827,7 +2872,21 @@ async function reloadAll() {
   $('llm-timeout').value = c.llm.timeout ?? 60000;
   // ⚠️ 2026-10-07：慢模型丢弃积压（**默认开** —— 只有明确写成 false 才算关）
   $('llm-slowDrop').checked = c.llm.slowQueueDrop !== false;
-  $('llm-slowDropMs').value = Math.round((c.llm.slowQueueDropMs ?? 60000) / 1000);
+  // ⚠️ 2026-10-09：判据从"秒"改成"**条**"（用户：「改成超过 3 条消息的个数，
+  //    时间还是没有精确对应到」）
+  $('llm-slowDropCount').value = Math.round(c.llm.slowQueueDropCount ?? 3);
+  // ⚠️ 2026-10-09：三类对话关思考链的开关。默认按用户定的：机器人之间 = 关，剧情里和真人 = 开 ✓
+  $('llm-thinkPeer').checked = (c.llm.thinking?.peer ?? true) !== false;
+  $('llm-thinkQuestPeer').checked = (c.llm.thinking?.questPeer ?? true) !== false;
+  $('llm-thinkQuest').checked = c.llm.thinking?.quest === true;
+  // ⚠️ 2026-10-09：备选模型 —— 三个场景**各一个勾**（和"关思考链"那三个并排 ✓）
+  $('llm-bkPeer').checked = c.llm.backup?.for?.peer === true;
+  $('llm-bkQuestPeer').checked = c.llm.backup?.for?.questPeer === true;
+  $('llm-bkQuest').checked = c.llm.backup?.for?.quest === true;
+  $('llm-bkBase').value = c.llm.backup?.baseURL || '';
+  // ⚠️ 2026-10-09：备选模型名现在是**下拉**（和主模型一样，可以点"从 API 拉取"）✓
+  fillModelSelect([c.llm.backup?.model].filter(Boolean), c.llm.backup?.model || '', 'llm-bkModel');
+  $('llm-bkKey').value = c.llm.backup?.apiKey || '';
 
   // 生图
   const ig = c.imagegen || {};
@@ -3041,19 +3100,28 @@ async function autostartSet(on) {
 // ── 模型下拉框 ──
 
 /** 用给定列表填充下拉框，并把 current 选中 */
-function fillModelSelect(models, current) {
-  const sel = $('llm-model');
+// ⚠️ 2026-10-09 泛化：多给一个 `selId` —— 备选模型的模型名也用同一个下拉填充 ✓
+//    （默认仍是主模型的 `llm-model`，原来那些调用一个字不用改 ✓）
+function fillModelSelect(models, current, selId = 'llm-model') {
+  const sel = $(selId);
   const want = current || sel.value;
   const list = [...new Set([...(models || []), want].filter(Boolean))];
   sel.innerHTML = list.map(m => `<option value="${esc(m)}">${esc(m)}</option>`).join('');
   if (want && list.includes(want)) sel.value = want;
 }
 
-/** 从 API 拉可用模型列表 */
+/**
+ * 从 API 拉可用模型列表。
+ * ⚠️ 2026-10-09 泛化：`opts` 里可以指定「拉哪个框」（备选模型的地址/Key/下拉/提示/按钮）——
+ *    用户要求：「**备选模型也要和之前一样可以直接拉取并选择**」✓
+ *    不传就是主模型那一套（原来的行为一个字没变 ✓）
+ */
 async function loadModels(opts = {}) {
-  const el = $('msg-llm');
-  const hint = $('model-hint');
-  const btn = $('btn-models');
+  const baseId = opts.baseId || 'llm-baseURL';
+  const keyId = opts.keyId || 'llm-apiKey';
+  const selId = opts.selId || 'llm-model';
+  const hint = $(opts.hintId || 'model-hint');
+  const btn = $(opts.btnId || 'btn-models');
   if (!opts.silent) btn.disabled = true;
   if (!opts.silent) { hint.textContent = '正在从 API 拉取模型列表…'; }
 
@@ -3061,23 +3129,62 @@ async function loadModels(opts = {}) {
     const r = await api('/api/models', {
       method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({
-        baseURL: $('llm-baseURL').value.trim(),
-        apiKey: $('llm-apiKey').value.trim(),
+        baseURL: $(baseId).value.trim(),
+        apiKey: $(keyId).value.trim(),
       })
     });
     if (r.ok && r.models.length) {
-      fillModelSelect(r.models, $('llm-model').value);
+      // ⚠️ 备选那一路用 `datalist`（能选也能手打 ✓），主模型仍是 `<select>`
+      if (opts.datalistId) fillDatalist(opts.datalistId, r.models, $(selId).value);
+      else fillModelSelect(r.models, $(selId).value, selId);
       hint.textContent = `API 上有 ${r.models.length} 个模型：${r.models.join('、')}`;
       hint.style.color = '#16a34a';
     } else {
       // 拉不到就保留手填能力
       hint.textContent = `拉取失败（${r.error || '未知错误'}）—— 可以直接在下拉框里手打模型名，或者检查 API 地址和 Key。`;
       hint.style.color = '#d97706';
-      ensureModelEditable();
+      if (!opts.noEditable) ensureModelEditable();
     }
   } finally {
     if (!opts.silent) btn.disabled = false;
   }
+}
+
+/** 填一个 `<datalist>`（备选模型名用 —— 既能从列表选、也能手打 ✓） */
+function fillDatalist(id, models, current) {
+  const dl = $(id);
+  if (!dl) return;
+  const list = [...new Set([...(models || []), current].filter(Boolean))];
+  dl.innerHTML = list.map((m) => `<option value="${esc(m)}"></option>`).join('');
+}
+
+/** 拉备选模型的列表（用的是备选那三个框 ✓） */
+function bkLoadModels() {
+  return loadModels({
+    baseId: 'llm-bkBase',
+    keyId: 'llm-bkKey',
+    selId: 'llm-bkModel',
+    datalistId: 'bk-model-list',
+    hintId: 'bk-hint',
+    btnId: 'btn-bk-models',
+    noEditable: true,
+  });
+}
+
+/**
+ * 「一键填 Gemini」（用户要求：「**要能点击自动填充**」）——
+ * 把 baseURL 填好、模型名给一个起点，Key 留给他粘 ✓
+ * ⚠️ 模型名**不写死成唯一答案**：填完让他点「从 API 拉取」按真实列表挑 ✓
+ */
+function bkFillGemini() {
+  $('llm-bkBase').value = 'https://generativelanguage.googleapis.com/v1beta/openai';
+  if (!$('llm-bkModel').value) $('llm-bkModel').value = 'gemini-2.5-flash';
+  const h = $('bk-hint');
+  if (h) {
+    h.textContent = '已填好 Gemini 的地址（模型名给了个起点）。把 API Key 粘进去 → 点「从 API 拉取」挑模型 → 上面三行勾想用它的那几类 → 保存 ✓';
+    h.style.color = '#2563eb';
+  }
+  $('llm-bkKey').focus();
 }
 
 /** 列表为空时，至少放一个可编辑的项，别让用户没得选 */
@@ -4326,8 +4433,31 @@ async function saveModel() {  const el = $('msg-llm');
       //    ⚠️ 这里必须**显式写 false**（不能省略）—— 省略等于"没改"，
       //       用户就关不掉这个闸了。
       slowQueueDrop: !!$('llm-slowDrop').checked,
-      slowQueueDropMs:
-        Math.max(1000, Math.round(Number($('llm-slowDropMs').value) * 1000)) || 60000,
+   // ⚠️ 2026-10-09 加：**哪几类对话关掉思考链**（勾上 = 这类不带给思考链）。
+   //    ⚠️ 必须**三个都显式写**（省略 = "没改"，用户就关不掉了）——
+   //       和上面 `slowQueueDrop` 那条同一个道理 ✓
+   //    ⚠️ 存在 `llm`（共用段）⇒ 所有账号一起生效。
+   thinking: {
+     peer: !!$('llm-thinkPeer').checked,
+     questPeer: !!$('llm-thinkQuestPeer').checked,
+     quest: !!$('llm-thinkQuest').checked,
+   },
+   // ⚠️ 2026-10-09 加：**备选模型**（Gemini）—— 三个场景**各一个勾**，
+   //    和上面那三个"关思考链"的勾一一对应（同一行、左边那个是思考链）✓
+   backup: {
+     for: {
+       peer: !!$('llm-bkPeer').checked,
+       questPeer: !!$('llm-bkQuestPeer').checked,
+       quest: !!$('llm-bkQuest').checked,
+     },
+     baseURL: $('llm-bkBase').value.trim(),
+     model: $('llm-bkModel').value.trim(),
+     apiKey: $('llm-bkKey').value.trim(),
+   },
+      // ⚠️ 2026-10-09 改（用户：「把这个判据改成**超过 3 条消息的个数**，
+      //    时间还是没有精确对应到」）：判据从"秒"换成"**条数**"。
+      //    ⚠️ `slowQueueDropMs` 不再写（老配置里留着也无妨 —— 代码只拿它打日志）
+      slowQueueDropCount: Math.max(1, Math.floor(Number($('llm-slowDropCount').value))) || 3,
     }})
   });
   flash(el, r.ok, r.ok ? '已保存并生效' : ('保存失败：' + r.error));

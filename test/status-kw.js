@@ -48,5 +48,30 @@ console.log('\n【1】★★ URL 里的 https 不许被当成 tps（中文关键
   check(b.shouldQueryStatus('有人吗') === true, '★ 兜底正则（"有人吗"）没被改坏');
 }
 
+console.log(
+  '\n【2】★★★ 「服务器开着没」这类问法必须**实查**' +
+    '（2026-10-10 用户截图：<主人> 问「服务器关了吗」，两个号都凭上下文猜 ⇒' +
+    '「这个问题应该要去找服务器状态再回答」）',
+);
+{
+  check(
+    b.shouldQueryStatus('服务器关了吗') === true,
+    '★★★ 「服务器关了吗」→ **必须实查**（原来一个关键词都不命中，表里只有「服务器开了」）',
+  );
+  check(b.shouldQueryStatus('服务器关了没') === true, '★★ 「服务器关了没」也算（中文问句常常不带问号）');
+  check(b.shouldQueryStatus('开服了吗') === true, '★ 「开服了吗」');
+  check(b.shouldQueryStatus('炸服了？') === true, '★ 「炸服了？」');
+  check(b.shouldQueryStatus('服里现在还开着吗') === true, '★ 「还开着吗」');
+  check(
+    b.shouldQueryStatus('我刚在服务器里挖了个洞') === false,
+    '★★ 纯闲聊**不触发**（没有开关词、也没在问 —— 别把状态查询变成"见服务器就查"）',
+  );
+  check(b.asksServerOpenClose('服务器关了吗') === true, '★ 判据能单独调（`asksServerOpenClose()`）');
+  check(
+    b.looksServerTalk('服务器关了没') === true,
+    '★★ 「回服务器消息」那道闸也认它（`looksServerTalk` 的疑问词补了"吗/呢/了没"）',
+  );
+}
+
 console.log(`\n结果: ${failures === 0 ? '全部通过 ✅' : `${failures} 项失败 ❌`}\n`);
 process.exit(failures === 0 ? 0 : 1);

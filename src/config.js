@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, watchFile } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, isAbsolute } from 'node:path';
 import yaml from 'js-yaml';
@@ -121,6 +121,11 @@ const DEFAULTS = {
     //    ⚠️ 阈值默认 **60 秒**（用户 2026-10-07 拍板：「把默认时长改为 60 秒吧」）。
     slowQueueDrop: true,
     slowQueueDropMs: 60000,
+    // ⚠️ 2026-10-09 加（用户：「把这个判据改成**超过 3 条消息的个数**，
+    //    时间还是没有精确对应到」）：**按条数**丢积压（默认 3 条）。
+    //    ⚠️ 上面那个 `slowQueueDropMs` 现在**只用于日志**（不再当判据）——
+    //      留着是为了老配置不报错，别再拿它当阈值。
+    slowQueueDropCount: 3,
     systemPrompt: '你是一个 QQ 聊天机器人，用简洁自然的中文回答。',
   },
   // ⚠️⚠️ 生图 —— 群里让她「拍个照」（2026-09-22 用户要求）。
@@ -1498,6 +1503,26 @@ function load() {
         }
         if (peers.length) one.peers = peers;
       }
+      // ⚠️⚠️ 2026-10-09 修（用户报：「**不同类机器人池保存不了**」）：
+      //    上面那段只处理了 `peers` —— **`otherBots` 压根没被合并** ✗
+      //    后果（实证）：保存时它**确实写进了账号文件**
+      //      （日志有 `配置写入账号私有文件（号 …）：groupParams`），
+      //      但 `reloadConfig()` 这一步把它**丢掉** ⇒ 内存里没有 ⇒
+      //        ① 界面回读显示空 —— 用户看到的就是"保存不了"；
+      //        ② `otherBotsFor(gid)` 返回空 ⇒ **那道"完全不回应"的闸等于一直没配** ✗
+      //    ⇒ 照 `peers` 同一套收（去空值 / 统一字符串 / 去重 / 封顶 10 个）✓
+      if (Array.isArray(v.otherBots)) {
+        const seenO = new Set();
+        const otherBots = [];
+        for (const x of v.otherBots) {
+          const id = String(x ?? '').trim();
+          if (!id || seenO.has(id)) continue;
+          seenO.add(id);
+          otherBots.push(id);
+          if (otherBots.length >= 10) break;
+        }
+        if (otherBots.length) one.otherBots = otherBots;
+      }
       if (Object.keys(one).length) g[k] = one;
     }
     cfg.groupParams = g;
@@ -1577,7 +1602,37 @@ function load() {
 
   cfg.webui.enable = cfg.webui.enable !== false;
   cfg.webui.host = String(cfg.webui.host ?? '127.0.0.1');
-  cfg.webui.port = Math.max(1, Number(cfg.webui.port) || 3099);
+  // ⚠️ 先记住"配置里到底写没写端口"：下面那句会把它规范成 3099，之后就分不清
+  //    "配置里写了 3099" 和 "配置里根本没写" 了。
+  const rawUiPort = Number(cfg.webui.port);
+  cfg.webui.port = Math.max(1, rawUiPort || 3099);
+  // ⚠️⚠️ 2026-10-09 加：**管理界面端口可以被环境变量顶掉**（`QQBOT_WEBUI_PORT`）。
+  //
+  //    踩到的（用户报：「**3099 为什么打不开了**」）：他那一刻打不开管理界面，
+  //    日志里是 `管理界面端口 3099 被占用，换一个端口或关掉占用的程序`。
+  //    ⚠️ 占它的**不是别的软件，是我自己** —— 回归套件里那些
+  //    `spawn(node, [src/index.js])` 起的探针（behavior / e2e / …）**全都想绑真实的 3099**：
+  //      · `test/run-all.js` 的隔离 env 只管状态文件 / 单例锁 / 账号目录 / 日志，
+  //        **没有一条管 webui 端口** ⇒ 探针按真实配置绑 3099；
+  //      · 于是"探针先绑上"时，真实机器人一重启就绑不上 ⇒ **他的管理界面直接没了** ✗
+  //        （14:04 和 15:11 两次都是这个原因；而他 14:25 / 15:08 的点又恰好错开了。）
+  //
+  //    ⚠️ 这不是今天才有的，是**一直存在**的：按天日志里「端口被占用」的次数 ——
+  //      10-03: 42 / 10-04: 48 / 10-05: 210 / 10-06: 120 / 10-07: 198 / 10-09: 97。
+  //      以前每次回归都在赌"探针和真实机器人谁先绑上"。
+  //
+  //    ⇒ 给测试一条**顶掉端口**的路，由 `run-all.js` 给每个套件发一个独立高位端口。
+  //      真实运行时**不设这个 env** ⇒ 行为一个字都不变（还是 config 里那个 3099）✓
+  //
+  //    ⚠️⚠️ 但**只在"配置里没写端口、走的默认 3099"时才顶** ——
+  //      套件自己显式配的端口（`test/accounts.js` 给两个号配的 39601 / 39602）
+  //      优先级更高，**不能被顶**：顶了它就连不上自己刚起的进程 ✗
+  //      （第一版我写成了无条件顶掉，`accounts` 套件立刻红两项 —— 就是它抓出来的。）
+  const envUiPort = Number(process.env.QQBOT_WEBUI_PORT);
+  const useDefaultPort = !Number.isFinite(rawUiPort) || rawUiPort === 0 || rawUiPort === 3099;
+  if (Number.isFinite(envUiPort) && envUiPort > 0 && useDefaultPort) {
+    cfg.webui.port = Math.floor(envUiPort);
+  }
 
   return cfg;
 }
@@ -1754,6 +1809,54 @@ export function reloadConfig() {
   const fresh = load();
   for (const k of Object.keys(fresh)) config[k] = fresh[k];
   return config;
+}
+
+/**
+ * 盯着 `config.yml` —— **谁写了它，本进程就重载一次**。
+ *
+ * ⚠️⚠️⚠️ 2026-10-10 加（用户：「**能不能模型界面两个界面是同时保存的**」）：
+ *    `config.yml` 是**多个账号进程共享**的一份文件，而 `reloadConfig()` 原来只在
+ *    「收到保存请求的那个进程」里跑（`webui.js` 的保存路由调的）⇒
+ *    用户在 A 号界面点保存，**B 号进程内存里还是旧值** ✗
+ *    （实测表现：改一次"备选模型"开关，得在**两个界面各点一次**才全生效。）
+ *    ⇒ 挂文件监听：**一次保存，所有进程各自重载** ✓
+ *
+ * ⚠️ 为什么用 `watchFile`（轮询）而不是 `watch`（事件）：
+ *    保存走的是"写 `.tmp` + rename **覆盖**" —— 在 Windows 上 `fs.watch(file)`
+ *    盯着的是被替换掉的那个句柄，rename 之后**可能就不再触发** ✗
+ *    `watchFile` 按 stat 变化判，rename 也躲不过 ✓ 代价是最多 2 秒延迟（可接受）。
+ *
+ * ⚠️ 三条讲究：
+ *   · **只认"内容真的变了"**（mtime/size 一起变）—— 免得 stat 抖动白重载；
+ *   · **自己写也会触发一次**（webui 保存 → 写文件 → 触发）：`reloadConfig()` 幂等，无害 ✓
+ *   · **必须 `unref()`** —— 不然这个轮询会把进程吊着不退（测试里会起真进程）✗
+ *
+ * ⚠️ **不在这里 import `log`**：`log.js` 反过来 import 本文件 ⇒ 顶部 import 会成环 ✗
+ *    ⇒ 要打日志就用 `onReload(fresh)` / `onReload(null, err)` 回调，由调用方打 ✓
+ *
+ * ⚠️ 边界（**不是这次新增的**）：`reloadConfig()` 是**整段替换**，所以只有启动时
+ *    才读的那些项（协议端 url / 管理界面端口 / 账号文件）热重载不会真的重连 ——
+ *    它们仍然要重启。界面保存本来就是这个边界，这里只是让**另一个号**也享受到 ✓
+ *
+ * @param {(fresh?:object|null, err?:Error)=>void} [onReload]
+ * @returns {boolean} 挂上了没有
+ */
+export function watchConfigFile(onReload = null) {
+  try {
+    const sw = watchFile(CONFIG_FILE, { interval: 2000 }, (cur, prev) => {
+      if (cur.mtimeMs === prev.mtimeMs && cur.size === prev.size) return;
+      try {
+        const fresh = reloadConfig();
+        if (typeof onReload === 'function') onReload(fresh, null);
+      } catch (e) {
+        if (typeof onReload === 'function') onReload(null, e);
+      }
+    });
+    sw.unref?.();
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** 启动前体检，返回问题列表（空数组 = 没问题） */

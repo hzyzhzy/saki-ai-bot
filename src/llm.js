@@ -4,7 +4,15 @@ import * as spend from './spend.js';
 // ⚠️ 2026-09-21：人设文案从 `personas/<id>/identity.json` 来（见 src/persona.js）。
 //    这里原来写死「Saki（丰川祥子）」—— 换人设时它不会跟着变，等于换了个名字还在演小祥。
 import * as persona from './persona.js';
-import { Agent, ProxyAgent, setGlobalDispatcher } from 'undici';
+// ⚠️⚠️ 2026-10-09 加 `fetch as undiciFetch`（用户报：「**刚才又拉取失败了**」，时通时不通）：
+//    这里是**独立的 `undici` 包**（package.json 里 ^8.10.2），而发请求用的却是
+//    **Node 内置的全局 `fetch`** —— 两者的 `dispatcher` **不是同一套** ✗
+//    ⇒ 把外部 undici 造的 `ProxyAgent` 塞给内置 fetch ⇒ `UND_ERR_INVALID_ARG`
+//      ⇒ **"走代理"这一路从来没真正生效过**，只有直连偶尔成功 ⇒ 表现就是时通时不通 ✗
+//    ⇒ 而且 `setGlobalDispatcher()`（applyEgress 的出口切换）改的也是 **undici 的**全局，
+//      内置 fetch 根本不看它 ⇒ 那个"自动切换出口"一直是个假动作 ✗
+//    ⇒ 统一成 undici 自己的 fetch（agent / dispatcher / 全局设置全都同源 ✓）
+import { Agent, ProxyAgent, setGlobalDispatcher, fetch as undiciFetch } from 'undici';
 import net from 'node:net';
 
 // ⚠️⚠️ 2026-09-16 深夜：**运行中自动切换网络出口**（用户要求：
@@ -59,9 +67,11 @@ const isNetErr = (e) =>
 function rawFetch(url, opts, mode) {
   if (mode === 'proxy') {
     proxyAgent ??= new ProxyAgent(PROXY_URL);
-    return fetch(url, { ...opts, dispatcher: proxyAgent });
+    return undiciFetch(url, { ...opts, dispatcher: proxyAgent });
   }
-  return fetch(url, opts);
+  // ⚠️ 2026-10-09：直连也走 undici 的 fetch —— 理由见文件顶部那个 import 的注释
+  //    （内置 fetch 不认 undici 的 dispatcher，也不看 setGlobalDispatcher ✗）
+  return undiciFetch(url, opts);
 }
 
 /**
@@ -159,8 +169,23 @@ export async function llmFetch(url, opts = {}) {
   if (opts && typeof opts.body === 'string') {
     opts = { ...opts, body: stripLoneSurrogates(opts.body) };
   }
+  // ⚠️⚠️ 2026-10-09 加（用户：「有没有**不用充钱直接用免费额度**的？」）：
+  //    要白嫖 **Gemini 官方免费额度**，就**必须走代理**（国内直连不到 Google ✗）；
+  //    可整个进程只有一个全局出口，而主模型（DeepSeek）在国内**直连更合适** ✗
+  //    ⇒ 这里按**目标域名**决定优先级：国外域名（Google / OpenAI / Anthropic）**优先代理**，
+  //      其余按全局出口走 ✓
+  //    ⚠️ 只改"先试哪个"，**失败重试那条路一个字没动**（仍然会试另一个出口 ✓）
+  //      ⇒ 代理真挂了也不会卡死，只是多一次失败重试 ✓
+  const host = (() => {
+    try {
+      return new URL(String(url)).hostname.toLowerCase();
+    } catch {
+      return '';
+    }
+  })();
+  const needProxy = /(^|\.)(googleapis\.com|google\.com|openai\.com|anthropic\.com)$/.test(host);
   if (egress === 'unknown') applyEgress((await proxyAlive()) ? 'proxy' : 'direct');
-  const first = egress;
+  const first = needProxy && (await proxyAlive()) ? 'proxy' : egress;
   try {
     return await rawFetch(url, opts, first);
   } catch (e) {
@@ -244,15 +269,29 @@ export async function* streamChat(messages, outerSignal, opts = {}) {
   //    `finally` 里要拿它报警（2026-09-18 那次"日志里什么都没有"的故障就靠这个说清）
   let finishReason = '';
 
+  // ⚠️⚠️ 2026-10-09 加（用户原话：「可以把这两个接入 **gemini** 吗，然后和关思考链一样
+  //    也加个按钮**选择是否使用 gemini**，即**备选模型**」）：
+  //    按**这一次调用**覆盖「模型 / 地址 / 密钥」——
+  //    让「机器人之间的日常聊天 + 剧情里和同类对戏」这两类走**备选模型**，其余照旧 ✓
+  //    ⚠️ 记账也要用**实际用的那个模型名**（不然月度账单里两个模型混成一个、对不上账 ✗）
+  //    ⚠️ 只有传了才覆盖；不传就完全是原来的行为（默认这条路一个字都没变 ✓）
+  const useModel = String(opts.model || llm.model);
+  const useBase = String(opts.baseURL || llm.baseURL);
+  const useKey = String(opts.apiKey || llm.apiKey);
+  // ⚠️⚠️ 2026-10-10：**这次用的是不是主模型那个地址**？
+  //    不是 ⇒ 是备选模型（Gemini）⇒ 下面那个 `thinking` 字段**一个都不能带**（见那段注释）。
+  const usingMainBase =
+    useBase.replace(/\/+$/, '') === String(llm.baseURL ?? '').replace(/\/+$/, '');
+
   try {
-    const res = await llmFetch(`${llm.baseURL.replace(/\/+$/, '')}/chat/completions`, {
+    const res = await llmFetch(`${useBase.replace(/\/+$/, '')}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${llm.apiKey}`,
+        Authorization: `Bearer ${useKey}`,
       },
       body: JSON.stringify({
-        model: llm.model,
+        model: useModel,
         messages,
         temperature: llm.temperature,
         max_tokens: maxTokens,
@@ -265,9 +304,22 @@ export async function* streamChat(messages, outerSignal, opts = {}) {
         //      辅助请求（说话判断/润色/识图）本来就显式传 `thinking:{type:'disabled'}`，不受影响 ✓
         //    ⚠️ 实测过这个字段被接受（带 `budget_tokens` 打 API 返回 200，不报 400）。
         //    ⚠️ 设 0 或负数 = 不限制（退回旧行为）。
-        ...(opts.thinking
-          ? { thinking: opts.thinking }
-          : (() => {
+        // ⚠️⚠️⚠️ 2026-10-10 修（**这才是"备选模型 400"的真正根因**）：
+        //    `thinking` 是 **DeepSeek 专用**字段，而它会从**两个地方**被带上：
+        //      ① 调用方显式传 `thinking:{type:'disabled'}`（"关思考链"那条路）；
+        //      ② **没传时下面补的这个默认值**（`config.llm.thinkingBudget`）。
+        //    ⇒ 只在调用方那一处删掉**没用** —— 默认值照样把请求打到 Gemini，然后被 400 拒：
+        //      `Invalid JSON payload received. Unknown name "thinking": Cannot find field.`
+        //    实测后果（14:27 日志）：机对机**每句都失败** ⇒ 走"生成失败"的兜底话术 ⇒
+        //      两个号反复说同一句「……我这边有点小状况，等下再说」**并互相引用**，
+        //      在群里看着像复读机 ✗
+        //    ⇒ 判据放在**这里**最省事：**只要这次不是主模型的 baseURL，就不带 thinking** ✓
+        //      （一次覆盖所有调用方：主聊天 / followUp / 润色 / 抽取 / 剧情…谁走备选模型都自动剥离）
+        ...(!usingMainBase
+          ? {}
+          : opts.thinking
+            ? { thinking: opts.thinking }
+            : (() => {
               // ⚠️⚠️ 2026-10-07：**试过默认关掉，用户要求调回**（原话：「直接调回思考链」）——
               //    实测数据：生成耗时一直在 8~20 秒（那次 52 秒是异常尖峰），
               //    所以"慢"的主因**不是**它；而关掉它确实会让回答少一层推敲 ⇒ 按用户要求恢复。
@@ -390,7 +442,7 @@ export async function* streamChat(messages, outerSignal, opts = {}) {
 
     if (usage) {
       try {
-        spend.record({ model: llm.model, usage });
+        spend.record({ model: useModel, usage });
       } catch (e) {
         // ⚠️ 这里**必须用 warn 而不是 debug** —— 我第一次就是把
         //    `spend` 的 import 漏了，`ReferenceError` 被 debug 吞掉，

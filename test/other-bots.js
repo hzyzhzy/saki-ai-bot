@@ -266,7 +266,11 @@ console.log('\n【10】★★ 剧情里同类之间要能**互相 @**（2026-10-
   // 接线：光有函数不算数 —— `sendText()` 必须真的走它，提示词必须真告诉她怎么写
   const bsrc10 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
   check(
-    /sendText\(event, text[\s\S]{0,1600}?splitAtMentions\(event/.test(bsrc10),
+    // ⚠️ 2026-10-09：窗口从 1600 放宽到 3200 —— `sendText()` 开头新加了"旁白闸"
+    //    （那段注释 + 判定约 1200 字符）⇒ 原来那个距离窗口不够，误报"没接线" ✗
+    // ⚠️ 2026-10-10：窗口 3200 → 8000 —— `sendText` 开头又长了两段（旁白剥离），
+    //    3200 字装不下、断言就"假失败"了。这条要钉的是**接线在不在**，不是距离 ✓
+    /sendText\(event, text[\s\S]{0,8000}?splitAtMentions\(event/.test(bsrc10),
     '★★ `sendText()` 真的把文本过了 `splitAtMentions`（不是只写了函数没接线）',
   );
   check(
@@ -1292,7 +1296,7 @@ console.log('\n【23】★★ 剧情起因进**聊天提示词**、并且**两�
     '★★ `finish` / `purge` 里都撤掉了（不然收尾、清剧情之后还一直挂着）',
   );
   check(
-    /quest\.chatBrief\(gid0, \{/.test(bsrc23),
+    /quest\.chatBrief\(\w+, \{/.test(bsrc23),
     '★★ 聊天提示词（`buildSystemPrompt`）真的注入了剧情简报（并带上"刚说过的几句"）',
   );
   check(/6c-4\./.test(src23), '★ 剧情提示词里有 6c-4（真相 / 秘密必须演出来）');
@@ -1317,7 +1321,7 @@ console.log('\n【23】★★ 剧情起因进**聊天提示词**、并且**两�
     '★★★ 聊天提示词里把它们列出来 + 明说"别再重复同样的意思"',
   );
   check(
-    /recentLines: recent\.lastBotLines\(gid0, \{/.test(bsrc23),
+    /recentLines: recent\.lastBotLines\(\w+, \{/.test(bsrc23),
     '★★ 而且真的接进去了（不是写了没用）',
   );
 
@@ -2105,13 +2109,20 @@ console.log('\n【34】★★★ 说了收场话就不许再追补（2026-10-07 
   //    提示词里原来写着「没什么可说的**直接不接**也完全可以」——
   //    模型把它读成"要说一句'不接'" ⇒ 群里出现「（这话已经说到头了，不接）」「（不接）」✗
   //    ⇒ 提示词必须说清：**"不接"就是不发消息**，不是发一句"我不接"。
+  // ⚠️⚠️ 2026-10-09 更新（用户又截图两次：「这个还是存在」+「结束对话的判定也交给模型吧」）：
+  //    光禁「（不接）」不够 —— 她换写法继续写（只写左括号 / 括号后带正文）。
+  //    ⇒ 提示词现在把话说透：**判断只体现在"发不发"这一个动作上**。
   check(
-    /不许发「（不接）」「（不回了）」「（这话说到头了）」这种旁白/.test(src34),
-    '★★★ 提示词里点名禁掉「（不接）」这种旁白式元发言（截图那句就是它教出来的）',
+    /任何"我决定了"都不许写出来/.test(src34),
+    '★★★ 提示词里禁掉**任何形式的"我决定了"**（不只是「（不接）」那一个写法）',
   );
   check(
-    /不想接就一个字都别发/.test(src34),
-    '★★★ 并且把"不接"的意思写清：**就是不发消息**',
+    /你的判断只体现在"发不发"这一个动作上/.test(src34),
+    '★★★ 而且点明：决定不接 = **一个字都别发** —— 判断只体现在发不发上（用户：「判定交给模型」）',
+  );
+  check(
+    /决定不接 ⇒ \*\*一个字都别发\*\*/.test(src34),
+    '★★ 这条正反两面都写了（决定接 ⇒ 只写那句话本身，别先解释为什么接）',
   );
 }
 
@@ -2298,9 +2309,22 @@ console.log('\n【39】★★★ 一整段"旁白式括号"不许发出去（202
   const b39 = new Bot();
 
   check(/isBracketNarration\(text\) \{/.test(src39), '★★★ 有"一整段旁白式括号"的判据');
+  // ⚠️ 2026-10-09 改：入口从"同步的快判据"换成"**await 的模型判定**"；
+  //    ⚠️⚠️ 更要紧的是**挂在哪一层**：原来挂在 `sendChatLike` 上 —— 而那个函数
+  //    **不是**她发言的唯一出口 ✗（`handle()` 的主聊天走 `sendChunk` → `sendText`）
+  //    ⇒ 群里连着 11 条括号旁白、日志里却一条 `[旁白` 都没有，就是这么来的。
+  //    现在挂在 `sendText()`（所有外发的最后一道）✓
   check(
-    /if \(!opts\.force && this\.isBracketNarration\(text\)\)/.test(src39),
-    '★★★ 而且接在 `sendChatLike`（她所有发言的**唯一出口**，拦一处就够）',
+    /async sendText\(event, text[\s\S]{0,1200}?await this\.shouldPauseByBracket\(/.test(src39),
+    '★★★ 闸挂在 **`sendText()`** 里 —— 所有外发的最后一道（聊天 / 剧情 / 日常事件全都经过它）',
+  );
+  check(
+    !/shouldPauseByBracket\(text, groupId\)/.test(src39),
+    '★★ 而且没有留在 `sendChatLike` 里（那层拦不到主聊天，留着还会判两次）',
+  );
+  check(
+    /return null;/.test(src39),
+    '★ 拦下时返回 `null`（调用方按 `sentText !== null` 判"发出去没有"）',
   );
 
   // 行为：截图那两条要拦
@@ -2313,6 +2337,61 @@ console.log('\n【39】★★★ 一整段"旁白式括号"不许发出去（202
     '★★★ 截图第 2 条（saki 那句，带句号）要拦',
   );
   check(b39.isBracketNarration('（不接）') === true, '★★ 上一轮那个「（不接）」也能兜住');
+  // ⚠️⚠️ 2026-10-09 用户截图又抓到两条（**新的形态：内部带句号**）——
+  //    它们原来被"内部还有别的句子 ⇒ 不算旁白"那条**写反**的判据放走了 ✗
+  check(
+    b39.isBracketNarration('（那是在说爱音，不是冲我。这条我不接。）') === true,
+    '★★★ 多句的旁白也要拦（先判断一句、再下结论「这条我不接」）',
+  );
+  check(
+    b39.isBracketNarration('（她在跟爱音掰扯，没我什么事。不接。）') === true,
+    '★★★ 同上那条的另一种写法',
+  );
+  check(
+    b39.isBracketNarration('（笑）') === false,
+    '★ 但纯语气那种照旧放行（它不含元话语词，别误伤）',
+  );
+  // ⚠️⚠️ 2026-10-09 第三轮（用户截图：「**这个还是存在**」，形态又变了）：
+  //    只认"整条被一对括号包住"是不够的 —— 下面这两种一条都拦不住 ✗
+  check(
+    b39.isBracketNarration('（这是回<主人>的，跟我没关系。不接') === true,
+    '★★★ 只有左括号（她没写右括号）也要拦',
+  );
+  check(
+    b39.isBracketNarration('（这条是黑祥回 <主人> 的，不是给我的）。那就不关我事了，你们自己说去') === true,
+    '★★★ 括号后还带着正文的那种也要拦',
+  );
+  // ⚠️ 提示词那头也要把话说透（用户：「结束对话的判定也交给模型吧」）
+  check(
+    /你的判断只体现在"发不发"这一个动作上/.test(src39),
+    '★★★ 提示词里点明：决定不接 = **一个字都别发**（判断只体现在发不发上）',
+  );
+  // ⚠️⚠️ 2026-10-09 第四轮（用户：「**括号话越来越多了**。为什么不能只要模型去检查括号里的话，
+  //    只要括号里的话意思是暂停就直接把消息截回来并且把对话掐断」）：
+  //    ⇒ 不再往关键词表里加词，改成**让模型判**，代码只负责"截住不发 + 掐断对话" ✓
+  check(
+    /async shouldPauseByBracket\(/.test(src39),
+    '★★★ 有一条"先快判、拿不准**问模型**"的判定（关键词表那条路不再独自扛）',
+  );
+  // ⚠️ 2026-10-09 撤回：这一版**不在 `sendText` 里 await 模型**了 ——
+  //    实测它会把她**最热的发送出口**拖红（`behavior` 5 项"发了 0 条"）✗
+  //    ⇒ 出口上只做**同步快判据**；"让模型判括号"换个位置（生成后、发送前）重做 ✓
+  check(
+    /if \(this\.isBracketNarration\(String\(text \?\? ''\)\)\)/.test(src39),
+    '★★★ 出口上做的是**同步**快判据（异步判定留待换位置重做）',
+  );
+  check(
+    /this\.botChainClosed\.set\(String\(event\.group_id\), Date\.now\(\)\)/.test(src39),
+    '★★★ 判为"停"时**把这轮对话掐断** —— 用户要的"把对话掐断"，不只是这条不发',
+  );
+  check(
+    /llm\.phrase\(\{[\s\S]{0,240}?maxTokens: 60/.test(src39),
+    '★★ 判定走轻量通道（`phrase`：非流式 + 关思考链 + 60 token 下限）',
+  );
+  check(
+    /if \(!\/\[（\(\]\/\.test\(t\)\) return false/.test(src39),
+    '★★ 没括号的消息**一次都不问**（只有"含括号 + 关键词没命中"才花这次调用）',
+  );
 
   // 对照：动作 / 表情那种括号**必须放行**（不然就误伤了）
   check(b39.isBracketNarration('（笑）') === false, '★★★ 对照：「（笑）」是动作，照旧放行');
@@ -2358,11 +2437,17 @@ console.log('\n【40】★★★ 两个机器人互刷时用精简提示词 + �
   //    现在改成**按节挑**（`leanSections()`），那条断言搬到了【42】里 ✓
   check(
     /const leanNoThink = leanMode && !this\.questLive\(String\(event\.group_id \?\? ''\)\);/.test(src40),
-    '★★★ D 只对"不演剧情的互刷"生效 —— 剧情里**保留思考链**（用户问「那剧情状态下互刷会怎么样」）',
+    '★★★ `leanNoThink` = "互刷、且**不**在演剧情"（2026-10-09 起剧情那一档单独用 `thinkOffInQuest` 关，见【50】）',
   );
   check(
-    /leanNoThink\s*\n?\s*\? \{ thinking: \{ type: 'disabled' \} \}/.test(src40),
-    '★★★ 关思考用的是 `leanNoThink`（不是 `leanMode`）',
+    // ⚠️ 2026-10-09 再改：关思考的判据从"两档硬编码"升级成**三类开关**
+    //    （`config.llm.thinking` = peer / questPeer / quest）⇒ 这里只守"开关真的接上了" ✓
+    /config\.llm\?\.thinking/.test(src40) && /if \(fromPeer && thinkOffInQuest\)/.test(src40),
+    '★★★ 关思考的判据走 `config.llm.thinking` 那三类开关（不是 `leanMode`）',
+  );
+  check(
+    !/\bleanMode\s*\n?\s*\?\s*\{ thinking/.test(src40),
+    '★★ 别拿 `leanMode` 当"关思考"的开关（它只是"要不要精简"，两者不是一回事）',
   );
   check(
     /const onlyNames = lean\s*\n?\s*\?\s*picked\.names\.filter\(/.test(src40),
@@ -2687,9 +2772,11 @@ console.log(
   //      `Alone゜独白ぴ（helps菜单）` 这种**完整昵称**，对方改个后缀就静默失效了。
   const src48 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
   check(
-    /this\.questLive\(gid0\) && !this\.isIgnoredBotEvent\(event\)/.test(src48),
-    '★★★ 「剧情进行中 → 这条我接」的快速通道必须先过 `isIgnoredBotEvent()` —— ' +
-      '不然剧情一开，不同类机器人那道闸就等于不存在 ✗',
+    // ⚠️ 2026-10-09：中间又插了 `!this.peersHeadsToHuman(event)`（见【55】）⇒
+    //    不能再要求两者**相邻**，改成"两个判据都在那条通道里"就行 ✓
+    /this\.questLive\(gid0\)[\s\S]{0,300}?!this\.isIgnoredBotEvent\(event\)/.test(src48),
+    '★★★ 「剧情进行中 → 这条我接」的快速通道必须过 `isIgnoredBotEvent()`' +
+      '（不然剧情一开，不同类机器人那道闸就等于不存在 ✗）',
   );
   check(
     /nc === core\(bs\)/.test(src48),
@@ -2704,6 +2791,441 @@ console.log(
   check(
     /if \(this\.isIgnoredBotEvent\(event\)\) \{/.test(src48),
     '★★★ `decide()` 里那道总闸还在（`isIgnoredBotEvent` 仍然被调用）',
+  );
+}
+
+console.log(
+  '\n【49】★★★ 提示词「固定的排前面、每轮会变的排最后」' +
+    '（2026-10-09 用户：「跑了一段时间剧情，可以对比出 token 花销数据变化了」）',
+);
+{
+  // ## 查出来的（`state/spend.json` + 日志）
+  //   主号 10-07：缓存命中 50.4% / 每次 ¥0.0132
+  //   主号 10-09：缓存命中 **32.4%** / 每次 **¥0.0264**（用户说「感觉烧得更快」）
+  //   根因：`chatBrief`（里面带"你们刚说过的 6 句"，**每轮都在变**）被插在
+  //   **人设正文（四万字）之前** ⇒ 提示词前缀每轮都不一样 ⇒ 大模型的**上下文缓存
+  //   整段失效** ✗ 缓存按**前缀**匹配：前面一变，后面几万字全部按全价重算。
+  // ## 修法
+  //   把"每轮会变"的两段（剧情起因 + 刚说过的几句、清剧情的作废窗口）挪到
+  //   `parts` 的**最末尾**（人设正文之后）。内容一个字没改，只是换了位置。
+  const src49 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  const iPersona = src49.indexOf('以下是人格设定与知识库');
+  const iBrief = src49.indexOf('const brief = quest.chatBrief');
+  check(iPersona > 0 && iBrief > 0, '★ 两处都在（人设正文的标题 / 剧情起因那一段）');
+  check(
+    iBrief > iPersona,
+    '★★★ 「刚说过的几句 + 剧情起因」（每轮都变）必须排在**人设正文之后** —— ' +
+      '排在前面会让上下文缓存整段失效、每次单价翻倍 ✗（10-09 实测：50.4% → 32.4%）',
+  );
+  check(
+    /thinking: \{ type: 'disabled' \},\s*\}\)\) full2 \+= delta;/.test(src49),
+    '★★★ 空内容重试要**关掉思考链** —— 第一次空回基本都是思考链吃满 8000 token，' +
+      '不关的话重试大概率还是空（10-09 一整天白跑 8 次）✗',
+  );
+}
+
+console.log(
+  '\n【50】★★★ 剧情进行中不带给思考链' + '（2026-10-09 用户：「指定只关剧情下的思考链」）',
+);
+{
+  // ## 用户拍板的
+  //   「只关剧情下的思考链」—— 日常闲聊照旧带（他 2026-10-07 说过「直接调回思考链」）。
+  // ## 为什么挑剧情
+  //   剧情对戏是**刷屏最多**的场景；思考链又**不受 `budget_tokens` 约束**
+  //   （设 3000 照样烧满 8000，日志 8 次 `其中思考链吃了 8000 token` 全是它）⇒
+  //   这一档关掉省得最多，而它不是解难题、对那层推敲的依赖最低。
+  const src50 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  check(
+    /const thinkOffInQuest = \(\(\) => \{/.test(src50) &&
+      /if \(fromPeer && thinkOffInQuest\) return th\.questPeer !== false/.test(src50),
+    '★★★ 剧情进行中（`questLive`）+ 对方是同类 ⇒ 默认**不带思考链**' +
+      '（关卡挂在 `llm.thinking.questPeer`，可在模型页改）',
+  );
+  check(
+    /this\.questLive\(String\(event\?\.group_id \?\? ''\)\)/.test(src50),
+    '★★ 判据要用 `questLive()`（让位的那个号自己没有剧情状态，只认 `quest.current` 会漏）',
+  );
+  check(
+    /th\.peer !== false/.test(src50) && /th\.quest === true/.test(src50),
+    '★★ 三档各有默认：**机器人之间关**、**剧情里和真人开**（其余日常闲聊照旧带思考链）',
+  );
+}
+
+console.log(
+  '\n【51】★★★ 回归的探针不许抢真实的管理界面端口' +
+    '（2026-10-09 用户：「http://127.0.0.1:3099 为什么打不开了」）',
+);
+{
+  // ## 用户报的
+  //   「3099 为什么打不开了」 —— 日志里是 `管理界面端口 3099 被占用`。
+  // ## 查出来的
+  //   占它的**不是别的软件，是我自己**：`test/run-all.js` 的隔离 env 只管
+  //   状态文件 / 单例锁 / 账号目录 / 日志，**没有一条管 webui 端口** ⇒
+  //   套件里 `spawn(node, [src/index.js])` 的探针按真实配置去绑 3099；
+  //   探针先绑上时，真实机器人一重启就绑不上 ⇒ 用户的管理界面没了 ✗
+  //   （按天日志「端口被占用」次数：10-05 210 次、10-07 198 次、10-09 97 次 —— 一直是它。）
+  // ## 修法
+  //   ① `src/config.js` 认 `QQBOT_WEBUI_PORT`（给了正数才顶掉）；② run-all 给每个套件发一个。
+  const cfg51 = readFileSync(join(ROOT, 'src', 'config.js'), 'utf8');
+  check(
+    /process\.env\.QQBOT_WEBUI_PORT/.test(cfg51),
+    '★★★ `src/config.js` 要认 `QQBOT_WEBUI_PORT`（管理界面端口能被测试顶掉）',
+  );
+  check(
+    // ⚠️ 这一条是**被 `accounts` 套件教出来的**：第一版我写成"有 env 就无条件顶掉"，
+    //    `accounts` 立刻红两项 —— 它给自己两个号显式配的 39601 / 39602 被顶成了别的端口，
+    //    于是连不上自己刚起的进程 ✗ ⇒ 判据必须是"**只有走默认端口时**才顶"。
+    /const useDefaultPort = [\s\S]{0,140}?rawUiPort === 3099/.test(cfg51) &&
+      /envUiPort > 0 && useDefaultPort/.test(cfg51),
+    '★★★ 只在"配置里没写端口、就是默认 3099"时才顶掉 —— ' +
+      '套件自己显式配的端口（`accounts` 的 39601 / 39602）优先级更高，不能被顶 ✗',
+  );
+  const run51 = readFileSync(join(ROOT, 'test', 'run-all.js'), 'utf8');
+  check(
+    /QQBOT_WEBUI_PORT:/.test(run51),
+    '★★★ `run-all.js` 要给每个套件注入一个独立的管理界面端口（不然探针还去抢 3099）',
+  );
+  check(/39100 \+/.test(run51), '★★ 而且是错开的高位端口，不是一个固定值');
+}
+
+console.log(
+  '\n【52】★★★ 三类对话关思考链的开关（模型页 · 共用段 · 默认值）' +
+    '（2026-10-09 用户：「把机器人互相对话的思考链也关掉…做成开关…放在模型页，' +
+    '控制所有账号，默认机器人互相对话和剧情内机器人互相对话关思考链，其他打开」）',
+);
+{
+  const b = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  check(
+    /config\.llm\?\.thinking/.test(b),
+    '★★★ 开关读 `config.llm.thinking` —— `llm` 是**共用段** ⇒ 天然"控制所有账号"',
+  );
+  check(
+    /if \(fromPeer && thinkOffInQuest\) return th\.questPeer !== false/.test(b),
+    '★★ 剧情里和同类对戏 ⇒ 默认**关**（questPeer）',
+  );
+  check(/if \(fromPeer\) return th\.peer !== false/.test(b), '★★ 机器人之间的日常聊天 ⇒ 默认**关**（peer）');
+  check(
+    /if \(thinkOffInQuest\) return th\.quest === true/.test(b),
+    '★★ 剧情里和真人 ⇒ 默认**开**（quest 没配就是开）',
+  );
+  check(
+    /isPeerBot\(String\(event\?\.group_id/.test(b),
+    '★ 判"是不是机器人之间"用 `isPeerBot()`，不是靠昵称猜',
+  );
+  const h = readFileSync(join(ROOT, 'src', 'webui.html'), 'utf8');
+  for (const id of ['llm-thinkPeer', 'llm-thinkQuestPeer', 'llm-thinkQuest']) {
+    check(h.split(id).length - 1 >= 3, `★★ 模型页里「${id}」表单 + 回填 + 保存三处配套`);
+  }
+  check(
+    /thinking: \{[\s\S]{0,200}?peer: !!/.test(h),
+    '★★ 保存时三个开关**都显式写**（省略 = 用户关不掉，和 slowQueueDrop 那条同理）',
+  );
+}
+
+console.log(
+  '\n【53】★★★ 「@ 的是同类」不能被当成「@ 我」' +
+    '（2026-10-09 用户：「@白祥会把黑祥也叫起来」）',
+);
+{
+  const s53 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  check(
+    /textAtOf\(text, segs = \[\], groupId = ''\)/.test(s53),
+    '★★★ `textAtOf()` 收群号（要靠它查"同类池里有没有人叫这个名字"）',
+  );
+  check(
+    /for \(const t2 of this\.atTargetsOf\(String\(groupId \?\? ''\)\)\)/.test(s53),
+    '★★★ 先查同类池的名字 ⇒ 有、且不是我 ⇒ 判成"@ 别人"',
+  );
+  check(
+    /lower === String\(k\)\.toLowerCase\(\)/.test(s53),
+    '★★ 而且用**精确相等** —— `includes` 会让"@saki酱"又命中 "saki"',
+  );
+  check(
+    /this\.textAtOf\(realText, segs, String\(event\?\.group_id \?\? ''\)\)/.test(s53),
+    '★★ 调用点把群号传进去了',
+  );
+  check(
+    /const selfNames = persona\.selfNames\(\)/.test(s53),
+    '★ selfNames 那条兜底还在（"@小祥"这种简称照旧认）',
+  );
+  // ⚠️ 本机是**主号**视角：`@saki酱saki酱saki酱` 就是它自己 ⇒ 仍判"@ 我"（别把正路修反了）
+  const b53 = new Bot();
+  b53.selfId = '10000002';
+  check(
+    b53.textAtOf('@saki酱saki酱saki酱 发张以前的', [], '200000001') === '',
+    '★★ 主号视角照旧：`@saki酱saki酱saki酱` 仍然算"@ 我"（不回归）',
+  );
+  // ⚠️⚠️ 2026-10-09 用户报「@别人时不接话的闸失效了」—— 真漏洞在这里：
+  //    原来只认**消息开头**那个 @，可群里最常见的是「XX @某人 你说呢」（@ 在中间）✗
+  check(
+    b53.textAtOf('你看 @<主人> 给个服世界地图', [], '200000001') === '<主人>',
+    '★★★ @ 在**中间**也要认出来（原来只认开头那个 @ ⇒ 闸等于没走到）',
+  );
+  check(
+    b53.textAtOf('a@b.com 这个邮箱', [], '200000001') === '',
+    '★ 但邮箱里的 @ 不算（`@` 前面是字母/数字 ⇒ 跳过）',
+  );
+}
+
+console.log(
+  '\n【54】★★★ 不同类机器人池：**保存了必须读得回来**' +
+    '（2026-10-09 用户：「不同类机器人池为什么保存不了」）',
+);
+{
+  // ## 用户报的
+  //   「不同类机器人池为什么保存不了？」—— 界面上填了、点了保存，回来还是空的。
+  // ## 查出来的（实测复现）
+  //   保存**是成功的**：账号文件里写进去了（日志也有 `配置写入账号私有文件：groupParams`）。
+  //   但 `config.js` 规范化 `groupParams` 那一段**只收了 `peers`**，**`otherBots` 压根没合并** ✗
+  //   ⇒ `reloadConfig()` 之后内存里没有它 ⇒ ① 界面回读空、② `otherBotsFor()` 返回空
+  //     ⇒ **"完全不回应"那道闸等于一直没配** ✗
+  const cfgSrc = readFileSync(join(ROOT, 'src', 'config.js'), 'utf8');
+  check(
+    /if \(Array\.isArray\(v\.otherBots\)\)/.test(cfgSrc) && /one\.otherBots = otherBots/.test(cfgSrc),
+    '★★★ `config.js` 合并时必须把 **otherBots** 也收进来 —— 漏了它就是"存得进、读不回" ✗',
+  );
+  check(
+    /if \(Array\.isArray\(v\.peers\)\)/.test(cfgSrc) && /one\.peers = peers/.test(cfgSrc),
+    '★ `peers`（同类池）那段当然还在（两个池子要一起管）',
+  );
+  // 两个池子各自独立（别又把其中一个写串）
+  const c = { groupParams: { '999000001': { peers: ['10000001'], otherBots: ['10000002'] } } };
+  check(
+    /seenO/.test(cfgSrc) && /seen\b/.test(cfgSrc),
+    '★ 去重用的是两个各自独立的 Set（`seen` / `seenO`），不会互相干扰',
+  );
+  void c;
+}
+
+console.log(
+  '\n【55】★★★ 「同类在跟真人说话」时不许被另一个号抢过去接' +
+    '（2026-10-09 用户截图：<主人> `@主号 解题`，**爱音却把主号那句回答接了**）',
+);
+{
+  // ## 怎么发生的
+  //   <主人> @ 主号 ⇒ 主号答「解题可以，题呢…」（**它在回真人**，带引用 `<主人>`）；
+  //   而另一条通道「剧情进行中 + 对方是同类 ⇒ 直接放行」**只看对方是不是同类** ⇒
+  //   爱音把主号那句**抢过来接了** ✗
+  // ## 修法
+  //   同类那句话**带引用 / @ 别人** ⇒ 它在跟真人对答 ⇒ 不接 ✓
+  //   （剧情里两个号对戏通常不带这两样，所以不受影响 ✓）
+  const b55 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  check(/peersHeadsToHuman\(event\) \{/.test(b55), '★★★ 有"同类在跟真人说话"这个判据（引用 / @ 别人）');
+  check(
+    (b55.match(/!this\.peersHeadsToHuman\(event\)/g) || []).length >= 2,
+    '★★★ 两条"剧情中同类直接放行"的通道**都**加了这道（漏一条就还漏一半）',
+  );
+  check(
+    /s\.type === 'at' && s\.data\?\.qq !== 'all'/.test(b55),
+    '★★ 判据只认「**@ 别人**」（`reply` 那半暂时不认 —— 见 bot.js 里那段"连试两版都碰红"的注释）',
+  );
+}
+
+console.log(
+  '\n【56】★★★ 「回服务器消息」那个开关要**真正管住服务器话题**' +
+    '（2026-10-09 用户：「爱音的账号已经关闭了回复服务器的内容，但是还是回复了」）',
+);
+{
+  // ## 用户报的
+  //   爱音那边 `groupParams['200000001'].chat.answerServer = false`（配置文件里确认过），
+  //   可她还是答了「为什么最新的整合包一进服务器就崩溃呀」✗
+  // ## 真因
+  //   那道闸判的是 `shouldQueryStatus()` —— 它**只认"有人吗 / 几个人 / 谁在线 / 关键词表"**，
+  //   而"整合包一进服务器就崩溃"一条都不命中 ✗
+  //   ⇒ 开关写着"回服务器消息"，实际只关得住"问在线人数" ⇒ 语义对不上 ✓
+  // （对照：同一天 20:42 那次"服务器问题"确实被拦了 —— 说明闸在，只是口径太窄。）
+  const b56 = new Bot();
+  for (const [t, want] of [
+    ['为什么最新的整合包一进服务器就崩溃呀', true],
+    // ⚠️ 注意：别把「服务器现在有人吗」放进这个列表 —— 它走的是 `shouldQueryStatus()`，
+    //    而那条**要求 `config.status.host` 有值**；测试环境里默认是空的 ⇒ 会假红 ✗
+    ['整合包怎么装', true],
+    ['服务器延迟高怎么办', true],
+    ['我刚在服务器里挖了个洞', false],
+    ['今天天气不错', false],
+  ]) {
+    check(b56.looksServerTalk(t) === want, `「${t}」→ ${want ? '算服务器消息（该拦）' : '不算（别误伤）'}`);
+  }
+  const src56 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  check(
+    /this\.looksServerTalk\(plain\)/.test(src56),
+    '★★★ 那道闸用的是**新判据**（原来只认"有人吗/几个人/谁在线"）',
+  );
+}
+
+console.log(
+  '\n【57】★★★ 电量 = 生命值（分档 / 劫后余生 / 同类配合）' +
+    '（2026-10-09 用户：「把电池电量设计为机器人的生命值…电量越低语气要更重，' +
+    '其他机器人也要配合演出」「复原的语气要和死里逃生一样，而不是化解一般般的困难比如考试之类」）',
+);
+{
+  const bl = await import('../src/battery-life.js');
+  // ⚠️ 2026-10-09 档位按用户改过的口径（0-20 濒死 / 20-40 很低 / 40-50 偏低 / >50 正常）——
+  //    原话：「因为笔记本的电池一般都不行」✓
+  for (const [p, ch, want] of [
+    [80, false, 'ok'],
+    [65, false, 'ok'],
+    [55, false, 'low'],
+    [45, false, 'low'],
+    [30, false, 'critical'],
+    [20, false, 'dying'],
+    [12, false, 'dying'],
+    [3, false, 'dying'],
+    [30, true, 'charging'],
+  ]) {
+    check(bl.levelOf({ percent: p, charging: ch }) === want, `${p}% charging=${ch} → ${want}`);
+  }
+  const src57 = readFileSync(join(ROOT, 'src', 'battery-life.js'), 'utf8');
+  check(
+    /劫后余生/.test(src57) && /绝不许/.test(src57),
+    '★★★ 复原那段写明是**劫后余生**，并明确**禁止**说成小事',
+  );
+  check(/考试/.test(src57), '★★ 而且把用户点名的反例（"考试没考好"那种）直接写进去了');
+  check(
+    /一直没说的，现在是说的时候/.test(src57),
+    '★★ 同类配合：对"随时会黑"的那个号说点平时不说的（用户要的演出）',
+  );
+  const bot57 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  check(
+    /batteryLife\.guide\(/.test(bot57) && /batteryLife\.publish\(/.test(bot57),
+    '★★★ 提示词里真的接了（自己的档 + 把自己的档写进共享文件给同类看）',
+  );
+}
+
+console.log(
+  '\n【58】★★★ config.yml 变动监听：一次保存、**多账号各自重载**' +
+    '（2026-10-10 用户：「能不能模型界面两个界面是同时保存的」）',
+);
+{
+  const cfgSrc58 = readFileSync(join(ROOT, 'src', 'config.js'), 'utf8');
+  const idxSrc58 = readFileSync(join(ROOT, 'src', 'index.js'), 'utf8');
+  check(/export function watchConfigFile\(/.test(cfgSrc58), '★★★ `config.js` 里有 `watchConfigFile()`');
+  check(
+    /watchFile\(CONFIG_FILE/.test(cfgSrc58),
+    '★★ 用的是 `watchFile`（轮询）—— 保存是"写 tmp + rename 覆盖"，`fs.watch(文件)` 在 Windows 上会失效 ✗',
+  );
+  check(
+    /sw\.unref\?\.\(\)/.test(cfgSrc58),
+    '★★ 轮询 `unref()` 了 —— 不然会把测试进程吊着不退（套件跑不完）',
+  );
+  check(
+    /cur\.mtimeMs === prev\.mtimeMs && cur\.size === prev\.size/.test(cfgSrc58),
+    '★ 只认"内容真的变了"（mtime + size 一起变），免得 stat 抖动白重载',
+  );
+  check(
+    /watchConfigFile\(\(fresh, err\)/.test(idxSrc58),
+    '★★★ `index.js` 启动时**真的挂了它**（只定义不调用 = 白做）',
+  );
+}
+
+console.log(
+  '\n【59】★★★ 日常聊天剥掉「（动作旁白）」，剧情里保留' +
+    '（2026-10-10 用户截图：「日常聊天不要带这些，只有剧情需要带一点」）',
+);
+{
+  const { stripBracketAct } = await import('../src/bot.js');
+  check(
+    stripBracketAct('（顿了顿）。祥祥，你先说，那个人的消息我可不管') ===
+      '祥祥，你先说，那个人的消息我可不管',
+    '★★★ 日常：剥掉「（顿了顿）」、**正文留下**（不整条丢）',
+  );
+  check(
+    stripBracketAct('（没退开，眼睛还半垂着）。……谢什么呀') === '……谢什么呀',
+    '★★ 神态描写同样剥掉（截图里那两句就是这两种）',
+  );
+  check(stripBracketAct('（笑）') === '', '★★ 整条只剩旁白 ⇒ 空串（调用方据此**不发**）');
+  check(stripBracketAct('我这儿正忙着呢') === '我这儿正忙着呢', '★ 没括号 ⇒ 原样返回（不动正常话）');
+  check(stripBracketAct('（这是口癖') === '这是口癖', '★ 不成对的半括号也清掉（有人拿「（」当口癖）');
+  const bsrc59 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  check(
+    (bsrc59.match(/stripBracketAct\(/g) || []).length >= 3,
+    '★★★ 接线**两处真实出口都挂了**（`sendText` 主聊天 + `sendChatLike` 剧情/事件/搭话）',
+  );
+  check(
+    /!this\.questLive\(String\(event\.group_id\)\)/.test(bsrc59) &&
+      /!this\.questLive\(String\(groupId \?\? ''\)\)/.test(bsrc59),
+    '★★ 判据是 `questLive`：**日常剥、剧情保留**（用户：「只有剧情需要带一点」）',
+  );
+}
+
+console.log(
+  '\n【60】★★★ 「服务器重新开启 → @ 他」订阅' +
+    '（2026-10-10 用户：「如果有人 @bot 让她在服务器重新开启的时候提醒一下、@他，可以做到吗」' +
+    ' ⇒ 拍板：谁都能挂、一直有效直到触发）',
+);
+{
+  const sw = await import('../src/server-watch.js');
+  const { Bot: BotW } = await import('../src/bot.js');
+  const GW = '999000906';
+  sw.__reset({ subs: [] });
+  check(sw.subscribe(GW, '10000001', '甲') === true, '★ 能挂订阅');
+  check(sw.list().length === 1, '★ 落盘列表里有 1 条');
+  check(
+    sw.subscribe(GW, '10000001', '甲') === true && sw.list().length === 1,
+    '★★ 同一个人重复挂 ⇒ **覆盖**（不叠加 —— 免得一次开服 @ 他五遍）',
+  );
+  sw.subscribe(GW, '10000002', '乙');
+  check(sw.list().length === 2, '★ 另一个人是另一条');
+  const taken = sw.takeAll();
+  check(taken.length === 2, '★★ 服务器恢复 ⇒ **取走全部**');
+  check(sw.list().length === 0, '★★ 取走即清空（提醒是**一次性**的）');
+  check(/服务器开了/.test(sw.textFor({ name: '甲' }, { online: 3, max: 20 })), '★ 文案里有"服务器开了"');
+  check(/在线 3/.test(sw.textFor({ name: '甲' }, { online: 3, max: 20 })), '★ 顺手带上在线人数');
+  check(
+    sw.textFor({ name: '甲' }, { online: 0 }).includes('还没人'),
+    '★ 没人在线时换个说法（不报"在线 0 人"这种怪话）',
+  );
+
+  // 命令识别（行为；`sendToGroup` 打桩，别真往群里发）
+  const bW = new BotW();
+  bW.selfId = '10000002';
+  bW.sendToGroup = async () => {};
+  const mk = (t) => ({
+    message_type: 'group',
+    group_id: GW,
+    user_id: '10000003',
+    message_id: 1,
+    self_id: '10000002',
+    message: [{ type: 'text', data: { text: t } }],
+    sender: { nickname: '甲' },
+  });
+  sw.__reset({ subs: [] });
+  const evW = mk('服务器重新开启的时候提醒我一下');
+  check(bW.tryServerWatch(evW, evW.message) === true, '★★★ 「服务器重新开启的时候提醒我一下」→ **挂上**');
+  check(sw.find(GW, '10000003') !== null, '★★ 没 @ 别人时，提醒的是**说这句话的人**');
+  const evW2 = mk('服务器卡不卡');
+  check(
+    bW.tryServerWatch(evW2, evW2.message) === false,
+    '★★ 单纯问状态**不挂订阅**（那种走实查 —— 两条路别混）',
+  );
+  sw.__reset({ subs: [] });
+}
+
+console.log(
+  '\n【61】★★★ 备选模型失败 ⇒ **自动回主模型重跑一次**' +
+    '（2026-10-10 用户拍板选 B —— 3.5 Flash Lite 免费层 TPM 只有 250K，' +
+    '而机对机提示词 6~7 万字，一次就吃掉 15%）',
+);
+{
+  const bsrc61 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  check(
+    /else if \(bkAny\)/.test(bsrc61) && /没配备选模型/.test(bsrc61),
+    '★★★ **双向兜底**：备选失败 → 回主模型；主模型失败 → **切备选顶上**；' +
+      '没配备选 ⇒ 照旧抛（真故障不吞）',
+  );
+  check(/自动切备选模型顶上/.test(bsrc61), '★★ 主模型挂了会切备选（日志里看得见）');
+  check(
+    /const noThink = \{ \.\.\.solveOpts \};\s*\n\s*delete noThink\.thinking;/.test(bsrc61),
+    '★★ 切备选前**现删 `thinking`**（Gemini 不认 DeepSeek 那个字段，会 400）',
+  );
+  check(
+    /const bkAny =\s*\n\s*bkCfg\.baseURL && bkCfg\.model/.test(bsrc61),
+    '★★ 兜底**不受 `for.*` 三个勾管** —— 那是"主动想用才用"，这是"保险"',
+  );
+  check(/full = '';\s*\n\s*buffer = '';/.test(bsrc61), '★★ 重跑前**清掉第一次的半截输出**（否则两份正文会拼在一起）');
+  check(
+    /\.\.\.solveOpts,\s*\n\s*report: solveReport,/.test(bsrc61),
+    '★★ 重跑用 `solveOpts`（主模型该带 thinking）—— 不是 `genOpts`（那个把 thinking 删了）',
   );
 }
 

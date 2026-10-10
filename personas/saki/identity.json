@@ -141,5 +141,16 @@
     "refs": [
       "ref.webp"
     ]
+  },
+  "birthday": {
+    "month": 2,
+    "day": 14
+  },
+  "age": {
+    "storyYear": 2023,
+    "atStory": 15,
+    "bornYear": 2008,
+    "derived": true,
+    "note": "官方故事背景 2023 年（MyGO 动画播出/手游登场那年，那时高一 15 岁） ⇒ 反推出生年 2008"
   }
 }

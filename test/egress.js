@@ -42,7 +42,11 @@ console.log('\n【1】★★ 切换必须是**全局**的（否则生图/搜索�
 {
   check(/setGlobalDispatcher/.test(src), '★ 用了 `setGlobalDispatcher`（改全局 dispatcher）');
   check(
-    /import \{ Agent, ProxyAgent, setGlobalDispatcher \} from 'undici'/.test(src),
+    // ⚠️ 2026-10-10 修（这条断言过时了，不是代码坏）：import 里后来多了
+    //    `fetch as undiciFetch` —— **外部 undici 的 fetch 才认 undici 的 dispatcher**，
+    //    内置 fetch 不认 ⇒ 走代理必须用它（那次"代理一直没生效"的根因）。
+    //    ⇒ 正则改成"这几个名字在就行、顺序不限"，别把新增的 import 判成失败 ✓
+    /import \{[^}]*\bAgent\b[^}]*\bsetGlobalDispatcher\b[^}]*\} from 'undici'/.test(src),
     '★ `Agent` 和 `setGlobalDispatcher` 都从 undici 引进来了',
   );
   check(/function applyEgress\(/.test(src), '有 `applyEgress()`（改出口的唯一入口）');

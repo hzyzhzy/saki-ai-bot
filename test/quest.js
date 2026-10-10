@@ -1808,5 +1808,84 @@ console.log('\n【18】★★ 剧情的「用词红线」——人设里那条�
   );
 }
 
+console.log(
+  '\n【19】★★★ 别人在跑剧情时，我收到的 `/剧情` 推进**不许另开一条**' +
+    '（2026-10-10 用户：「saki 开始剧情之后发了一个 /剧情 推进剧情，' +
+    '但是爱音那边读取成了开始新剧情」）',
+);
+{
+  // ⚠️ 根因：命令的"推进 or 开新"判据原来只看**本地** `quest.current()`，
+  //    而**让位的那个号从来不 begin** ⇒ 它本地永远是空的 ⇒ 把"推进"当"开新" ✗
+  //    实测（14:48:37 同一条命令）：主号 `手动推进` ✓ / 爱音 `手动开始`+`手动开了一条` ✗
+  const bsrc19 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  check(
+    /quest\.lineSeen\(gid\)[\s\S]{0,500}?让位/.test(bsrc19),
+    '★★★ 别人那条线**真的在演**（`lineSeen` = 我看过它的台词）⇒ **让位**、不开新线',
+  );
+  check(
+    /lineSeen\(gid\)[\s\S]{0,600}?return true/.test(bsrc19),
+    '★★ 而且返回 `true`（当"受理了"）—— 返回 false 会掉进"开新剧情"那条路（正是要修的 bug）',
+  );
+  check(
+    !/if \(this\.questLive\(gid\)\) \{[\s\S]{0,300}?让位/.test(bsrc19),
+    '★★★ 让位**不许**用 `questLive()` —— 它含"只记过命令"的 `lineAlive`，' +
+      '那会让两个号**都**让位 ⇒ **没人开场**（用户报的"哪个 bot 都没主动接上"）✗',
+  );
+  check(
+    /if \(hint && !quest\.lineSeen\(gid\)\)/.test(bsrc19),
+    '★★★ **"推进"命令不许覆盖线的身份**：已经在演时不再记新线（`!lineSeen` 守卫）—— ' +
+      '不然推进命令会算出新 id、把 `seen` 归零 ⇒ 让位闸失效 ⇒ 让位方又开一条 ✗',
+  );
+  // 行为：只有共享起因、本地 current 为空 —— 这正是让位方真实的处境
+  // ⚠️ 会写共享文件 ⇒ **必须走 `run-all` 跑**（它注入了 `QQBOT_QUEST_SHARED_FILE` 隔离路径）。
+  //    直接 `node test/quest.js` 会污染真实 `state/quest-shared.json`（项目里已有的坑）。
+  const q19 = await import('../src/quest.js');
+  const G19 = '999000903';
+  q19.noteSharedPremise(G19, { premise: '别人开的剧情（测试用）', by: '10000002' });
+  const { Bot: Bot19 } = await import('../src/bot.js');
+  const b19 = new Bot19();
+  b19.selfId = '10000002';
+  check(
+    !q19.current(G19),
+    '★ 先确认本地确实**没有**剧情（让位方的真实状态）',
+  );
+  check(
+    b19.questLive(G19) === true,
+    '★★★ 只有共享起因 ⇒ `questLive()` 仍为真（让位方**唯一**能看到"别人在演"的信号）',
+  );
+  q19.clearSharedPremise(G19);
+}
+
+console.log(
+  '\n【20】★★★ 跨机器对齐：确定性"线 id"' +
+    '（2026-10-10 用户：「跨机器不能用一个固定公式算出一个随机值、' +
+    '但是算出的值是一样的来判断吗」）',
+);
+{
+  const q20 = await import('../src/quest.js');
+  const G20 = '999000904';
+  const A = q20.lineIdOf(G20, '10000001', '门把手上有电，不能碰');
+  check(
+    !!A && A === q20.lineIdOf(G20, '10000001', '门把手上有电，不能碰'),
+    '★★★ 同样的输入 ⇒ 同样的 id（"两台机器算出来一样"的前提就在这里）',
+  );
+  check(A !== q20.lineIdOf(G20, '10000002', '门把手上有电，不能碰'), '★ 换发起人 ⇒ 不是同一条线');
+  check(A !== q20.lineIdOf('999000905', '10000001', '门把手上有电，不能碰'), '★ 换群 ⇒ 不是同一条线');
+  check(A !== q20.lineIdOf(G20, '10000001', '另一段背景'), '★ 换背景 ⇒ 不是同一条线');
+  check(q20.lineIdOf(G20, '10000001', '   ') === '', '★ 空背景 ⇒ 空 id（不记线）');
+
+  // 关键一步：**只有本地记的那条线**、没有共享文件 —— 让位方就靠这个认出"在演"
+  const { Bot: Bot20 } = await import('../src/bot.js');
+  const b20 = new Bot20();
+  b20.selfId = '10000012'; // 假装我是让位方
+  check(!b20.questLive(G20), '★ 一开始：本地没剧情、也没记线 ⇒ 不在演');
+  check(!q20.current(G20), '★ 而且 `quest.current` 确实是空的（让位方真实的处境）');
+  q20.rememberLine(G20, { id: A, by: '10000001', premise: '门把手上有电，不能碰' });
+  check(q20.__lines()[G20]?.id === A, '★★ 落盘了（重启之后还认得出这条线）');
+  check(b20.questLive(G20) === true, '★★★ 只凭"本地记的线"（**没有共享文件**）⇒ questLive 也为真 ✓');
+  q20.forgetLine(G20);
+  check(!b20.questLive(G20), '★★ `/清除剧情` 撤掉本地那条线 ⇒ questLive 立刻变假 ✓');
+}
+
 console.log(`\n结果: ${failures === 0 ? '全部通过 ✅' : `${failures} 项失败 ❌`}\n`);
 process.exit(failures === 0 ? 0 : 1);

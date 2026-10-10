@@ -611,7 +611,9 @@ console.log('\n【10】★ 接线断言（源码级 —— 这两个坑互相拉
   // ⚠️⚠️ 2026-09-22 用户截图「发的还是表情格式」——
   //    照片被当**表情**发了（QQ 里是小图 + `[动画表情]`），真因是 `sendText` 的
   //    `asSticker` **默认 `true`**（那是给表情包设的），而拍照这条路没传它。
-  const sd = /sendText\(event, text, \{ reply = false, faceFile = null, asSticker = ([a-z]+) \}/.exec(src);
+  // ⚠️ 2026-10-09 改：`sendText` 的签名又加了参数（`force = false`，给"旁白闸"用）⇒
+  //    原来要求 `asSticker = xxx }` **紧接右花括号**，现在后面还有 ` force = false` ⇒ 得容错 ✓
+  const sd = /sendText\(event, text, \{ reply = false, faceFile = null, asSticker = ([a-z]+)[,}]/.exec(src);
   check(sd && sd[1] === 'false', '★★ `sendText` 的 `asSticker` 默认必须是 **false**（默认 true 那次让照片变成了表情）', sd?.[1]);
   check(
     /await this\.sendText\(event, '', \{ faceFile: r\.file, asSticker: false \}\)/.test(src),

@@ -227,6 +227,11 @@ const SUITES = [
   'storyline',
   'life',
   'holiday',
+  // ★ 生日 + **动态年龄**（2026-10-09 用户：「把所有角色的信息只留下生日，年龄变为
+  //   真实动态的，这样随机事件和剧情可以出现互相庆祝生日的好事」）。
+  //   重点盯：①年龄是**按当天日期算**的（写死就会过一年就不对）②同一天里结果稳定
+  //   ③这段逻辑**一个字都不许碰学校 / 年级 / 学历**（用户随后补的硬约束）。
+  'birthday',
   'quest',
   'outbox',
   // ⚠️ 2026-09-21 加：提示词快照 —— 做人设模块化时靠它证明"一个字都没改味"。
@@ -325,6 +330,11 @@ function isolatedStateEnv(name) {
     //    它默认写在 `state/quest-shared.json` ⇒ **测试必须也隔离**，
     //    不然离线套件会把用户真实那条剧情的起因写坏、或者读到它。
     QQBOT_QUEST_SHARED_FILE: p('quest-shared'),
+    // ⚠️ 2026-10-10 加：确定性"线 id"那份（跨机器对齐用）也要隔离 ——
+    //    不隔离的话套件会把用户真实 `state/quest-lines.json` 写坏
+    QQBOT_QUEST_LINES_FILE: p('quest-lines'),
+    // ⚠️ 2026-10-10 加：「服务器开了 @ 我」那套订阅也要隔离
+    QQBOT_SERVER_WATCH_FILE: p('server-watch'),
     QQBOT_FRIEND_FILE: p('friend'),
     QQBOT_OUTBOX_FILE: p('outbox'),
     // ⚠️ 2026-09-15 加：QQ号→名字（群名片/昵称）那张表。
@@ -366,6 +376,23 @@ function isolatedStateEnv(name) {
     //    「不回复的机器人名单」，**差点判成机器人在崩溃重启循环**。
     //    ⇒ 显式给每个套件一个文件（`src/log.js` 优先认这个 env）。
     QQBOT_LOG_FILE: `logs/__run-${safe}.log`,
+    // ⚠️⚠️ 2026-10-09 加：**管理界面端口也要隔离**（用户报「3099 为什么打不开了」）。
+    //    套件里 `spawn(node, [src/index.js])` 起的探针原来**全都去绑真实的 3099** ——
+    //    探针先绑上时，真实机器人一重启就绑不上 ⇒ **用户的管理界面直接打不开** ✗
+    //    （按天日志里"管理界面端口被占用"一直有：10-05 那天 210 次、10-07 198 次。）
+    //    ⇒ 每个套件一个独立高位端口（`src/config.js` 认这个 env，
+    //      真实运行时不设 ⇒ 一切照旧）。
+    QQBOT_WEBUI_PORT: String(
+      39100 + [...safe].reduce((a, c) => (a * 31 + c.charCodeAt(0)) % 400, 7),
+    ),
+    // ⚠️ 2026-10-09 加：**群友生日表**（`state/member-birthdays.json`）。
+    //    不隔离的话，`test/birthday.js` 里那些假 uid（`10000001` 之类）会被写进
+    //    **真实的**那份 ⇒ 以后真有人今天生日，提示词里会冒出"张三"来 ✗
+    QQBOT_MEMBER_BD_FILE: `logs/__run-${safe}-member-bd.json`,
+    // ⚠️ 2026-10-09 加：**电量（生命值）的两个状态文件** —— 不隔离的话，
+    //    套件里的假电量会写进**真实的**那份 ⇒ 真机没电时提示词里会冒出假数据 ✗
+    QQBOT_BATTERY_LIFE_FILE: `logs/__run-${safe}-battery-life.json`,
+    QQBOT_BATTERY_SHARED_FILE: `logs/__run-${safe}-battery-shared.json`,
   };
 }
 

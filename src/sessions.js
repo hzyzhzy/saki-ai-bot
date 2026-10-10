@@ -98,6 +98,15 @@ function save() {
 load();
 
 /**
+ * 「服务器**确认恢复**」时的回调 —— 由 `index.js` 注册（订阅那套在 `server-watch.js`）。
+ * ⚠️ 本模块**只负责认出"它真关过、现在又活了"**，发消息是 bot 的事 ✓
+ */
+let onServerBack = null;
+export function setOnServerBack(cb) {
+  onServerBack = typeof cb === 'function' ? cb : null;
+}
+
+/**
  * 查一次名单并更新记录。
  * @returns {Promise<{online:string[]}>}
  */
@@ -157,6 +166,17 @@ export async function tick() {
     state.lastOnlineAt = Date.now();
     log.info(`[在线] 服务器恢复了（之前至少离线到 ${new Date(state.lastOfflineAt).toLocaleTimeString('zh-CN', { hour12: false })}）`);
     state.lastOfflineAt = 0;
+    // ⚠️⚠️ 2026-10-10 加（用户要求：「服务器**重新开启**的时候提醒一下、@他」）：
+    //    **这里是"服务器重新开启"的唯一触发点** ✓
+    //    为什么是这里：本函数前面已经做了「**连续 3 次查不到才算真关了**」的确认，
+    //    所以走到这个分支就是"**真关过、现在又活了**"——正是用户要的那件事 ✓
+    //    ⚠️ 只**回调**、不在这里发消息（本模块是纯逻辑，发消息是 bot 的事）✓
+    //      订阅那套在 `server-watch.js`，接线在 `index.js` ✓
+    try {
+      onServerBack?.(data?.players ?? null);
+    } catch (e) {
+      log.debug(`开服提醒回调出错（不影响主流程）：${e.message}`);
+    }
   }
   state.lastSeenAt = Date.now();
 

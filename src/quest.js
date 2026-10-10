@@ -24,6 +24,7 @@
  * 才能用**同一个引擎**跑，而不是另写一套必定会漂移的。
  */
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join, dirname } from 'node:path';
 import { config, ROOT, paramsFor, peersFor, stateDir } from './config.js';
 import { log } from './log.js';
@@ -33,6 +34,10 @@ import * as storyline from './storyline.js';
 // ⚠️ 2026-09-21：剧情提示词里的名字从 `identity` 来（原来写死「祥子」「客服小祥」）——
 //    换人设后剧情那段还在说旧名字，等于"人换了、剧本没换"。
 import * as persona from './persona.js';
+// ⚠️ 2026-10-09 加：生日（剧情里要能出现"互相庆祝生日"的桥段）。
+import * as birthday from './birthday.js';
+// ⚠️ 2026-10-09 加：**群友**的生日（好感度 90 以上），剧情里也能出现"给他过生日"。
+import * as memberBirthday from './member-birthday.js';
 // ⚠️ 2026-10-04：套话句式（「谁也没喊谁」）的二次改写 —— 见 `src/rewrite.js` 顶部
 import { naturalize } from './rewrite.js';
 
@@ -1121,6 +1126,19 @@ export function briefFor(groupId = '') {
     '     **不许**回「我哪说过」，更**不许**把它推给"那件事里的某个人"（说成"是她去的""是她在弄"）；',
     '   · 上面只列了一部分段落，更早的你可能真想不起来了 ——',
     '     那就**别否认**：说「我再想想」「翻一下记录」都比"我没说过"强。',
+    // ⚠️⚠️ 2026-10-09 加（用户：「……剧情可以出现**互相庆祝生日**的好事」）：
+    //    最近谁要过生日 —— 当成**可选线索**给她（不是任务）。
+    //    ⚠️ 空串在这个数组里会被下面的 `.filter(Boolean)` 丢掉 ⇒ 没生日时提示词一字不变 ✓
+    (() => {
+      try {
+        return (
+          birthday.questNote(Date.now(), { selfId: String(config.persona?.id ?? '') }) +
+          memberBirthday.note(String(groupId ?? ''))
+        );
+      } catch {
+        return '';
+      }
+    })(),
   ]
     .filter(Boolean)
     .join('\n');
@@ -2421,6 +2439,9 @@ export function finish(quest, ending, reason = 'llm', now = Date.now()) {
   // ⚠️ 2026-10-07：剧情收尾了 ⇒ 共享的那份起因也撤掉（不然聊天提示词里
   //    还挂着"这个群正在演…"，她们会接着已经结束的故事往下聊 ✗）
   clearSharedPremise(quest.groupId);
+  // ⚠️ 2026-10-10：确定性"线"那份也要撤（跨机器对齐用的，见 `lineIdOf`）——
+  //    不然收尾之后 `lineAlive()` 还会真 12 小时，让位方一直以为"这个群在演" ✗
+  forgetLine(quest.groupId);
   save();
   noteStory({
     tier: 2,
@@ -2513,6 +2534,8 @@ export function purge(groupId) {
   // ⚠️ 2026-10-07：共享的那份起因也要撤掉 —— 不然他清完剧情，
   //    聊天提示词里还挂着"这个群正在演…"，她们照样接着上文聊 ✗
   clearSharedPremise(k);
+  // ⚠️ 2026-10-10：同上 —— 清掉剧情的号，本地那份"线"也一起撤 ✓
+  forgetLine(k);
   save();
   log.info(
     `[剧情] 清除（群 ${k}，${running ? '正在跑的' : '已结束的'}）：${last.premise ?? ''}` +
@@ -2675,6 +2698,174 @@ export function clearSharedPremise(groupId) {
   } catch {
     return false;
   }
+}
+
+/* ──────────────────────────────────────────────────────────────
+ * **确定性"线 id"**（2026-10-10 加，用户思路：
+ *   「跨机器不能用一个固定公式算出一个随机值、但是算出的值是一样的来判断吗」）
+ *
+ * ## 解决什么
+ *   两台机器上的号（saki / 黑祥）**读不到对方的 `state/quest-shared.json`** ——
+ *   那是本地文件 ⇒ 跨机器时"这个群在不在演剧情"两边判断不一致 ✗
+ *   （同机的两个号靠共享文件够用，跨机就不行。）
+ *
+ * ## 靠什么对齐
+ *   **群里那条 `/剧情 …` 命令** —— 它是真人发的**群消息**，两台机器都收得到。
+ *   把「群号 + 发起人 + 命令原文」哈希成一个 id ⇒ **两台机器算出来一模一样** ✓
+ *
+ * ⚠️⚠️ 输入为什么是这三样（别改成别的）：
+ *   · **不能用本地时间** —— 两台机器时钟差几分钟 ⇒ 算不到一块去 ✗
+ *   · **不能用 message_id** —— 那种 id 是**协议端自己造的**（日志里是 `#-1805498059`
+ *     这种形态），两台机器各跑各的协议端，**不保证同一个值** ✗
+ *   · 命令原文里带着具体设定 ⇒ 同一条背景几乎不会被重复发第二次 ⇒ 天然唯一 ✓
+ *     （万一真有人原样重发，那语义上**本来就是同一条线**，判成同一条不算错 ✓）
+ *
+ * ## 它和共享文件的关系
+ *   不是替代关系，是**兜底关系**：同机时共享文件更快更准（还有起因全文），
+ *   跨机时这个 id 负责"认得出在演同一场"。`questLive()` 两条都认 ✓
+ * ────────────────────────────────────────────────────────────── */
+const LINES_FILE =
+  process.env.QQBOT_QUEST_LINES_FILE || join(ROOT, 'state', 'quest-lines.json');
+
+/** 这条线的确定性身份（两台机器算出来必须一样）。空白起因 ⇒ 空串（不记） */
+export function lineIdOf(groupId, byUid, premise) {
+  const g = gk(groupId);
+  const t = String(premise ?? '').replace(/\s+/g, ' ').trim();
+  if (!g || !t) return '';
+  return createHash('sha1')
+    .update(`${g}|${String(byUid ?? '')}|${t}`)
+    .digest('hex')
+    .slice(0, 16);
+}
+
+function readLines() {
+  try {
+    return JSON.parse(readFileSync(LINES_FILE, 'utf8')) ?? {};
+  } catch {
+    return {};
+  }
+}
+
+function writeLines(j) {
+  mkdirSync(dirname(LINES_FILE), { recursive: true });
+  const tmp = `${LINES_FILE}.tmp`;
+  writeFileSync(tmp, JSON.stringify(j), 'utf8');
+  renameSync(tmp, LINES_FILE);
+}
+
+/** 记下「这个群在演这条线」——**每个号各记各的**（id 是算出来的，不需要通信） */
+export function rememberLine(groupId, { id = '', by = '', premise = '', at = Date.now() } = {}) {
+  const g = gk(groupId);
+  const lineId = String(id ?? '') || lineIdOf(g, by, premise);
+  if (!g || !lineId) return false;
+  try {
+    const j = readLines();
+    const prev = j[g];
+    // ⚠️ 2026-10-10：**`seen` = "这条线真的演过"**（看见过台词，见 `touchLine`）。
+    //    重复记**同一条**线时不许把 `seen` 清掉（同一条命令可能被处理两次）；
+    //    记的是**另一条**线 ⇒ seen 归零（那是全新的一条）✓
+    j[g] = {
+      id: lineId,
+      by: String(by ?? ''),
+      // ⚠️ 起因截断存：只为日志/排错用（判定只认 id），别把整段设定压在状态文件里
+      premise: String(premise ?? '').slice(0, 200),
+      at: Number(at) || Date.now(),
+      seen: prev?.id === lineId && prev.seen === true,
+    };
+    writeLines(j);
+    log.info(`[剧情] 记下这条线（确定性 id=${lineId}，发起 ${by}）→ 跨机器也认得出`);
+    return true;
+  } catch (e) {
+    log.debug(`[剧情] 线记录写盘失败：${e.message}`);
+    return false;
+  }
+}
+
+/**
+ * 这个群**在演吗**？—— 靠本地记的那条线（`rememberLine` 写的）。
+ *
+ * ⚠️⚠️⚠️ 2026-10-10 收窄（**我自己踩出来的回归，用户截图报「对话停不下来了」**）：
+ *    第一版窗口给了 **12 小时**，结果出了这个事故：
+ *      · 用户发了 `/剧情 …`，**命令记下了线**，但那条剧情**根本没开成**
+ *        （`state/quest.json` 里 `current` 是 null、`recent` 空）；
+ *      · 线记录却按 12 小时一直真 ⇒ `questLive()` 永远为真 ✗
+ *      · ⇒ "剧情例外"**全部生效**（硬闸不闭麦 / 收尾冷却豁免 / 同类"剧情进行中→这条我接、
+ *        不判不节流"）⇒ **两个号靠一个字一个字互回，停不下来** ✗✗
+ *    ⇒ 两条修正：
+ *      ① 窗口缩到 **20 分钟**（假剧情态最多活 20 分钟，不会吊一整天）；
+ *      ② **靠"看见台词"续期**（`touchLine`，由 `notePeerPlot` 命中时调）——
+ *        真剧情里每句台词都会续上，假剧情（只有命令、没有演出）自然过期 ✓
+ */
+export function lineAlive(groupId, { maxAgeMs = 20 * 60 * 1000 } = {}) {
+  const g = gk(groupId);
+  if (!g) return false;
+  const rec = readLines()[g];
+  if (!rec?.id) return false;
+  const age = Date.now() - (Number(rec.at ?? 0) || 0);
+  return age <= Math.max(60000, Number(maxAgeMs) || 0);
+}
+
+/**
+ * 给本地那条线**续期**（把 `at` 推到现在）。
+ *
+ * ⚠️ 调用点：`notePeerPlot()` 命中时（"看见同类在演剧情" / "我自己在剧情群里说话了"）——
+ *    也就是说**只有真的在演才会续**，光发一条 `/剧情` 命令是撑不住的 ✓
+ * ⚠️ 没记过线的群 ⇒ 什么都不做（绝不凭空造线）✓
+ */
+export function touchLine(groupId) {
+  const g = gk(groupId);
+  if (!g) return false;
+  try {
+    const j = readLines();
+    if (!j[g]?.id) return false;
+    j[g].at = Date.now();
+    j[g].seen = true; // `seen` = "真的演过"（只有看过台词才置真）
+    writeLines(j);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * **这条线真的演过吗**（看见过台词）？
+ *
+ * ⚠️⚠️⚠️ 2026-10-10 加（用户报：「**刚才开始剧情的时候哪个 bot 都没有主动接上**」）：
+ *    我那个"让位闸"第一版用的是 `lineAlive()`（"记过这条命令"）—— 太宽：
+ *    **用户发了 `/剧情 …`、命令把线记下了、但剧情根本没开成的**情况（我上一版的事故）
+ *    会让 `lineAlive` 一直真 ⇒ 两个号**都**让位 ⇒ **没人开场** ✗✗
+ *    ⇒ 让位必须要求"**真的演过**"（`seen`，由 `touchLine` 在看见台词时置真）：
+ *      · 只有命令、没有演出 ⇒ `seen=false` ⇒ **不让位**，照常开场 ✓
+ *      · 别人真在演（我看过它的台词）⇒ `seen=true` ⇒ 让位 ✓
+ *    开场那一刻的让位本来就不靠它 —— 那是 `questTurnYield()` 的序位公式管的 ✓
+ */
+export function lineSeen(groupId, { maxAgeMs = 20 * 60 * 1000 } = {}) {
+  const g = gk(groupId);
+  if (!g) return false;
+  const rec = readLines()[g];
+  if (!rec?.id || rec.seen !== true) return false;
+  const age = Date.now() - (Number(rec.at ?? 0) || 0);
+  return age <= Math.max(60000, Number(maxAgeMs) || 0);
+}
+
+/** 这条线结束了 / 被 `/清除剧情` 清了 ⇒ 本地那份也要撤掉 */
+export function forgetLine(groupId) {
+  const g = gk(groupId);
+  if (!g) return false;
+  try {
+    const j = readLines();
+    if (!j[g]) return false;
+    delete j[g];
+    writeLines(j);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 测试用：看本地记了什么 */
+export function __lines() {
+  return readLines();
 }
 
 /**
