@@ -223,6 +223,51 @@ check(persona.warm() === true, 'persona.warm() 是 true');
   }
 }
 
+// ⚠️⚠️ 2026-10-13 加（用户截图：他当面问「你和我什么关系」，她答「给你打工的呗」）：
+//
+//   真因**不是模型跑偏**，是 `config.persona.ownerException` —— 这个开关**现在是关的**
+//   （`accounts/<号>.yml` 里 `ownerException: false`，10-07 多号迁移时从当时的全局配置
+//   抄进去的旧值），关着的时候 `knowledge/relationship.md` **根本不注入**，
+//   她手上只剩「身份 + 他的职权清单」⇒ 说成"老板跟员工"几乎必然。
+//
+//   ⇒ 修法：那条"别把关系说成雇佣"的口径**独立于这个开关**（演示模式只管语气软不软，
+//     不管关系是什么），两种模式各给一版。这里把两个模式都跑一遍。
+console.log('\n【★】2026-10-13：被问"你和我什么关系"的口径 —— 两个模式都要有，且措辞各是各的');
+{
+  const ownerEv = {
+    message_type: 'group',
+    group_id: '200000001',
+    user_id: String(config.ownerQQ),
+    sender: { nickname: '<主人>', card: '<主人>' },
+  };
+  const keep = config.persona?.ownerException;
+  try {
+    config.persona = { ...(config.persona || {}), ownerException: false };
+    const demo = bot.buildSystemPrompt('你和我什么关系', ownerEv, null, '你和我什么关系');
+    check(demo.includes('他不是你老板'), '★★ 演示模式（开关关）下**照样**有这条口径');
+    check(
+      demo.includes('「老板跟员工」「上下级」「同事关系」「给你打工的」'),
+      '★★ 演示模式下也点名了「给你打工的」这种错说法',
+    );
+    check(demo.includes('一视同仁'), '★ 演示模式那版写明了"语气一视同仁"');
+    check(!demo.includes('他是**你自己人**'), '★ 演示模式不给"自己人"那套（免得演示露馅）');
+    check(
+      !demo.includes('群友是工作对象，他是你自己人'),
+      '★ 演示模式下确实**不注入**关系那份文档（开关的原意，没被这条口径带回来）',
+    );
+
+    config.persona.ownerException = true;
+    const full = bot.buildSystemPrompt('你和我什么关系', ownerEv, null, '你和我什么关系');
+    check(full.includes('他是**你自己人**'), '★ 开关打开（例外模式）→ 给"自己人"那套');
+    check(
+      full.includes('群友是工作对象，他是你自己人'),
+      '★ 例外模式下关系文档**注入**（开关的原意）',
+    );
+  } finally {
+    config.persona = { ...(config.persona || {}), ownerException: keep };
+  }
+}
+
 console.log(
   failures === 0
     ? '\n结果: 全部通过 ✅（黑祥全关、saki 一点没动）'

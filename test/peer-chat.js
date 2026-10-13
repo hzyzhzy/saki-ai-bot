@@ -14,7 +14,7 @@
  * ⚠️ 纯离线：不调模型、不发消息（`tick()` 需要真 bot，这里只测纯判据）。
  * 用法: node test/peer-chat.js
  */
-import { rmSync } from 'node:fs';
+import { rmSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 process.env.QQBOT_PEERCHAT_FILE = 'logs/__test-peerchat.json';
@@ -185,6 +185,65 @@ console.log('\n【5】★ 认她自己说的"收场话"（决定权在她，代�
     b.isFarewell('我跟你说啊，昨天那个客人从早上一直站到晚上，走的时候还回头跟我拜拜了一下，我当时都没反应过来') === false,
     '★ 长段落不算收场（≤40 字那条护栏；「不聊了」「拜拜」都在里面，但那是长段落）',
   );
+}
+
+console.log('\n【6】★★ 可以**自己起个头**（用户：互相 @ 不一定全靠群里的消息生成）');
+{
+  // 用户原话：「另外机器人互相 @ 的消息**不一定**要全部由群里的消息生成，
+  //   也可以和**随机事件**一样**自己生成**，比如 saki@爱音出去玩，或者一起去干什么
+  //   其他事情，或者问爱音一些**自己想了解的**、关于爱音的事情」。
+  //
+  // 原来提示词里钉着「别自己编一件不相干的事」⇒ 她只会承接群里的话题 ✗
+  // 现在：`peerChat.selfTopicChance`（默认 0.5）随机决定「承接」还是「自己起头」。
+  // ⚠️ 这里用 `opts.rng` + `opts.phrase` 桩掉模型 —— **纯离线**，不花钱不联网。
+  const cap = [];
+  const fake = async (p) => {
+    cap.push(String(p.user ?? ''));
+    return '@爱音 行啊，那就说好了';
+  };
+  const self = await pc.compose(G, '1001', 20 * 60 * 1000, 1000, { rng: () => 0, phrase: fake });
+  check(self === '行啊，那就说好了', `★ 结果照旧过清洗（把 @ 去掉）：${self}`);
+  const p1 = cap.at(-1) ?? '';
+  check(/不用接群里刚才的话题/.test(p1), '★★ 自己起头那套：**明确说不用接群话题**');
+  check(/约她一起出去玩|问她一件/.test(p1), '★★ 给了「约出去玩 / 一起去干点什么 / 问她一件你想知道的事」这些方向');
+  check(/贴着你们俩的关系/.test(p1), '★ 要求贴着两人关系写（不是对谁都一样的口气）');
+  check(/别打听得太直接/.test(p1), '★ 有护栏：不是采访，是随口问一句');
+
+  const reply = await pc.compose(G, '1001', 20 * 60 * 1000, 1000, { rng: () => 0.99, phrase: fake });
+  void reply;
+  const p2 = cap.at(-1) ?? '';
+  check(/接着上面那些话/.test(p2), '★★ 另一半概率走原来那套（承接群里的话题）');
+  check(!/不用接群里刚才的话题/.test(p2), '★ 承接那套里不出现「不用接话题」');
+  check(!/别自己编一件不相干的事/.test(p2), '★★ 原来那句「别自己编一件不相干的事」已经删掉（正是它压住了自发话题）');
+
+  // ⚠️ 频率没放宽：这条只改"内容来源"，五道闸一个都没动
+  //    （⚠️ 别在这里调 `shouldPing` —— 前面几节已经把 cooldown/计数推过了，
+  //      那样必红；直接盯源码里那道闸还在不在）
+  const src = readFileSync(join(ROOT, 'src', 'peer-chat.js'), 'utf8');
+  check(
+    /const v = shouldPing\(now, gid, lastMsgAt\)/.test(src),
+    '★★ 五道闸照旧（`tick()` 还是先过 `shouldPing`：这次只改内容来源，没放宽频率）',
+  );
+
+  // 最近说过的话要摆出来（不然天天问同一件）
+  pc.note(G, '1001', Date.now(), '你今天在忙什么');
+  const r3 = await pc.compose(G, '1001', 20 * 60 * 1000, 1000, { rng: () => 0.99, phrase: fake });
+  void r3;
+  check(/别再问同一件事/.test(cap.at(-1) ?? ''), '★★ 最近发过的话会摆进提示词（别重复同一件）');
+  check(/你今天在忙什么/.test(cap.at(-1) ?? ''), '★ 摆的就是原话');
+}
+{
+  // 关掉自发那套（`selfTopicChance: 0`）→ 永远走承接（老行为可回退）
+  const keep = config.peerChat;
+  config.peerChat = { ...keep, selfTopicChance: 0 };
+  const cap2 = [];
+  const fake2 = async (p) => {
+    cap2.push(String(p.user ?? ''));
+    return '嗯';
+  };
+  await pc.compose(G, '1001', 20 * 60 * 1000, 1000, { rng: () => 0, phrase: fake2 });
+  check(/接着上面那些话/.test(cap2.at(-1) ?? ''), '★ selfTopicChance=0 → 永远是承接（可回退）');
+  config.peerChat = keep;
 }
 
 try {

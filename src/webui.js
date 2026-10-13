@@ -698,6 +698,76 @@ async function applyPersonaQQ(id) {
   return out;
 }
 
+/**
+ * ⚠️⚠️ 2026-10-13 加（用户：「**然后加任务页**」）。
+ *
+ * 为什么是**一个自包含页面**而不是往 `webui.html` 里加标签页：
+ *   那个文件 6000+ 行、导航/切页/渲染三套逻辑缠在一起，动它风险大 ✗
+ *   ⇒ 这里直接吐一页完整的 HTML（内联样式 + 内联 JS，只用两个接口）✓
+ *     · `GET /agent-tasks` —— 打开这一页
+ *     · `GET /api/agent-tasks` —— 任务列表（新的在前）
+ *     · `GET /api/agent-task?id=` —— 单条 + 那次会话的对话
+ *   ⚠️ 好处：**刷新就有**，完全不依赖 DSH 那个侧边栏（那边要重启才更新，实测过 ✗）
+ */
+const AGENT_TASKS_HTML = [
+  '<!doctype html>',
+  '<html lang="zh"><head><meta charset="utf-8"><title>本机任务</title>',
+  '<meta name="viewport" content="width=device-width,initial-scale=1">',
+  '<style>',
+  'body{font:14px/1.6 system-ui,"Microsoft YaHei",sans-serif;margin:0;background:#111;color:#eee}',
+  '.wrap{max-width:920px;margin:0 auto;padding:16px}',
+  'h1{font-size:18px;margin:0 0 4px}',
+  '.hint{color:#888;font-size:12px;margin-bottom:12px}',
+  '.t{border:1px solid #333;border-radius:8px;padding:10px;margin-bottom:8px;background:#161616;cursor:pointer}',
+  '.t:hover{border-color:#555}',
+  '.m{color:#8b8b8b;font-size:12px;margin-top:2px}',
+  '.s{padding:1px 6px;border-radius:6px;font-size:12px;margin-left:6px}',
+  '.running{background:#3a2f00;color:#ffd166}.done{background:#12351f;color:#7ee787}',
+  '.failed,.killed{background:#3a1a1a;color:#ff7b72}.asking{background:#1f2a3a;color:#79c0ff}',
+  '.talk{margin-top:8px;border-top:1px dashed #333;padding-top:8px;display:none}',
+  '.u{color:#9ecbff}.a{color:#e8e8e8}',
+  'pre{white-space:pre-wrap;word-break:break-word;margin:4px 0;font:inherit}',
+  '</style></head><body><div class="wrap">',
+  '<h1>本机任务</h1>',
+  '<div class="hint">点一条看那次她到底在做什么（15 秒自动刷新）</div>',
+  '<div id="list">加载中…</div>',
+  '</div><script>',
+  'function esc(s){return String(s==null?"":s).replace(/[&<>]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;"}[c]})}',
+  'function fmt(t){try{return new Date(t).toLocaleString("zh-CN",{hour12:false})}catch(e){return ""}}',
+  'async function load(){',
+  '  var r=await fetch("/api/agent-tasks?limit=50");var j=await r.json();',
+  '  var L=document.getElementById("list");',
+  '  if(!j.tasks||!j.tasks.length){L.textContent="还没有任务";return}',
+  '  L.innerHTML=j.tasks.map(function(t){',
+  '    var arts=(t.arts||[]).map(function(a){return a.name}).join("、");',
+  '    return "<div class=\\"t\\" data-id=\\""+esc(t.id)+"\\">"+',
+  '      "<div><b>"+esc(t.task||"")+"</b><span class=\\"s "+esc(t.status||"")+"\\">"+esc(t.status||"")+"</span></div>"+',
+  '      "<div class=\\"m\\">"+fmt(t.startedAt)+" ｜ "+esc(t.byName||t.by||"")+(t.cost?" ｜ "+t.cost+" 秒":"")+(t.gid?" ｜ 群 "+esc(t.gid):"")+"</div>"+',
+  '      (t.text?"<div class=\\"m\\">她说的："+esc(String(t.text).slice(0,140))+"</div>":"")+',
+  '      (arts?"<div class=\\"m\\">产物："+esc(arts)+"</div>":"")+',
+  '      "<div class=\\"talk\\" id=\\"talk-"+esc(t.id)+"\\"></div></div>"',
+  '  }).join("");',
+  '  Array.prototype.forEach.call(L.querySelectorAll(".t"),function(el){',
+  '    el.addEventListener("click",function(){openTalk(el)})',
+  '  })',
+  '}',
+  'async function openTalk(el){',
+  '  var id=el.getAttribute("data-id");var box=document.getElementById("talk-"+id);',
+  '  if(box.style.display==="block"){box.style.display="none";return}',
+  '  box.style.display="block";box.textContent="加载对话…";',
+  '  try{',
+  '    var r=await fetch("/api/agent-task?id="+encodeURIComponent(id));var j=await r.json();',
+  '    if(!j.ok){box.textContent=j.error||"读不到";return}',
+  '    if(!j.talk||!j.talk.length){box.textContent="（这次没有可显示的对话）";return}',
+  '    box.innerHTML=j.talk.map(function(x){',
+  '      return "<pre class=\\""+(x.role==="user"?"u":"a")+"\\">"+(x.role==="user"?"我：":"她：")+esc(x.text)+"</pre>"',
+  '    }).join("");',
+  '  }catch(e){box.textContent="出错："+e.message}',
+  '}',
+  'load();setInterval(load,15000);',
+  '</script></body></html>',
+].join('\n');
+
 const routes = {
   /**
    * 「这个进程是谁」—— 多 QQ 号的地基接口（2026-10-07 加）。
@@ -1887,6 +1957,30 @@ const routes = {
    * ⚠️ 2026-09-15 晚加：收紧度按群之后，界面上那个下拉框需要"选中群现在是什么值"。
    *    这里**故意不校验档位**（只是读，界面不该因为不是 1 档群就报错）。
    */
+  'GET /agent-tasks': async (_req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(AGENT_TASKS_HTML);
+  },
+
+  /** 任务列表（新的在前） */
+  'GET /api/agent-tasks': async (req, res) => {
+    const u = new URL(req.url, 'http://x');
+    const limit = Math.min(200, Math.max(1, Number(u.searchParams.get('limit') ?? 50) || 50));
+    const ab = await import('./agent-bridge.js');
+    send(res, 200, { ok: true, tasks: ab.taskHistory(limit), running: ab.status().running });
+  },
+
+  /** 单条任务 + 那次会话的对话（页面点开就看这个） */
+  'GET /api/agent-task': async (req, res) => {
+    const u = new URL(req.url, 'http://x');
+    const id = String(u.searchParams.get('id') ?? '').trim();
+    const ab = await import('./agent-bridge.js');
+    const t = ab.taskHistory(200).find((x) => String(x.id) === id);
+    if (!t) return send(res, 200, { ok: false, error: '没有这条任务（可能太老了，只留最近 200 条）' });
+    const talk = t.sessionId ? await ab.readSessionTalk(t.sessionId).catch(() => []) : [];
+    send(res, 200, { ok: true, task: t, talk });
+  },
+
   'GET /api/group-params': async (req, res) => {
     const u = new URL(req.url, 'http://x');
     const gid = String(u.searchParams.get('groupId') ?? '').trim();

@@ -63,7 +63,23 @@ const KNOW = process.env.QQBOT_KNOWLEDGE_DIR
 const wed = (h, m = 0) => new Date(2026, 8, 16, h, m);
 const sat = (h, m = 0) => new Date(2026, 8, 19, h, m);
 
-console.log('\n【1】★ 上学日 / 周末分得清');
+console.log('\n【1.5】★★ 深夜（0:00-5:00）不许再说"还没起"（用户截图：00:24 她说"够用到回家"）');
+{
+  // 现场（2026-10-13 00:24，用户截图）：他问「还有多少电」，她答
+  //   「还有一半多，55，**够用到回家**了」—— 可他早跟她说过晚安，她**已经在家**。
+  // 真因：原来是 `hh < 7 → 在家（还没起 / 刚起）`，**半夜也被算成"还没起"** ⇒
+  //   「现在 00:24，按你的一天：在家（还没起/刚起）」这句自相矛盾，模型只能自己找补，
+  //   于是编出"还在外面、够用到回家"。⇒ 深夜单独一档，写清"已经在家了"。
+  const late = whereAmI(wed(0, 24)).line;
+  check(/家/.test(late.split('\n')[1] ?? ''), '★ 周三 00:24 → **在家**', late.split('\n')[1] ?? '');
+  check(!/还没起|刚起/.test(late), '★★ 00:24 那条**不许**出现"还没起 / 刚起"');
+  check(!/准备出门上学|去上学/.test(late), '★ 00:24 也不许说"准备出门上学"');
+  check(!/还没起|刚起/.test(whereAmI(wed(3, 30)).line), '★ 03:30 同样不许说"还没起"');
+  check(/还没起|刚起/.test(whereAmI(wed(6, 30)).line), '★ 06:30 才轮到"还没起 / 刚起"（这档本来是对的）');
+  check(!/还没起|刚起/.test(whereAmI(sat(1, 30)).line), '★ 放假的凌晨 1:30 也不许说"睡到自然醒"那套前提到"还没起"');
+}
+
+console.log('\n【2】★ 上学日 / 周末分得清');
 {
   check(typeof whereAmI === 'function', '导出了 `whereAmI`（测试要能单独问它）');
   check(whereAmI(wed(10))?.schoolDay === true, '周三 10:00 → 上学日');

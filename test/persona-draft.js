@@ -15,7 +15,7 @@
  *
  * 用法: node test/persona-draft.js
  */
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -110,6 +110,46 @@ console.log('\n【4】★★ 模板字段清单（"按模板填"的唯一依据 
   check(arrMiss.length === 0, '四个"名字数组"都在', arrMiss.length ? `少了：${arrMiss.join('、')}` : '');
   check(!!tpl.anime && Array.isArray(tpl.anime.works), '`anime.works` 在');
   check(!!tpl.qq && 'nickname' in tpl.qq && 'avatar' in tpl.qq, '`qq` 段有 nickname / avatar');
+}
+
+console.log('\n【4.5】★★ 关系片段库（用户：「以后建新人设时这种人际关系也要能摘下来」）');
+{
+  // 2026-10-13 用户要求：新建人设时**人际关系要能摘下来**。
+  // ⇒ 片段库 `personas/_template/relations.md` + 起草时挑片段产出 cast.md。
+  const cat = pd.relationsCatalog();
+  check(cat.length >= 6, `片段库解析出 ${cat.length} 条片段`, cat.map((x) => x.name).join(' / '));
+  // 每条片段必须**四行齐全**（关系 / 怎么称呼 / 怎么相处 / 别写）—— 不然摘出来是残的
+  const bad = [];
+  for (const f of cat) {
+    for (const k of ['关系', '怎么称呼', '怎么相处', '别写']) {
+      if (!f.body.includes(`- ${k}：`)) bad.push(`${f.name} 缺「${k}」`);
+    }
+  }
+  check(bad.length === 0, '★★ 每条片段四行齐全（关系 / 怎么称呼 / 怎么相处 / 别写）', bad.join('；'));
+  check(
+    cat.some((x) => /同校同学/.test(x.name)) && cat.some((x) => /直球/.test(x.name)),
+    '★ 常用的那几类都在（同校同学 / 直球×端着）',
+  );
+  check(
+    !cat.some((x) => /站在.*这边的写法/.test(x.name)),
+    '★★ 「范例」那一节**不算片段**（那是写法示范，不是可摘的类型）',
+  );
+  const src = readFileSync(join(ROOT, 'personas', '_template', 'relations.md'), 'utf8');
+  check(/（二创）/.test(src), '★ 二创设定标了「（二创）」（用户："不符合官方的二创也能加"）');
+  check(/爱音/.test(src) && /祥子/.test(src), '★ 范例里那对（爱音 / 祥子）在');
+
+  // 起草要真的把 cast.md 带上（不然新人设还是没有"人际关系"）
+  const draftSrc = readFileSync(join(ROOT, 'src', 'persona-draft.js'), 'utf8');
+  check(/MAX_CAST_CHARS/.test(draftSrc), '★★ 起草那边有 cast.md 的上限');
+  check(/\[\s*'cast\.md',\s*MAX_CAST_CHARS\s*\]/.test(draftSrc), '★★ cast.md 进了"限长并落盘"那张表');
+  check(
+    /"docs":\s*\{[^}]*cast\.md/.test(draftSrc.replace(/\n/g, '')),
+    '★★ 输出格式里要求模型给 cast.md',
+  );
+  check(/relationsCatalog\(\)/.test(draftSrc), '★ 起草时读了片段库');
+  const uiSrc = readFileSync(join(ROOT, 'src', 'webui.html'), 'utf8');
+  check(/id="pd-cast"/.test(uiSrc), '★★ 界面上有 cast.md 的编辑框');
+  check(/\['cast\.md', 'pd-cast'\]/.test(uiSrc), '★★ 保存时会把 cast.md 写进人设包');
 }
 
 console.log('\n【5】★ 动画库选项的校验（全部要在**联网之前**拦住）');

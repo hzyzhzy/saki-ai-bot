@@ -65,6 +65,12 @@ const botWith = (role = 'owner') => {
   // 只测「@她」这条路：引用/点名那两条 stub 掉（它们各自有别的套件盯着）
   b.isQuoteOfMe = () => false;
   b.calledByName = () => '';
+  // ⚠️⚠️ 2026-10-13 加（用户要求：「记住 / 忘记应该在**命中关键词之后
+  //    再用模型判定一遍**是否执行」）：`tryForgetMemory` 现在会在命中之后
+  //    `await this.judgeMemoryCommand('forget', …)` —— 那是**一次模型调用**，
+  //    而本套件是"纯离线、不调模型"的，所以这里把它桩成"判定通过"；
+  //    「判定说不是指令 → 不许删」那一条单独在【7】里测（桩成 false）。
+  b.judgeMemoryCommand = async () => ({ do: true, why: '套件桩：当它是指令' });
   b.sent = [];
   b.sendToGroup = async (g, t) => {
     b.sent.push(String(t));
@@ -107,7 +113,7 @@ for (const t of [
   const b = botWith('owner');
   // 塞一条快照，好让撤回真的能成
   observe.__pushUndoForTest({ file: makeMemory(GROUP, '- 旧\n', '- 旧\n- 新\n'), gid: GROUP, before: '- 旧\n', after: '- 旧\n- 新\n' });
-  const r = b.tryForgetMemory(evOf(OWNER, [atSeg(BOT), textSeg(t)]), [atSeg(BOT), textSeg(t)]);
+  const r = await b.tryForgetMemory(evOf(OWNER, [atSeg(BOT), textSeg(t)]), [atSeg(BOT), textSeg(t)]);
   check(r === true, `处理掉：${t}`, b.sent.join(' / ').slice(0, 40));
 }
 
@@ -121,7 +127,7 @@ for (const t of [
 ]) {
   clearUndo();
   const b = botWith('owner');
-  const r = b.tryForgetMemory(evOf(OWNER, [atSeg(BOT), textSeg(t)]), [atSeg(BOT), textSeg(t)]);
+  const r = await b.tryForgetMemory(evOf(OWNER, [atSeg(BOT), textSeg(t)]), [atSeg(BOT), textSeg(t)]);
   // ⚠️ 最后一条是**已知会命中**的边界（"这个不用记"确实是在让她别记）——
   //    不算误伤，所以这里单独放行它，其余必须 false。
   const expect = t === '这个不用记了谢谢你' ? true : false;
@@ -133,13 +139,13 @@ console.log('\n【3】没 @她 / 没对着她说 → 不管');
   clearUndo();
   const b = botWith('owner');
   const msg = [textSeg('忘记刚才那个')]; // 没 @
-  check(b.tryForgetMemory(evOf(OWNER, msg), msg) === false, '没 @ 她 → 不处理（只是群里闲聊）');
+  check((await b.tryForgetMemory(evOf(OWNER, msg), msg)) === false, '没 @ 她 → 不处理（只是群里闲聊）');
 }
 {
   clearUndo();
   const b = botWith('owner');
   const msg = [atSeg('10000009'), textSeg('忘记刚才那个')]; // @ 的是别人
-  check(b.tryForgetMemory(evOf(OWNER, msg), msg) === false, '@ 的是别人 → 不处理');
+  check((await b.tryForgetMemory(evOf(OWNER, msg), msg)) === false, '@ 的是别人 → 不处理');
 }
 
 console.log('\n【4】权限：普通群友说这句 → 婉拒，但**不动记忆**');
@@ -149,7 +155,7 @@ console.log('\n【4】权限：普通群友说这句 → 婉拒，但**不动记
   observe.__pushUndoForTest({ file, gid: GROUP, before: '- 旧\n', after: '- 旧\n- 新\n' });
   const b = botWith('member');
   const msg = [atSeg(BOT), textSeg('忘记刚才那个')];
-  const r = b.tryForgetMemory(evOf(MEMBER, msg), msg);
+  const r = await b.tryForgetMemory(evOf(MEMBER, msg), msg);
   check(r === true, '命令被处理了（她得有回应，不能装没听见）');
   check(
     b.sent.some((t) => /只有服主和管理员/.test(t)),
@@ -186,9 +192,46 @@ console.log('\n【6】没有可撤的时候 → 明确回一句，不许装死')
   clearUndo();
   const b = botWith('owner');
   const msg = [atSeg(BOT), textSeg('忘记刚才那个')];
-  const r = b.tryForgetMemory(evOf(OWNER, msg), msg);
+  const r = await b.tryForgetMemory(evOf(OWNER, msg), msg);
   check(r === true, '命令被处理了');
   check(b.sent.some((t) => /没有什么可撤/.test(t)), '★ 回了"没有什么可撤的"', b.sent.join(' / '));
+}
+
+console.log('\n【7】★★ 关键词命中了、但模型说"不是在让她忘" → **一个字都不许动**');
+{
+  // 现场（用户截图 + 日志实锤，2026-10-13 14:29:56）：
+  //   他说「我**都忘记**那个开关了，是之前加黑祥的时候加的」——
+  //   「忘」+ 指代「那个」命中判据 ⇒ 她**真撤掉**了「服务器规则」那条教学 ✗
+  //   他说的"忘"是**他自己忘**。
+  // ⇒ 判据只当"可能是指令"，命中之后由 `judgeMemoryCommand` 再确认一次（模型判定）；
+  //   判定为"否"或**判不出来**都**不执行** —— 误删是真动数据，宁可这次不做。
+  clearUndo();
+  const file = makeMemory(GROUP, '- 旧\n', '- 旧\n- 服务器规则：白名单要申请\n');
+  observe.__pushUndoForTest({
+    file,
+    gid: GROUP,
+    before: '- 旧\n',
+    after: '- 旧\n- 服务器规则：白名单要申请\n',
+  });
+  const b = botWith('owner');
+  b.judgeMemoryCommand = async () => ({ do: false, why: '是说话的人自己忘了什么' });
+  const msg = [atSeg(BOT), textSeg('我都忘记那个开关了，是之前加黑祥的时候加的')];
+  const r = await b.tryForgetMemory(evOf(OWNER, msg), msg);
+  check(r === false, '★ 不当撤回指令（返回 false，交给正常聊天）', `实际 ${r}`);
+  check(readFileSync(file, 'utf8').includes('白名单要申请'), '★★ 那条知识**还在**（一个字都没动）');
+  check(observe.undoCount(GROUP) === 1, '★★ 快照也没被消费掉（还能撤）');
+  check(!b.sent.some((t) => /我忘了|删了/.test(t)), '★ 没有发"我忘了"那种回执');
+
+  // 判定**失败**（模型调用挂了 / 解析不出来）→ 同样不执行（保守）
+  clearUndo();
+  const file2 = makeMemory(GROUP, '- 旧\n', '- 旧\n- 又一条\n');
+  observe.__pushUndoForTest({ file: file2, gid: GROUP, before: '- 旧\n', after: '- 旧\n- 又一条\n' });
+  const b2 = botWith('owner');
+  b2.judgeMemoryCommand = async () => ({ do: false, why: '判定出错：fetch failed', failed: true });
+  const msg2 = [atSeg(BOT), textSeg('忘记刚才那个')];
+  const r2 = await b2.tryForgetMemory(evOf(OWNER, msg2), msg2);
+  check(r2 === false, '★ 判定失败 → 也不执行（保守，宁可这次不撤）', `实际 ${r2}`);
+  check(readFileSync(file2, 'utf8').includes('又一条'), '★★ 判定失败时那条也**没被删**');
 }
 
 try {

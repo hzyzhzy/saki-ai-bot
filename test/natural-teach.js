@@ -60,6 +60,16 @@ const llmServer = createServer((req, res) => {
       res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: JSON.stringify(obj) } }] }));
     };
 
+    // ⚠️⚠️ 2026-10-13 加：新增的「记住 / 忘记 **是不是真指令**」判定
+    //    （`bot.js` 的 `judgeMemoryCommand`）—— 非流式轻调用，system 带固定标记
+    //    「【记忆指令判定】」。不认它的话会落到「普通回答」那条上，
+    //    而那条判定要求**整条就是「是」** ⇒ 【5】「记住：xxx」不再入库 ✗
+    if (sys.includes('【记忆指令判定】')) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: '是' } }] }));
+      return;
+    }
+
     // 知识判断请求
     if (sys.includes('知识录入') || sys.includes('知识抽取器')) {
       detectCalls++;

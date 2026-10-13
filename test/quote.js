@@ -591,6 +591,122 @@ console.log('\n【12】★★ 被引用的**文件内容**要真读出来');
   check(t5 === '', '★ 段里既没 url 也没 file_id → 安静返回空（不抛错）');
 }
 
+console.log('\n【★】2026-10-13：**引用哪一条**让模型挑（合并消息时它才是准的）');
+{
+  // 用户原话：「现在**该引用哪条也不是很准**，因为有时会**合并消息**，
+  //   要引用时也**先用模型判定一遍该引用哪条消息**吧」。
+  //
+  // 原来写死引用 `event.message_id`（=当前这条）—— 连发被合并时
+  // 她答的是**整串**，而 message_id 只是串尾那条 ⇒ 引用框挂得不像在回那句。
+  // 现在：真要引用时让模型从候选里挑一条；挑不出/失败 → 退回当前这条（不退化）。
+  const b2 = new Bot();
+  b2.selfId = BOT;
+
+  const seed = () => {
+    recent.clearAll();
+    // 她自己的话（**不该进候选**）
+    recent.rememberBot(
+      { message_type: 'group', group_id: GROUP, user_id: BOT, message_id: 'b1' },
+      '她先说一句',
+    );
+    const put = (id, text) =>
+      recent.remember(
+        { message_type: 'group', group_id: GROUP, user_id: OTHER, message_id: id, sender: { nickname: '甲' } },
+        { text },
+      );
+    put('m1', '连发的第一句');
+    put('m2', '连发的第二句');
+    put('m3', '连发的第三句（串尾）');
+  };
+  const ev = () => {
+    // ⚠️ 造**合并**那一轮：`_sources` 好几条 ⇒ 她答的是整串，而 message_id 只是串尾
+    //    （这正是用户说的"有时会合并消息，引用哪条不准"）
+    const e = evOf([textSeg('嗯')], OTHER, 'm3');
+    e._sources = [
+      { userId: OTHER, name: '甲', text: '连发的第一句' },
+      { userId: OTHER, name: '甲', text: '连发的第二句' },
+      { userId: OTHER, name: '甲', text: '连发的第三句（串尾）' },
+    ];
+    return e;
+  };
+
+  seed();
+  let seenIds = [];
+  b2.judgeQuoteTarget = async (cands) => {
+    seenIds = cands.map((c) => c.messageId);
+    return 1;
+  };
+  check(
+    (await b2.pickQuoteTarget(ev(), '你第一句那个我答一下')) === 'm1',
+    '★★ 模型选第 1 条 → 引用**那一条**（不是永远引当前这条）',
+  );
+  check(!seenIds.includes('b1'), '★★ 她自己的消息**不进候选**（不引用自己）');
+  check(seenIds.includes('m3'), '★ 当前这条在候选里（不然"想引当前这条"就没得选）');
+  check(seenIds.length === 3, `候选 = 3 条别人的消息（实际 ${seenIds.length}）`);
+
+  // ⚠️ 成本控制：**没歧义**的两条路都不该花这次调用 ——
+  //    ① 没合并、当前这条就是最新的；② 候选不足两条
+  {
+    const plain = evOf([textSeg('嗯')], OTHER, 'm3'); // 没有 _sources、后面也没别人
+    let n = 0;
+    b2.judgeQuoteTarget = async () => {
+      n++;
+      return 1;
+    };
+    check((await b2.pickQuoteTarget(plain, '随口接一句')) === 'm3', '★ 没合并 + 当前这条最新 → 直接用当前这条');
+    check(n === 0, '★★ 没歧义时**一次模型调用都没有**（成本控制）');
+  }
+
+  // 没合并，但**她要回的那条后面还有人说话** → 有歧义 → 问模型
+  {
+    const earlier = evOf([textSeg('嗯')], OTHER, 'm1'); // m2/m3 在它后面
+    let n = 0;
+    b2.judgeQuoteTarget = async (c) => {
+      n++;
+      return c.findIndex((x) => x.messageId === 'm1') + 1;
+    };
+    check((await b2.pickQuoteTarget(earlier, '回你那句')) === 'm1', '★ 回的是被刷上去那条 → 引它');
+    check(n === 1, '★ 这种歧义才问一次模型');
+  }
+
+  b2.judgeQuoteTarget = async () => 0;
+  check(
+    (await b2.pickQuoteTarget(ev(), '随口接一句')) === 'm3',
+    '★★ 模型说"看不出"（0）→ 退回当前这条（行为不退化）',
+  );
+
+  b2.judgeQuoteTarget = async () => 99;
+  check((await b2.pickQuoteTarget(ev(), '')) === 'm3', '★ 越界编号 → 也退回当前这条');
+
+  b2.judgeQuoteTarget = async () => {
+    throw new Error('fetch failed');
+  };
+  check((await b2.pickQuoteTarget(ev(), '')) === 'm3', '★ 判定调用失败 → 退回当前这条（不炸）');
+
+  // 候选不足 2 条 ⇒ **不花这次调用**
+  recent.clearAll();
+  recent.remember(
+    { message_type: 'group', group_id: GROUP, user_id: OTHER, message_id: 'only', sender: { nickname: '甲' } },
+    { text: '唯一一条' },
+  );
+  let called = 0;
+  b2.judgeQuoteTarget = async () => {
+    called++;
+    return 1;
+  };
+  const onlyEv = evOf([textSeg('嗯')], OTHER, 'only');
+  onlyEv._sources = [{ userId: OTHER, name: '甲', text: '唯一一条' }, { userId: OTHER, name: '甲', text: 'x' }];
+  check((await b2.pickQuoteTarget(onlyEv, '')) === 'only', '★ 只有一条候选 → 直接用当前这条');
+  check(called === 0, '★★ 候选不足两条时**一次模型调用都没有**（成本控制）');
+
+  // 私聊 / 没群号 → 不改行为
+  check(
+    (await b2.pickQuoteTarget({ message_type: 'private', message_id: 'p1' }, '')) === 'p1',
+    '★ 私聊照旧用当前这条',
+  );
+  recent.clearAll();
+}
+
 try {
   rmSync(join(ROOT, CFG_REL), { force: true });
 } catch {}

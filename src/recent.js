@@ -625,6 +625,40 @@ export function speakers(groupId, n = 8) {
 }
 
 /**
+ * 最近几条消息的**原始条目**（从早到晚）—— 给「该引用哪一条」那段用。
+ *
+ * ⚠️ 2026-10-13 加（用户要求：「现在该引用哪条也不是很准，因为有时会合并消息，
+ *    要引用时也先用模型判定一遍该引用哪条消息吧」）。
+ *
+ * 为什么不能拿 `contextText()` 凑：那是**给人看的文本**（带时间前缀、
+ * 会把当前那条剔除、还会压缩空格），里面**没有 message_id** ——
+ * 而引用框要的是 id。所以这里给一份"带 id 的原始列表" ✓
+ *
+ * ⚠️ **必须原样给**（别在这里筛人）：`self` 过滤交给调用方 ——
+ *    她自己的消息也要让模型看见（不然"我在回他上面那句"就断链了），
+ *    只是**不许被选成引用目标**（在 `pickQuoteTarget` 里排掉）。
+ *
+ * @param {string} groupId
+ * @param {number} [n] 取最近几条
+ * @returns {{messageId:string, name:string, userId:string, text:string, time:number, self:boolean, atMe:boolean}[]}
+ */
+export function recentItems(groupId, n = 8) {
+  const list = store.get(String(groupId)) ?? [];
+  return list
+    .slice(-Math.max(1, n))
+    .map((m) => ({
+      messageId: String(m.messageId ?? '').trim(),
+      name: String(m.name ?? ''),
+      userId: String(m.userId ?? ''),
+      text: String(m.text ?? ''),
+      time: Number(m.time) || 0,
+      self: m.self === true,
+      atMe: m.atMe === true,
+    }))
+    .filter((m) => m.messageId);
+}
+
+/**
  * 这个群**最后一条消息**是什么时候（2026-10-05 加）。
  *
  * ⚠️ 用途：「同类机器人」主动搭话要用它判**冷场**（见 `src/peer-chat.js`）。

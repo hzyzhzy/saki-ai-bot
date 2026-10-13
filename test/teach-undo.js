@@ -51,6 +51,20 @@ const server = createServer((req, res) => {
     //    表现为**偶发假失败**（真凶抓到过一次：「在吗，��个事」）。
     const body = Buffer.concat(__bodyChunks).toString('utf8');
     calls++;
+    // ⚠️⚠️ 2026-10-13 加：新增的「记住 / 忘记 **是不是真指令**」判定
+    //    （`bot.js` 的 `judgeMemoryCommand`，用户要求「命中关键词后再让模型判一遍」）。
+    //    它是**非流式**轻调用，system 里带「【记忆指令判定】」这个特征串。
+    //    假模型不认它的话会落到下面那条 `{"cat":…}` 上，而那条判定要求
+    //    **整条就是「是」** ⇒ 所有撤回都会被拦掉（这套件会整片红）。
+    let judgeSys = '';
+    try {
+      judgeSys = String(JSON.parse(body)?.messages?.[0]?.content ?? '');
+    } catch {}
+    if (judgeSys.includes('【记忆指令判定】')) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { content: '是' } }] }));
+      return;
+    }
     // ⚠️ `phrase()`（教学分类走的就是它）是**非流式** `res.json()` ——
     //    这里回 SSE 会让它解析不出内容（本项目因为"假模型回错格式"踩过四次）。
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -209,7 +223,7 @@ console.log('\n【5】人话撤回教学 → 回话分得清"教学"和"闲聊�
   await teach('服务器地址', 'mc.example.com。');
   const b = botWith('owner');
   const msg = [atSeg(BOT), textSeg('忘记刚才那个')];
-  const r = b.tryForgetMemory(evOf(OWNER, msg), msg);
+  const r = await b.tryForgetMemory(evOf(OWNER, msg), msg);
   check(r === true, '命令被处理了');
   const said = b.sent.join(' / ');
   check(/服务器地址/.test(said), '★ 回话里点名了撤掉的是哪条教学', said);
@@ -290,7 +304,7 @@ console.log('\n【9】没有可撤的 → 明确回一句，不许装死');
   clearUndo();
   const b = botWith('owner');
   const msg = [atSeg(BOT), textSeg('忘记刚才那个')];
-  const r = b.tryForgetMemory(evOf(OWNER, msg), msg);
+  const r = await b.tryForgetMemory(evOf(OWNER, msg), msg);
   check(r === true, '命令被处理了');
   check(b.sent.some((t) => /没有什么可撤/.test(t)), '★ 回了"没有什么可撤的"', b.sent.join(' / '));
 }

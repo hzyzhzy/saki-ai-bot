@@ -24,7 +24,7 @@ const check = (ok, label, extra = '') => {
   if (!ok) failures++;
 };
 
-const { preSearch } = await import('../src/search-presearch.js');
+const { preSearch, looksLikeOwnStatus } = await import('../src/search-presearch.js');
 
 /**
  * 跑一次预搜索并返回「有没有去搜」。
@@ -80,6 +80,31 @@ console.log('\n【3】稍长的正常消息不受影响（走正常判断）');
   for (const t of ['中国人能飞是什么梗', '服务器怎么进啊']) {
     const r = await didSearch(t);
     check(!/极短消息/.test(r.why), `「${t}」不走"极短消息"闸门`, r.why);
+  }
+}
+
+console.log('\n【4】★ 问她/这台机器自己的状态 → 一律不搜（规则短路，离线可测）');
+{
+  // 现场（2026-10-13 00:24，用户截图）：<主人> 问「还有多少电」→ 判成**要搜** →
+  //   bing 改版解析不到、又连搜两次，白等 6 秒才拼提示词；
+  //   同一晚 00:36 再问一次，就正确地不搜了 —— 同一句话两次结论相反。
+  //   ⇒ 现在由规则短路，不再交给模型碰运气。
+  for (const t of [
+    '还有多少电',
+    '你这台机器还剩多少电',
+    '充上电没',
+    '你电脑怎么样',
+    '电池还撑得住吗',
+    '你的笔记本还有电吗',
+  ]) {
+    const r = await didSearch(t);
+    check(!r.searched, `「${t}」不去搜`, r.why);
+  }
+
+  // ⚠️ 反例：**服务器**的硬件/性能问题照旧走正常判断，不许被这条误伤
+  //    （「内存 / 硬盘 / 显卡」故意没收进判据，就是为了这个）
+  for (const t of ['这个整合包吃内存吗', '服务器要多大显存', '这台服务器是几核的']) {
+    check(looksLikeOwnStatus(t) === false, `「${t}」不算"她自己的状态"`, String(looksLikeOwnStatus(t)));
   }
 }
 

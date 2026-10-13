@@ -134,7 +134,7 @@ export function pickPeer(gid, peers, rng = Math.random) {
 }
 
 /** 记一次"主动过了"（冷却 + 当日计数），供发送成功后调用 */
-export function note(gid, peer, now = Date.now()) {
+export function note(gid, peer, now = Date.now(), text = '') {
   const d = dayOf(now);
   if (state.day !== d) {
     state.day = d;
@@ -143,14 +143,58 @@ export function note(gid, peer, now = Date.now()) {
   state.counts[String(gid)] = Number(state.counts?.[String(gid)] ?? 0) + 1;
   state.lastAt[String(gid)] = now;
   state.lastPeer[String(gid)] = String(peer ?? '');
+  // ⚠️ 2026-10-13：记下**最近发过的原话**（只留 5 条）—— 下次拼提示词时摆给她看，
+  //    提醒"别再问同一件事"（她跟同一个号的对话就那么几个话题，不摆出来会天天问同一句）。
+  const t = String(text ?? '').replace(/\s+/g, ' ').trim();
+  if (t) {
+    state.lastTexts ??= {};
+    const k = String(gid);
+    const arr = Array.isArray(state.lastTexts[k]) ? state.lastTexts[k] : [];
+    arr.push(t.slice(0, 60));
+    state.lastTexts[k] = arr.slice(-5);
+  }
   save();
 }
 
+/**
+ * ⚠️⚠️ 2026-10-13 加（用户要求）：
+ *
+ *   「另外机器人互相 @ 的消息**不一定**要全部由群里的消息生成，也可以和**随机事件**
+ *     一样**自己生成**，比如 saki@爱音出去玩，或者一起去干什么其他事情，
+ *     或者问爱音一些**自己想了解的**、关于爱音的事情」。
+ *
+ *   原来提示词里钉着「✅ 接着上面那些话说 —— …… **别自己编一件不相干的事**」
+ *   ⇒ 她只会承接群里的话题，永远不会自己起个头 ✗
+ *   ⇒ 现在**两种来源都允许**，由 `peerChat.selfTopicChance`（默认 0.5）随机决定这次走哪种：
+ *     · `reply` —— 承接群里刚才的话（老行为）；
+ *     · `self`  —— **自己起一个**：约对方出去玩 / 一起干点什么 / 问一件自己想知道的关于对方的事。
+ *
+ *   ⚠️ 放宽的只是**内容来源** —— **频率不变**（还是冷场 + 冷却 30 分钟 + 每日上限），
+ *     所以不会变成两个机器人整天互相约饭。
+ */
+export const SELF_TOPIC_ROLLS = Object.freeze([
+  '约她一起出去玩：去哪儿、什么时候、看什么吃什么（**说得随意一点，别像在排行程**）',
+  '约她一起干点什么：练琴 / 排练 / 买东西 / 看演出 / 顺路走一段',
+  '问她一件**你自己想知道的、关于她的事**：最近在忙什么、练得怎么样、喜欢什么、某件事她怎么看',
+  '说一句**你自己的事**（今天干了什么、碰上什么），让她接',
+  '吐槽一句，或者顺着你们俩那条"不太对付、又有点在意"的线撩一下',
+]);
+
 /** 生成那句话（开场白）—— **模型按当下情况现想**（用户拍板） */
-export async function compose(gid, peer, idleMs, timeoutMs = 25000) {
+export async function compose(gid, peer, idleMs, timeoutMs = 25000, opts = {}) {
   const name = names.of(peer, gid) || String(peer);
   const ctx = String(recent.contextText(gid) ?? '').slice(0, 2500);
   const mins = Math.max(1, Math.round((Number(idleMs) || 0) / 60000));
+  // ⚠️⚠️ 2026-10-13：这次是「承接群话题」还是「**自己起个头**」（见上面 SELF_TOPIC_ROLLS 的注释）。
+  //    `opts.rng` / `opts.phrase` 只是**为了让套件能离线测**（不起模型、不联网），
+  //    生产调用方一个都不传 ⇒ 走 Math.random 和真模型 ✓
+  const rng = typeof opts.rng === 'function' ? opts.rng : Math.random;
+  const ask = typeof opts.phrase === 'function' ? opts.phrase : phrase;
+  const selfChance = Math.min(1, Math.max(0, nz(cfg().selfTopicChance, 0.5)));
+  const self = rng() < selfChance;
+  const roll =
+    SELF_TOPIC_ROLLS[Math.floor(rng() * SELF_TOPIC_ROLLS.length) % SELF_TOPIC_ROLLS.length];
+  const lastTexts = (state.lastTexts?.[String(gid)] ?? []).slice(-3);
   const user = [
     `【现在的情况】群里已经 **${mins} 分钟**没人说话了。`,
     `你想找「${name}」搭一句 —— 就说**一句**，短一点。`,
@@ -159,22 +203,48 @@ export async function compose(gid, peer, idleMs, timeoutMs = 25000) {
     //    （`очередь ещё не выстроилась — 你先说说打算拿什么插队`）——
     //    因为这里只给了人设文本，**没写"说中文"** ✗
     //    （主聊天那条路是靠 `buildSystemPrompt` 里那一堆约束压住的，包括语言。）
-    //    ⇒ 在这儿把语言、标点、"别自己编一件不相干的事"都写死。
+    //    ⇒ 在这儿把语言、标点、分寸都写死。
     '⚠️⚠️ **必须用中文说** —— 她平时在群里就是中文，🚫 一个外文词都不许混进来。',
+    '',
+    // ⚠️ 2026-10-13：**自己起个头**那套 —— 不接群话题，方向随机给一个
+    self
+      ? [
+          '⚠️⚠️ **这次不用接群里刚才的话题** —— 是你**自己**突然想找她。',
+          '',
+          '🎲 这次的方向（**挑一个**，别全用）：',
+          `· ${roll}`,
+          '',
+          '· ✅ 可以是「约她出去玩 / 一起去干什么」，也可以是「问她一件你自己想知道的、关于她的事」；',
+          '· ⚠️ **贴着你们俩的关系**写（人设里写着你怎么看她 —— 别写成对谁都一样的口气）；',
+          '· 🚫 别写成通知、别把时间地点排得像日程表；',
+          '· 🚫 别打听得太直接（不是采访，是随口问一句）。',
+        ].join('\n')
+      : [
+          '⚠️ 就一句（**8~20 字**），像群里随口搭话：',
+          '· ✅ **接着上面那些话**说 —— 提一句刚才聊到的人或事；',
+        ].join('\n'),
     '',
     ctx ? `【群里刚才是这么聊的】\n${ctx}` : '（群里最近没什么可接的话）',
     '',
-    '⚠️ 就一句（**8~20 字**），像群里随口搭话：',
-    '· ✅ **接着上面那些话**说 —— 提一句刚才聊到的人或事，别自己编一件不相干的事；',
+    // ⚠️ 2026-10-13：最近已经说过的那几句摆出来 —— 她跟同一个号的对话就那么几件事，
+    //    不摆出来会天天问同一句（实测过「你今天怎么样」连着一周）。
+    lastTexts.length
+      ? `⚠️ 你最近已经找过她这些（**别再问同一件事、也别用同样的句式**）：\n${lastTexts
+          .map((t) => `· ${t}`)
+          .join('\n')}`
+      : '',
+    self ? '⚠️ 就一句（**8~20 字**），像随手发来的一句。' : '',
     '· 🚫 别写小作文、别连着说两三句；',
     '· 🚫 别用「在吗」「你好」这种客服腔；',
     '· 🚫 别用破折号（——）、别用书面标点；',
     '· 🚫 别解释「我为什么找你」；',
-    `· 🚫 **别提他名字**（「${name}」这三个字不用写）—— @ 由代码加，你写了就重复了。`,
+    `· 🚫 **别提她名字**（「${name}」这三个字不用写）—— @ 由代码加，你写了就重复了。`,
     '直接给那句话本身 —— 🚫 **不要自己加 @**（@ 由代码来加）。',
-  ].join('\n');
+  ]
+    .filter(Boolean)
+    .join('\n');
 
-  const out = await phrase({ system: personaText(), user, maxTokens: 120, timeoutMs });
+  const out = await ask({ system: personaText(), user, maxTokens: 120, timeoutMs });
   return String(out ?? '')
     .replace(/@\S{1,24}/g, '')
     .replace(/^[「『"']|[」』"']$/g, '')
@@ -267,7 +337,8 @@ export async function tick(bot, now = Date.now()) {
     }
     try {
       await bot.sendToGroup(gid, text, { at: peer, atName: names.of(peer, gid) || '' });
-      note(gid, peer, now);
+      // ⚠️ 2026-10-13：把**原话**一起记下来（下次提示词里摆出来，别重复同一件事）
+      note(gid, peer, now, text);
       log.info(`[同类] 群里冷场 → 她主动找「${names.of(peer, gid) || peer}」搭话：「${text}」`);
     } catch (e) {
       log.warn(`[同类] 群 ${gid} 发送失败（不记账，下次还能试）：${e.message}`);

@@ -225,6 +225,170 @@ console.log('\n【8】★★ 她刚说完话 → 立刻清掉这个群的判断�
   );
 }
 
+console.log('\n【9】★★ 她刚回过话 → 不算"别人在对话"（窗口独立于 followUp.idleMs）');
+{
+  // 现场（2026-10-13，用户报「问工资这个…好像不会进上下文」→ 查出来的真因）：
+  //   14:51:36 她报完工资（19020…），14:52:23 他接着问「都快2万了，居然是还行吗」
+  //   → 日志：`两个人在互相对话，且跟它无关，不插嘴` → **不接**。
+  //   他那句其实**没有**被丢出上下文（`state/recent.json` 里她报的账原句就在）——
+  //   被挡的是"要不要接"：那道豁免原来复用 `chat.followUp.idleMs`，而实盘是 **25 秒**，
+  //   他隔了 47 秒 ⇒ 既不算"对话延续"、又撞上"群里两个真人在说话" ⇒ 直接丢 ✗
+  // ⇒ 现在用**独立**的 `chat.replyGraceMs`（默认 2 分钟）。
+  const src = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  const { config } = await import('../src/config.js');
+  check(
+    /const inConvWithMe =\s*[\s\S]{0,120}?chat\.replyGraceMs/.test(src),
+    '★★ 「她刚回过话」那道豁免用 `chat.replyGraceMs`，**不再复用 followUp.idleMs**',
+  );
+  check(
+    !/inConvWithMe = conv && Date\.now\(\) - conv\.lastBotReplyAt < \(chat\.followUp/.test(src),
+    '★★ 旧的 `followUp?.idleMs` 那版写法已经没了',
+  );
+  check(
+    Number(config.chat.replyGraceMs) >= 60000,
+    `★ 默认值够宽（≥60 秒，实际 ${config.chat.replyGraceMs}ms）`,
+  );
+
+  // 行为：她 1 分钟前回过话，现在两个真人在群里（他 + 另一个人），他没 @ 她 ⇒ **不该被"两人对话"挡**
+  const b2 = new BotClass();
+  b2.selfId = '10000002';
+  const gid = G1;
+  const UID_A = '40001';
+  const UID_B = '40002';
+  // 造「两个真人在说话」：`isOthersTalking` 看 `this.speakers`（最近 6 条、两个不同真人）
+  b2.speakers = new Map([
+    [
+      gid,
+      [
+        { uid: UID_A, name: 'A', at: Date.now() - 20000 },
+        { uid: UID_B, name: 'B', at: Date.now() - 12000 },
+        { uid: UID_A, name: 'A', at: Date.now() - 6000 },
+      ],
+    ],
+  ]);
+  const evB = {
+    message_type: 'group',
+    group_id: gid,
+    user_id: UID_B,
+    message: [{ type: 'text', data: { text: '那他这个月赚了多少' } }],
+    sender: { nickname: 'B', card: 'B' },
+  };
+  check(b2.isOthersTalking(evB) === true, '★ 造数：确实判成"两个人在互相对话"');
+
+  // ① 她 **1 分钟前**回过话 → 宽限内 ⇒ 不套这道闸
+  b2.activeConv = new Map();
+  b2.touchConversation(evB);
+  const conv = b2.activeConv.get(`group:${gid}`);
+  conv.lastBotReplyAt = Date.now() - 60000;
+  const kept = b2.shouldJoinChat(evB);
+  check(
+    kept !== null || !/两个人在互相对话/.test(String(kept)),
+    '★★ 她一分钟前回过话 → 即使两个真人在聊，也**不按"两人对话"挡掉**',
+    `实际 ${kept}`,
+  );
+
+  // ② 她 **5 分钟前**回过话（超出宽限）→ 照旧可以挡（老行为没被废）
+  conv.lastBotReplyAt = Date.now() - 5 * 60 * 1000;
+  const blocked = b2.shouldJoinChat(evB);
+  check(blocked === null, '★ 超出宽限（5 分钟前回过）→ 两人对话那道闸照旧生效', `实际 ${blocked}`);
+
+  // ③ 配置能改：把宽限调到 10 秒，1 分钟前回过的就挡
+  config.chat.replyGraceMs = 10000;
+  conv.lastBotReplyAt = Date.now() - 60000;
+  check(
+    b2.shouldJoinChat(evB) === null,
+    '★ 宽限是**可配的**（改成 10 秒后，1 分钟前回过的就挡）',
+  );
+  config.chat.replyGraceMs = 120000;
+}
+
+console.log('\n【10】★★ 同类 / 已知机器人**不算"另一个真人"**（用户：「爱音也不算真人吧」）');
+{
+  // 现场：群 200000001 里那两个"人"是 **<主人> + 爱音**，而爱音是**同类池里的号**（自己人）。
+  //   原来 `isOthersTalking()` 只剔了 `selfId` ⇒ 「她 + 爱音」被算成
+  //   "两个真人在互相对话，跟我无关" ⇒ 她不开口 ✗（正是"刚报完工资，接着问就不理了"的成因之一）
+  // ⇒ 现在自家 + 同类池 + `otherBots` 名单里的号都不算"别人"。
+  const b3 = new BotClass();
+  b3.selfId = '10000002';
+  const gid = G1;
+  const HUMAN = '40001';
+  const HUMAN2 = '40002';
+  const PEER = '10000012'; // 同类（爱音那个号）
+  const KNOWN = '10000010'; // 已知机器人（otherBots 名单里那种）
+  const mkev = (uid) => ({
+    message_type: 'group',
+    group_id: gid,
+    user_id: uid,
+    message: [{ type: 'text', data: { text: '说点什么' } }],
+    sender: { nickname: uid, card: uid },
+  });
+  const setSpeakers = (uids) => {
+    b3.speakers = new Map([
+      [gid, uids.map((u, i) => ({ uid: u, name: u, at: Date.now() - (uids.length - i) * 3000 }))],
+    ]);
+  };
+
+  // ① 两个真人 → 照旧算"别人在对话"（老行为没被废）
+  setSpeakers([HUMAN, HUMAN2, HUMAN]);
+  check(b3.isOthersTalking(mkev(HUMAN2)) === true, '★★ 两个真人 → 照旧判成"别人在对话"');
+
+  // ② 一个真人 + 一个**同类** → 只有"一个别人" ⇒ 不算
+  b3.isPeerBot = (g, u) => String(u) === PEER;
+  setSpeakers([HUMAN, PEER, HUMAN]);
+  check(
+    b3.isOthersTalking(mkev(PEER)) === false,
+    '★★ 真人 + 同类（爱音）→ **不算"两个人"**，那道闸不生效',
+  );
+
+  // ③ 当前说话的是那个真人、旁边是同类 → 也不该算
+  check(
+    b3.isOthersTalking(mkev(HUMAN)) === false,
+    '★★ 反过来（真人说话、同类在场）也一样',
+  );
+
+  // ④ 两个都是同类 → 不算（同类之间本来就要搭话）
+  setSpeakers([PEER, PEER, HUMAN]);
+  check(b3.isOthersTalking(mkev(PEER)) === false, '★ 两个同类 → 不算');
+
+  // ⑤ `otherBots` 名单里的号同理（黑祥那种）—— 这条要走**真实配置**才测得到；
+  //    本套件用的是最小测试配置（那个群没有 otherBots 名单）⇒ 没名单就**明确跳过**，
+  //    别把断言吊死在配置上（第一版就是这么假红的）
+  {
+    const { otherBotsFor } = await import('../src/config.js');
+    const pool = (() => {
+      try {
+        return otherBotsFor(gid).map(String);
+      } catch {
+        return [];
+      }
+    })();
+    if (pool.length) {
+      const known = pool[0];
+      const b4 = new BotClass();
+      b4.selfId = '10000002';
+      b4.speakers = new Map([
+        [
+          gid,
+          [
+            { uid: HUMAN, name: 'A', at: Date.now() - 9000 },
+            { uid: known, name: 'K', at: Date.now() - 6000 },
+            { uid: HUMAN, name: 'A', at: Date.now() - 3000 },
+          ],
+        ],
+      ]);
+      check(
+        b4.isOthersTalking(mkev(known)) === false,
+        `★★ otherBots 名单里的号（${known}）不算"第二个真人"`,
+      );
+    } else {
+      check(
+        true,
+        '★ 本套件的测试配置里这个群没有 otherBots 名单 → 这条跳过（同类那条走的是同一段代码）',
+      );
+    }
+  }
+}
+
 try {
   rmSync(join(ROOT, CFG_REL), { force: true });
 } catch {}

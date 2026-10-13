@@ -42,6 +42,11 @@ const originalLearned = readFileSync(LEARNED, 'utf8');
 // ── 假模型 ──
 const calls = { extract: 0, answer: 0 };
 const answerPrompts = [];
+// ⚠️⚠️ 2026-10-13 加（用户要求：「记住和忘记，应该在**命中关键词之后
+//    再用模型判定一遍**是否执行」）：`judgeMemoryCommand` 的那次判定走这里。
+//    默认「是」（正常教学照旧入库），【5】里临时改成「否」验证"命中但不执行"。
+let judgeYes = true;
+let judgeCalls = 0;
 
 const llmServer = createServer((req, res) => {
   const __bodyChunks = [];
@@ -97,6 +102,20 @@ const llmServer = createServer((req, res) => {
       res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: 'NONE' } }] })}\n\n`);
       res.write('data: [DONE]\n\n');
       res.end();
+      return;
+    }
+
+    // ⚠️⚠️ 2026-10-13 加：新增的「记住 / 忘记 **是不是真指令**」判定
+    //    （`bot.js` 的 `judgeMemoryCommand`）—— **非流式**轻调用，system 里带
+    //    「【记忆指令判定】」这个特征串。不认它的话会落到下面那条
+    //    「非流式 → 回一段固定文本」上，而那条判定要求**整条就是「是」** ⇒
+    //    所有教学都不执行（这套件会整片红）。
+    if (sys.includes('【记忆指令判定】')) {
+      judgeCalls++;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({ choices: [{ message: { role: 'assistant', content: judgeYes ? '是' : '否' } }] }),
+      );
       return;
     }
 
@@ -342,6 +361,27 @@ async function main() {
   if (newReplies) console.log(`     （这条的回复：${newReplies.replace(/\n/g, ' / ')}）`);
   check(readFileSync(LEARNED, 'utf8') === before7, '普通提问没有被写进学习档案');
   check(!newReplies.includes('记下了'), '也没有回「记下了」');
+
+  console.log('\n[8] ★★ 命中「记住」但模型判定"不是在教她" → **不许入库**');
+  // 现场（用户要求，2026-10-13）：「记住和忘记应该在**命中关键词之后
+  //   再用模型判定一遍**是否执行」。这条验的就是那一次判定：
+  //   假模型回「否」⇒ 教学不执行、不回「记下了」、档案一个字不动。
+  {
+    const before8 = readFileSync(LEARNED, 'utf8');
+    const extractBefore8 = calls.extract;
+    judgeYes = false;
+    sent.length = 0;
+    say(OWNER, '记住：我刚才说的那句是引用别人的，别当真', 'owner', 4012);
+    await sleep(3000);
+    judgeYes = true;
+    check(judgeCalls >= 1, '★ 命中关键词后**确实问了模型一次**（判定调用发生了）');
+    check(
+      readFileSync(LEARNED, 'utf8') === before8,
+      '★★ 判定为"不是教学" → 学习档案**一个字都没动**',
+    );
+    check(!sent.join('\n').includes('记下了'), '★ 也没有回「记下了」');
+    void extractBefore8;
+  }
 }
 
 async function cleanup() {

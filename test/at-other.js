@@ -261,6 +261,47 @@ console.log('        「只有 @她 或者明确叫她名字时，才能把自�
   check(/接不上就\*\*别开口\*\*/.test(p) || /接不上就别开口/.test(p), '★ 而且给了她"接不上就不说"的出口');
 }
 
+console.log('\n【★】2026-10-13：@主号问话，**黑祥不该也被叫起来**（用户截图）');
+{
+  // 现场：<主人> 在群里「@saki酱saki酱saki酱 你和爱音什么关系」——
+  //   主号正常回了，**黑祥也回了一条**「问过的事别再问我一遍」✗
+  // 根因：`atCalledInText()` 是"@ 被协议端退化成纯文本"的兜底，可它**从来没检查过
+  //   "到底有没有 at 段"** ⇒ at 段明明指着主号，它还是拿正文里的 `@saki…` 去比名字，
+  //   而 `@saki酱saki酱saki酱` **含 "saki"**、黑祥的名字表里也有 `saki` ⇒ 它以为自己被叫 ✗
+  // ⇒ 有 at 段就说明协议端没退化：@ 的是谁以 at 段为准，正文不再参与判断。
+  const { config } = await import('../src/config.js');
+  const keep = config.trigger.callNames;
+  config.trigger.callNames = ['saki']; // 黑祥的名字表里也有 saki（真实情况）
+  const DARK = '10000011';
+  const textSaki = '@saki酱saki酱saki酱 你和爱音什么关系';
+
+  // ① 有 at 段（@ 的是主号）→ **不算在叫我**
+  const bDark = new Bot();
+  bDark.selfId = DARK;
+  check(
+    bDark.atCalledInText(textSaki, [atSeg(BOT), textSeg(textSaki)], GROUP) === '',
+    '★★ 有 at 段（@ 的是主号）+ 正文里 @saki… → 黑祥**不认**（不当成在叫它）',
+  );
+
+  // ② 真正的退化形态（**没有 at 段**）→ 照旧认（老兜底别废掉）
+  const bMain = new Bot();
+  bMain.selfId = BOT;
+  check(
+    !!bMain.atCalledInText('@saki酱saki酱saki酱 你说呢', [textSeg('@saki酱saki酱saki酱 你说呢')], GROUP),
+    '★ 没有 at 段（协议端真的退化了）→ 照旧当成 @ 我（这条兜底不能废）',
+  );
+
+  // ③ @ 我的 QQ 号那种写法 + 有 at 段指着我 → 仍然认（别改坏）
+  const bQq = new Bot();
+  bQq.selfId = BOT;
+  check(
+    !!bQq.atCalledInText(`@${BOT} 你在吗`, [textSeg(`@${BOT} 你在吗`)], GROUP),
+    '★ 正文写的是 @QQ号、且没有 at 段 → 照旧认',
+  );
+
+  config.trigger.callNames = keep;
+}
+
 try {
   rmSync(join(ROOT, CFG_REL), { force: true });
 } catch {}

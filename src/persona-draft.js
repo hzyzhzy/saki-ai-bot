@@ -36,6 +36,8 @@ import { parseJson } from './storyline.js';
 export const MAX_PERSONA_CHARS = 3000;
 /** `voices.md` 的上限 */
 export const MAX_VOICES_CHARS = 2000;
+/** ⚠️ 2026-10-13 加：`cast.md`（出场人物表 / 人际关系）的上限 */
+export const MAX_CAST_CHARS = 4000;
 /** 新建动画库时，库文件的上限 */
 export const MAX_ANIME_CHARS = 4000;
 
@@ -44,6 +46,52 @@ const bad = (msg) => {
   e.bad = true;
   return e;
 };
+
+/**
+ * ⚠️⚠️ 2026-10-13 加（用户要求：「以后建新人设时**这种人际关系也要能摘下来**」）：
+ *
+ *   读 `personas/_template/relations.md` —— **关系片段库**。
+ *   每个 `### 片段名` 是一条**可摘取的片段**，片段里固定四行
+ *   （`关系` / `怎么称呼` / `怎么相处` / `别写`）。
+ *
+ *   用途：起草新人设时把这份清单给模型，让它**挑 1~5 条**、按 cast.md 的格式
+ *   落成那个包的人物表（以前起草根本不产出 cast.md ⇒ 新角色没有"人际关系" ✗）。
+ *
+ * @returns {{name:string, body:string}[]}
+ */
+export function relationsCatalog() {
+  const f = join(ROOT, 'personas', '_template', 'relations.md');
+  let text = '';
+  try {
+    text = readFileSync(f, 'utf8');
+  } catch (e) {
+    log.warn(`读 _template/relations.md 失败（起草时就没有片段可摘）：${e.message}`);
+    return [];
+  }
+  const out = [];
+  let cur = null;
+  let inExample = false;
+  for (const line of text.split('\n')) {
+    const h2 = /^##\s+(.+)$/.exec(line);
+    if (h2) {
+      // ⚠️ 「范例」那一节是**写法示范**（把片段拼成一个人的样子），不是可摘的类型 ⇒ 整节跳过
+      inExample = /范例|示例/.test(h2[1]);
+      cur = null;
+      continue;
+    }
+    const h = /^###\s+(.+)$/.exec(line);
+    if (h) {
+      cur = inExample ? null : { name: h[1].trim(), body: [] };
+      if (cur) out.push(cur);
+      continue;
+    }
+    if (!cur) continue;
+    cur.body.push(line);
+  }
+  return out
+    .map((x) => ({ name: x.name, body: x.body.join('\n').trim() }))
+    .filter((x) => x.name && /-\s*关系：/.test(x.body));
+}
 
 /**
  * **字段清单的唯一来源**：`personas/_template/identity.json`。
@@ -162,6 +210,8 @@ export async function draft(p = {}, opts = {}) {
   const shape = shapeOf(tpl);
   const hints = hintLines(tpl);
   const wantAnimeDoc = mode === 'new';
+  // ⚠️ 关系片段库（可摘）—— 起草时挑几条写进 cast.md（用户 2026-10-13 要求）
+  const relCatalog = relationsCatalog();
 
   // ── ① 联网搜 ──
   const query = `${name}${work ? ` ${work}` : ''} 角色 设定`;
@@ -268,6 +318,28 @@ export async function draft(p = {}, opts = {}) {
     '',
     '贴几段示例对话，覆盖：打招呼 / 被夸 / 被骂 / 被问到不知道的事 / 主动接话 / 拒绝。',
     `（${MAX_VOICES_CHARS} 字以内）⚠️ 这是"人味"的关键 —— 比一堆形容词有用得多。`,
+    '',
+    // ⚠️⚠️ 2026-10-13 加（用户要求：「以后建新人设时这种人际关系也要能摘下来」）
+    '## cast.md 怎么写（⭐ 人际关系，**从片段库里摘**）',
+    '',
+    '⚠️⚠️ 用户原话：「以后建新人设时**这种人际关系也要能摘下来**」——',
+    '所以这次**必须**产出 `cast.md`（出场人物表）：它是"谁跟你活在同一个世界、你们怎么相处"。',
+    '',
+    '做法：从下面这份**关系片段库**里**挑 1~5 条**（挑跟这个角色真的对得上的），',
+    '每条落成 cast.md 里的一个 `### 名字 / 别名` 条目，**四行照抄结构、内容换成她的**：',
+    '`- 关系：` / `- 怎么称呼：` / `- 怎么相处：` / `- 别写：`',
+    '（有把握才加 `- 生日：**x 月 y 日**` —— ⚠️ 只有**拆到人的条目**才会进"今天谁生日"，拿不准就留空）。',
+    '',
+    '⚠️ 片段里标了 `（二创）` 的部分**可以用** —— 用户定的：',
+    '「**不符合官方的二创也是能加的**，因为二创的生命力确实要比官方强」；',
+    '但**二创不能当成官方事实**去说（"别写"那行就是干这个的）。',
+    `⚠️ ${MAX_CAST_CHARS} 字以内；用 markdown，别写剧情梗概（那是联网搜的事）。`,
+    '',
+    relCatalog.length
+      ? `关系片段库（可摘，共 ${relCatalog.length} 条）：\n${relCatalog
+          .map((r) => `- **${r.name}**`)
+          .join('\n')}`
+      : '（关系片段库读不到 —— 那就按你搜到的资料，照上面那四行格式写 1~3 个人。）',
     wantAnimeDoc
       ? [
           '',
@@ -301,7 +373,7 @@ export async function draft(p = {}, opts = {}) {
     '',
     '# 输出格式',
     '{"blocked": false, "identity": {…按上面那份形状，**每个键都要有**…},',
-    ' "docs": {"persona.md": "…", "voices.md": "…"},' +
+    ' "docs": {"persona.md": "…", "voices.md": "…", "cast.md": "…"},' +
       (wantAnimeDoc ? ' "animeLib": "…",' : ''),
     ' "notes": ["给用户看的提醒（例：『生日没查到，留空了』）"]}',
     '',
@@ -365,6 +437,8 @@ export async function draft(p = {}, opts = {}) {
   for (const [file, limit] of [
     ['persona.md', MAX_PERSONA_CHARS],
     ['voices.md', MAX_VOICES_CHARS],
+    // ⚠️ 2026-10-13：人物表也要（它是"人际关系"的落点，用户要求能摘下来）
+    ['cast.md', MAX_CAST_CHARS],
   ]) {
     let text = String(j.docs?.[file] ?? '').trim();
     if (!text) {

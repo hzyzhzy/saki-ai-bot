@@ -17,6 +17,9 @@ import { extname, join } from 'node:path';
 import { log } from './log.js';
 import { streamChat, quickAck, phrase } from './llm.js';
 import * as msg from './message.js';
+// ⚠️ 2026-10-13：本机 agent 任务桥（自然语言派活 / 主人审批 / `/任务撤回`）——
+//    ⚠️ 它**不进聊天上下文那条链**：命中就在 `handle()` 里拦掉、自己回话（和 `/剧情` 同一层）
+import * as agentBridge from './agent-bridge.js';
 import * as history from './history.js';
 import { knowledgeText, hasKnowledge, selectFor as knowledgeSelect, mentionsAnyTerm, whoIsBrief, aliasesOf, animeLibNames, reloadKnowledge, personaText, castRoleOf, castBands } from './knowledge.js';
 // ⚠️ 2026-09-20 从上游 fork 挑过来：梗库（`knowledge/memes.md`）**按需**注入 ——
@@ -312,7 +315,16 @@ export function whereAmI(now = new Date()) {  const hh = now.getHours();
   //    （会变成"地点：**在羽丘的教室里上课** —— 手机静音，回得慢"这种东西）。
   let place;
   if (schoolDay) {
-    if (hh < 7) {
+    // ⚠️⚠️ 2026-10-13 修（用户截图：00:24 她说「还有一半多，55，**够用到回家**」，
+    //    可他早跟她说过晚安、她**已经在家**了）：
+    //    根因是这一档原来是 `hh < 7 → 在家（还没起 / 刚起）` ——
+    //    **半夜 0 点也被算成"还没起"** ⇒ 「现在 00:24，按你的一天：在家（还没起/刚起）」
+    //    这句话本身自相矛盾，模型只能自己找补，于是编出"还在外面/够用到回家" ✗
+    //    ⇒ 深夜（0:00–5:00）单独一档，写清"已经在家、该睡了"。
+    if (hh < 5) {
+      where = '在**家**（深夜，已经在家了 —— 洗漱完躺在床上，或者还亮着手机没睡）';
+      place = '家里';
+    } else if (hh < 7) {
       where = '在家（还没起 / 刚起）';
       place = '家里';
     } else if (hh < 8) {
@@ -339,6 +351,10 @@ export function whereAmI(now = new Date()) {  const hh = now.getHours();
       where = '**下班回家了**（写作业、练琴、写东西；手机上的客服软件还挂着）';
       place = '家里';
     }
+  } else if (hh < 5) {
+    // ⚠️ 2026-10-13：和上面那个深夜档同理（放假的日子半夜也不是"睡到自然醒"）
+    where = '在**家**（深夜，已经在家了 —— 已经睡下或者躺着刷手机）';
+    place = '家里';
   } else if (hh < 9) {
     where = '在家（不上学，睡到自然醒）';
     place = '家里';
@@ -1181,13 +1197,30 @@ export class Bot {
     //    就撤回她刚记下的那条 —— **区别于 / 的命令**」。
     //    ⇒ 放在和 `/剧情` 那一批**同一个位置**：指令要在进聊天上下文之前处理掉，
     //      也不能被"要不要接话"那套判定挡住（她是**必须**回这条的）。
+    //    ⚠️ 2026-10-13：这个方法现在是 **async**（命中关键词后要再问模型一次是否真是指令，
+    //      见 `judgeMemoryCommand`）⇒ 这里必须 `await`，否则 Promise 恒为真值、
+    //      每条群消息都会被当成"撤回指令"吞掉 ✗
     if (
       payload.message_type === 'group' &&
       !cmdSenderIsBot &&
-      this.tryForgetMemory(payload, msg.toSegments(payload.message))
+      (await this.tryForgetMemory(payload, msg.toSegments(payload.message)))
     ) {
       return;
     }
+    // ⚠️⚠️ 2026-10-13 加（用户要求）：**本机 agent 任务**，全自然语言 ——
+    //    · 主人说一句活 → 回「  行，我去弄」（**两个空格开头** = 任务已开始）→ 起 agent
+    //    · 别人说 → 先 **@主人** 问一句，主人回「同意」才开
+    //    · `/任务撤回` → 把正在跑的那个停掉
+    //    ⚠️ 位置和 `/剧情` / 撤回同一层：**进聊天上下文之前**处理掉，
+    //      也不能被"要不要接话"那套判定挡住（她是**必须**回这条的）。
+    if (payload.message_type === 'group' && !cmdSenderIsBot) {
+      try {
+        if (await agentBridge.handle(payload, msg.toSegments(payload.message), this)) return;
+      } catch (e) {
+        log.warn(`[任务] 处理出错（当普通聊天继续）：${e.message}`);
+      }
+    }
+
     // ⚠️ 机器人发的命令被挡掉时留一条日志 —— 不然"它怎么没反应"要查半天
     if (cmdSenderIsBot && String(msg.extractText(msg.toSegments(payload.message))).includes('/')) {
       log.info(`[命令] ${payload.user_id} 是同类/已知机器人 → 它带的 / 命令一律不执行`);
@@ -1852,7 +1885,15 @@ export class Bot {
       const aboutMe =
         chat.mention?.enable !== false && chat.mention?.names?.some((n) => lowerT.includes(n));
       const conv = this.activeConv?.get(key0);
-      const inConvWithMe = conv && Date.now() - conv.lastBotReplyAt < (chat.followUp?.idleMs ?? 180000);
+      // ⚠️⚠️ 2026-10-13 改（用户报「问工资这个…好像不会进上下文」的真因）：
+      //    这道豁免原来是 `chat.followUp?.idleMs`（**实盘 25 秒**，用户自己调紧的）⇒
+      //    他 47 秒后接着说的话：既不算"对话延续"，又撞上"两个真人在互相对话" ⇒
+      //    **直接丢**（日志：`两个人在互相对话，且跟它无关，不插嘴`）。
+      //    从他那边看就是"她刚报完工资，接着问就不理了"，很像"那条没进上下文"
+      //    （其实进了：`state/recent.json` 里她报的账原句就在）。
+      //    ⇒ 用**独立**的 `chat.replyGraceMs`（默认 2 分钟）：她刚回过话 ⇒ 不算"别人在对话" ✓
+      const inConvWithMe =
+        conv && Date.now() - conv.lastBotReplyAt < (chat.replyGraceMs ?? 120000);
 
       if (!askingServer && !aboutMe && !inConvWithMe) {
         log.info('两个人在互相对话，且跟它无关，不插嘴');
@@ -2941,6 +2982,12 @@ export class Bot {
         if (mid && this.catchUpSeen?.has(mid)) continue;
         if (mid && recent.hasMessageId(gid, mid)) continue;
         if (mid && handled.has(mid)) continue;
+        // ⚠️⚠️ 2026-10-13 加（用户：「**掉线之后的补回不要回已经接过任务的话**」）：
+        //    被任务桥接管的消息**不进聊天上下文**（`handle()` 接到就 return 了），
+        //    所以上面三道去重**一个都不认识它** ⇒ 补看会把派过的活又捞回来，
+        //    她于是**又答一遍**（现场是「你掉线了？我早写完了，再发你一遍」）✗
+        //    ⇒ 照着任务桥自己那份 id 记的账跳过。
+        if (mid && agentBridge.wasHandled(mid)) continue;
 
         const ev = {
           post_type: 'message',
@@ -3555,7 +3602,15 @@ export class Bot {
     //    **兜底**闸用（`decide()` 里那条）。⚠️ 主力仍然是提示词（教模型自己判断
     //    该不该结束），这里只在**已经形成拉锯**时兜一下。
     if (event?.group_id) this.noteMyFarewell(event.group_id, text);
-    if (reply) segments.push({ type: 'reply', data: { id: String(event.message_id) } });
+    // ⚠️⚠️ 2026-10-13 改（用户要求：「要引用时也先用模型判定一遍该引用哪条消息」）：
+    //    原来这里写死 `event.message_id`（= 永远引"当前这条"）——
+    //    **连发被合并**时她答的是整串、`message_id` 只是串尾那条 ⇒ 引用框挂得不对。
+    //    现在交给 `pickQuoteTarget()`：真要引用时让模型从候选里挑一条，
+    //    挑不出来 / 失败 → 它自己退回当前这条（行为不退化）✓
+    if (reply) {
+      const qid = await this.pickQuoteTarget(event, text);
+      segments.push({ type: 'reply', data: { id: String(qid || event.message_id) } });
+    }
     // ⚠️ 只**剥 Markdown 符号**，**不压换行**（2026-09-13）。
     //
     //    原来这里不洗 → 账本里的 `**0.03 元**` 星号原样显示（用户截图反馈）。
@@ -5869,7 +5924,7 @@ export class Bot {
     //    ⚠️ 位置和上面那条一样：**先于灵敏度**，三档都认（明确召唤不分档）。
     //    ⚠️ 一定要排在 `calledByName` **之前** —— 否则会先拿到 `hit='call'`
     //       （虽然同级，但"@ 的组合"语义上就是 @；而且号码那种写法 `call` 压根不命中）。
-    const atByText = this.atCalledInText(text, segments);
+    const atByText = this.atCalledInText(text, segments, String(event?.group_id ?? ''));
     if (atByText) {
       log.info(
         `[${history.sessionKey(event)}] 正文里是「@${atByText}」而**没有 at 段**（协议端退化了）→ 当成 @ 处理`,
@@ -6992,8 +7047,17 @@ export class Bot {
       if (this.canTeach(event)) {
         const explicit = this.isTeaching(event, text);
         if (explicit) {
-          await this.doTeach(event, text, 'explicit');
-          return;
+          // ⚠️⚠️ 2026-10-13（用户要求：「记住和忘记应该在命中关键词之后再用模型判定一遍」）：
+          //    命中关键词只当"可能是教学"，再让模型确认一次**是不是在给她下令**。
+          //    不是（转述 / 开玩笑 / 顺带带个"记住"）⇒ 不记，让它继续走聊天那条路 ✓
+          const v = await this.judgeMemoryCommand('teach', text);
+          if (v.do) {
+            await this.doTeach(event, text, 'explicit');
+            return;
+          }
+          log.info(
+            `[教学] 命中关键词但模型判定**不是在教她** → 这次不记（${v.why}）：「${text.slice(0, 30)}」`,
+          );
         }
         if (config.teach.naturalLearning && config.teach.confirmMode !== 'off') {
           const done = await this.tryNaturalLearning(event, text);
@@ -9095,6 +9159,76 @@ export class Bot {
   }
 
   /**
+   * ⚠️⚠️ 2026-10-13 加（用户要求：「这个**记住**和**忘记**，应该在**命中关键词之后
+   *    再用模型判定一遍**是否执行」）。
+   *
+   * ## 现场（用户截图，日志实锤）
+   *
+   * 他说：「我**都忘记**那个开关了，是之前加黑祥的时候加的」——
+   * `tryForgetMemory` 的判据是「忘」+ 指代「那个」⇒ **命中** ⇒ 她真的执行了：
+   *   `[记忆] 撤回了群 … 最近一次教学（「服务器规则」）（原话：「我都忘记那个开关了…」）`
+   * 他说的"忘"是**他自己忘**，不是让她忘 ✗ —— 一条真知识就这么被删了。
+   *
+   * 关键词匹配天生分不清「谁要做什么」：**同样的"忘记"两个字**，
+   * 主语不同（我忘 / 你忘）、语气不同（陈述 / 命令）就差着一整次写盘。
+   *
+   * ⇒ 所以命中只当"**可能是**指令"，再让模型看一眼：**这是不是冲机器人下的令**。
+   *
+   * ## 三条设计
+   *
+   * ① **失败 = 不执行**（`do:false`）。误删/误记是"真动数据"，宁可这次不做 ——
+   *    他没看到回执，再 @ 一次就行；反过来退不回来（教学倒是能撤，但那次撤本身就是误触）。
+   * ② 判据**只回答一个字**（是/否），和 `shouldPauseByBracket` 一个路子 ——
+   *    轻通道（`llm.phrase`：非流式 + 关思考），而且**整条必须就是"是"**才认
+   *    （假模型返回一整段固定文本时，不能因为开头是"是"就把整条当指令）。
+   * ③ **只在命中关键词之后才调** —— 群里绝大多数消息根本走不到这里，不增加日常开销 ✓
+   *
+   * @param {'forget'|'teach'} kind
+   * @param {string} text 原话
+   * @returns {Promise<{do:boolean, why:string, failed?:boolean}>}
+   */
+  async judgeMemoryCommand(kind, text) {
+    const t = String(text ?? '').trim();
+    if (!t) return { do: false, why: '空消息', failed: true };
+    const what =
+      kind === 'forget'
+        ? [
+            '你在判断：群里这句话，是不是在**命令机器人**（客服小祥）**忘掉 / 撤回它刚记下的那条内容**。',
+            '',
+            '· 说话的人**要求机器人**忘 / 删 / 撤回某条记录 → 答「是」；',
+            '· 说话的人说**自己**忘了什么（「我都忘记那个开关了」「我忘了带钥匙」）、',
+            '  说别人忘了、转述或引用别人的话、开玩笑、',
+            '  或者说的是一条 **QQ 消息**（「撤回那条消息」）→ 答「否」。',
+          ].join('\n')
+        : [
+            '你在判断：群里这句话，是不是在**教机器人**（客服小祥）**记住一条新知识**',
+            '（明确的「记住：xxx」这类指令）。',
+            '',
+            '· 明确在给她下指令、让她记下某条信息 → 答「是」；',
+            '· 转述 / 引用别人的话、说她本来就该知道的事、开玩笑、',
+            '  或者只是句子里顺带带了「记住」两个字（「你记住了吗」「我记住了」）→ 答「否」。',
+          ].join('\n');
+    try {
+      const ans = await phrase({
+        // ⚠️ 开头的【记忆指令判定】是个**固定标记**：假模型靠它认这条请求
+        //    （套件里"记住/忘记"的桩全靠它，别改这个词，改了三个套件一起红）
+        system: `【记忆指令判定】${what}\n\n只回答一个字：是 或 否。不要解释，不要加标点。`,
+        user: `这句话：「${t.slice(0, 200)}」`,
+        maxTokens: 60,
+        timeoutMs: 6000,
+      });
+      // ⚠️ 和 `shouldPauseByBracket` 同一条收严：**整条就是"是"**才算
+      const yes = /^[\s"「]*是(的|呀|啊|对)?[\s"」。.!！,，]*$/.test(String(ans ?? '').trim());
+      const raw = String(ans ?? '').trim();
+      if (!raw) return { do: false, why: '判定没出内容', failed: true };
+      return { do: yes, why: raw.slice(0, 20) };
+    } catch (e) {
+      log.warn(`[记忆] 指令判定出错（这次**不执行**）：${e.message}`);
+      return { do: false, why: `判定出错：${e.message}`, failed: true };
+    }
+  }
+
+  /**
    * 判断这条消息是不是用了明确的教学措辞。
    *
    * ⚠️ 光用 `text.includes('记住')` 判会误判（真实踩过）：
@@ -10013,8 +10147,31 @@ export class Bot {
     if (Date.now() - list[list.length - 1].at > 120000) return false;
 
     // ② 剔除机器人自己，剩下的活跃人类只能有两个
+    //
+    //    ⚠️⚠️ 2026-10-13 修（用户：「**爱音也不算真人吧**」）：
+    //      原来只剔了 `selfId`（她自己）—— **同类池里的号**（爱音）和
+    //      `otherBots` 里那些已知机器人**全被当成"真人"** ⇒
+    //      「她 + 爱音」在群里说话就被算成"两个真人在互相对话，跟我无关"⇒ 她不开口 ✗
+    //      （正是用户报的「刚报完工资，接着问就不理了」那次的成因之一：群里
+    //        另一个"人"就是爱音）。
+    //    ⇒ 机器人（自己 + 同类 + 已知机器人）都不算"别人"：
+    //      · 两个真人在聊 → 照旧不插嘴 ✓
+    //      · 一个真人 + 一个机器人 → 只算一个"别人" ⇒ 那道闸不生效（她该接就接）✓
+    //      · 两个都是机器人 → 同样不生效（同类之间本来就要搭话）✓
     const others = [
-      ...new Set(list.map((x) => String(x.uid)).filter((u) => u && u !== String(this.selfId ?? ''))),
+      ...new Set(
+        list
+          .map((x) => String(x.uid))
+          .filter((u) => {
+            if (!u) return false;
+            if (u === String(this.selfId ?? '')) return false;
+            if (this.isPeerBot(gid, u)) return false; // 同类池（爱音那份）
+            try {
+              if (otherBotsFor(gid).map(String).includes(u)) return false; // 已知机器人名单
+            } catch {}
+            return true;
+          }),
+      ),
     ];
     if (others.length !== 2) return false;
 
@@ -12739,6 +12896,66 @@ export class Bot {
       } catch {}
     }
 
+    // ⚠️⚠️⚠️ 2026-10-13：**被问"你和我什么关系"时的口径**（放整个提示词的**最末尾**）。
+    //
+    //    现场（用户截图，两次）：他当面问「你和我什么关系」——
+    //      10-12 14:23 她答「……老板跟员工呗，你还想是什么呀」
+    //      10-13 13:57 她答「给你打工的呗，不然你还想是什么关系」
+    //    两句都是**把关系说成雇佣**。
+    //
+    //    ⚠️⚠️ 我第一次的归因是错的，记在这里免得下次再犯：
+    //      那会儿我以为"材料给了、模型不照做"，就把口径加进上面那段
+    //      「对服主的差异化提醒」里 —— 结果**一句都没生效**，因为那段整块受
+    //      `config.persona.ownerException` 控制，而**这个开关现在是关的**：
+    //      `accounts/<号>.yml` 里写着 `ownerException: false`（2026-10-07 多号迁移
+    //      那次从当时的全局配置抄进去的旧值，`config.yml` 里现在根本没这个键）。
+    //      关着的时候 `knowledge/relationship.md` **根本不注入** ⇒ 她手上只剩
+    //      「身份 + 他的职权清单（改配置/审批建设/发 OP…）」⇒ 说成"老板跟员工"
+    //      几乎是唯一合理的答法 ✗ —— 不是模型跑偏，是**开关**。
+    //
+    //    ⇒ 所以这条口径**必须独立于那个开关**：
+    //      · 演示模式（`ownerException: false`）管的是「**对他要不要特别软**」，
+    //        不是「他跟她是什么关系」—— 冷可以，把关系**说低**不行；
+    //      · 位置：整个提示词的最后一段（离提问最近、影响力最大）。
+    //    ⚠️ 两种模式口径不同，按 `wantException` 分岔，不写死一套。
+    // ⚠️⚠️ 2026-10-13 加（用户截图：她**明明正在**给爱音写简历，却在群里说
+    //    「**谁说要给你写了，少自作多情啦**」—— 她不知道自己手上正在做这件事 ✗）：
+    //    agent 任务开跑只记在**任务桥那边的状态**里，聊天提示词里一个字都没有
+    //    ⇒ 别人问起时她一脸茫然、甚至当场否认。
+    //    ⇒ 注入一句"你手上正做着什么"（**只在真有任务在跑时**才有内容 ⇒ 平时一个字不加 ✓）。
+    //    ⚠️ `runningNote()` 是**同步**的（本函数全程同步，await 不了）；
+    //    ⚠️ 它每轮都在变（"N 分钟前"）⇒ 只能放**动态区（末尾）**，别插到人设前面（会打掉上下文缓存）。
+    const onHand = agentBridge.runningNote();
+    if (onHand) parts.push(`\n${onHand}`);
+
+    if (event && this.speakerRole(event) === 'owner') {
+      const wantException = config.persona?.ownerException !== false;
+      parts.push(
+        [
+          '',
+          '# 🚨 最后一条：被问「你和我是什么关系」时怎么说',
+          '',
+          '**他不是你老板，你也不是他雇来的员工。**',
+          '「老板跟员工」「上下级」「同事关系」「给你打工的」这类话**一律不说** ——',
+          '那是把关系说没了，事实也不对（你在这儿做事，不是因为受雇于他）。',
+          '',
+          ...(wantException
+            ? [
+                '- ✅ 口径：他是**你自己人**（照 `knowledge/relationship.md`：不是他的客服，是他的助手/自己人）。',
+                '- ✅ 想嘴硬也可以 —— 但嘴硬是**不承认亲近**（「……关你什么事」「你猜」），',
+                '  不是把关系**往下说**；这两个差得很远。',
+                '- ✅ 群里有人在场也一样这么答，不用装生分。',
+              ]
+            : [
+                // 演示模式：对他的**语气**照旧一视同仁，但关系照样不许说错
+                '- ⚠️ 现在你对他是**一视同仁**的（没有特殊照顾）—— 那影响的是**语气软不软**。',
+                '- ✅ 想冷就冷、想嘴硬就嘴硬（「……关你什么事」「你猜」都行），',
+                '  但**不许**把关系说成雇佣 / 上下级 —— 冷不等于把关系说低。',
+              ]),
+        ].join('\n'),
+      );
+    }
+
     return parts.join('\n');
   }
 
@@ -12808,7 +13025,7 @@ export class Bot {
    *    ⚠️ 只认「`@` 紧挨着名字」；**单纯提到名字**仍走 `calledByName`（`hit='call'`）——
    *      那条路本来就同级，不用改。
    */
-  atCalledInText(text, segments = null) {
+  atCalledInText(text, segments = null, groupId = '') {
     // ⚠️⚠️ **必须用原文本判**：`decide()` 拿到的 `text` 已经被 `stripLeadingAt()`
     //    剥过（「@saki酱saki酱saki酱 做题」→「做题」），`@` 早就没了 ✗
     //    （第一版就是这么挂的：三条断言全红。实测 `message.js:275` 那条注释
@@ -12822,8 +13039,38 @@ export class Bot {
     }
     if (!t.includes('@')) t = String(text ?? '');
     if (!t.includes('@')) return '';
+    // ⚠️⚠️⚠️ 2026-10-13 修（用户截图：「@saki 问话，**黑祥也回了**」）：
+    //
+    //    这个方法**本来就是给"@ 被协议端退化成纯文本"准备的**（见上面调用点的注释
+    //    和那行日志：「正文里是「@xxx」而**没有 at 段**」）—— 可是它**从来没真的检查过
+    //    "有没有 at 段"** ✗ 于是只要 at 段还在、而正文里又写了 `@saki…`，
+    //    它照样按"文本里有 @ 我的名字"判成 hit='at'：
+    //      · `@saki酱saki酱saki酱` 是**主号**的群名片，可它**含 "saki"**；
+    //      · 黑祥（`sakiko-dark`）的名字表里也有 `saki` ⇒ **它以为自己被叫了** ✗
+    //      （用户看到的：@主号问话，黑祥抢答「问过的事别再问我一遍」。）
+    //    ⇒ 有 at 段就说明协议端**没退化**：@ 的是谁，at 段里已经写清楚了，
+    //      **一律不再用正文猜**（`textAtOf` 那边早就是这么做的，这里补上同一条）✓
+    //    ⚠️ 真被 @ 我时轮不到这里 —— 上面 `if (atMe || atAll)` 已经 return 了 ✓
+    if (Array.isArray(segments) && segments.some((s) => s?.type === 'at')) return '';
     // ① 直接 @ 她的 QQ 号 —— 最容易被漏的那种写法（名字表里当然没有号码）
     if (this.selfId && new RegExp(`@\\s*${this.selfId}(?!\\d)`).test(t)) return String(this.selfId);
+    // ①.五 ⚠️ 2026-10-13：**先看正文里 @ 的那一串是不是同类池里的别人**。
+    //    `textAtOf()` 那边 2026-10-09 就改成这个顺序了（用户截图：「@白祥会把黑祥也叫起来」），
+    //    但**这条兜底路当时漏了** —— 名字撞车的另一半就在这儿。
+    //    ⚠️ 用**精确相等**（`@saki酱saki酱saki酱` 不等于 `saki`），否则又会误判 ✓
+    {
+      const m = /@\s*([A-Za-z0-9_\u4e00-\u9fa5]{1,24})/.exec(t);
+      const tok = m ? m[1].toLowerCase() : '';
+      if (tok) {
+        try {
+          const me = String(this.selfId ?? '');
+          for (const p of this.atTargetsOf(String(groupId ?? ''))) {
+            if (String(p.uid) === me) continue;
+            if ((p.keys ?? []).some((k) => tok === String(k).toLowerCase())) return '';
+          }
+        } catch {}
+      }
+    }
     // ② @ + 名字：她**所有的**叫法
     const names = [
       ...(Array.isArray(config.trigger?.callNames) ? config.trigger.callNames : []),
@@ -12909,6 +13156,142 @@ export class Bot {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * ⚠️⚠️ 2026-10-13 加（用户要求：「现在**该引用哪条也不是很准**，
+   *    因为有时会**合并消息**，要引用时也**先用模型判定一遍该引用哪条消息**吧」）。
+   *
+   * ## 原来是怎么引的
+   *
+   * `sendText(…, { reply: true })` 里写死一条：
+   *   `segments.push({ type: 'reply', data: { id: String(event.message_id) } })`
+   * 也就是**永远引用"当前这条"**。可当前这条不一定是她在答的那条：
+   *   · **连发被合并**（`scheduleHandle` 里"合并了 N 条连发消息，一次回复"）——
+   *     她答的内容横跨那一串，而 `event.message_id` 只是**串尾那条**；
+   *   · 他在一串里先问 A、又说 B，她答的是 A，引用框却挂在 B 上；
+   *   · 群里两个人同时在说话时同理。
+   * ⇒ 表现就是"引用框挂得不像在回那句"。
+   *
+   * ## 现在怎么引
+   *
+   * 真到要引用那一步（`shouldQuote()` 已经判过**要不要**引用了），
+   * **再让模型从候选里挑一条**（候选 = 最近的原始消息，带 message_id 和昵称）。
+   *   · 挑得出 → 引它；
+   *   · 挑不出（返回 0 / 乱回 / 调用失败）→ **退回当前这条**（老行为，不退化）✓
+   *   · 连发一串 → 提示词里明说"选那一串的**第一条**"（引用框挂串头最清楚）。
+   *
+   * ⚠️ 成本控制：只在 `reply === true`（真要挂引用框）时才走到这里，
+   *    而且**候选不足 2 条就直接返回**（没得选，不花这次调用）。
+   *
+   * @param {object} event
+   * @param {string} said 她这次要说的话（给模型当判据）
+   * @returns {Promise<string>} 要引用的 message_id（永远有值：兜底是当前这条）
+   */
+  async pickQuoteTarget(event, said = '') {
+    const fallback = String(event?.message_id ?? '').trim();
+    try {
+      const gid = String(event?.group_id ?? '');
+      if (event?.message_type !== 'group' || !gid) return fallback;
+      const cands = this.quoteCandidates(event, gid);
+      if (cands.length < 2) return fallback;
+      // ⚠️⚠️ 只在**真有歧义**时才花这次调用（2026-10-13）：
+      //    `reply: true` 的调用点不少（教学回执「记下了」、撤回回执、各种提示），
+      //    而每条都问一次模型 = 每条都多等最多 6 秒。歧义只有两种：
+      //      · **这一轮是合并出来的**（`_sources` 好几条 ⇒ 她答的是整串，
+      //        而 `event.message_id` 只是串尾那条）—— 用户这次报的就是它；
+      //      · 她要回的那条**后面还有别人说话**（同时有别人插话 ⇒ 不引用看不出在回谁）。
+      let ambiguous = false;
+      try {
+        ambiguous =
+          (Array.isArray(event?._sources) && event._sources.length > 1) ||
+          recent.messagesAfterMe(gid, String(event?.message_id ?? '')) >= 1;
+      } catch {}
+      if (!ambiguous) return fallback;
+      const picked = await this.judgeQuoteTarget(cands, said);
+      const idx = Number(picked);
+      if (Number.isFinite(idx) && idx >= 1 && idx <= cands.length) {
+        const hit = cands[idx - 1];
+        if (hit?.messageId) {
+          log.info(
+            `[引用] 模型选定第 ${idx} 条（${hit.name}）：「${String(hit.text).replace(/\s+/g, ' ').slice(0, 24)}」`,
+          );
+          return hit.messageId;
+        }
+      }
+      log.info(`[引用] 模型没给出可用目标（${picked || '空'}）→ 退回当前这条`);
+      return fallback;
+    } catch (e) {
+      log.debug(`[引用] 选目标出错（退回当前这条）：${e.message}`);
+      return fallback;
+    }
+  }
+
+  /**
+   * 「该引用哪条」的候选列表 —— 最近的原始消息（**带 message_id**）。
+   *
+   * ⚠️ 两条规矩：
+   *   · 她**自己**刚说的话不列（她不会引用自己）；
+   *   · 当前这条**一定在**列表里（它在缓冲里可能还没落、或者被上面那条排掉了）——
+   *     不然"模型想引当前这条"就没得选。
+   */
+  quoteCandidates(event, gid) {
+    const me = (m) => !m.self && String(m.messageId ?? '') !== '';
+    let cands = [];
+    try {
+      cands = recent.recentItems(gid, 8).filter(me);
+    } catch {}
+    const cur = String(event?.message_id ?? '').trim();
+    if (cur && !cands.some((c) => c.messageId === cur)) {
+      let curText = '';
+      try {
+        curText = String(msg.extractText(event?.message) ?? '');
+      } catch {}
+      cands.push({
+        messageId: cur,
+        name: String(event?.sender?.card || event?.sender?.nickname || event?.user_id || '他'),
+        userId: String(event?.user_id ?? ''),
+        text: curText,
+        time: Date.now(),
+        self: false,
+        atMe: true,
+      });
+    }
+    // 只留最近 8 条（`recentItems` 已经截过，这里再兜一次）
+    return cands.slice(-8);
+  }
+
+  /**
+   * 让模型挑"该引用哪一条"——**只回答一个编号**。
+   *
+   * ⚠️ 和 `judgeMemoryCommand` 一个路子：轻通道（`llm.phrase`：非流式 + 关思考）、
+   *    超时短、**答不出就算 0**（调用方退回当前这条）。开头的【引用目标判定】
+   *    是固定标记，套件里的假模型靠它认这条请求（别改这个词）。
+   *
+   * @returns {Promise<number>} 1..N = 第几条；0 = 看不出 / 失败
+   */
+  async judgeQuoteTarget(cands, said = '') {
+    const list = cands
+      .map((c, i) => {
+        const t = String(c.text ?? '').replace(/\s+/g, ' ').slice(0, 60) || '（图片/表情）';
+        const mark = c.atMe ? '（这条 @ 了她）' : '';
+        return `${i + 1}. 「${c.name}」：${t}${mark}`;
+      })
+      .join('\n');
+    const ans = await phrase({
+      system:
+        '【引用目标判定】她（QQ 群里的机器人）正要回一句话。下面是群里最近的几条消息，' +
+        '请判断**她那句话该引用（QQ 的"回复某条消息"）哪一条**。\n\n' +
+        '· 她那句话明显在回应 / 接哪一条 → 就选那一条的编号；\n' +
+        '· 同一个人的**连发一串**、她回答的是整串 → 选**那一串的第一条**（引用框挂串头最清楚）；\n' +
+        '· 看不出她在回哪条、或者只是随口接一句 → 输出 0。\n\n' +
+        `只输出一个编号（1-${cands.length} 之间的数字），或者 0。不要解释，不要加别的话。`,
+      user: `群里最近这几条：\n${list}\n\n她要说的是：「${String(said ?? '').replace(/\s+/g, ' ').slice(0, 100)}」\n该引用第几条？`,
+      maxTokens: 60,
+      timeoutMs: 6000,
+    });
+    const m = /(\d+)/.exec(String(ans ?? '').trim());
+    return m ? Number(m[1]) : 0;
   }
 
   shouldQuote(event, wantReply = false) {
@@ -15486,7 +15869,7 @@ export class Bot {
    *
    * @returns {boolean} true = 这条已经处理完了（调用方直接 return，别再走正常聊天）
    */
-  tryForgetMemory(event, segs) {
+  async tryForgetMemory(event, segs) {
     try {
       const gid = String(event?.group_id ?? '');
       if (!gid) return false;
@@ -15527,6 +15910,22 @@ export class Bot {
         log.info(`[记忆] ${event.user_id} 想撤回记忆但没权限（role=${role}）→ 已回提示`);
         this.replyOnceToGroup(gid, '这个只有服主和管理员能用（');
         return true;
+      }
+
+      // ④ ⚠️⚠️ 2026-10-13（用户要求：「记住和忘记，应该在**命中关键词之后
+      //    再用模型判定一遍**是否执行」）：
+      //
+      //    现场教训：他说「我**都忘记**那个开关了」——「忘」+「那个」命中判据，
+      //    她于是**真撤掉**了「服务器规则」那条教学。他说的"忘"是他自己忘 ✗
+      //    ⇒ 命中只当"可能是指令"，再让模型看一眼是不是**冲她下的令**；
+      //      不是 / 判不出来 → **不执行**（return false → 照常走聊天）。
+      const jr = await this.judgeMemoryCommand('forget', raw);
+      if (!jr.do) {
+        log.info(
+          `[记忆] 命中"忘/撤"但模型判定**不是在让她忘** → 这次不撤` +
+            `${jr.failed ? '（判定失败，保守不做）' : ''}（${jr.why}）：「${raw.slice(0, 40)}」`,
+        );
+        return false;
       }
 
       const r = observe.undoLast(gid);

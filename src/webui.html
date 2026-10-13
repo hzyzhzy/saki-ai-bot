@@ -618,6 +618,9 @@
       <!-- ⚠️ 默认页是 QQ登录（用户要求：进去先看登录状态）—— 这个 class="on" 不许挪 -->
       <button data-tab="qqlogin" class="on">QQ登录</button>
       <button data-tab="status">运行状态</button>
+      <!-- ⚠️⚠️ 2026-10-13 加（用户：「然后加任务页」）：本机 agent 任务那页是**独立的一页**
+           （`/agent-tasks`，自己一套 HTML）—— 不塞进这个 6000 行的前端里，改动小、风险也小 ✓ -->
+      <button onclick="window.open('/agent-tasks','_blank')">本机任务</button>
     </div>
     <!-- ⚠️ 2026-09-28 加：作者信息（用户要求「在侧栏单开一个卡片」） -->
     <div class="navsec">
@@ -6246,6 +6249,11 @@ function renderDraft() {
     `<textarea id="pd-persona" rows="14">${escHtml(PDRAFT.docs?.['persona.md'] || '')}</textarea>` +
     '<label style="margin-top:10px">voices.md（示例对话 —— 人味就靠它）</label>' +
     `<textarea id="pd-voices" rows="12">${escHtml(PDRAFT.docs?.['voices.md'] || '')}</textarea>` +
+    // ⚠️ 2026-10-13 加（用户要求：「以后建新人设时这种人际关系也要能摘下来」）：
+    //    cast.md = 出场人物表 / 人际关系。起草时模型会从
+    //    `personas/_template/relations.md` 的片段库里挑几条落成它。
+    '<label style="margin-top:10px">cast.md（出场人物表 / 人际关系 —— 从片段库里摘的）</label>' +
+    `<textarea id="pd-cast" rows="12">${escHtml(PDRAFT.docs?.['cast.md'] || '')}</textarea>` +
     (PDRAFT.animeLibName
       ? '<label style="margin-top:10px">新建的动画库 ' +
         escHtml(PDRAFT.animeLibName) +
@@ -6291,8 +6299,12 @@ async function personaDraftSave() {
   for (const [path, key] of [
     ['persona.md', 'pd-persona'],
     ['voices.md', 'pd-voices'],
+    // ⚠️ 2026-10-13 加：人际关系（出场人物表）也要落盘
+    ['cast.md', 'pd-cast'],
   ]) {
-    const text = $(key).value;
+    const el = $(key);
+    if (!el) continue; // 旧界面/缺元素时不炸
+    const text = el.value;
     if (!text.trim()) continue;
     const d = await post('/api/persona/doc', { id, path, text });
     if (!d || !d.ok) {
