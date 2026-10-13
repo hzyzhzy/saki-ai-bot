@@ -335,6 +335,10 @@ function isolatedStateEnv(name) {
     QQBOT_QUEST_LINES_FILE: p('quest-lines'),
     // ⚠️ 2026-10-10 加：「服务器开了 @ 我」那套订阅也要隔离
     QQBOT_SERVER_WATCH_FILE: p('server-watch'),
+    // ⚠️ 2026-10-10 加：生日日常事件的"每天最多 2 条"计数也要隔离
+    QQBOT_BIRTHDAY_LIFE_FILE: p('birthday-life'),
+    // ⚠️ 2026-10-10 加：日常事件"跨群去重"那份也要隔离
+    QQBOT_LIFE_SENT_FILE: p('life-sent'),
     QQBOT_FRIEND_FILE: p('friend'),
     QQBOT_OUTBOX_FILE: p('outbox'),
     // ⚠️ 2026-09-15 加：QQ号→名字（群名片/昵称）那张表。

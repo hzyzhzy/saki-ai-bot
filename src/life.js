@@ -48,6 +48,8 @@ import { personaText, castBlock, personaDataFile } from './knowledge.js';
 import * as persona from './persona.js';
 // ⚠️ 2026-10-04：套话句式（「谁也没喊谁」）的二次改写 —— 见 `src/rewrite.js` 顶部
 import { naturalize } from './rewrite.js';
+// ⚠️ 2026-10-11 加：生日那一段要**看群里最近说过什么**（跨机器去重靠群消息，见下）
+import * as recent from './recent.js';
 
 // ⚠️ 2026-09-21：事件库是**角色专属**的（换个角色"今天遇到什么事"完全不同），
 //    所以跟着人设包走（`personas/<id>/life-events.md`）。
@@ -68,6 +70,22 @@ function file() {
 const STATE_FILE = process.env.QQBOT_LIFE_FILE
   ? join(ROOT, process.env.QQBOT_LIFE_FILE)
   : join(stateDir(), 'life.json');
+
+/**
+ * ⚠️⚠️ 2026-10-13 加（用户截图：同一个群里同一条事件 15 分钟内出现了两遍）：
+ *
+ *   真因**不在计划器**，在回执 —— 现场日志：
+ *     [12:21:05] [分条] 第 1/1 条发送失败：retcode=100 send reply … timed out after 15000
+ *     [12:21:05] [日常] 群 X「天台上有别人在，她端着饭换了个地方」→ ❌ 没发出去 → 不记账，顺延重排
+ *     [12:36:15] [日常] 群 X「天台上有别人在，她端着饭换了个地方」→ ❌ 没发出去   ← 又抽到同一条
+ *   而用户截图里那句话**就在群里** ⇒ 「回执超时」**不等于没发到** ⇒
+ *   不记账 + 顺延重排 = 同一句话再发一遍 ✗
+ *
+ *   ⇒ 发失败（含超时这种"不确定到没到"的）之后，**这条文本在这个群里冷藏 45 分钟**：
+ *     `plan()` 抽池子时把它剔掉，重排就会抽到别的事，而不是把同一句再顶上去。
+ *   ⚠️ 只冷藏"文本"，**不记账**（`fired` 照旧不加，今天该发的条数不会少）✓
+ */
+const FAIL_COOLDOWN_MS = 45 * 60 * 1000;
 
 // ─────────────────────────────────────────────────────────────
 // 事件库解析
@@ -266,13 +284,30 @@ function pickFrom(pool, rng) {
 
 const stats = { fired: 0, skipped: 0, lastError: '', lastFireAt: 0 };
 
-const emptyBucket = () => ({ day: '', target: 0, fired: 0, lastFireAt: 0, nextAt: 0, recent: [] });
+const emptyBucket = () => ({
+  day: '',
+  target: 0,
+  fired: 0,
+  lastFireAt: 0,
+  nextAt: 0,
+  recent: [],
+  /** 刚发失败（含回执超时）的**事件文本** → 失败时刻（45 分钟内重排不再抽它，见 `FAIL_COOLDOWN_MS`） */
+  tried: {},
+});
 /** 群号 → 状态桶 */
 let buckets = new Map();
 
 const gkOf = (gid) => String(gid ?? '').trim();
 
 function readBucket(v) {
+  /** @type {Record<string, number>} */
+  const tried = {};
+  if (v?.tried && typeof v.tried === 'object') {
+    for (const [k, ts] of Object.entries(v.tried)) {
+      const n = Number(ts);
+      if (k && Number.isFinite(n)) tried[k] = n;
+    }
+  }
   return {
     day: String(v?.day ?? ''),
     target: Number(v?.target) || 0,
@@ -280,6 +315,7 @@ function readBucket(v) {
     lastFireAt: Number(v?.lastFireAt) || 0,
     nextAt: Number(v?.nextAt) || 0,
     recent: Array.isArray(v?.recent) ? v.recent.slice(-20) : [],
+    tried,
   };
 }
 
@@ -467,6 +503,74 @@ export function syncTarget(groupId = '') {
  * @param {string} [groupId] 哪个群；不给 = `''` 那个桶（老用法/测试）
  * @returns {{fire:boolean, reason:string, template?:object, slot?:string, nextAt?:number}}
  */
+/* ── 日常事件的**跨群去重**（2026-10-10 用户报：「刚才为什么 200000002 又发了一遍」）──
+ * 实测（今天，日志原文）：
+ *   [11:07:54] 群 200000007「上课打瞌睡被老师点起来回答问题」→ 已发
+ *   [11:12:53] 群 200000002「上课打瞌睡被老师点起来回答问题」→ 已发   ← 同一条，5 分钟内两个群各一遍 ✗
+ * 设计上"每个群各排各的"没错，但**两个群他都在** ⇒ 看着就是复读机 ✗
+ * ⇒ 同一天里**同一条事件文本只发一次**（哪个群先用算哪个）✓
+ *   库存 114 条、一天最多 4 群 × 3 条 = 12 条 ⇒ 够用，不会"没得发" ✓
+ *   ⚠️ 万一某天真的全发过了（库小的号）⇒ 调用方退回原池，别让日常事件停摆 ✓
+ *   ⚠️ 只在**真的发出去之后**才记（没发成不记 —— 和"不记账，顺延重排"那条一致）✓
+ */
+const SENT_FILE = process.env.QQBOT_LIFE_SENT_FILE
+  ? join(ROOT, process.env.QQBOT_LIFE_SENT_FILE)
+  : join(stateDir(), 'life-sent.json');
+
+function _readSent() {
+  try {
+    return JSON.parse(readFileSync(SENT_FILE, 'utf8')) ?? {};
+  } catch {
+    return {};
+  }
+}
+
+function _writeSent(j) {
+  try {
+    mkdirSync(stateDir(), { recursive: true });
+    const t = `${SENT_FILE}.tmp`;
+    writeFileSync(t, JSON.stringify(j), 'utf8');
+    renameSync(t, SENT_FILE);
+  } catch {}
+}
+
+/** 这条事件**今天在别的群发过了吗**（按文本比） */
+export function sentToday(text, now = Date.now()) {
+  const t = String(text ?? '').trim();
+  if (!t) return false;
+  return (_readSent()[dayKey(now)] ?? []).includes(t);
+}
+
+/** 记下"这条今天发过了"（**发出去之后**才调） */
+export function markSent(text, now = Date.now()) {
+  const t = String(text ?? '').trim();
+  if (!t) return false;
+  try {
+    const j = _readSent();
+    const k = dayKey(now);
+    const arr = Array.isArray(j[k]) ? j[k] : [];
+    if (!arr.includes(t)) arr.push(t);
+    j[k] = arr.slice(-400);
+    // ⚠️ 只留最近 3 天（不然文件一直长）
+    for (const key of Object.keys(j)) {
+      if (key === k) continue;
+      const d = Date.parse(`${key}T00:00:00`);
+      if (Number.isFinite(d) && now - d > 3 * 86400000) delete j[key];
+    }
+    _writeSent(j);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 测试用 */
+export function __resetSent() {
+  try {
+    _writeSent({});
+  } catch {}
+}
+
 export function plan(now = Date.now(), rng = Math.random, groupId = '') {
   const gid = gkOf(groupId);
   const b = bucketOf(gid, true);
@@ -511,16 +615,75 @@ export function plan(now = Date.now(), rng = Math.random, groupId = '') {
   if (!slot) return { fire: false, reason: '现在这个时刻没有对应时段', nextAt: b.nextAt };
 
   const { pool, off, holidayEvents } = poolFor(slot, now, gid);
+  // ⚠️⚠️⚠️ 2026-10-10 加（用户报：「**刚才为什么 200000002 又发了一遍**」）：
+  //    跨群去重 —— 同一天里**同一条事件文本只发一次**（哪个群先用算哪个）✓
+  //    实测那条重复：「上课打瞌睡被老师点起来回答问题」11:07 在 200000007、
+  //    11:12 在 200000002 —— 同一条，两个群各一遍 ✗（两个群他都在，看着就是复读）
+  //    ⚠️ 兜底：当天**全都发过了**就退回原池，别让日常事件停摆 ✓
+  const fresh = pool.filter((t) => !sentToday(t?.text, now));
+  const usePool = fresh.length ? fresh : pool;
+  // ⚠️ 2026-10-13：**发失败过的、45 分钟内不再抽**（那次回执超时其实已经发到群里了，
+  //    重排又抽到同一条 ⇒ 群里同一句话出现两遍，见 `FAIL_COOLDOWN_MS`）。
+  //    ⚠️ 全被冷藏了就退回 `usePool` —— 宁可重复一次，也别让日常事件停摆。
+  const usable = usePool.filter((t) => !triedRecently(b?.tried, t?.text, now));
+  const finalPool = usable.length ? usable : usePool;
+  if (finalPool !== usePool) {
+    log.debug(`[日常] 群 ${gid || '(默认)'} 跳过 ${usePool.length - usable.length} 条刚发失败的事件`);
+  }
   return {
     fire: true,
     reason: '',
     groupId: gid,
     slot: slot.name,
-    template: pickFrom(pool, rng),
+    template: pickFrom(finalPool, rng),
     off,
     holidayEvents,
     nextAt: 0,
   };
+}
+
+/** 这条文本是不是**刚试过但没发成**（含回执超时那种"不确定到没到"） */
+function triedRecently(tried, text, now) {
+  const t = String(text ?? '').trim();
+  if (!t || !tried) return false;
+  const at = Number(tried[t]);
+  return Number.isFinite(at) && at > 0 && now - at < FAIL_COOLDOWN_MS;
+}
+
+/**
+ * 记下"**这条刚发失败了**"（调用方：`index.js` 的日常发送分支）。
+ *
+ * ⚠️ 和 `markSent()` 是两件事，别混：
+ *   · `markSent()` = 真发出去了（跨群去重用，**不**冷却本群，因为它本来就不该再发）；
+ *   · `noteFailed()` = 没发出去**或回执超时**（本群 45 分钟内不再抽它 —— 防重复）。
+ * ⚠️ 两者都**不**加 `fired`（不记账 = 今天该发的条数不会少，会顺延重排）✓
+ *
+ * @param {string} groupId
+ * @param {string} text 事件库原文（`plan.template.text` —— 抽池子是按它抽的）
+ * @param {number} [now]
+ */
+export function noteFailed(groupId = '', text = '', now = Date.now()) {
+  const t = String(text ?? '').trim();
+  if (!t) return false;
+  try {
+    const gid = gkOf(groupId);
+    const b = bucketOf(gid, true);
+    const tried = (b.tried ??= {});
+    tried[t] = now;
+    // 过期的顺手清掉，别让状态文件一直长
+    for (const [k, v] of Object.entries(tried)) {
+      if (!Number.isFinite(Number(v)) || now - Number(v) > FAIL_COOLDOWN_MS) delete tried[k];
+    }
+    save();
+    log.info(
+      `[日常] 群 ${gid || '(默认)'} 这条刚发失败 → ${Math.round(FAIL_COOLDOWN_MS / 60000)} 分钟内不再抽它：` +
+        `「${t.slice(0, 24)}」`,
+    );
+    return true;
+  } catch (e) {
+    log.debug(`记"发失败"出错（不影响发送）：${e.message}`);
+    return false;
+  }
 }
 
 /**
@@ -613,15 +776,60 @@ export async function compose(planObj, extra = {}) {
   //      并把模板降级成"不用跟着走"。这样那天至少有一条日常事件是过生日 ✓
   let bdLine = '';
   try {
-    bdLine =
-      birthday.lifeNote(Date.now(), { selfId: String(config.persona?.id ?? '') }) +
-      memberBirthday.note(gidBd);
-    if (bdLine) {
-      bdLine +=
-        '\n⚠️ **今天这条就围绕生日写**（挑礼物 / 被叫去对方家里 / 顺路买个蛋糕 /' +
-        '路上碰见说一句）—— 今天最特别的就是这件事，别写成别的小事。';
+    // ⚠️⚠️⚠️ 2026-10-10 加（用户：「**那个生日的日常事件还是太多了，一天最多两条就够了**，
+    //    除非那个过生日的人或者 bot 在群内」）：
+    //    ⇒ 默认一天最多 `birthday.LIFE_CAP`（2）条"生日主导"的日常事件；
+    //      **寿星本人（那个群友 / 那个 bot 号）就在这个群里 ⇒ 不限** ✓
+    //    ⚠️ 计数按**群 + 天**落盘（重启不重置 —— 不然重启一次又能多刷两条）✓
+    const selfId0 = String(config.persona?.id ?? '');
+    let peers0 = [];
+    try {
+      peers0 = (config.groupParams?.[gidBd]?.peers ?? []).map(String);
+    } catch {}
+    // 群友生日：`memberBirthday.today(gid)` 非空 ⇒ **那个人真的在这个群里** ✓
+    let memberToday = [];
+    try {
+      memberToday = memberBirthday.today(gidBd) ?? [];
+    } catch {}
+    const starInGroup =
+      memberToday.length > 0 ||
+      birthday.lifeStarInGroup(gidBd, { selfId: selfId0, peers: peers0 });
+    const used = birthday.lifeCount(gidBd);
+    // ⚠️⚠️⚠️ 2026-10-11 加（用户报：「**saki 刚才又发了一次生日**」）：
+    //    现场：**黑祥 16:37 在群里说「宇田川巴今天生日…」**，而 saki 17:20 的日常事件
+    //    又顺着生日写（位置还标了"买炸鸡"）⇒ 群里看着就是"生日被说了两遍" ✗
+    //    真因：**两台机器各自生成日常事件** —— 我上次做的"跨群去重"是**本机文件**
+    //    （`state/life-sent.json`），**跨机器无效** ✗（黑祥在另一台机器上）
+    //    ⇒ 改用**群消息**判 —— 那是两台机器**天然共享**的：
+    //      最近 30 分钟里群里已经有人提过"生日" ⇒ 这条**别再提** ✓
+    //    ⚠️ 覆盖不了的情况：两台机器同一分钟各发一条（窗口里都还没看到对方的）——
+    //      那种只能靠共享文件，先不管 ✓
+    let saidBirthday = false;
+    try {
+      const ctx = recent.contextText(gidBd, '', [], { maxChars: 3000 });
+      saidBirthday = /生日/.test(String(ctx ?? ''));
+    } catch {}
+    if (saidBirthday) {
+      log.info(`[生日] 群 ${gidBd} 最近已经有人提过生日 → 这条**不再提**（跨机器也管得住）`);
     }
-  } catch {}
+    if (!saidBirthday && (starInGroup || used < birthday.LIFE_CAP)) {
+      bdLine =
+        birthday.lifeNote(Date.now(), { selfId: selfId0 }) + memberBirthday.note(gidBd);
+      if (bdLine) {
+        bdLine +=
+          '\n⚠️ **今天这条就围绕生日写**（挑礼物 / 被叫去对方家里 / 顺路买个蛋糕 /' +
+          '路上碰见说一句）—— 今天最特别的就是这件事，别写成别的小事。';
+        birthday.bumpLife(gidBd); // 拼了就计数（拼了就会生成）✓
+      }
+    } else {
+      log.info(
+        `[生日] 群 ${gidBd} 今天生日事件已到上限（${birthday.LIFE_CAP} 条，寿星不在群内）→ ` +
+          '这条走普通事件',
+      );
+    }
+  } catch (e) {
+    log.debug(`[生日] 判定失败（当没生日）：${e.message}`);
+  }
 
   const lines = [
     todayLine ? `今天是：${todayLine}` : '',

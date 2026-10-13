@@ -258,6 +258,16 @@ chat:
     #    另外：人设包里也有各自的别名表（`personas/<id>/identity.json` 的
     #    selfNames / callNames / nicknames / matchNames），改完**要重启**才生效
     #    （「重载配置」按钮不带人设，见 `src/webui.js` 的 `/api/reload`）。
+    # ⚠️⚠️⚠️ 2026-10-12 再加一条（**新建号 / 新建人设时最容易踩的坑**）：
+    #    **`trigger.callNames` 别抄别的号的** —— **留空就行**（`callNames: []`）！
+    #    真事：`accounts/10000012.yml`（爱音那个号）里抄的是**主号的名字**
+    #      （祥子 / 小祥 / saki …）⇒ **爱音压根不认识「爱音」** ⇒
+    #      别人点名她、她一声不吭 ✗
+    #    症状特别迷惑：**她在线、别人的话也接得住，只有"叫她的名字"没反应**。
+    #    ⇒ 现在的代码是**合并**（见 `bot.js` 的 `calledByName`）：账号里写的只当**追加**，
+    #      `identity.json` 里那份**永远在** ⇒ 就算写错，也丢不掉自己的名字 ✓
+    #    ⇒ 但规矩是：**`callNames: []` 留空**，名字只在
+    #      `personas/<id>/identity.json` 里维护**一份**（那才是唯一的真源）✓
     enable: true
     names:
       - 小祥

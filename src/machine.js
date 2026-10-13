@@ -179,7 +179,20 @@ async function collect() {
   try {
     const total = os.totalmem();
     const free = os.freemem();
-    const [load, bat, g] = await Promise.all([cpuLoad(), battery(), gpu()]);
+    // ⚠️⚠️⚠️ 2026-10-13 改（用户报「**为什么没触发没电语言**」，查到底就是这里）：
+    //    原来是 `Promise.all` —— **任何一条采集抛错，整次作废** ⇒ `cache.data` 停在
+    //    **上一次成功**的那份 ✗（实测：`battery-life.json` 卡在 6 小时前的 `dying`，
+    //    而进程里 `snapshot().battery` 一直是旧的 ⇒ 电量段要么注入错、要么整个不注入 ✗）
+    //    ⇒ 改成 `allSettled` + **单条失败就沿用上次那份**（电池尤其要留）✓
+    const [rLoad, rBat, rGpu] = await Promise.allSettled([cpuLoad(), battery(), gpu()]);
+    const pick = (r, prev) => (r.status === 'fulfilled' ? r.value : prev);
+    const load = pick(rLoad, cache.data?.cpuLoad ?? 0);
+    const bat = pick(rBat, cache.data?.battery ?? null);
+    const g = pick(rGpu, cache.data?.gpu ?? null);
+    if (rBat.status === 'rejected') {
+      // ⚠️ 用 warn：原来这段是 debug，`logLevel: info` 时**根本看不见** ⇒ 这个坑藏了很久 ✗
+      log.warn(`电池读不到（沿用上次那份）：${rBat.reason?.message ?? rBat.reason}`);
+    }
     cache = {
       at: Date.now(),
       data: {

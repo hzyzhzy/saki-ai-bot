@@ -762,8 +762,28 @@ if (true) {
         //      中了骰子的群这一格走剧情、**不再发日常事件**。
         if (questRollFromLife && (await questRollFromLife(plan, g))) continue;
 
-        // 润色失败退回事件原文（宁可说得平，也不能卡住不发）
-        const text = (await life.compose(plan)) || plan.template.text;
+        // ⚠️⚠️ 2026-10-13 改（用户截图：群里冒出一句旁白「天台上有别人在，她端着饭换了个地方」）：
+        //   那一句**不是模型现编的**，是 `personas/<id>/life-events.md` 里的事件库**原文** ——
+        //   而事件库是**第三人称的语义描述**（那个文件第 7 行就写着
+        //   「说法交给模型按人设现场发挥，千万不要在这里写她的台词」，全篇用「她」）
+        //   ⇒ 它**只能喂给模型**，绝不能当成品发出去 ✗
+        //
+        //   原代码是「润色取不到东西就退回**事件库原文**」（`compose(plan) ?? 模板原文`）——
+        //   即"润色失败就退回原文"。而润色失败**不是罕见事**：网络一抖就失败
+        //   （现场日志 12:20 起一连串 `[网络] 代理失败（ECONNRESET）` + `润色出错：fetch failed`，
+        //   `llm.js` 的 `phrase()` 出错返回空串 ⇒ `compose()` 空 ⇒ 兜底把原文顶上）
+        //   ⇒ 每次网络抖一下就漏一句旁白到群里。10-10 12:35 也发生过一次 ✓（日志可对）
+        //
+        //   ⇒ 现在：**润色没出文本就这条不发**（不记账 ⇒ 今天顺延重排，条数不会少）。
+        //     宁可这一格空着，也不让第三人称原文进群。
+        const text = await life.compose(plan);
+        if (!text) {
+          log.warn(
+            `[日常] 群 ${g}「${plan.template.text}」→ ❌ 润色没出文本（模型/网络失败）` +
+              ' → **不发**（原文是第三人称旁白，不能直发），不记账、今天顺延重排',
+          );
+          continue;
+        }
 
         // ⚠️⚠️ **别把"发过"当成"发出去了"**（2026-09-15 修，用户就是被这句坑的）。
         //
@@ -786,10 +806,19 @@ if (true) {
             `[日常] 群 ${g}「${plan.template.text}」→ ❌ 没发出去` +
               ' → **不记账，这个群今天顺延重排**（去查协议端是不是假在线：tools/napcat-state.mjs）',
           );
+          // ⚠️⚠️ 2026-10-13 加（同一条事件 15 分钟内在同一个群出现两遍）：
+          //    `send reply … timed out` 这种"回执超时"**不等于没发到** ——
+          //    用户截图里那句话就在群里，而系统这里判了失败 ⇒ 顺延重排又抽到同一条 ⇒ 群里看两遍 ✗
+          //    ⇒ 这条文本在这个群冷藏 45 分钟（`life.noteFailed`），重排就抽别的事 ✓
+          //    ⚠️ 它**不记账**（`fired` 不加），所以"今天该发几条"一点也不少。
+          life.noteFailed(g, plan.template.text, Date.now());
           continue;
         }
         // ⚠️ 只给这个群记账、只写这个群的故事线（分群之后各算各的）
         life.commit(plan, text, Date.now(), { groups: [g], groupId: g });
+        // ⚠️ 2026-10-10：**发出去了才记**"今天这条用过了"（跨群去重用，见 `life.markSent`）——
+        //    没发成的分支上面已经 return 了（"不记账、顺延重排"）✓
+        life.markSent(plan.template.text);
         log.info(`[日常] 群 ${g}「${plan.template.text}」→ 已发（这个群今天第 ${life.status(g).fired} 条）`);
       }
     } catch (e) {

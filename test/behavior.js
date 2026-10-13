@@ -399,6 +399,14 @@ async function logicTests() {
   check(bot.shouldJoinChat(ev('嗯嗯是这样的')) === null, '没聊过时，普通闲聊不接');
 
   // 模拟「它刚回过话」
+  // ⚠️⚠️ 2026-10-13 修（这条在**并行跑回归**时偶发红：实测 0/20，单跑全过）：
+  //   `shouldJoinChat` 里有一道闸 —— 她上次说话之后中间夹着**别人的 > 1 条**就不算延续
+  //   （用户原话：「这哪是对话延续，就是突然接的」）。而这一节之前的 A 段
+  //   （A4.5 / A9 那些假消息）往**同一个 recent 缓冲**里塞过消息，机器一忙
+  //   （并行跑、时间戳更集中）那些消息还留在窗口里 ⇒ 闸一开，下面 20 次全被拒 ✗
+  //   ⇒ 断言前把这个群的缓冲清干净，让这一节不受前一节影响（测试要可复现）✓
+  const recentMod = await import('../src/recent.js');
+  recentMod.clearAll();
   bot.touchConversation(ev('刚才那句'));
   let joined2 = 0;
   for (let i = 0; i < 20; i++) {

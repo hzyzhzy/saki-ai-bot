@@ -3268,8 +3268,8 @@ console.log(
     '★★ 没轮到的那个**让位**（`return null`），轮到的正常接',
   );
   check(
-    /if \(this\.peersHeadsToHuman\(event\)\) \{\s*\n\s*log\.info\('\[让位\]/.test(bsrc62),
-    '★★ @ 的是别人 ⇒ **这条路上也不接**（那个判据原来只挂在剧情路）',
+    /if \(!calledMe && this\.peersHeadsToHuman\(event\)\)/.test(bsrc62),
+    '★★ @ 的是别人 ⇒ 这条路上也不接（⚠️ **点名我就除外** —— 2026-10-12 加）',
   );
   check(
     !/Math\.random\(\)[\s\S]{0,120}?pickPeerIndex/.test(bsrc62),
@@ -3277,10 +3277,60 @@ console.log(
   );
   check(
     /recent\.messagesSinceBotLast\(String\(event\?\.group_id \?\? ''\)\)/.test(bsrc62) &&
-      /if \(sinceBot > 1\)/.test(bsrc62),
+      /if \(!calledMe && sinceBot > 1\)/.test(bsrc62),
     '★★★ **"中间还夹着别人"就不算对话延续**（用户：「这哪是对话延续，就是突然接的」）—— ' +
-      '原判据只看 isSamePerson + 他刚说话，完全没管有人插过话 ✗',
+      '⚠️ **但点名我就得当它是在跟我说话**（2026-10-12 加的豁免，别再删）',
   );
+}
+
+console.log(
+  '\n【64】★★★ 「点名我」要豁免那几道掐断闸' +
+    '（2026-10-12 用户截图：saki 那句点了「爱音」的名字，爱音却没回）',
+);
+{
+  const bsrc64 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  check(/const calledMe = \(\(\) => \{/.test(bsrc64), '★★★ 先算「这条有没有点名我」');
+  check(/if \(!calledMe && this\.peersHeadsToHuman\(event\)\)/.test(bsrc64), '★★ @ 别人的那道闸豁免点名');
+  check(
+    /if \(!calledMe && sinceBot > 1\)/.test(bsrc64),
+    '★★★ 「中间夹着别人 ⇒ 不算延续」那道闸**也豁免点名**（这次拦掉她的就是它）',
+  );
+  check(/if \(!calledMe && short && short\.length <= 2\)/.test(bsrc64), '★★ 极短（≤2 字）那道闸也豁免');
+  check(
+    /const isLatin = \/\^\[a-zA-Z\]\+\$\//.test(bsrc64) && /t\.includes\(name\)/.test(bsrc64),
+    '★★★ 非拉丁名用 `includes` 判 ⇒ **句末粘连**的「…夸你脸皮够厚吗爱音」也认得出' +
+      '（不要求名字前后有标点 —— 这正是她被漏掉的那一半）',
+  );
+}
+
+console.log(
+  '\n【63】★★★ 日常事件**跨群去重**' +
+    '（2026-10-10 用户：「刚才为什么 200000002 又发了一遍」—— ' +
+    '同一条事件 5 分钟里在 200000007 和 200000002 各发了一遍）',
+);
+{
+  const lsrc63 = readFileSync(join(ROOT, 'src', 'life.js'), 'utf8');
+  check(
+    /const fresh = pool\.filter\(\(t\) => !sentToday\(t\?\.text, now\)\)/.test(lsrc63),
+    '★★★ `plan()` 里**剔掉今天已经发过的条目**（不再"每个群各发一遍"）',
+  );
+  check(
+    /const usePool = fresh\.length \? fresh : pool/.test(lsrc63),
+    '★★ 兜底：当天全都发过了就退回原池（别让日常事件停摆）',
+  );
+  check(/export function markSent\(text, now = Date\.now\(\)\)/.test(lsrc63), '★★ 有 `markSent`');
+  const isrc63 = readFileSync(join(ROOT, 'src', 'index.js'), 'utf8');
+  check(
+    /life\.markSent\(plan\.template\.text\)/.test(isrc63),
+    '★★★ 接线挂在**发送成功之后**那一行 —— 没发成的不记（和"不记账、顺延重排"一致）',
+  );
+  const lf = await import('../src/life.js');
+  lf.__resetSent();
+  check(lf.sentToday('测试条目X') === false, '★ 没发过 ⇒ false');
+  lf.markSent('测试条目X');
+  check(lf.sentToday('测试条目X') === true, '★★ 发过 ⇒ true（别的群就抽不到它了）');
+  check(lf.sentToday('测试条目Y') === false, '★ 不影响别的条目');
+  lf.__resetSent();
 }
 
 console.log(`\n结果: ${failures === 0 ? '全部通过 ✅' : `${failures} 项失败 ❌`}\n`);

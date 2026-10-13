@@ -499,6 +499,63 @@ console.log('\n【★】2026-09-18：剧情在跑时不许插日常 + 别自己�
   check(/这次随机到的方向/.test(srcLife), '★ 每次随一个方向（在哪 / 细节 / 落点）逼出多样性');
 }
 
+console.log('\n【★】2026-10-13：日常事件不许发第三人称原文 + 发失败的那条 45 分钟内不再抽');
+{
+  const srcIndex = readFileSync(join(ROOT, 'src', 'index.js'), 'utf8');
+  const srcLife = readFileSync(join(ROOT, 'src', 'life.js'), 'utf8');
+
+  // ① 用户截图：群里冒出一句旁白「天台上有别人在，她端着饭换了个地方」
+  //    真因 = 润色失败时拿**事件库原文**顶上，而事件库是第三人称的语义描述。
+  check(
+    !/\|\|\s*plan\.template\.text/.test(srcIndex),
+    '★★ 删掉了 `|| plan.template.text` 兜底（润色失败不再拿事件库原文顶上）',
+  );
+  check(
+    /const text = await life\.compose\(plan\);[\s\S]{0,400}?if \(!text\) \{[\s\S]{0,400}?continue;/.test(
+      srcIndex,
+    ),
+    '★★ 润色没出文本 → **这条不发**（continue，照旧不记账、今天顺延重排）',
+  );
+  check(
+    /原文是第三人称旁白，不能直发/.test(srcIndex),
+    '★ 为什么不能直发写在代码里了（事件库是用来润色的，不是台词）',
+  );
+  // ② 同一条 15 分钟内在同一个群出现两遍：回执超时 ≠ 没发到
+  check(
+    /life\.noteFailed\(g, plan\.template\.text/.test(srcIndex),
+    '★★ 发失败（含回执超时）→ 登记 `life.noteFailed`（重排不再抽同一条）',
+  );
+  check(/FAIL_COOLDOWN_MS = 45 \* 60 \* 1000/.test(srcLife), '★ 冷藏窗口 = 45 分钟');
+
+  // ② 行为：冷藏之后重排必须换一条；过了窗口还能再抽（不是永久拉黑）
+  reset();
+  arm(at(12, 30), { target: 5, fired: 1, lastFireAt: at(12, 0), nextAt: at(12, 30) });
+  const first = life.plan(at(12, 30), seqRng([0]));
+  check(first.fire === true, '先正常抽一条中午的事件', first.reason ?? '');
+  const text = first.template?.text ?? '';
+  check(!!text, '抽到的事件文本非空', text);
+
+  life.noteFailed('', text, at(12, 31));
+  check(
+    readFileSync(join(ROOT, LIFE_REL), 'utf8').includes(text.slice(0, 10)),
+    '★ 冷藏名单**落盘**（重启也不丢）',
+  );
+  arm(at(12, 36), { target: 5, fired: 1, lastFireAt: at(12, 0), nextAt: at(12, 36) });
+  const second = life.plan(at(12, 36), seqRng([0]));
+  check(
+    second.fire === true && second.template?.text !== text,
+    '★★ 5 分钟后重排 → **不再是同一条**（防"超时其实发到了"的重复）',
+    second.template?.text ?? '',
+  );
+  arm(at(13, 20), { target: 5, fired: 1, lastFireAt: at(12, 0), nextAt: at(13, 20) });
+  const third = life.plan(at(13, 20), seqRng([0]));
+  check(
+    third.template?.text === text,
+    '★ 过了 45 分钟 → 又能抽到它（只是冷藏，不是永久拉黑）',
+    third.template?.text ?? '',
+  );
+}
+
 try {
   server.close();
   for (const f of [CFG_REL, LIFE_REL, STORY_REL]) rmSync(join(ROOT, f), { force: true });

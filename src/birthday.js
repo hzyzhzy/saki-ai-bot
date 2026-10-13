@@ -33,8 +33,8 @@
  *   · （计划）`src/quest.js`：临近生日时给剧情一个"互相庆祝"的引子。
  */
 
-import { readFileSync, readdirSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync, writeFileSync, renameSync, mkdirSync, readdirSync, existsSync } from 'node:fs';
+import { join, dirname } from 'node:path';
 import { ROOT } from './config.js';
 // ⚠️ 顶层 import 就行：`accounts.js` 不引用本模块，没有循环依赖。
 import * as accounts from './accounts.js';
@@ -304,6 +304,97 @@ export function upcomingAll(now = Date.now(), days = 14, selfId = '', packs = nu
  *     这里只给"今天是谁生日"这个事实 + 一句"怎么表示看关系"，不替她定调；
  *   · 自己生日**别写成"她一定会广播"**（她不是那种人）；别人生日也别写成"必须热络"。
  */
+/* ── 生日日常事件的**每天限流**（2026-10-10 用户要求）─────────────────
+ * 用户原话：「那个生日的日常事件**还是太多了，一天最多两条就够了**，
+ *   **除非那个过生日的人或者 bot 在群内**」。
+ * ⇒ 默认一天最多 **2 条**"生日主导"的日常事件；
+ *    寿星本人（群友 / 那个 bot 号）就在这个群里 ⇒ **不限**（那种才值得多写几条）✓
+ * ⚠️ 计数**按群 + 按天落盘** —— 不落盘的话重启一次又能多刷两条 ✗
+ */
+const LIFE_FILE = process.env.QQBOT_BIRTHDAY_LIFE_FILE
+  ? join(ROOT, process.env.QQBOT_BIRTHDAY_LIFE_FILE)
+  : join(ROOT, 'state', 'birthday-life.json');
+
+/** 一天最多几条"生日主导"的日常事件（寿星不在群内时） */
+export const LIFE_CAP = 2;
+
+function _dayKey(groupId, now = Date.now()) {
+  const d = new Date(now);
+  const ymd =
+    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-` +
+    `${String(d.getDate()).padStart(2, '0')}`;
+  return `${ymd}|${String(groupId ?? '')}`;
+}
+
+function _readLife() {
+  try {
+    return JSON.parse(readFileSync(LIFE_FILE, 'utf8')) ?? {};
+  } catch {
+    return {};
+  }
+}
+
+function _writeLife(j) {
+  try {
+    mkdirSync(dirname(LIFE_FILE), { recursive: true });
+    const t = `${LIFE_FILE}.tmp`;
+    writeFileSync(t, JSON.stringify(j), 'utf8');
+    renameSync(t, LIFE_FILE);
+  } catch {}
+}
+
+/** 这个群**今天已经用了几条**"生日主导"的日常事件 */
+export function lifeCount(groupId, now = Date.now()) {
+  const v = Number(_readLife()[_dayKey(groupId, now)] ?? 0);
+  return Number.isFinite(v) && v > 0 ? v : 0;
+}
+
+/** 记一条（拼提示词时调 —— 拼了就说明这条要走生日方向） */
+export function bumpLife(groupId, now = Date.now()) {
+  try {
+    const j = _readLife();
+    const k = _dayKey(groupId, now);
+    j[k] = (Number(j[k] ?? 0) || 0) + 1;
+    // ⚠️ 顺手清掉 7 天前的旧键（不然文件越积越大）
+    for (const key of Object.keys(j)) {
+      const d = Date.parse(`${key.split('|')[0]}T00:00:00`);
+      if (Number.isFinite(d) && now - d > 7 * 86400000) delete j[key];
+    }
+    _writeLife(j);
+    return j[k];
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * **今天过生日的那个人（或那个 bot 号）就在这个群里吗**？
+ *
+ * ⚠️ 只认两种能确定的：
+ *   · `selfId`（我自己）今天生日 ⇒ 我当然在这个群 ✓
+ *   · `peers`（同类池那些号）里有人今天生日 ⇒ 那个号在这个群 ✓
+ * ⚠️ 名册里**不在群里的**角色（睦 / 初华…）不算 —— 它们过生日不该让这个群多刷 ✗
+ * ⚠️ **群友**生日那种由调用方用 `member-birthday` 另外判（那才是"人真的在群里"）✓
+ */
+export function lifeStarInGroup(groupId, { selfId = '', peers = [], now = Date.now() } = {}) {
+  if (selfId && daysUntil(selfId, now) === 0) return true;
+  for (const qq of peers ?? []) {
+    const pid = personaIdOfQQ(qq);
+    if (pid && daysUntil(pid, now) === 0) return true;
+  }
+  return false;
+}
+
+/** 测试用 */
+export function __resetLife() {
+  try {
+    _writeLife({});
+  } catch {}
+}
+export function lifeFiles() {
+  return { file: LIFE_FILE };
+}
+
 export function lifeNote(now = Date.now(), { selfId = '', packs = null, soonDays = 0 } = {}) {
   const list = upcomingAll(now, soonDays, selfId, packs);
   if (!list.length) return '';

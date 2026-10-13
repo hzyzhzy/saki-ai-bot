@@ -89,7 +89,19 @@ export function track() {
   loadMem();
   const b = machine.snapshot()?.battery ?? null;
   const level = levelOf(b);
-  if (level === 'unknown') return { b, level, recovered: false, recoveredAt: mem.recoveredAt };
+  if (level === 'unknown') {
+    // ⚠️⚠️⚠️ 2026-10-13 改（用户报「**为什么没触发没电语言**」）：
+    //    原来**读不到电池就什么都不注入** ⇒ 表现是"电量低的时候她完全不演" ✗
+    //    （读不到的原因就是采集偶发失败 —— 见 `machine.js` 里 `allSettled` 那段）
+    //    ⇒ 改成：**30 分钟内**的旧档位继续用（临终时不会因为一次读失败就突然活蹦乱跳）✓
+    //      超过 30 分钟才算"真的不知道" ✓
+    const age0 = Date.now() - (Number(mem.at ?? 0) || 0);
+    if (mem.level && age0 < 30 * 60 * 1000) {
+      log.debug(`[电量] 这次读不到电池 → 沿用 30 分钟内的旧档「${mem.level}」`);
+      return { b, level: mem.level, recovered: false, recoveredAt: mem.recoveredAt, stale: true };
+    }
+    return { b, level, recovered: false, recoveredAt: mem.recoveredAt };
+  }
   const was = mem.level;
   let recovered = false;
   if (was && BAD.has(was) && GOOD.has(level)) {
@@ -98,6 +110,15 @@ export function track() {
     log.info(`[电量] 从「${was}」回到「${level}」→ 这一段按**劫后余生**演 ✓`);
   }
   if (level !== was) {
+    // ⚠️ 2026-10-13 加（用户查「为什么没触发没电」时**日志里一个字都看不到**）：
+    //    原来**只有"从坏档恢复"才打日志** ⇒ "好档掉进临终档"这么大的事**一行都没有** ✗
+    //    ⇒ 往坏的方向变也打一行（info 级），以后一眼就能看到"什么时候进的临终档" ✓
+    if (BAD.has(level) && !BAD.has(was)) {
+      log.info(
+        `[电量] ⚠️ 掉进「${level}」（${b?.percent}%，${b?.charging ? '插电' : '没插电'}）` +
+          '→ 从现在起按这个档演',
+      );
+    }
     mem.level = level;
     mem.at = Date.now();
     saveMem();
@@ -232,6 +253,16 @@ export function guide({ selfId = '', peerIds = [] } = {}) {
     lines.push('· 🔊 语气也活过来：比平时快、话偏多（刚缓过来的人就是这样）✓');
   }
   if (!lines.length) return '';
+  // ⚠️ 2026-10-13 加（用户查「昨天 20-50 之间都有消息，都没触发」时，
+  //    **日志里一个字都看不到** —— 不知道到底注入了什么、什么档）：
+  //    ⇒ 低电量档每次都打一行（量不大：只在她不充电、且档位不是 ok 时才打）✓
+  //      以后核对"到底演没演"直接搜 `[电量] 注入` 就行 ✓
+  if (level !== 'ok' && level !== 'charging') {
+    log.info(
+      `[电量] 注入：档=${level} 电量=${p ?? '?'}% 内容 ${lines.length} 行` +
+        (recoveredAt ? '（含劫后余生）' : ''),
+    );
+  }
   return ['', '### 🔋 电量（你的"生命值"）', '', ...lines].join('\n');
 }
 

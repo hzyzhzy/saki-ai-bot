@@ -327,5 +327,37 @@ console.log(
   check(!/还有 2 天/.test(cn), '★★★ 聊天提示词那段同样不提前（只当天说"今天谁生日"）');
 }
 
+console.log(
+  '\n【10】★★★ 生日日常事件**一天最多 2 条**（寿星不在群内时）' +
+    '（2026-10-10 用户：「那个生日的日常事件还是太多了，一天最多两条就够了，' +
+    '除非那个过生日的人或者 bot 在群内」）',
+);
+{
+  const bd = await import('../src/birthday.js');
+  const GB = '999000908';
+  bd.__resetLife();
+  check(bd.LIFE_CAP === 2, '★★ 上限 = **2 条**');
+  check(bd.lifeCount(GB) === 0, '★ 一开始是 0');
+  bd.bumpLife(GB);
+  bd.bumpLife(GB);
+  check(bd.lifeCount(GB) === 2, '★★ 记满两条');
+  check(bd.lifeCount(GB) === 2, '★★ 计数**落盘**（再读一次还是 2 —— 重启不会又能多刷两条）');
+  check(bd.lifeCount('999000909') === 0, '★ 按群分开计数');
+  check(
+    bd.lifeStarInGroup(GB, { selfId: '', peers: [] }) === false,
+    '★ 过生日的人不在群里 ⇒ false（那就该按上限拦）',
+  );
+  const todayId = bd.ids().find((id) => bd.daysUntil(id, Date.now()) === 0);
+  if (todayId) {
+    check(
+      bd.lifeStarInGroup(GB, { selfId: todayId }) === true,
+      '★★ 今天**我自己**生日（我在这个群）⇒ true ⇒ **不限**',
+    );
+  } else {
+    check(true, '（今天没人设包过生日，这条跳过）');
+  }
+  bd.__resetLife();
+}
+
 console.log(`\n结果: ${failures === 0 ? '全部通过 ✅' : `${failures} 项失败 ❌`}\n`);
 process.exit(failures === 0 ? 0 : 1);

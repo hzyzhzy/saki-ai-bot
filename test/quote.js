@@ -397,7 +397,14 @@ console.log('\n【12】★★ 正文里**点名叫她** → 也算召唤（<主�
   const oldNames = cfg2.trigger.callNames;
   cfg2.trigger.callNames = ['小祥子'];
   check(b.decide(evOf([textSeg('小祥子在哪')]))?.hit === 'call', '★ 配了 callNames 就按配置走');
-  check(b.decide(evOf([textSeg('祥子在吗')]))?.hit !== 'call', '★ 覆盖之后原来的「祥子」不再命中');
+  // ⚠️⚠️ 2026-10-13 改（断言跟着**语义变更**走，不是测试松了）：
+  //    原来是"**覆盖**" —— 配了 `trigger.callNames` 就把人设里的名字挤掉。
+  //    真实现的坑（用户报「叫爱音名字她不回」）：那个号的 config 里配着**祥子**的名字，
+  //    于是爱音连自己人设里的名字都不认 ⇒ 人设名 + 配置名**合并**才对 ✓
+  check(
+    b.decide(evOf([textSeg('祥子在吗')]))?.hit === 'call',
+    '★★ 配了 callNames 之后，**人设里的名字照样命中**（合并语义，不再互相挤掉）',
+  );
   cfg2.trigger.callNames = oldNames;
 }
 

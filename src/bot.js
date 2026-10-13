@@ -2041,6 +2041,19 @@ export class Bot {
         //    （搜 `if (!cooling && this.botChainHard(gid0))`），而这里一旦 `return`，
         //    后面的判断**根本不会执行** ✗ ⇒ 两个同类可以靠这个通道无限互回一个字。
         //    ⇒ 只对**同类**补两道（真人接着聊照旧"直接接、不判"，一个字都不动）：
+        // ⚠️⚠️⚠️ 2026-10-12 加（用户截图：saki 那句**点名了「爱音」**，爱音却没回）：
+        //    真因是**我前一天加的那道闸**把她拦掉了（日志原文）：
+        //      `[对话延续·不算] 我上次说话之后中间还夹着别人的 2 条 → 他是在跟别人聊` ✗
+        //    可那句明明叫了她名字（「谁吃你的醋啊，夸你什么，夸你脸皮够厚**吗爱音**」）——
+        //    **点名 = 在跟她说话**，比"中间夹着别人"强 ✓
+        //    ⇒ **我加的那几道闸都要"点名我"豁免**（`calledByName()` 命中就不掐）✓
+        const calledMe = (() => {
+          try {
+            return !!this.calledByName(msg.extractText(msg.toSegments(event.message)));
+          } catch {
+            return false;
+          }
+        })();
         const peerNow = (() => {
           try {
             return this.isPeerBot(String(event?.group_id ?? ''), String(uid ?? ''));
@@ -2062,7 +2075,7 @@ export class Bot {
         //        行为却一模一样 —— 用户就是照这个发现不对的）
         //
         //    ① **@ 的是别人的 ⇒ 不接**（这条判据现成，只是原来没挂到这条路上）✓
-        if (this.peersHeadsToHuman(event)) {
+        if (!calledMe && this.peersHeadsToHuman(event)) {
           log.info('[让位] 这条 @ 了别人 → 我不接（不是我该应的）');
           return null;
         }
@@ -2077,7 +2090,7 @@ export class Bot {
         //      他其实是在跟那个人聊 ⇒ **不算延续、不接** ✓
         try {
           const sinceBot = recent.messagesSinceBotLast(String(event?.group_id ?? ''));
-          if (sinceBot > 1) {
+          if (!calledMe && sinceBot > 1) {
             log.info(
               `[对话延续·不算] 我上次说话之后中间还夹着别人的 ${sinceBot - 1} 条 ` +
                 '→ 他是在跟别人聊，不是在跟我（用户：「这哪是对话延续，就是突然接的」）',
@@ -2122,7 +2135,7 @@ export class Bot {
           try {
             short = String(msg.extractText(msg.toSegments(event.message)) ?? '').trim();
           } catch {}
-          if (short && short.length <= 2) {
+          if (!calledMe && short && short.length <= 2) {
             log.info(
               `[同类] 它只发了「${short}」（≤2 字）→ **不接**` +
                 '（免得两个号"嗯"来"嗯"去停不下来）',
@@ -3512,6 +3525,28 @@ export class Bot {
         }
       } catch (e) {
         log.debug(`[旁白] 剥离出错（照原样发）：${e.message}`);
+      }
+    }
+    // ⚠️⚠️⚠️ 2026-10-11 加（用户：「**如果一个 bot 能接收到另一个 bot 发的差不多的
+    //    重复信息时，直接把自己的掐断就行了**」）：
+    //    **发送前**再查一次 —— 群里最近 20 分钟已经有人（很可能正是另一个号，它在另一台机器上）
+    //    说了"生日"这档子事，而我这条也在说 ⇒ **掐断不发** ✓
+    //    ⚠️ 这一道比"生成前不注入"更狠：**模型自己想起来的也拦得住**（17:20 那条就是"顺着写"）。
+    //    ⚠️ `contextText(gid, text)` 把**我这条文本**排除掉，免得匹配到我自己 ✓
+    //    ⚠️ 现在只认"生日"这一类（用户报的就是它）；以后要扩，照这个形状加词即可。
+    if (text && /生日/.test(String(text))) {
+      try {
+        const ctxBd = String(
+          recent.contextText(String(event?.group_id ?? ''), String(text), [], { maxChars: 3000 }) ?? '',
+        );
+        if (/生日/.test(ctxBd)) {
+          log.info(
+            `[掐断] 群里最近已经有人说过「生日」了 → 我这条不发了（${String(text).slice(0, 24)}）`,
+          );
+          return null;
+        }
+      } catch (e) {
+        log.debug(`[掐断] 生日查重失败（照常发）：${e.message}`);
       }
     }
     const _unusedGuard = null;
@@ -12618,13 +12653,27 @@ export class Bot {
     } catch {}
 
     try {
-      const bdNote = birthday.note(Date.now(), {
-        selfId: String(persona.status()?.id ?? ''),
-        peerIds: (peersFor(String(event?.group_id ?? '')) ?? [])
-          .map((q) => birthday.personaIdOfQQ(q))
-          .filter(Boolean),
-      });
-      if (bdNote) parts.push(bdNote);
+      // ⚠️⚠️⚠️ 2026-10-11 加（用户报：「**saki 刚才又发了一次生日**」）：
+      //    如果**群里最近已经有人提过生日**（很可能正是另一个号 —— 它在**另一台机器**上），
+      //    就别再把"今天谁生日"塞给她了 —— 塞了她就会跟着重复说一遍 ✗
+      //    ⚠️ 判据用**群消息**（`recent`）：那是两台机器**天然共享**的东西；
+      //      本机文件那一套（`life-sent.json`）跨机器无效 ✗
+      const gidBd2 = String(event?.group_id ?? '');
+      let saidBd = false;
+      try {
+        saidBd = /生日/.test(String(recent.contextText(gidBd2, '', [], { maxChars: 3000 }) ?? ''));
+      } catch {}
+      if (saidBd) {
+        log.info(`[生日] 群 ${gidBd2} 最近已经有人提过生日 → 这次**不注入**（免得跟着重复说）`);
+      } else {
+        const bdNote = birthday.note(Date.now(), {
+          selfId: String(persona.status()?.id ?? ''),
+          peerIds: (peersFor(String(event?.group_id ?? '')) ?? [])
+            .map((q) => birthday.personaIdOfQQ(q))
+            .filter(Boolean),
+        });
+        if (bdNote) parts.push(bdNote);
+      }
     } catch {}
 
     // ⚠️⚠️ 2026-10-09 加（用户三连）：
@@ -12800,11 +12849,20 @@ export class Bot {
   calledByName(text) {
     const t = String(text ?? '');
     if (!t) return '';
-    // ⚠️ 2026-09-21：默认值从 `identity.callNames` 来（原来写死这 5 个写法）。
-    //    ⚠️ `config.trigger.callNames` 仍然**优先级更高** —— 那是用户在配置文件里显式写的覆盖。
-    const list = Array.isArray(config.trigger?.callNames) && config.trigger.callNames.length
-      ? config.trigger.callNames.map((x) => String(x)).filter(Boolean)
-      : persona.callNames();
+    // ⚠️⚠️⚠️ 2026-10-12 改（**踩过的坑，别再改回"覆盖"**）：
+    //    这里原来是**覆盖** —— 账号配置里只要写了 `trigger.callNames`，就**完全不用**人设那份 ✗
+    //    结果：`accounts/10000012.yml` 里抄的是**主号的名字**（祥子 / 小祥 / saki …）
+    //    ⇒ **爱音压根不认识"爱音"** ⇒ 别人点名她，她一声不吭 ✗✗
+    //      （症状特别迷惑：她在线、别人的话也接得住，就是"叫她的名字"没反应。）
+    //    ⇒ 现在改成**合并**：账号里写的只当**追加**，人设（`identity.json`）那份**永远在** ✓
+    //      ⇒ 以后就算谁又写错了，顶多是"多认错几个名字"，**绝不会把自己的名字丢掉** ✓
+    //      （用户 2026-10-12：「留空吧，下次新建人设的时候这个问题要避免」—— 这道合并就是那个"避免"）
+    const list = [
+      ...(Array.isArray(config.trigger?.callNames) ? config.trigger.callNames : []),
+      ...persona.callNames(),
+    ]
+      .map((x) => String(x))
+      .filter(Boolean);
     for (const name of list) {
       // 中日文按原样找；纯英文字母的不区分大小写
       const isLatin = /^[a-zA-Z]+$/.test(name);
@@ -14204,6 +14262,23 @@ export class Bot {
         log.debug(`[旁白] 剥离出错（照原样发）：${e.message}`);
       }
     }
+    // ⚠️⚠️⚠️ 2026-10-11 加（用户：「**一个 bot 收到另一个 bot 发的差不多的重复信息时，
+    //    直接把自己的掐断**」）—— 这条出口也要同一道闸（剧情 / 日常事件 / 同类搭话走这里）✓
+    if (text && /生日/.test(String(text))) {
+      try {
+        const ctxBd2 = String(
+          recent.contextText(String(groupId ?? ''), String(text), [], { maxChars: 3000 }) ?? '',
+        );
+        if (/生日/.test(ctxBd2)) {
+          log.info(
+            `[掐断] 群里最近已经有人说过「生日」了 → 这条不发了（${String(text).slice(0, 24)}）`,
+          );
+          return [];
+        }
+      } catch (e) {
+        log.debug(`[掐断] 生日查重失败（照常发）：${e.message}`);
+      }
+    }
     // ⚠️⚠️ 2026-10-07 加（用户：「**睡着在其他地方都可以，在剧情里睡着肯定不行**」）：
     //    剧情进行中 ⇒ **不许用"眯会儿 / 晚安 / 睡了"把这一晚带过去**。
     //    实测（用户截图）：那条"必须做到 X 才能出去"的线还在演，她俩聊着聊着互相道晚安 ——
@@ -15526,6 +15601,25 @@ export class Bot {
         .map((s) => String(s.data.qq));
       const target = ats[0] ?? String(event.user_id ?? '');
       if (!target) return false;
+      // ⚠️⚠️⚠️ 2026-10-12 加（用户截图：同一条请求 **saki 和 Anon 各回了一遍**
+      //    「行，服务器一开我就 @ 你（一直挂着，不会忘）」✗）：
+      //    两个号**在同一台机器上** ⇒ 同一条群消息它们都收得到 ⇒ 都执行了本函数 ✗
+      //    ⇒ 和"真人消息只让一个号接"用**同一套确定性公式**（`pickPeerIndex`）：
+      //      同一条命令两边算出来是**同一个号** ⇒ 只有它订、只有它回执 ✓
+      //      ⚠️ 跨机器也算得一样（公式只依赖 群号+发送者+命令原文）✓
+      const list0 = peersFor(gid).map(String);
+      const me0 = String(this.selfId ?? '');
+      const myIdx0 = list0.indexOf(me0);
+      if (list0.length > 1 && myIdx0 >= 0) {
+        const owner = pickPeerIndex(`${gid}|${event.user_id}|${raw}`, list0.length);
+        if (owner !== myIdx0) {
+          log.info(
+            `[开服提醒] 这条请求**轮到 ${list0[owner]} 接**（公式选的）→ 我不订、也不回执` +
+              `（同类池 ${list0.length} 个，我排第 ${myIdx0 + 1}）`,
+          );
+          return true; // ⚠️ true = "这条我受理了"，别再往下走（免得又被当成别的命令）
+        }
+      }
       const name = names.of(target, gid) || '';
       const ok = serverWatch.subscribe(gid, target, name);
       if (ok) {
