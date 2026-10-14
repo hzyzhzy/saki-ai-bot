@@ -306,6 +306,39 @@ async function main() {
   const secFile = readFileSync(acc.fileOf(SECOND), 'utf8');
   check(/999000001/.test(secFile), '那个群号出现在**二号的私有文件**里');
 
+  console.log('\n[9] 日常事件：**非主号默认不开**（2026-10-14 用户定）');
+  // 用户原话：「非主号默认不开日常事件」。
+  // 成因：`config.yml` 里那份 `life` / `groupParams.*.life` 是**主号配的**，
+  // 而日常事件是主号那条人设线的功能 —— 原来非主号会照样继承 ⇒
+  // 新加一个号就自动开始在群里发日常事件 ✗
+  // ⚠️ 判据看的是 **`life.status()`（走 `paramsFor`）**，不是 `config.life` 那个全局段。
+  const gid = '999000001';
+  const lsA = await apiAt(PORT_A, `/api/life/status?groupId=${gid}`);
+  const lsB = await apiAt(PORT_B, `/api/life/status?groupId=${gid}`);
+  check(lsA.status.enable === true, '主号：这个群的日常事件照旧是开的');
+  check(lsB.status.enable === false, '二号（非主号）：自己没开过 ⇒ 默认关着（config.yml 里写着开也不算）');
+
+  // 要开只能在**它自己的** `accounts/<QQ>.yml` 里显式写 —— 界面「按群设定」保存的就是那个文件
+  await apiAt(PORT_B, '/api/config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ life: { enable: true } }),
+  });
+  const lsB2 = await apiAt(PORT_B, `/api/life/status?groupId=${gid}`);
+  check(lsB2.status.enable === true, '二号在自己的文件里写了 life.enable: true ⇒ 才真的开起来');
+
+  await apiAt(PORT_B, '/api/config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ life: { enable: false } }),
+  });
+  const lsB3 = await apiAt(PORT_B, `/api/life/status?groupId=${gid}`);
+  check(lsB3.status.enable === false, '再关掉 ⇒ 又回到不开');
+  check(
+    (await apiAt(PORT_A, `/api/life/status?groupId=${gid}`)).status.enable === true,
+    '这一通操作**一点没碰到主号**（主号还是开的）',
+  );
+
   cleanup();
   console.log(
     failures === 0

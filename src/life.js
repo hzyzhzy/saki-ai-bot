@@ -158,6 +158,12 @@ export function reload() {
     log.warn(`日常事件库读不到（${e.message}），一级事件将不发`);
     slots = [];
   }
+  // ⚠️ 2026-10-14 加（爱音那次）：「文件读不到」和**「读到了但是空的」**要分开报。
+  //    原来只有 readFileSync 抛错才 warn，而"这个人设包里压根没有 life-events.md"是回落成空，
+  //    表现是「立刻发一条」回一句**「现在这个时刻没有对应时段（0-7 点不发）」** ——
+  //    完全看不出真因是**事件库空的**（查了半天才知道）✗
+  //    ⇒ 空库在这里就点名，附上它找的那条路径。
+  if (!slots.length) log.warn(`日常事件库是空的（${file()}）—— 日常事件不会发，检查这个人设包`);
   // 节日表跟着一起重载（两个都是知识库文件，改完一起生效）
   try {
     holiday.reload();
@@ -179,6 +185,11 @@ export function reload() {
 export async function preview(now = Date.now(), groupId = '') {
   const gid = gkOf(groupId);
   if (cfgFor(gid).enable === false) return { ok: false, reason: '这个群的日常事件没开' };
+  // ⚠️ 2026-10-14 加：**库是空的**和"不在时段内"分开报（见 `reload()` 里那段说明）。
+  //    这两件事在界面上原来长得一模一样，爱音那次就是被它带偏的 ✗
+  if (!slots.length) {
+    return { ok: false, reason: '日常事件库是空的（这个人设包里缺 life-events.md，或者里面一条事件都没有）' };
+  }
   const slot = slotAt(now);
   if (!slot) return { ok: false, reason: '现在这个时刻没有对应时段（0-7 点不发）' };
   const { pool, off, holidayEvents } = poolFor(slot, now, gid);

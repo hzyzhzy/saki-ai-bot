@@ -101,6 +101,15 @@ void R2;
 // ⚠️ 2026-10-13：「用她自己的口吻说一遍」那一步也是**一次真模型调用**（`voiceize`）——
 //    套件里桩掉、原样返回（要验的是"发没发、内容对不对"，不是模型文笔）。
 ab.__setVoice(async (kind, facts) => String(facts ?? ''));
+// ⚠️⚠️ 2026-10-13：**"他问的是不是刚做完那个活"那个判定也要默认桩成"不是"** ——
+//    不桩的话它会**真调模型**（每句 @她的消息都要等 8 秒 ✗），而且会抢插话那条路 ✗
+//    （要测它的那一段自己覆盖成 `action:'ask'` ✓ 见【27】）
+ab.__setAskAgent(async () => ({ action: '', question: '' }));
+// ⚠️⚠️ 2026-10-14（用户：「**直接把 agent 设定为 saki 自己的电脑**，由**她自己决定**
+//    什么时候该用电脑…」）：那道"她自己决定要不要动电脑"的判定也是**一次真模型调用** ——
+//    默认桩成「不用」，否则**套件里每一句 @她的话都会真调模型**（等 6 秒 + 花钱 ✗）。
+//    （要测它的那一段自己覆盖成 `{ action: 'use', plan: … }` ✓ 见【29】）
+ab.__setSelfUse(async () => ({ action: '', plan: '' }));
 
 const GROUP = '999000001';
 const BOT = '10000002';
@@ -297,7 +306,11 @@ console.log('\n【6】★★ `/任务撤回`：把正在跑的那个停掉');
   const calls = stubRunner({ autoFinish: false }); // 一直跑，等撤回
   const b = botWith();
   await ab.handle(evOf(OWNER, [textSeg('帮我整理一下这个大目录')]), [textSeg('帮我整理一下这个大目录')], b);
-  check(calls.tasks.length === 1, '★ 先跑起来');
+  check(
+    calls.tasks.length === 1,
+    '★ 先跑起来',
+    `实际 ${calls.tasks.length} 次：${JSON.stringify(calls.tasks.map((x) => String(x).slice(0, 24)))}`,
+  );
   const b2 = botWith();
   const handled = await ab.handle(evOf(OWNER, [textSeg('/任务撤回')]), [textSeg('/任务撤回')], b2);
   check(handled === true, '★ 撤回指令被接管');
@@ -555,7 +568,7 @@ console.log('\n【15】★★ 做完的**文件**发进群（用户要的是那�
   b.uploads = [];
   // ⚠️ 桩掉 `call`（真的 `Bot#call` 会去连 OneBot，套件里连不上）
   b.call = async (action, params) => {
-    b.uploads.push({ action, params });
+    if (action === 'upload_group_file') b.uploads.push({ action, params });
     return { status: 'ok' };
   };
   // 桩：这次"agent"真往任务文件夹里放了几份东西 —— 一份该发、一份该被体积挡住、
@@ -603,8 +616,13 @@ console.log('\n【15】★★ 做完的**文件**发进群（用户要的是那�
   const calls2 = stubRunner();
   const b2 = botWith();
   b2.uploads = [];
+  // ⚠️ 2026-10-14 修（加了「她自己决定用电脑」之后这里稳定假红）：
+  //    这个桩原来把**任何** `bot.call` 都记进 `uploads` —— 而她的电脑现在起任务时会
+  //    调 `get_group_msg_history`（拉群聊记录给她读 ✓）⇒ 那次**根本不是上传**却被记成 upload
+  //    ⇒ 断言「没有产物 ⇒ 一次 upload 都没有」就假红 ✗
+  //    ⇒ 只记真正的上传（`upload_group_file`）—— 这条断言的本意也正是这个 ✓
   b2.call = async (action, params) => {
-    b2.uploads.push({ action, params });
+    if (action === 'upload_group_file') b2.uploads.push({ action, params });
     return { status: 'ok' };
   };
   await ab.handle(evOf(OWNER, [textSeg('帮我看看这个目录里有什么')]), [textSeg('帮我看看这个目录里有什么')], b2);
@@ -869,7 +887,11 @@ console.log('\n【20】★★ 活跑着的时候：只有**发起者**能对 age
   const t = '写一份爱音的简历';
   await ab.handle(evOf(OWNER, [textSeg(t)]), [textSeg(t)], b);
   await wait(40);
-  check(calls.tasks.length === 1, '★ 先跑起来');
+  check(
+    calls.tasks.length === 1,
+    '★ 先跑起来',
+    `实际 ${calls.tasks.length} 次：${JSON.stringify(calls.tasks.map((x) => String(x).slice(0, 24)))}`,
+  );
   ab.__setInterject(async () => 'stop');
   const b2 = botWith();
   const m2 = [textSeg('别写了')];
@@ -984,6 +1006,12 @@ console.log('\n【21】★★ 她说的每一句都要进**她自己的上下文
     '★★ 把她**最近刚说过的几句**贴进去（这一招最管用：那些说法这次不许照抄）',
   );
   check(/voiceImpl\('result', facts, \{ task, gid \}\)/.test(srcV), '★ 说话那层带上了群号（才取得到"最近刚说过的话"）');
+  // ⚠️ 2026-10-13 用户：「直接把 喏 这个语气词禁用吧」+「不够活人感」
+  check(/不许用「喏」/.test(srcV), '★★ 「喏」被点名禁用（他说得太频繁了）');
+  check(
+    /别把东西一样样念出来/.test(srcV) && /最多两句、四十字上下/.test(srcV),
+    '★★ 禁掉"顿号串成的清单"（那是说明书）+ 限长两句（原话：不够活人感）',
+  );
 
   // ⚠️ 2026-10-13 用户截图：「就在「2026-10-13 2220 做个你自己的简历」里，叫丰川祥子-简历.md」
   //    ⇒「这一段说在哪里的也不要写出来」—— 喂给她之前先把路径抹掉（提示词里也明令禁止）✓
@@ -1269,17 +1297,23 @@ console.log('\n【26】★★ 插话 = 立刻带上新要求接着做（且绝�
   ab.__setAside(async () => '');
   ab.__setVoice(async (kind, facts) => (kind === 'progress' ? '行，我加上。' : String(facts)));
   const runs = [];
+  let killer = null;
   ab.__setRunner((task, hooks) => {
     runs.push({ task: String(task), dir: String(hooks?.taskDir ?? '') });
+    // ⚠️ 产物要在"agent 还在跑的时候"写出来 —— 它收尾时才会去扫任务文件夹 ✓
+    try {
+      if (hooks?.taskDir) writeFileSync(join(String(hooks.taskDir), 'x.py'), 'print(1)\n', 'utf8');
+    } catch {}
     return {
+      // ⚠️ 第一轮**必须一直挂着**（不然插话时"手上没活"，根本走不到插话那条路 ✗）；
+      //    被 kill 时才 resolve（模拟"收掉这轮"）
       promise:
         runs.length === 1
           ? new Promise((r) => {
-              // 第一轮：一直挂着（等被插话收掉）
-              setTimeout(() => r({ code: 0, stdout: '第一版做好了', stderr: '', killed: true }), 60);
+              killer = () => r({ code: 0, stdout: '第一版做好了', stderr: '', killed: true });
             })
           : Promise.resolve({ code: 0, stdout: '红囍字也加上了', stderr: '', killed: false }),
-      kill: () => {},
+      kill: () => killer?.(),
     };
   });
   const b = botWith();
@@ -1313,6 +1347,251 @@ console.log('\n【26】★★ 插话 = 立刻带上新要求接着做（且绝�
   check(runs[1].dir === runs[0].dir, '★★ 复用同一个任务文件夹（产出的东西不散）');
   ab.__setVoice(async (kind, facts) => String(facts ?? ''));
   ab.__reset();
+}
+
+console.log('\n【27】★★ 她答不上来时，把问题转给 agent 再问一遍（模型判定）');
+{
+  ab.__reset();
+  ab.__setJudge(async () => ({ action: 'task', related: false })); // ⚠️ 第一轮"做个脚本"得能开跑
+  ab.__setAside(async () => '');
+  ab.__setVoice(async (k, f) => String(f ?? ''));
+  const runs = [];
+  ab.__setRunner((task, hooks) => {
+    runs.push({ task: String(task), dir: String(hooks?.taskDir ?? '') });
+    return {
+      promise: Promise.resolve({
+        code: 0,
+        stdout: runs.length === 1 ? '做好了：x.py，十页' : 'x.py 是跑数据用的，装了 Python 直接 python x.py',
+        stderr: '',
+        killed: false,
+      }),
+      kill: () => {},
+    };
+  });
+
+  // 先真做完一个活（这样才进任务历史）
+  const b1 = botWith();
+  const m1 = [atSeg(BOT), textSeg('帮我做个 x 的脚本')];
+  await ab.handle(evOf(OWNER, m1), m1, b1);
+  await wait(80);
+  check(runs.length === 1, '★ 先做完一个活');
+  check(!!ab.recentDoneTask(), '★ 任务历史里能取到"刚做完的那个"');
+  check(
+    /x\.py/.test(ab.recentDoneNote()),
+    '★★ 她的聊天上下文里会带上"最近做完的活 + 产物名"',
+    ab.recentDoneNote().split('\n').slice(-1)[0],
+  );
+
+  // 他问那个 py 怎么用 ⇒ 模型判定说"问" ⇒ 转给 agent 再问一遍
+  ab.__setJudge(async () => ''); // 这句是"问问题"，不是派活
+  ab.__setAskAgent(async () => ({ action: 'ask', question: '这个 py 文件怎么用' }));
+  const b2 = botWith();
+  const m2 = [atSeg(BOT), textSeg('这个 py 文件怎么用')];
+  const h2 = await ab.handle(evOf(OWNER, m2), m2, b2);
+  await wait(120);
+  check(h2 === true, '★★ 这句被接管（转去问 agent）');
+  check(runs.length === 2, '★★ **又跑了一轮 agent**', String(runs.length));
+  check(runs[1].dir === runs[0].dir, '★★ 复用同一个任务文件夹');
+  check(
+    String(runs[1]?.task ?? '').includes('追问') && String(runs[1]?.task ?? '').includes('别把整个活重做'),
+    '★★ 提示词里明说「只回答这个追问、别重做」',
+    String(runs[1]?.task ?? '').slice(0, 56),
+  );
+  check(
+    !b2.sent.some((s) => /哪个 py/.test(s.text)),
+    '★★ 不会再反问「哪个 py」（原现场就是这句）',
+    JSON.stringify(b2.sent.map((s) => s.text.slice(0, 16))),
+  );
+
+  // ⚠️ 判定说"不是" ⇒ 不碰（交回正常聊天）
+  ab.__reset();
+  ab.__setRunner(() => ({ promise: Promise.resolve({ code: 0, stdout: 'ok', stderr: '', killed: false }), kill: () => {} }));
+  const b3 = botWith();
+  const m3 = [atSeg(BOT), textSeg('帮我做个 y 的脚本')];
+  await ab.handle(evOf(OWNER, m3), m3, b3);
+  await wait(60);
+  ab.__setAskAgent(async () => ({ action: '', question: '' }));
+  const b4 = botWith();
+  const m4 = [atSeg(BOT), textSeg('今天天气不错')];
+  const h4 = await ab.handle(evOf(OWNER, m4), m4, b4);
+  check(h4 === false, '★★ 判定说"不是" ⇒ **不接管**（交回正常聊天）');
+  ab.__setAskAgent();
+  ab.__reset();
+}
+
+console.log(
+  '\n【28】★★ 长窗口的"活台账"（用户截图：他问「继续完善昨天的 PPT」，她答「我这边没留底诶」）',
+);
+{
+  // 真因：`recentDoneNote()` 只看**最近 6 小时** ⇒ 昨天做的活早出窗口，
+  //   她的上下文里一个字都没有 ⇒ 只能说"没留底"✗
+  //   （实测那条记录就在台账里：10-13 15:50「做一个爱音和素世结婚用的PPT」✓）
+  // ⇒ 新增 `taskLedgerNote()`：把**6 小时以外**、10 天以内的活列成一张短表。
+  ab.__reset();
+  ab.__setJudge(async () => ({ action: 'task', related: false }));
+  ab.__setAside(async () => '');
+  ab.__setVoice(async (k, f) => String(f ?? ''));
+  ab.__setRunner(() => ({
+    promise: Promise.resolve({ code: 0, stdout: '做好了：婚礼.pptx', stderr: '', killed: false }),
+    kill: () => {},
+  }));
+  const b = botWith();
+  const m = [atSeg(BOT), textSeg('做一个爱音和素世结婚用的PPT')];
+  await ab.handle(evOf(OWNER, m), m, b);
+  await wait(80);
+
+  // ① 刚做完的：由 `recentDoneNote` 负责，台账里**不该**再说一遍
+  check(!!ab.recentDoneTask(), '★ 先真做完一个活（进任务历史）');
+  check(
+    !ab.taskLedgerNote().includes('结婚'),
+    '★★ 刚做完（6 小时内）的活**不进**台账 —— 两条分工不重叠、同一件事不说两遍',
+  );
+
+  // ② 把"现在"往后推一天 ⇒ 同一条活落进台账（这就是"昨天的 PPT"能接上的原因）
+  const tmr = ab.taskLedgerNote({ now: Date.now() + 24 * 3600 * 1000 });
+  check(tmr.includes('结婚'), '★★ 一天前做完的活 → **台账里有**（她再也不会说"我这边没留底"）');
+  // ⚠️ 这条**不能**断言产物名：套件里的 runner 是 stub，**根本没真写文件** ⇒
+  //    `collectArtifacts()` 自然是空的（真实跑时产物名会进台账 ✓ 比如线上台账里那句
+  //    「做一个爱音和素世结婚用的PPT → 爱音素世婚礼.pptx」）。
+  //    改成断言**文件夹名里带着那次的原话关键词** —— 她照着就能指认是哪一份 ✓
+  check(/（文件夹：[^）]*结婚/.test(tmr), '★★ 文件夹名里带着那次的原话关键词（够她指认是哪一份了）');
+  check(/文件夹/.test(tmr), '★★ 连产物**文件夹名**一起给（要"接着弄"时知道在哪儿）');
+  check(/没留底|发来看看/.test(tmr), '★★ 明着禁止她说"我没留底 / 你说哪份 / 发来看看"');
+
+  // ③ 窗口之外（默认 10 天）⇒ 不再列（提示词不能无限长）
+  check(
+    !ab.taskLedgerNote({ now: Date.now() + 40 * 24 * 3600 * 1000 }).includes('结婚'),
+    '★ 超出窗口（默认 10 天）的不再列',
+  );
+
+  // ④ 上限：只列最近 `max` 条
+  const one = ab.taskLedgerNote({ now: Date.now() + 24 * 3600 * 1000, max: 1 });
+  check(one.split('\n').filter((l) => l.startsWith('· ')).length === 1, '★ max 生效（最多几条）');
+
+  ab.__setRunner();
+  ab.__reset();
+}
+
+console.log(
+  '\n【29】★★★ 她自己决定要不要动电脑（用户：「直接把 agent 设定为 **saki 自己的电脑**，' +
+    '由她自己决定什么时候该用电脑」）',
+);
+{
+  // 判据：有人跟她说话、而这句话"光靠聊天答不好、得动那台电脑" ⇒ **她自己上手** ✓
+  //   ⚠️ 这一路**不带两个空格** —— 那个前缀是"他派活、我确认"的标记，这里是她自己决定 ✓
+  ab.__reset();
+  ab.__setJudge(async () => ''); // 不是派活（派活那条路各走各的 ✓）
+  ab.__setAside(async () => '');
+  ab.__setVoice(async (k, f) => String(f ?? ''));
+  const runs = [];
+  ab.__setRunner((task, hooks) => {
+    runs.push({ task: String(task), dir: String(hooks?.taskDir ?? '') });
+    return { promise: Promise.resolve({ code: 0, stdout: 'ok', stderr: '', killed: false }), kill: () => {} };
+  });
+
+  // ① 判定说"要动电脑" ⇒ 她自己上手
+  ab.__setSelfUse(async () => ({ action: 'use', plan: '翻一下我昨天做的那个 PPT 还在不在' }));
+  const b1 = botWith();
+  const m1 = [atSeg(BOT), textSeg('昨天那个 PPT 你还留着吗')];
+  const h1 = await ab.handle(evOf(OWNER, m1), m1, b1);
+  await wait(80);
+  check(h1 === true, '★★ 这句被接管（她自己决定动电脑）');
+  check(runs.length === 1, '★★ **真的起了一次 agent**', String(runs.length));
+  check(
+    /昨天|翻一下/.test(String(runs[0]?.task ?? '')),
+    '★★ 交给 agent 的是「她打算干什么」',
+    String(runs[0]?.task ?? '').slice(0, 36),
+  );
+  check(
+    b1.sent.length > 0 && !String(b1.sent[0]?.text ?? '').startsWith('  '),
+    '★★ 她说那句**不带两个空格**（那是"他派活"的标记；这次是她自己动手）',
+    JSON.stringify(String(b1.sent[0]?.text ?? '').slice(0, 20)),
+  );
+
+  // ② 判定说"不用" ⇒ 一个字都不动（交回正常聊天）
+  ab.__reset();
+  ab.__setSelfUse(async () => ({ action: '', plan: '' }));
+  const b2 = botWith();
+  const m2 = [atSeg(BOT), textSeg('今天过得怎么样')];
+  const h2 = await ab.handle(evOf(OWNER, m2), m2, b2);
+  check(h2 === false, '★★ 判定说"不用" ⇒ 不接管（交回正常聊天）');
+  check(runs.length === 1, '★★ 而且**没有再起 agent**', String(runs.length));
+
+  // ③ **明确派活那条路不受它管** —— 照旧走「要 @ 她 + 要确认」那套（规矩一个字不改）
+  ab.__reset();
+  ab.__setJudge(async () => ({ action: 'task', related: false }));
+  ab.__setSelfUse(async () => ({ action: 'use', plan: '不该走到这里' }));
+  const b3 = botWith();
+  const m3 = [atSeg(BOT), textSeg('帮我做个 PPT')];
+  await ab.handle(evOf(OWNER, m3), m3, b3);
+  await wait(60);
+  check(
+    b3.sent.some((s) => String(s.text ?? '').startsWith('  ')),
+    '★★ 派活那条路照旧带两个空格（"他派活"的规矩没被这条新路改掉）',
+  );
+  check(runs.length === 2, '★ 派活也照样起了 agent', String(runs.length));
+
+  ab.__setSelfUse();
+  ab.__setJudge();
+  ab.__setRunner();
+  ab.__reset();
+}
+
+console.log(
+  '\n【30】★★★ 发进群的话不许提「位置 / 电脑」' +
+    '（用户：「我不需要文件在哪里，因为我自己找得到，别人就更不需要了，因为电脑不是他的」）',
+);
+{
+  const f = ab.desensitizeForGroup;
+  check(typeof f === 'function', '有这道「去位置化」的口子（它挂在唯一出口 taskSay 上）');
+  check(!/工作区/.test(f('东西都在工作区的那个文件夹里')), '「工作区 / 文件夹」被抹掉');
+  check(!/C:\\/.test(f('放在 C:\\Users\\<主人>\\OneDrive\\x 里')), '绝对路径被抹掉');
+  check(!/文件夹/.test(f('还有两个没发出来（进群文件夹 /abc-123）')), '「（进群文件夹 xxx）」整段抹掉');
+  check(!/电脑/.test(f('我电脑上存着呢')), '「电脑」也换成人话');
+  check(!/[（(]\s*[）)]/.test(f('这些都没发出来（文件夹 abc）')), '抹完不留空括号');
+  // ⚠️ 正常的话必须**原样**活下来（这道口子只去位置，不改内容）
+  const keeps = '弄好了，配图我画了两张，先看着别嫌土';
+  check(f(keeps) === keeps, '正常的话一个字不动', JSON.stringify(f(keeps)));
+  check(f('行，那个我停了（').startsWith('行，那个我停了'), '她的话照旧（只去位置，不改语义）');
+}
+
+console.log(
+  '\n【31】★★★ 重启不要断掉正在跑的活（用户：「以后重启不要断掉之前的任务，要自动恢复」）',
+);
+{
+  const src = readFileSync(join(ROOT, 'src', 'agent-bridge.js'), 'utf8');
+  check(typeof ab.resumePending === 'function', '导出了 resumePending（由 bot 连上之后调）');
+  check(
+    /state\.resume = \{ \.\.\.state\.running, resumeAt: Date\.now\(\) \}/.test(src),
+    '★★ 启动时不再**直接清掉**"正在跑"，而是记进 state.resume',
+  );
+  check(
+    /resumePending/.test(readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8')),
+    '★★ bot 连上之后会去调它（不然记下来也没人接着做）',
+  );
+  // ⚠️ 行为级：真的"接着做"这件事由**下次真重启**验证（套件里没法重启进程）——
+  //    这里只把三条接线钉住，别让谁哪天把它删了 ✓
+  check(
+    /reuseDir: String\(r\.dir \?\? ''\)/.test(src),
+    '★★ 恢复时复用**同一个任务文件夹**（它先读 这个活的对话.md 就知道上一轮做到哪儿）',
+  );
+
+  ab.__reset();
+}
+
+console.log('\n【32】★★★ 快判别把「帮我找点图 / 搜点东西」漏掉（真实漏判一次）');
+{
+  // 现场：他 @她 说「帮我找点爱祥的图发过来」—— 词表里没有"找/搜" ⇒ 快判说"不是派活"
+  //   ⇒ 任务桥不接 ⇒ 她**自己用生图画了一张**（群里那句「行行行，我画。就这一张啊」）✗
+  const T = (t, atMe = true) => ab.looksLikeTask(t, { atMe });
+  check(T('帮我找点爱祥的图发过来') === true, '★★ 「帮我找点爱祥的图发过来」→ 像派活（原来漏）');
+  check(T('搜一下今年的赛程') === true, '★ 「搜一下…」→ 像派活');
+  check(T('把配图换成网上的') === true, '★ 「换配图」→ 像派活');
+  check(T('帮我挑一张好看的封面') === true, '★ 「帮我挑…」→ 像派活');
+  check(T('下载一份官方立绘') === true, '★ 「下载…」→ 像派活');
+  // ⚠️ 放宽不等于乱接：**模型判定**还在后面兜着（这里只验快判不把它放进来的那些）
+  check(T('今天天气不错') === false, '★ 纯闲聊 → 不像（照旧别接）');
+  check(T('我这两天在改论文', false) === false, '★ 没 @ 她 + 说的是他自己 → 不像');
 }
 
 try {

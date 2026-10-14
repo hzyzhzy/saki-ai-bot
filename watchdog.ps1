@@ -99,7 +99,18 @@ function Test-BotForQQ {
   try {
     $j = Get-Content -LiteralPath $lock -Raw -ErrorAction Stop | ConvertFrom-Json
     $procId = [int]$j.pid
-    if (-not (Get-Process -Id $procId -ErrorAction SilentlyContinue)) { return $false }
+    $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue
+    if (-not $proc) { return $false }
+    # ⚠️⚠️⚠️ 2026-10-13 修（**真事故**：主号掉了半个多小时，看门狗一次都没补）：
+    #    pid 是会被**复用**的 —— 光看"这个 PID 还活着"，会把**别的号**的进程当成它在跑。
+    #    实测现场：主号的锁里记着 15872，而爱音 23:54 新起的进程**正好也拿到 15872**
+    #    ⇒ 这里判"在跑" + 锁文件 4 分钟前写过（< 300 秒）⇒ **永远不补** ✗
+    #    ⇒ 再核一条：**进程的启动时间不能比锁里记的启动时间晚**（晚 5 秒以上就是复用）
+    try {
+      $startedMs = [DateTimeOffset]::new($proc.StartTime).ToUnixTimeMilliseconds()
+      $lockMs = [long]$j.startedAtMs
+      if ($lockMs -gt 0 -and $startedMs -gt ($lockMs + 5000)) { return $false }
+    } catch { }
     $age = ((Get-Date) - (Get-Item -LiteralPath $lock).LastWriteTime).TotalSeconds
     return ($age -lt 300)
   } catch {

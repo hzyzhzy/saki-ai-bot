@@ -729,7 +729,7 @@ const AGENT_TASKS_HTML = [
   'pre{white-space:pre-wrap;word-break:break-word;margin:4px 0;font:inherit}',
   '</style></head><body><div class="wrap">',
   '<h1>本机任务</h1>',
-  '<div class="hint">点一条看那次她到底在做什么（15 秒自动刷新）</div>',
+  '<div class="hint">点一条看那次她到底在做什么 ｜ <a href="#" id="rf" style="color:#79c0ff">刷新</a>（有更新会自动刷）</div>',
   '<div id="list">加载中…</div>',
   '</div><script>',
   'function esc(s){return String(s==null?"":s).replace(/[&<>]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;"}[c]})}',
@@ -764,7 +764,11 @@ const AGENT_TASKS_HTML = [
   '    }).join("");',
   '  }catch(e){box.textContent="出错："+e.message}',
   '}',
-  'load();setInterval(load,15000);',
+  'load();',
+  'document.getElementById("rf").addEventListener("click",function(e){e.preventDefault();load()});',
+  '// ⚠️ 2026-10-13：不再定时轮询 —— 服务端在任务有变化时用 SSE 推一下（断了自己会重连）',
+  'try{var es=new EventSource("/agent-tasks/stream");es.addEventListener("change",function(){load()});',
+  'es.addEventListener("open",function(){/* 连上了 */});}catch(e){}',
   '</script></body></html>',
 ].join('\n');
 
@@ -1957,6 +1961,46 @@ const routes = {
    * ⚠️ 2026-09-15 晚加：收紧度按群之后，界面上那个下拉框需要"选中群现在是什么值"。
    *    这里**故意不校验档位**（只是读，界面不该因为不是 1 档群就报错）。
    */
+  /** ⚠️⚠️ 2026-10-13 加（用户：「15 秒刷新改成**对话有更新时刷新**吧」）：
+   *  任务页不再定时轮询 —— 服务端推送（SSE）：任务一开始/结束/产物发了/在问话，都会推一下 ✓
+   *  ⚠️ 这是**长连接**：必须把 socket 的超时关掉，不然被服务端掐掉 ✗ */
+  'GET /agent-tasks/stream': async (req, res) => {
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+    try {
+      req.socket?.setTimeout?.(0);
+      res.socket?.setTimeout?.(0);
+    } catch {}
+    res.write(': connected\n\n');
+    const ab = await import('./agent-bridge.js');
+    const off = ab.onTaskChange(() => {
+      try {
+        res.write('event: change\ndata: {}\n\n');
+      } catch {}
+    });
+    // ⚠️ 心跳：中间可能有代理/防火墙，久了不发东西会被断
+    const hb = setInterval(() => {
+      try {
+        res.write(': ping\n\n');
+      } catch {}
+    }, 25000);
+    const bye = () => {
+      clearInterval(hb);
+      try {
+        off();
+      } catch {}
+      try {
+        res.end();
+      } catch {}
+    };
+    req.on('close', bye);
+    req.on('error', bye);
+  },
+
   'GET /agent-tasks': async (_req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(AGENT_TASKS_HTML);
@@ -2445,6 +2489,78 @@ const routes = {
       peerChat.note(gid, peer);
       log.info(`管理界面手动触发同类搭话 → 群 ${gid}，@「${peerName}」：「${text}」`);
       send(res, 200, { ok: true, gid, peer, name: peerName, text });
+    } catch (e) {
+      send(res, 200, { ok: false, error: e.message });
+    }
+  },
+
+  /**
+   * ⚠️ 2026-10-14 加（用户：「**现在直接补回刚才的消息**」）：
+   *   **把一条消息当成"刚收到"投给她** —— 走的是正常的 `handle()` 那条路，
+   *   她自己判断、自己回，跟真收到一样。
+   *
+   * 为什么需要它：一条"被闸拦掉 / 被重启打断"的消息，想补回来本来只有两条路，都不行 ——
+   *   · `catchUpMissed()`：只认**上线前 10 分钟**的消息，而且被 `recent` / `handled`
+   *     两道去重挡着 —— 而那条消息在线时**已经被收进群聊上下文了**
+   *     ⇒ 补看永远不认它（去重命中）✗
+   *   · 界面上的「立刻试一次」：那是让她**主动**找同类搭话（内容由模型另生成），
+   *     不是"回应刚才那条"✗（实测生成的是「最近排练累不累啊」这种开场白）
+   * ⇒ 这个是第三种：**原样重放一条群消息** ✓
+   *
+   * ⚠️ 它会在群里**真的发**一条回复（跟"手动触发同类搭话"同一性质，
+   *    不可逆），所以只给本机诊断用，不做任何自动调用 ✓
+   * ⚠️ `at !== false` 时会在消息前面加一个"@她"的段 —— 模拟"别人点名她"。
+   */
+  'POST /api/replay-message': async (req, res) => {
+    if (!bot?.selfId) return send(res, 200, { ok: false, error: 'QQ 没在线' });
+    let b = {};
+    try {
+      b = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+    } catch {}
+    const gid = String(b.groupId ?? '').trim();
+    const uid = String(b.userId ?? '').trim();
+    const text = String(b.text ?? '').trim();
+    if (!gid || !uid || !text) {
+      return send(res, 200, { ok: false, error: '要 groupId / userId / text 三个都填' });
+    }
+    const name = String(b.name ?? '').trim() || names.of(uid, gid) || uid;
+    const at = b.at !== false;
+    const ev = {
+      post_type: 'message',
+      message_type: 'group',
+      group_id: Number(gid),
+      user_id: Number(uid),
+      self_id: bot.selfId,
+      message_id: Date.now(),
+      time: Math.floor(Date.now() / 1000),
+      raw_message: text,
+      sender: { user_id: Number(uid), nickname: name, card: name, role: 'member' },
+      message: at
+        ? [
+            { type: 'at', data: { qq: String(bot.selfId) } },
+            { type: 'text', data: { text } },
+          ]
+        : [{ type: 'text', data: { text } }],
+    };
+    log.info(
+      `管理界面重放一条消息 → 群 ${gid}，来自「${name}」（${uid}）` +
+        `${at ? '（带 @ 她）' : '（不带 @）'}：「${text}」`,
+    );
+    try {
+      // ⚠️⚠️⚠️ 2026-10-14 修（真实事故：重放「继续」时**任务桥根本没收到那条消息**，
+      //    她只当闲聊回了一句、压根没开工 ✗）：
+      //    任务桥（`agentBridge.handle`）是在 **`onMessage`（真实消息入口）** 里接的，
+      //    而这里原来只调了 `bot.handle()` ⇒ 重放的消息**跳过了任务桥** ✗
+      //    ⇒ 重放必须走**和真实消息一样的那条路**：先任务桥，它不接管才交给聊天 ✓
+      const { toSegments } = await import('./message.js');
+      const segs = toSegments(ev.message);
+      const ab = await import('./agent-bridge.js');
+      if (await ab.handle(ev, segs, bot)) {
+        log.info('（这条被任务桥接管了 —— 重放走的是和真实消息一样的路）');
+        return send(res, 200, { ok: true, gid, uid, name, at, handled: 'task' });
+      }
+      await bot.handle(ev);
+      send(res, 200, { ok: true, gid, uid, name, at });
     } catch (e) {
       send(res, 200, { ok: false, error: e.message });
     }

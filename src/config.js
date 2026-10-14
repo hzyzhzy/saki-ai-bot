@@ -472,6 +472,20 @@ const DEFAULTS = {
      * ⚠️ 设成 `false` 就回到老行为：不带 @ 的祈使句也算派活（那种容易把群里的闲聊误接成任务）✗
      */
     requireAt: true,
+    /**
+     * ⚠️⚠️ 2026-10-14 加（用户原话：「**直接把 agent 设定为 saki 自己的电脑**，
+     *    由**她自己决定**什么时候该用电脑、该去读那一段对话或者**直接发送消息到对话**」）。
+     *
+     * `true`（默认）= **她自己决定要不要动电脑**：有人跟她说话、而这句话"光靠聊天答不好、
+     *   得动那台电脑"（查文件/跑一下/写一份/翻以前的活…）⇒ 她自己上手去动
+     *   （判定由模型做，见 `agent-bridge.js` 的 `judgeSelfUse()`）。
+     * ⚠️ **明确派活那条路不受它管** —— 那条照旧要 @ 她 + 要确认（`requireAt` 那套一个字不改）✓
+     * ⚠️ 代价：**每轮她准备回话时多一次小模型调用**（约 1 秒 / 极便宜）—— 用户 2026-10-14 已确认接受。
+     * 设成 `false` = 退回老行为：只有他派活才动电脑（她不会自己动手）。
+     */
+    selfUse: true,
+    /** 她自己动手的冷却（默认 90 秒；防止一句话里连开好几次电脑） */
+    selfUseCooldownMs: 90000,
     /** 每天最多几个任务（每次都是一次真实模型调用，会花钱；**0 = 不限次数**） */
     maxPerDay: 3,
     /** 除了主人，还允许谁**直接**开始任务（默认空 = 只有主人） */
@@ -792,6 +806,35 @@ function load() {
   const priv = privateSectionsOnly(acct.private);
   if (priv.body) cfg = merge(cfg, priv.body);
   cfg.__account = { ...acct, ignoredPrivate: priv.ignored };
+
+  // ── ⚠️⚠️ 2026-10-14 加（用户要求：「**非主号默认不开日常事件**」）──────────
+  //
+  //   日常事件是**主号那条人设线**的功能（"她今天遇到的一件小事"），
+  //   而 `config.yml` 里那份 `life` / `groupParams.*.life` 是**主号配的**。
+  //   原来非主号会**照样继承** ⇒ 新加一个号（爱音那类群友号）就自动开始在群里
+  //   发日常事件 ✗
+  //
+  //   ⇒ 非主号**一律不继承**：只有它自己在 `accounts/<QQ>.yml` 里写过的才算 ——
+  //     没写 = 关。要开就在那个文件里显式写 `life: { enable: true }`
+  //     （或者按群 `groupParams.<群>.life.enable: true`）；
+  //     界面「按群设定」保存的**就是那个文件** ⇒ 想给某个号按群开，走界面就行 ✓
+  //
+  //   ⚠️ 为什么写在 `load()` 里、而不是 `paramsFor()` 里：
+  //     `paramsFor()` 若去读 `ACCOUNT.private`，拿到的是**启动那一刻的快照**，
+  //     而 `reloadConfig()` 只换顶层键、`ACCOUNT` 这个 `const` 不跟着更新 ⇒
+  //     界面上把开关打开，它**看不见**（实测被 `test/accounts.js` 的【9】抓到 ✗）
+  //     ⇒ 在这里按"刚读进来的这份 `acct`"算，热重载自然就是对的 ✓
+  //   ⚠️ 只动 `enable` 这一个键：条数 / 时段 / 冷却这些参数该继承还是继承 ✓
+  //   ⚠️ 主号一个字都不变（`acct.isMain` 为真时整段跳过）✓
+  if (!acct.isMain) {
+    const own = acct.private && typeof acct.private === 'object' ? acct.private : {};
+    const ownGroups = own.groupParams && typeof own.groupParams === 'object' ? own.groupParams : {};
+    cfg.life = { ...(cfg.life ?? {}), enable: own.life?.enable === true };
+    for (const [g, v] of Object.entries(cfg.groupParams ?? {})) {
+      if (!v || typeof v !== 'object' || !v.life) continue;
+      v.life = { ...v.life, enable: ownGroups[g]?.life?.enable === true };
+    }
+  }
 
   // ⚠️ 2026-09-13：把**用户显式写过的配置**记下来，给「收紧度」滑块用。
   //    滑块只在用户**没手写**那一项时接管它 —— 否则用户手调的值会被悄悄覆盖，
@@ -1825,6 +1868,11 @@ export const DEFAULT_QUEST = {
  * ⚠️ 只覆盖**写了的**那几项，没写的跟着内置默认走。
  * ⚠️ `groupId` 给空/给不出 → 只用内置默认（老调用点、私聊、模拟面板都走这条）。
  * ⚠️ 返回的是**新对象**（浅合并），别拿它去改 —— 改了不会落盘。
+ *
+ * ⚠️ 「**非主号默认不开日常事件**」那道闸**不在这里**，在 `load()` 里 ——
+ *    这里读 `ACCOUNT.private` 拿到的是**启动那一刻的快照**，
+ *    界面上把开关打开它会看不见（`reloadConfig()` 只换顶层键，
+ *    `ACCOUNT` 这个 const 不跟着更新）。写在 `load()` 里热重载才是对的。
  *
  * @param {'life'|'quest'|string} kind
  * @param {string|number} [groupId]

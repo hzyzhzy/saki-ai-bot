@@ -374,13 +374,33 @@ async function main() {
   check(ok, '机器人已连接');
   if (!ok) return;
 
-  console.log('[2] 非白名单群应该被完全忽略');
+  console.log('[2] 非白名单群：**不带 @** ⇒ 完全忽略');
   const beforeOther = sentTexts().length;
   const callsBeforeOther = llmCalls.length;
-  pushGroupMsg(OTHER_GROUP, '有人在线吗', true, 1001, '30001');
+  // ⚠️ 2026-10-14 改：这一条原来是 `true`（**@ 她**）—— 而白名单现在的规矩是
+  //    「**点名 @ 她一律放行**」（见下面 [2b]），所以"其他群完全忽略"这句
+  //    只能用**不带 @** 的闲聊来表达 ✓
+  pushGroupMsg(OTHER_GROUP, '有人在线吗', false, 1001, '30001');
   await sleep(3000);
-  check(sentTexts().length === beforeOther, '其他群里没有回复');
+  check(sentTexts().length === beforeOther, '其他群里没有回复（不带 @ 的闲聊）');
   check(llmCalls.length === callsBeforeOther, '其他群没有触发模型调用（连查都没查）');
+
+  // ⚠️⚠️ 2026-10-14 加（用户：「**@ 不应该直接跳过所有闸来回复吗**」＋
+  //    「除非在不同类机器人名单」）：
+  //    白名单原来**连 @ 她**都拦（消息在入口就被 return 掉了）⇒ 别的群里点名叫她，
+  //    她连"听到"都做不到 ✗（现场：爱音在一个没进主号白名单的群里 @ 主号，
+  //    主号日志只剩一行「不在 allowGroups 白名单里 → 这条（@ 了她）被忽略了」）
+  //    ⇒ 改成：**点名 @ 她一律放行**。⚠️ 只是"被 @ 才回"，
+  //      她**不会**在那个群主动搭话（主动搭话仍然只认白名单）✓
+  console.log('[2b] 非白名单群：**@ 她** ⇒ 会回（2026-10-14 用户定）');
+  const beforeAtOther = sentTexts().length;
+  pushGroupMsg(OTHER_GROUP, '有人在线吗', true, 1004, '30004');
+  const repliedInOther = await waitFor(
+    () => sentTexts().length > beforeAtOther,
+    12000,
+    '非白名单群里被 @ 之后的回复',
+  );
+  check(repliedInOther, '★ 别的群点名 @ 她 → 她回了（白名单不再拦"被点名"）');
 
   console.log('[3] 客服群未 @ 时也应该沉默');
   const beforeNoAt = sentTexts().length;
@@ -390,8 +410,15 @@ async function main() {
 
   console.log('[4] @ 客服问新人问题 → 知识库应被注入');
   pushGroupMsg(WORK_GROUP, '新人应该怎么安装这个整合包？', true, 1003, '30003');
-  const got = await waitFor(() => sentTexts().includes('好的，我来帮您'), 15000, '客服回复');
-  check(got, '客服在客服群里回复了');
+  // ⚠️ 2026-10-14 改（加了 [2b] 之后这里**稳定假红**）：
+  //    原来等的是 `sentTexts().includes('好的，我来帮您')` —— 而 [2b]（别的群里 @ 她）
+  //    拿到的**也是同一句假模型模板话术** ⇒ 这个条件在 [4] 的请求发出**之前**
+  //    就已经成立 ⇒ 紧接着断言 `sysPrompt`，抓到的还是空探针（0 字）✗
+  //    ⇒ 改成直接等**我要的那条请求**到达假模型 —— 这正是 AGENTS 里那条教训：
+  //      `waitFor` 的条件必须指向你要的那一条请求，别用"某句话出现过"这种
+  //      会被上一步满足的条件 ✓
+  const got = await waitFor(() => !!chatFor('新人应该怎么安装'), 15000, '客服那条请求到达假模型');
+  check(got, '客服在客服群里回复了（而且真的走了模型）');
 
   const sysPrompt = chatFor('新人应该怎么安装')?.sys ?? '';
   if (process.env.CS_DEBUG) {

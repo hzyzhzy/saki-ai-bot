@@ -43,6 +43,19 @@ const ISOLATED = {
   QQBOT_TIC_FILE: 'logs/__snap-tic.json',
   QQBOT_MEAL_FILE: 'logs/__snap-meal.json',
   QQBOT_WHERE_FILE: 'logs/__snap-where.json',
+  // ⚠️⚠️ 2026-10-14 加（踩到了）：**agent 的任务台账也要隔离** ——
+  //    提示词末尾那两段（「你最近做完的活」「你以前做过的活」）是**运行态**，
+  //    直接读 `state/agent-tasks.json` ⇒ 她一做活，快照就变 ✗
+  //    （实测：刚跑完那个婚礼 PPT，复跑快照立刻 1 项失败 ✗）
+  //    ⇒ 隔离成一个不存在的文件 ⇒ 那两段为空、快照只盯"人设本身" ✓
+  //    （那两段的行为由 `test/agent-bridge.js` 的【28】管着 ✓）
+  QQBOT_AGENT_TASKS_FILE: 'logs/__snap-agent-tasks.json',
+  QQBOT_AGENT_FILE: 'logs/__snap-agent.json',
+  // ⚠️⚠️ 2026-10-14 又踩：`run-all.js` 会给**所有**套件注入 `QQBOT_AGENT=off`
+  //    （免得不小心真起 agent）⇒ 而这个套件里我手动跑时是 on、run-all 跑时是 off
+  //    ⇒ 提示词里「🖥️ 你自己有一台电脑」那一段时有时无 ⇒ **手动存完基线、进回归就红** ✗
+  //    ⇒ 这里显式钉成 on（本套件只拼提示词，不会真起 agent ✓ 和 test/agent-bridge.js 同一手法）
+  QQBOT_AGENT: 'on',
   QQBOT_REMIND_FILE: 'logs/__snap-remind.json',
   QQBOT_MAMA_FILE: 'logs/__snap-mama.json',
   QQBOT_SPEND_FILE: 'logs/__snap-spend.json',

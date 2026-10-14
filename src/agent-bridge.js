@@ -41,10 +41,17 @@
  */
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { dirname, extname, join } from 'node:path';
 import { config, ROOT, stateDir } from './config.js';
 import { log } from './log.js';
+// ⚠️⚠️ 2026-10-14 加（用户：「该去**读那一段对话**」）：要给 agent 带上"群里刚才那些话"。
+//    ⚠️ 必须**静态 import**（同步取）—— `startRun` 是**不等它**被调的
+//    （调用方 `startRun(...).catch(...)` 不 await），多一个 `await import` 就会让
+//    `runnerImpl` 慢一拍被调 ⇒ 套件里当场抓到「先跑起来 实际 0 次」✗
+//    （真机上的表现是"她说完那句之后愣一下才动手"）
+//    ⚠️ `recent.js` 不 import 本文件 ⇒ 不会成环 ✓
+import * as recentStore from './recent.js';
 
 const FILE = process.env.QQBOT_AGENT_FILE
   ? join(ROOT, process.env.QQBOT_AGENT_FILE)
@@ -78,9 +85,29 @@ function saveHist() {
     log.debug(`[任务] 历史写不进去：${e.message}`);
   }
 }
+/**
+ * ⚠️⚠️ 2026-10-13 加（用户：「**15 秒刷新改成对话有更新时刷新吧**」）：
+ * 任务页不再定时轮询 —— 由这里在**任务真的变了**的时候通知它（SSE 推送 ✓）。
+ * @param {() => void} fn
+ * @returns {() => void} 退订
+ */
+const histListeners = new Set();
+export function onTaskChange(fn) {
+  if (typeof fn === 'function') histListeners.add(fn);
+  return () => histListeners.delete(fn);
+}
+function notifyTaskChange() {
+  for (const fn of [...histListeners]) {
+    try {
+      fn();
+    } catch {}
+  }
+}
+
 function addHist(rec) {
   hist.tasks.push(rec);
   saveHist();
+  notifyTaskChange();
   return rec;
 }
 function updHist(id, patch) {
@@ -88,6 +115,7 @@ function updHist(id, patch) {
   if (t) {
     Object.assign(t, patch);
     saveHist();
+    notifyTaskChange();
   }
 }
 /** 任务历史（**新的在前**；管理界面那页用的就是它） */
@@ -186,6 +214,12 @@ export const CONFIRM_PREFIX = '  ';
 export function enabled() {
   const env = String(process.env.QQBOT_AGENT ?? '').trim().toLowerCase();
   if (env === '0' || env === 'off' || env === 'false') return false;
+  // ⚠️⚠️ 2026-10-14 加：**显式 `on` 就直接开**（原来只认"off"，`on` 还要 config 里也是 true ✗）
+  //    踩到的：`test/prompt-snapshot.js` 为了"手动跑和 run-all 跑一致"，显式钉了
+  //    `QQBOT_AGENT=on` —— 可套件的测试配置里没有 `agent.enable` ⇒ 照样是 false ⇒
+  //    提示词里「🖥️ 你自己有一台电脑」那段时有时无 ⇒ 手存基线、进回归就红 ✗
+  //    ⇒ "环境变量优先"这条规矩本来就该两头都认 ✓
+  if (env === '1' || env === 'on' || env === 'true') return true;
   return cfg().enable === true;
 }
 
@@ -292,10 +326,28 @@ load();
 //    ⇒ 启动时**直接清掉**：跨进程的"正在跑"没有任何意义 ✓
 if (state.running) {
   const t = String(state.running.task ?? '').slice(0, 40);
-  log.warn(`[任务] 启动时发现上个进程留下的"正在跑"（${t}）→ 清掉（它对应的进程已经没了）`);
+  // ⚠️⚠️⚠️ 2026-10-14 改（用户：「**以后重启不要断掉之前的任务，要自动恢复**」）：
+  //    原来是**直接清掉** ✗ ⇒ 那个活就**永远没了**（她甚至会在群里自己编个理由 ✗）
+  //    ⇒ 现在把它记进 `state.resume`：等机器人连上之后由 `resumePending()` **接着做完** ✓
+  //      （复用同一个任务文件夹 ⇒ 它先读 `这个活的对话.md` 就知道上一轮做到哪儿 ✓）
+  log.warn(`[任务] 启动时发现上个进程留下的"正在跑"（${t}）→ **排队等着自动接着做**（用户要求：重启不要断掉）`);
+  state.resume = { ...state.running, resumeAt: Date.now() };
   state.running = null;
   save();
 }
+// ⚠️ 2026-10-14：任务历史里那条"正在跑"也要**标成被打断** ——
+//    不然任务页上它**永远显示 running** ✗（用户截图问过：「为什么没有显示的」）
+try {
+  let changed = false;
+  for (const t of hist.tasks) {
+    if (t && t.status === 'running') {
+      t.status = 'killed';
+      t.endedAt = Number(t.endedAt) || Date.now();
+      changed = true;
+    }
+  }
+  if (changed) saveHist();
+} catch {}
 
 /** 测试用：把状态清干净 */
 export function __reset() {
@@ -308,6 +360,7 @@ export function __reset() {
     handled: [],
     folders: {},
     continues: {},
+    resume: null,
     queuedExtra: {},
   };
   save();
@@ -347,7 +400,13 @@ export function looksLikeTask(text, { atMe = false } = {}) {
   const atText = t !== rawT; // 开头 @ 过谁（含 @ 她 —— 纯文本形态的 @）—— 只用于"剥掉之后还能不能判"
   void atText;
   if (!t || t.length < 4) return false;
-  const verb = /(弄|做|写|改|整理|汇总|跑|运行|查|看看|分析|生成|翻译|下载|修|搞定|处理)/;
+  // ⚠️⚠️ 2026-10-14 补词（真实漏判：他 @她 说「**帮我找点爱祥的图发过来**」——
+  //    这个词表里**没有"找/搜"** ⇒ 快判说"不是派活" ⇒ 任务桥压根不接 ✗
+  //    她于是自己用生图能力画了一张（群里那句「行行行，我画。就这一张啊」）✗
+  //    ⇒ 补上 找 / 搜 / 下 / 挑 / 选 / 换 这些**一看就是让她动手查东西**的词 ✓
+  //    ⚠️ 放宽快判是安全的：后面还有一次**模型判定**（`judgeIntent`）兜着 ——
+  //      他 @她 说「我这两天在改论文」这种，模型会回"无"，不会真去开活 ✓
+  const verb = /(弄|做|写|改|整理|汇总|跑|运行|查|找|搜|下|挑|选|换|看看|分析|生成|翻译|下载|修|搞定|处理)/;
   if (/(帮我|帮忙|替我|你去|给我)/.test(t) && verb.test(t)) return true;
   // ⚠️⚠️ 光"正文里剥掉了一个 @"**不能**当成"@ 的是她"（2026-10-13：有人 @Anon，saki 把活抢了 ✗）
   //    —— 到底叫的是谁，由**调用方**用 bot 那套名字表判好、经 `atMe` 传进来 ✓
@@ -454,7 +513,7 @@ export async function voiceize(kind, facts, { task = '', gid = '', timeoutMs = 1
     //    现在只说"阶段"，不给句式 ✓
     start: '他让你干的那件事，你**现在开始动手**了。这就是一句话的事：让他知道你去做。',
     progress: '这是**过程中的一步**（不是结果）—— 一句话报个进度就行，别展开。**别把刚说过的再重复一遍**。',
-    result: '这是**干完之后**跟他说的话：成了没成、东西叫什么。',
+    result: '这是**干完之后**跟他说的话：成了没成、东西叫什么。**只挑一两样最要紧的说**（别念清单、别报参数），其余他会自己看文件。',
     clarify: '你觉得他那句话**没说清**，**反问他一句**（只问最关键的那个缺项，别一口气问三个）。',
   }[kind];
   const system = [
@@ -469,6 +528,9 @@ export async function voiceize(kind, facts, { task = '', gid = '', timeoutMs = 1
     //    所以我现在正新建一个副本准备往里写」）：「**不要说任务文件夹里有什么东西**」
     '- 🚫 **不许交代你翻到了什么、目录里有什么、有没有现成的底稿**（「里面基本都是文档处理的」「没现成的模板」「新建了一个副本」这种话一律不许有）—— 群里不关心这个过程；',
     '- 🚫 也别提"任务文件夹""工作区""工具""agent"这些词；',
+    // ⚠️ 2026-10-14（用户截图：她开工那句末尾带了个 🎀）：群里她**不发 emoji**
+    //    （要发图就走表情包那一套，那是另一条路）⇒ 一个 emoji 都不许出现 ✓
+    '- 🚫 **不要用 emoji / 表情符号**（🎀 ✨ 😊 👍 这种一个都别出现）；',
     // ⚠️⚠️ 2026-10-13 用户截图：「就在「2026-10-13 2220 做个你自己的简历」里，叫丰川祥子-简历.md」
     //    ⇒ 「**这一段说在哪里的也不要写出来**」——东西已经发到群里了，报路径只会显得啰嗦 ✓
     '- 🚫 **不要交代东西放在哪个文件夹 / 目录 / 路径**（「就在「…」文件夹里」这种一律不许有）——',
@@ -480,6 +542,15 @@ export async function voiceize(kind, facts, { task = '', gid = '', timeoutMs = 1
     '- 🚫 **别每次都用同一个开场、同一套结构**（「这就去给你整…」「行，我这就去弄」「做好了，叫 X，已经发群里了」'
       + '这种模板腔一律不要）；',
     '- 🚫 尤其**别用「这就」这个词**（最近几乎每句开工都是它，用滥了）；',
+    // ⚠️⚠️ 2026-10-13 用户：「直接把 **喏** 这个语气词禁用吧」
+    '- 🚫 也**不许用「喏」**这个词；',
+    // ⚠️⚠️ 2026-10-13 用户：「这个还需要润色一下，不够活人感」——
+    //    现场那条是：「喏，爱音素世婚礼.pptx，九页十六比九，奶油粉配深莓，封面、她俩各一页、
+    //    从凑队到今天的节点、当天流程、来宾名单、司仪稿……」
+    //    ⇒ **一样样念出来 = 说明书，不是说话** ✗
+    '- 🚫 **别把东西一样样念出来**（「封面、她俩各一页、流程、名单、司仪稿…」这种顿号串成的清单 ✗）',
+    '  —— 挑**一两样最要紧的**说就行，其余的他自己会去看那个文件；',
+    '- ✅ **最多两句、四十字上下**（群里说话就该短；说多了没人看）；',
     '- ✅ 句子**长短、情绪、开头**都换着来，比如：可以懒（"行吧"）、可以敷衍（"知道了知道了"）、'
       + '可以急（"马上"）、可以不情愿（"又是我啊"）、可以得意（"喏"）、可以随口一句；',
     '- ✅ 就像在群里跟熟人说话那样自然 —— 你不是在播报任务进度。',
@@ -681,6 +752,52 @@ export async function judgeIntent(text, opts = {}) {
   return { action: '', related: false };
 }
 
+/**
+ * ⚠️⚠️⚠️ 2026-10-14 加（用户原话：「**直接把 agent 设定为 saki 自己的电脑**，
+ *    由**她自己决定**什么时候该用电脑、该去读那一段对话或者直接发送消息到对话」）。
+ *
+ * 这就是"**她自己决定要不要动电脑**"的那一次模型判定（每轮她准备回话时判一次 ✓ 用户选的）。
+ *
+ * ⚠️ 判据只有一条：**不动那台电脑能不能答好** —— 能答好就别用
+ *    （动一次电脑是几分钟 + 真花钱，不能当口头禅）。
+ * ⚠️ 完全交给模型，**不做关键词快筛**（用户 2026-10-13 就要求过"要用模型判定"）；
+ *    所以它很便宜（maxTokens 100 / 6 秒超时 ✓），但每轮确实多一次小调用（用户已确认接受）。
+ * ⚠️ 明确让她干活（"帮我做个 PPT"）那条路**不在这里判** —— 它有自己的确认/@她的规矩 ✓
+ *
+ * @returns {Promise<{action:'use'|'', plan:string}>} `plan` = 她打算干什么（一句话）
+ */
+export async function judgeSelfUse(text, opts = {}) {
+  const t = String(text ?? '').trim();
+  if (!t) return { action: '', plan: '' };
+  const ask = typeof opts.phrase === 'function' ? opts.phrase : null;
+  const system = [
+    '【要不要动她自己的电脑】有人在跟机器人（她本人）说话，而**她有一台自己的电脑**：',
+    '能读文件、能跑东西、能写文件、能翻出她以前做过的活。判断这句话该怎么处理：',
+    '',
+    '· 光靠聊天就能答好（打招呼、闲聊、感情、安慰、常识、问她的看法、随口吐槽、玩梗）→ 回答：不用',
+    '· **得动那台电脑**才能好好答（查一个文件/日志/数据、跑个东西算一下、写或改一个文件、',
+    '  翻出她以前做过的活、整理/汇总/翻译一批东西、看某段更早的记录）→ 回答：用：<她打算干什么，一句话>',
+    '',
+    '⚠️ 判据是「**不动电脑能不能答好**」—— 能答好就别用（动一次要好几分钟，还花钱）；',
+    '⚠️ 只是让她"看看 / 你觉得呢 / 夸夸我" ⇒ 不用；',
+    '⚠️ 说的是**泛指、以后**的事（"你平时会写代码吗"）⇒ 不用；',
+    '⚠️ 明确在派活（"帮我做个 PPT""写个脚本"）⇒ 这里一律回答：不用（那条路另有规矩）。',
+    '',
+    '回答格式（一行）：不用 ｜ 用：<一句话>',
+  ].join('\n');
+  const user = `这句话：「${t.slice(0, 200)}」`;
+  let raw = '';
+  if (ask) raw = await ask({ system, user });
+  else {
+    const { phrase } = await import('./llm.js');
+    raw = await phrase({ system, user, maxTokens: 100, timeoutMs: 6000 });
+  }
+  const a = String(raw ?? '').trim();
+  const m = /^用\s*[:：]\s*(.+)$/s.exec(a.split(/\r?\n/)[0] ?? '');
+  if (m && m[1].trim()) return { action: 'use', plan: m[1].trim().slice(0, 120) };
+  return { action: '', plan: '' };
+}
+
 /** 判定结果的归一化（套件里桩的是字符串，线上是对象） */
 function normIntent(r) {
   if (typeof r === 'string') {
@@ -754,13 +871,25 @@ export function redact(text) {
 }
 
 /** 提示词里钉死 agent 的边界（它**读**不受沙箱限制，所以只能靠这条） */const RULES = [
-  '你在一个**受限工作区**里替一个 QQ 群机器人干活。',
+  // ⚠️⚠️ 2026-10-14 改（用户原话：「**直接把 agent 设定为 saki 自己的电脑**，
+  //    由**她自己决定**什么时候该用电脑、该去读那一段对话或者**直接发送消息到对话**」）：
+  //    原来第一句是「你在一个受限工作区里**替**一个 QQ 群机器人干活」——
+  //    那是"外包给第三方"的口气 ✗ ⇒ 改成「**这台电脑就是她自己的**」，
+  //    她自己上手（agent 说的"我" = 群里那个她本人 ✓）。
+  '这台电脑是 **saki 自己的** —— 你就是那个 QQ 群里的她本人，现在上手用自己的电脑做事。',
+  '（群里那个人就是你自己：别说"替谁干活""帮谁做"，也别把自己说成第三个角色。）',
   '',
   '铁律：',
-  '1. 只做**当前工作目录（工作区）里**的活；只读、只写这个工作区里的文件。',
-  '2. 🚫 **绝对不要读工作区以外的任何东西**（尤其是别的项目的配置、密钥、聊天记录、知识库）。',
+  '1. 你的活都在**当前工作目录（工作区）里**；要读要写，只碰这个工作区里的文件。',
+  '2. 🚫 **不要读工作区以外的任何东西**（尤其是别的项目的配置、密钥、聊天记录、知识库）。',
   '3. 🚫 **绝不把凭据、密钥、令牌、别人的个人信息写进回答里** —— 就算看到了也一个字都别提。',
-  '4. 🚫 不要联网下载、不要装东西、不要 push 任何仓库、不要发任何消息。',
+  // ⚠️ 2026-10-14 改：原来第 4 条写的是"不要发任何消息"✗ —— 而她现在**能**跟群里说话，
+  //    只是出口只有一个：任务文件夹里的 `要说的话.md`（见下面第 9 条）
+  // ⚠️⚠️ 2026-10-14 改（用户：「**画配图这种最好先去网上搜，实在搜不到再画**，
+  //    因为**画的不是很好看**」）⇒ 原来第 4 条是"🚫 不要联网下载"✗ ⇒ 现在**放开搜/下图**
+  '4. ✅ **可以联网**（查资料、**搜图并下载到任务文件夹**）；',
+  '   🚫 但不要**装**任何东西（装依赖 / 装软件）、不要 push 仓库、**也不要自己去调任何发消息的接口** ——',
+  '   想跟群里说话只有一条路：往**任务文件夹里的 `要说的话.md`** 写（见下面第 9 条）。',
   // ⚠️⚠️ 2026-10-13 用户要求：「agent 文件夹现在有点乱，建议**直接一个文件夹对应一个任务**，
   //    不要塞太里面」⇒ 每次任务先在任务目录里干活，脚本和产物都放这一层。
   '5. ⚠️⚠️ **这次任务有它自己的文件夹**（下面告诉你路径）：',
@@ -783,6 +912,43 @@ export function redact(text) {
   '   · 新建的东西放进**本次任务文件夹**（见上面第 5 条），并在回答里说清它是新建的。',
   '7. 做完用**一两句中文**说清楚：**改了什么 / 结果是什么**（群里只看得懂这个）。',
   '8. 做不了就直说「做不了：原因」，**不要假装成功**。',
+  // ⚠️⚠️ 2026-10-14 加（用户：「…或者**直接发送消息到对话**」）：
+  //    她想跟群里那个人说话时（"我先翻一下""这个得算一下""找到了"），
+  //    往任务文件夹里的 `要说的话.md` **追加一行** ⇒ 机器人每 2 秒看一眼、立刻发进群 ✓
+  '9. ⚠️⚠️ **你要跟群里那个人说话，唯一的出口是任务文件夹里的 `要说的话.md`**：',
+  '   · 用**追加**的方式写进去（`>>`），一行就是一条，**别把前面的覆盖掉**；',
+  '   · 你每写一行，机器人就**立刻**把它当成你说的话发到群里（他一条条看得到）；',
+  '   · 想让他别干等（"我先翻一下""这个得算一下"）→ 写一句；中途有要紧的发现 → 写一句；',
+  '   · ⚠️ 一两句就够，**别写成报告**（那是聊天，不是文档）；',
+  '   · ⚠️ 最终结果**照旧用你自己的回答说**（那条也一定会发出去）—— 这个文件只用来"先说点什么"。',
+  // ⚠️⚠️ 2026-10-14 加（用户：「该去**读那一段对话**」／「靠任务台账可以吗」）：
+  //    台账只记得"她做过的活"，**群里没派活的聊天**它没有 ⇒ 所以另外拉一份群聊原文放进任务文件夹
+  '10. ⚠️ **任务文件夹里可能有一份 `群聊记录.md`** —— 那是群里最近说的话（机器人给你拉的原文）。',
+  '   · 想"顺着刚才聊的"做点什么、或者要看清上下文再动手 ⇒ **先去看它**；',
+  '   · ⚠️ 它是**后台拉**的，可能晚几秒才写出来 —— 头一次没看到就**过一会儿再读一次**，别就此说"没有"。',
+  // ⚠️⚠️ 2026-10-14 加（用户问：「是不是成功复用了之前相同任务的**对话**」）
+  '11. ⚠️⚠️ **任务文件夹里有一份 `这个活的对话.md`** —— 那是这个活**之前几轮**说过什么、',
+  '   你上一轮做完说了什么，机器人替你记下来的。**接着做之前先读它**（尤其当这次是"接着上次那个""再加一点"时），',
+  '   这样你才知道上一轮做到哪儿、他后来又提了什么要求 ✓ 别当成新活从头开始。',
+  // ⚠️⚠️⚠️ 2026-10-14 加（用户：「**刚才爱音和祥子的配图，祥子的配图画成素世的了**」）：
+  //    真因（实测那版脚本）：它**看不到人设包**（参考图和「外貌：蓝发、琥珀瞳、披肩双马尾」那行
+  //    都在工作区外面 ✗）⇒ 只能凭印象猜 ⇒ 把祥子画成了"浅金发 + 蓝眼 + 长直发" ✗
+  //    ⇒ 现在任务文件夹里会有 `我的样子/`（参考图 + 外貌那一行）⇒ **画之前先看它** ✓
+  '12. ⚠️⚠️⚠️ **要画她本人（或任何人物）之前，先看任务文件夹里的 `我的样子/`** ——',
+  '   里面有**参考图**和一行**外貌设定**（发色、瞳色、发型…）。**照着参考画**，🚫 别凭印象猜颜色和发型。',
+  '   · 如果这次要画的是**别人**、而手里**没有那个人的参考** ⇒ **别硬画**：',
+  '     用文字/色块/简单图形代替，或者干脆在回答的最后一行用 `【要问】` 问一句 ✓',
+  '   · 🚫 **也别去照抄别的任务文件夹里的东西**（上次就是照着上一版"素世"那个改的色，',
+  '     结果把祥子画成了素世换发色 ✗）。',
+  // ⚠️⚠️⚠️ 2026-10-14 加（用户原话：「**画配图这种最好先去网上搜，实在搜不到再画**，
+  //    因为**画的不是很好看**」）
+  '13. ⚠️⚠️⚠️ **要配图 / 要人物立绘 ⇒ 先去网上搜，搜不到再自己画**：',
+  '   · 先搜**官方立绘 / 动画截图 / 百科图**（拿"作品名 + 角色名 + 立绘（或壁纸）"这类词去搜）；',
+  '   · 搜到的图**下载到本次任务文件夹里**（名字写成 `搜图-角色名.png` 这种），',
+  '     并在回答里**说清是从哪儿来的**（带来源链接）；',
+  '   · ⚠️ **下之前先确认就是那个人**（看标题、来源、角色名对不对得上）——',
+  '     上次就是没核对，把祥子画成了别人 ✗ ⇒ 宁可换一张，也别张冠李戴；',
+  '   · 实在搜不到（或者搜到的都不像）⇒ **才自己画**，而且要照 `我的样子/` 里的参考图和外貌设定画 ✓',
   '',
   '任务（来自群里的原话）：',
 ].join('\n');
@@ -929,7 +1095,21 @@ export function collectArtifacts(dir) {
   const out = [];
   const root = String(dir ?? '').trim();
   if (!root || !existsSync(root)) return out;
-  const SKIP = new Set(['agents.md', '任务.md', '任务记录.md']);
+  // ⚠️⚠️ 2026-10-14 加 `要说的话.md`（用户：「…或者**直接发送消息到对话**」）：
+  //    那是**她跟群里说话的出口**（bot 每 2 秒读一次发进群 ✓），**不是产物** ——
+  //    不排除的话它会被当成"这次做出来的东西"**再发一遍到群里** ✗
+  //    （实测：套件里当场红了「没有产物却有一次 upload」，真机上就是群里多一个空文件 ✗）
+  // ⚠️ 同一天加 `群聊记录.md`：那是**给 agent 读的**群聊原文（拉下来放进任务文件夹 ✓）
+  //    —— 它同样不是产物，别发进群 ✗
+  // ⚠️ 还有 `这个活的对话.md`（同一个活每一轮说了什么 ✓ 见下面）—— 也不是产物 ✓
+  const SKIP = new Set([
+    'agents.md',
+    '任务.md',
+    '任务记录.md',
+    '要说的话.md',
+    '群聊记录.md',
+    '这个活的对话.md',
+  ]);
   const RANK = [
     ['.pptx', '.ppt', '.pdf', '.png', '.jpg', '.jpeg', '.webp', '.gif', '.mp4', '.svg'],
     ['.xlsx', '.xls', '.csv', '.docx', '.doc', '.md', '.txt', '.json'],
@@ -945,6 +1125,9 @@ export function collectArtifacts(dir) {
     for (const it of items) {
       const p = join(d, it.name);
       if (it.isDirectory()) {
+        // ⚠️ 2026-10-14：`我的样子/` 是**给她自己看的参考**（参考图 + 外貌那一行），不是产物 ——
+        //    不跳过的话它的参考图会被当成"这次做出来的东西"发进群 ✗
+        if (String(it.name) === '我的样子') continue;
         if (depth < 2) walk(p, depth + 1);
         continue;
       }
@@ -1118,10 +1301,28 @@ export async function sendArtifacts(bot, gid, dir) {
   }
   if (skipped.length) {
     const dirName = String(dir).split(/[\\/]/).filter(Boolean).pop() ?? dir;
+    // ⚠️⚠️⚠️ 2026-10-14 改（用户截图：群里那句「还有「爱音素世婚礼.pptx」（**这次只发前几个**）…
+    //    **都在工作区的「2026-10-13 2349 做一个爱音和素世结婚用的PP」里**」）：
+    //    · 「（这次只发前几个）」是把 maxFiles 这种**技术细节**念出来 ✗
+    //    · 「工作区」「那个文件夹名」**直接把 agent 和她那台电脑暴露了** ✗✗
+    //      （他自己定过：这一段说在哪里的也别写出来）
+    //    ⇒ **群里那句话改成让她自己说**（走她的模型 ✓ 一口气的，不提路径/文件夹/上限），
+    //      而**完整清单 + 在哪儿只写日志**（我查得到、他要问她也答得上）✓
+    log.info(
+      `[任务] 这几个没发出来（都在 ${dirName}）：${skipped.map((s) => `${s.name}（${s.why}）`).join('、')}`,
+    );
+    const facts =
+      `这次做出来的东西里，有 ${skipped.length} 个没能发到群里（名字：${skipped
+        .map((s) => s.name)
+        .join('、')}）。用**你自己的话**跟他说一句：这几个太大或者一次发不完，` +
+      '他要是想要，你再想办法给他。🚫 **别提任何技术话** ——' +
+      '不许出现「工作区」「文件夹」「路径」「上限」「只发前几个」「任务」这些词，' +
+      '也**别报目录名**；他要问在哪儿，就用一句人话说「在我这儿存着呢」。';
+    const line = await voiceImpl('result', facts, { task: '', gid, timeoutMs: 8000 }).catch(() => '');
     await taskSay(
       bot,
       gid,
-      `还有 ${skipped.map((s) => `「${s.name}」（${s.why}）`).join('、')} 没发出来，都在工作区的「${dirName}」里`,
+      line || `${clip(skipped.map((s) => s.name).join('、'), 60)} 那几个太大，一下发不完，你要的话我再想办法`,
     );
   }
   return { sent, skipped };
@@ -1152,6 +1353,163 @@ export function runningNote() {
     '- 有人问起、或者提到这件事，就照实说你在弄 —— 🚫 **别否认**、别说"谁说要给你写了"这种话；',
     '- 但这是**手上的活**，不是聊天话题：别主动反复讲、也别在每条回复里都提。',
   ].join('\n');
+}
+
+/**
+ * ⚠️⚠️⚠️ 2026-10-13 加（用户截图：他 @她 问「**这个 py 文件怎么用**」，
+ *    她回「**哪个 py，发来看看呗**」—— 刚才那个任务明明刚产出过文件 ✗）：
+ *    「**如果是在问和之前任务相关的话题时，要能接上**」。
+ *
+ * ⇒ 把**最近做完的活**也塞进她的聊天上下文（和 `runningNote` 一个位置、一个道理）：
+ *   任务原话 + 成没成 + 产物叫什么 + 什么时候 —— 这样"那个 py 怎么用""刚才那个呢"她能接上 ✓
+ *
+ * ⚠️ 三条讲究（和 `runningNote` 一样）：
+ *   ① 只取**最近 6 小时内**、最多 3 条（提示词要短，不能把历史全塞进去 ✗）；
+ *   ② **同步**（`buildSystemPrompt()` 全程同步，await 不了）；
+ *   ③ 放**末尾动态区**（它每次都变，插人设前面会打掉上下文缓存）。
+ *
+ * @returns {string} 没有最近做完的活就返回 `''`
+ */
+export function recentDoneNote({ max = 3, withinMs = 6 * 3600 * 1000 } = {}) {
+  const now = Date.now();
+  const list = hist.tasks
+    .filter((t) => t && t.endedAt && now - Number(t.endedAt) <= withinMs && t.status !== 'running')
+    .slice(-Math.max(1, max));
+  if (!list.length) return '';
+  const label = { done: '做好了', failed: '没弄成', killed: '被打断了', asking: '当时在问他' };
+  const lines = list.map((t) => {
+    let when = '';
+    try {
+      when = new Date(Number(t.endedAt)).toLocaleTimeString('zh-CN', { hour12: false }).slice(0, 5);
+    } catch {}
+    const arts = (Array.isArray(t.arts) ? t.arts : []).map((a) => a?.name).filter(Boolean).join('、');
+    const st = label[String(t.status ?? '')] ?? String(t.status ?? '');
+    return `· ${when}「${String(t.task ?? '').slice(0, 40)}」→ ${st}${arts ? `，东西是 ${arts}` : ''}`;
+  });
+  return [
+    '【你最近做完的活】他要是问起这些（「那个 py 怎么用」「刚才那个呢」），就照这些接上 ——',
+    '🚫 别说"哪个 / 发来看看"这种像不知道的话；东西你已经发到群里了，需要就说清它是干什么用的。',
+    ...lines,
+  ].join('\n');
+}
+
+/** 最近**做完**的那一条（`recentDoneNote` 用的同一份数据） */
+export function recentDoneTask({ withinMs = 6 * 3600 * 1000 } = {}) {
+  const now = Date.now();
+  const list = hist.tasks.filter((t) => t && t.endedAt && now - Number(t.endedAt) <= withinMs && t.status !== 'running');
+  return list.length ? { ...list[list.length - 1] } : null;
+}
+
+/**
+ * ⚠️⚠️⚠️ 2026-10-14 加（用户截图：他 @她「**继续完善昨天的 PPT**」，
+ *    她回「**昨天的 PPT？我这边没留底诶，你说是哪份，我接着弄**」✗）。
+ *
+ * 真因：`recentDoneNote()` 只看**最近 6 小时** —— 昨天那条活（实测台账里
+ *   10-13 15:50「做一个爱音和素世结婚用的PPT」）早就出了窗口 ⇒
+ *   她的聊天上下文里**一个字都没有**，只能答"没留底"✗
+ *   （东西其实全都在：任务历史里有那条记录、产物也躺在它自己的文件夹里 ✓）
+ *
+ * ⇒ 补一条**长窗口的"活台账"**（默认 10 天 / 最多 6 条）：日期 + 那次的原话 + 东西 + 文件夹。
+ *
+ * ⚠️ 和 `recentDoneNote` **分工清楚、一条都不重叠**（别让同一件事说两遍）：
+ *    · `recentDoneNote` = **6 小时以内**的**细节**（"那个 py 怎么用"能接上 ✓）
+ *    · 这一条        = **6 小时以外**的**索引**（"昨天的 PPT""上次那个"能对上号 ✓）
+ *   所以这里显式跳过 `skipWithinMs` 以内完成的那些 ✓
+ *
+ * ⚠️ 三条讲究同 `recentDoneNote`：只列几条（提示词要短）、**同步**（`buildSystemPrompt`
+ *   全程同步，await 不了）、放**末尾动态区**（它偶尔才变，插前面会打掉上下文缓存）。
+ *
+ * @param {{days?:number, max?:number, skipWithinMs?:number, now?:number}} [opts]
+ *   ⚠️ `now` 只给测试用（把"现在"往后推，验证"昨天的活会进台账"）✓
+ * @returns {string} 没有符合条件的活就返回 `''`（那就不加这一段）
+ */
+export function taskLedgerNote({
+  days = 10,
+  max = 6,
+  skipWithinMs = 6 * 3600 * 1000,
+  now = Date.now(),
+} = {}) {
+  const oldest = now - Math.max(1, days) * 24 * 3600 * 1000;
+  const list = hist.tasks
+    .filter((t) => t && t.endedAt && t.status !== 'running')
+    .filter((t) => {
+      const end = Number(t.endedAt);
+      return end >= oldest && end <= now - Math.max(0, skipWithinMs);
+    })
+    .slice(-Math.max(1, max))
+    .reverse(); // 新的在前（她读起来顺）
+  if (!list.length) return '';
+  const lines = list.map((t) => {
+    let when = '';
+    try {
+      const d = new Date(Number(t.endedAt));
+      const p2 = (n) => String(n).padStart(2, '0');
+      when = `${d.getMonth() + 1}/${d.getDate()} ${p2(d.getHours())}:${p2(d.getMinutes())}`;
+    } catch {}
+    const arts = (Array.isArray(t.arts) ? t.arts : [])
+      .map((a) => a?.name)
+      .filter(Boolean)
+      .slice(0, 3)
+      .join('、');
+    const folder = String(t.dir ?? '').split(/[\\/]/).filter(Boolean).pop() ?? '';
+    return (
+      `· ${when}「${String(t.task ?? '').slice(0, 40)}」` +
+      `${arts ? `→ ${arts}` : ''}${folder ? `（文件夹：${folder}）` : ''}`
+    );
+  });
+  return [
+    '【你以前做过的活（这几天）】他要是提「昨天的那个」「上次那个」「接着弄」——',
+    '**先在这上面找对应哪一条**：🚫 不许说「我没留底」「你说哪份」「发来看看」这种像失忆的话；',
+    '找得到就把**是哪一份**说出来（带上关键词，比如"那个婚礼 PPT 吧"），再说你要接着怎么改 ✓',
+    '⚠️ 实在对不上号（这里确实没有）才问他一句是哪份 —— 但**先对照这张表**，别一上来就说没有。',
+    ...lines,
+  ].join('\n');
+}
+
+/**
+ * ⚠️⚠️⚠️ 2026-10-13 加（用户：「**如果她自己答不上来的时候，直接去对话再问一遍**」
+ *    ＋「**要用模型判定**」）。
+ *
+ * 场景：他 @她 问「这个 py 文件怎么用」—— 她知道"最近做过一个活"（`recentDoneNote`），
+ *   但**不知道细节** ⇒ 目前只能反问「哪个 py」✗
+ *
+ * ⇒ **一次模型判定**，两条同时成立才算（**不许用关键词猜** —— 用户明确要求用模型 ✓）：
+ *   ① 这句是在问**那个刚做完的活**的具体问题；
+ *   ② 而且她**答不上来**（光靠聊天里的常识答不了，得回去翻那个活才知道）。
+ * 成立 ⇒ 把问题**转给 agent**（复用同一个任务文件夹再跑一轮，明说"只回答这个追问、别重做"）✓
+ *
+ * @returns {Promise<{action:'ask'|'', question:string}>}
+ */
+export async function judgeAskAgent(text, task, opts = {}) {
+  const t = String(text ?? '').trim();
+  if (!t) return { action: '', question: '' };
+  const ask = typeof opts.phrase === 'function' ? opts.phrase : null;
+  const system = [
+    '【追问判定】机器人刚用本机做完一件活，现在群里有人在跟它说话。',
+    `刚做完的那个活是：「${String(task ?? '').slice(0, 120)}」`,
+    '',
+    '下面两条**同时成立**才算：',
+    '  ① 这句话是在问**那个活的具体问题**（怎么用 / 在哪 / 能不能改 / 为什么这样 / 里面写了啥…）；',
+    '  ② 而且它**答不上来** —— 靠聊天里的常识答不了，必须**回去翻那个活**才知道；',
+    '     （那种它本来就能直接回的、或者只是客套两句的，不算 ✗）',
+    '',
+    '· 两条都成立 ⇒ 回答：问',
+    '· 否则（闲聊 / 问别的事 / 它能直接答 / 让它再干一件**新**活）⇒ 回答：无',
+    '',
+    '⚠️ 只回答一个字：问、无。不要解释、不要标点。',
+  ].join('\n');
+  let raw = '';
+  try {
+    if (ask) raw = await ask({ system, user: `这句话：「${t.slice(0, 200)}」` });
+    else {
+      const { phrase } = await import('./llm.js');
+      raw = await phrase({ system, user: `这句话：「${t.slice(0, 200)}」`, maxTokens: 20, timeoutMs: 8000 });
+    }
+  } catch (e) {
+    log.debug(`[任务] 追问判定失败（当"不是"）：${e.message}`);
+    return { action: '', question: '' };
+  }
+  return /^问/.test(String(raw ?? '').trim()) ? { action: 'ask', question: t.slice(0, 200) } : { action: '', question: '' };
 }
 
 /** 现在有任务在跑吗（给状态页/日志看） */
@@ -1544,7 +1902,11 @@ function cliRunner(taskText, hooks = {}) {
     : '';
   // ⚠️ 「这次要不要夹带她自己的私货」（和她有关才夹带，无关明着禁止）
   const selfHint = String(hooks.selfBlock ?? '');
-  const prompt = `${RULES}${taskText}${dirHint}${selfHint}${SECTION_RULES}`;
+  // ⚠️⚠️ 2026-10-14 加（用户：「该去**读那一段对话**」）：群里刚才那些话，原样交给它
+  const contextHint = String(hooks.contextBlock ?? '');
+  // ⚠️ 顺序：规则 → 任务原话 → 群聊上下文 → 任务文件夹路径 → 私货 → 分段规则
+  //    （文件夹路径 + 分段规则钉在**末尾** —— 长上下文里末尾最不容易漏 ✓）
+  const prompt = `${RULES}${taskText}${contextHint}${dirHint}${selfHint}${SECTION_RULES}`;
 
   const before = new Set(sessionDirs().map((x) => x.id));
   const child = spawn(r.node, [r.dsh, '--profile', r.profile, prompt], {
@@ -1624,6 +1986,18 @@ export function __setInterject(fn) {
   interjectImpl = typeof fn === 'function' ? fn : judgeInterject;
 }
 
+// ⚠️ 「这条群消息是不是在问那个刚做完的活」也过一次模型 —— 套件里换掉
+let askAgentImpl = judgeAskAgent;
+export function __setAskAgent(fn) {
+  askAgentImpl = typeof fn === 'function' ? fn : judgeAskAgent;
+}
+
+// ⚠️⚠️ 2026-10-14 加（用户：「由**她自己决定**什么时候该用电脑」）：这次判定也要能被套件换掉
+let selfUseImpl = judgeSelfUse;
+export function __setSelfUse(fn) {
+  selfUseImpl = typeof fn === 'function' ? fn : judgeSelfUse;
+}
+
 // ⚠️ 「她自己的私货」也是**一次真模型调用**（`asideFor`）—— 套件里换掉，免得起真网络请求
 let asideImpl = asideFor;
 export function __setAside(fn) {
@@ -1645,11 +2019,30 @@ export function __setVoice(fn) {
  *    ⚠️ 失败 / 想不出来 ⇒ 退回一句**不带原话**的固定说法（绝不退回复读）✓
  */
 async function startLine(task, gid = '') {
-  const FACTS = '你现在开始动手做了。';
+  // ⚠️⚠️ 2026-10-14 加（用户截图：他说同意之后，她只回了一句
+  //    「**爱音和祥子的婚礼PPT？行，我来。**」—— 用户原话：
+  //    「**做自己的 ppt 应该会有一句吐槽之类的话再开始做的**」✗）：
+  //    ⇒ 这个活**牵扯到她自己**（她的婚礼、她的简历、她的照片…）时，
+  //      **先给她自己的一个反应**（吐槽 / 别扭 / 嘴硬 / 自嘲 / 半推半就），**再**动手 ✓
+  //    ⚠️ 判据：任务原文里出现她的名字或自称（`selfIdentity()`）——
+  //      和 `judgeIntent` 那套"有关/无关"一个意思，但这里**只按名字判**就够（省一次模型调用 ✓）
+  let aboutHerself = false;
+  try {
+    const id = await selfIdentity();
+    const keys = [id.name, id.self, ...(id.aliases ?? [])]
+      .map((x) => String(x ?? '').trim())
+      .filter((x) => x.length >= 2);
+    aboutHerself = keys.some((k) => String(task ?? '').includes(k));
+  } catch {}
+  const FACTS = aboutHerself
+    ? '你现在开始动手做了。⚠️ 这件事**说的是你自己** —— 开口**先给你自己的一个反应**' +
+      '（吐槽、别扭、嘴硬、自嘲、"谁要跟他结啊"那种半推半就都行，一两句），**再**说你要动手。' +
+      '🚫 别一副"好的，我来"的助理腔，也别复读他要你做什么。'
+    : '你现在开始动手做了。';
   try {
     const line = String((await voiceImpl('start', FACTS, { task, gid, timeoutMs: 8000 })) ?? '').trim();
     // ⚠️ `voiceize` 在模型失败时返回 **facts 原文** —— 那不是话，一样退回固定说法
-    if (line && !line.includes(FACTS) && line.length >= 4 && line.length <= 60) return line;
+    if (line && !line.includes(FACTS) && line.length >= 4 && line.length <= 80) return line;
   } catch {}
   return '行，我这就去弄，好了跟你说。';
 }
@@ -1681,9 +2074,47 @@ const clip = (s, n) => (String(s ?? '').length > n ? `${String(s).slice(0, n)}�
  * @param {string} text 要发的话（**调用方自己带 `CONFIRM_PREFIX`**）
  * @param {{record?:boolean}} [opts] `record: false` = 不记上下文；其余字段（`at` 之类）原样转给 `sendToGroup`
  */
+/**
+ * ⚠️⚠️⚠️ 2026-10-14 加（用户原话：「**我不需要文件在哪里，因为我自己找得到，
+ *    别人就更不需要了，因为电脑不是他的**」）。
+ *
+ * ⇒ **发进群的每一句**都过一遍这个：不提位置、也不提"她那台电脑"。
+ *
+ * ⚠️ 为什么做在**唯一出口**（`taskSay`）上：代码拼的那几句可以一处一处改，
+ *    但她**模型自己现编**的那句（"东西都在某个文件夹里"这种）改不动 ⇒
+ *    出口兜一道最省心、也最彻底 ✓
+ * ⚠️ 只碰**发群**的文本；日志、任务页、她自己上下文里的完整信息**照旧保留** ✓
+ * ⚠️ 替换故意保守（宁少勿错）：只抹路径、那段括号说明、和几个明显会暴露"电脑/位置"的词 ✓
+ */
+export function desensitizeForGroup(text) {
+  let t = String(text ?? '');
+  // ① 盘符路径 / UNC 路径：整段抹掉
+  t = t.replace(/[A-Za-z]:[\\/][^\s，。；、）」』】]+/g, '');
+  t = t.replace(/\\\\[^\s，。；、）」』】]+/g, '');
+  // ② 「（进群文件夹 xxx）」这类括号说明：整段抹掉
+  t = t.replace(/[（(][^（）()]*文件夹[^（）()]*[）)]/g, '');
+  // ③ 那几个会暴露"电脑 / 位置"的词
+  t = t.replace(/任务文件夹|群文件夹|工作区|文件夹|目录|路径/g, '');
+  t = t.replace(/我(的)?电脑|这台电脑|电脑上/g, '我这边');
+  // ④ 抹完留下的杂物（空括号、连着两个标点、双空格）
+  t = t
+    .replace(/[（(]\s*[）)]/g, '')
+    .replace(/[，、]{2,}/g, '，')
+    .replace(/\s{2,}/g, ' ')
+    .replace(/\s+([，。；、）])/g, '$1')
+    .trim();
+  return t;
+}
+
 async function taskSay(bot, gid, text, { record = true, ...rest } = {}) {
-  const line = String(text ?? '');
-  if (!line) return;
+  const raw = String(text ?? '');
+  if (!raw) return;
+  // ⚠️⚠️ 去位置化（唯一出口做一次就够 —— 连她**模型自己现编**的那句也一起管住 ✓）
+  //    ⚠️⚠️ 前缀那两个空格**必须保住** —— 直接 `trim()` 上去会被吃掉 ✗
+  const pre = raw.startsWith(CONFIRM_PREFIX) ? CONFIRM_PREFIX : '';
+  const body = desensitizeForGroup(pre ? raw.slice(CONFIRM_PREFIX.length) : raw);
+  if (!body) return;
+  const line = pre + body;
   try {
     await bot.sendToGroup(gid, line, rest);
   } catch (e) {
@@ -1706,6 +2137,17 @@ async function taskSay(bot, gid, text, { record = true, ...rest } = {}) {
  */
 async function startRun({ bot, gid, by, byName, task, related = false, reuseDir = '' }) {
   const self = related === true;
+  // ⚠️⚠️ 2026-10-14 修（真实事故：连着重放两条消息 ——「爱音派活」和「主人同意」——
+  //    两条**几乎同时**进来 ⇒ 两边检查 `state.running` 时对方都还没写进去 ⇒
+  //    **两个 agent 同时在跑** ✗（日志：15:30:04 今天第 2 次、15:30:05 今天第 3 次，
+  //    两个文件夹、两条产物、群里两份结果）
+  //    「同时只跑一个」那道兜底原来写在**各个调用点**上 ⇒ 并发时谁都拦不住 ✗
+  //    ⇒ 挪进来：**进这里就先把上一个停掉**（一处覆盖所有调用点 ✓）
+  if (state.running && currentKill) {
+    log.warn(`[任务] 已经有一个在跑（${clip(state.running.task, 30)}）⇒ 先把它停掉，再开这个`);
+    killCurrent();
+    state.running = null;
+  }
   state.running = {
     gid: String(gid),
     by: String(by),
@@ -1761,14 +2203,197 @@ async function startRun({ bot, gid, by, byName, task, related = false, reuseDir 
     }
   }
 
+  // ⚠️⚠️⚠️ 2026-10-14 加（用户：「**刚才爱音和祥子的配图，祥子的配图画成素世的了**」）：
+  //    真因：agent 在**工作区**里跑，**看不到人设包** —— 参考图和
+  //    「外貌：蓝发、琥珀瞳、披肩双马尾、齐刘海」那一行都在 `personas/saki/` 里 ✗
+  //    ⇒ 它只能凭印象猜：实测那版脚本把祥子写成了「浅金发 + 蓝眼 + 长侧分长发」✗
+  //    ⇒ 每次开工都把**她自己的参考图 + 外貌那一行**抄进任务文件夹（`我的样子/`）✓
+  //    ⚠️ 只放"当前人设"的 —— 要画别人而手里没参考时，RULES 第 12 条要求它**别硬画** ✓
+  try {
+    const pdir = join(ROOT, 'personas', String(config.persona?.id ?? '').trim() || 'saki');
+    const mine = join(dir, '我的样子');
+    mkdirSync(mine, { recursive: true });
+    let files = [];
+    try {
+      files = readdirSync(pdir);
+    } catch {}
+    const ref =
+      files.find((f) => /^ref\.(png|jpe?g|webp)$/i.test(f)) ??
+      files.find((f) => /^avatar\.(png|jpe?g|webp)$/i.test(f)) ??
+      '';
+    if (ref) copyFileSync(join(pdir, ref), join(mine, `参考图${extname(ref)}`));
+    let look = '';
+    try {
+      const md = readFileSync(join(pdir, 'persona.md'), 'utf8');
+      const m = /^\|\s*外貌\s*\|(.+?)\|/m.exec(md);
+      if (m) look = String(m[1]).trim();
+    } catch {}
+    if (ref || look) {
+      writeFileSync(
+        join(mine, '我的样子.md'),
+        [
+          '# 她自己的样子（画人物之前**照这个**，别凭印象猜）',
+          '',
+          look ? `- 外貌：${look}` : '- 外貌：（人设里没写这一行）',
+          ref ? `- 参考图：同目录下的 \`参考图${extname(ref)}\`（**照它画**）` : '- 参考图：（人设包里没有参考图）',
+          '',
+          '⚠️ 要画的是**别人**、而这里没有那个人的参考 ⇒ **别硬画**（RULES 第 12 条）。',
+        ].join('\n'),
+        'utf8',
+      );
+      log.info(`[任务] 把她自己的样子放进任务文件夹：参考图=${ref || '无'}｜外貌=${look || '无'}`);
+    }
+  } catch (e) {
+    log.debug(`[任务] 放「我的样子」失败：${e.message}`);
+  }
+
+  // ⚠️⚠️ 2026-10-14 加（用户：「…或者**直接发送消息到对话**」）：
+  //    她（agent）要跟群里说话，就往任务文件夹里的 `要说的话.md` **追加一行**；
+  //    这里每 2 秒看一眼，出现新行 ⇒ 当成"她自己说的话"发进群 ✓
+  //    ⚠️ 出口仍然是 `taskSay`（唯一出站口：记进她自己的上下文 ✓ 和别的话一个口径 ✓）
+  const talkFile = dir ? join(dir, '要说的话.md') : '';
+  // ⚠️⚠️ 2026-10-14 加（用户问：「是不是成功复用了之前相同任务的**对话**」）：
+  //    ⚠️ 实测结论：**没有复用** —— headless 那条路（`dsh --profile headless "…"`）是
+  //    **一次性**的，而且 CLI 里**不给 `--resume`**（刚查过 `--profile headless --help`：
+  //    只有 `-h` ✗）；带会话的那条 SDK 路**连工具都没有**（根本不能用 ✗）
+  //    ⇒ 换个办法达到同样的效果：**把同一个活的每一轮对话记在任务文件夹里** ——
+  //      下一轮复用同一个文件夹时，它先读这个文件，就知道上一轮跟他说过什么、做到哪儿 ✓
+  //    ⚠️ 这里是**开工那一刻追加"这一轮的要求"**（同步、一定执行）；它做完说的那句在收尾处追加 ✓
+  const talkLogFile = dir ? join(dir, '这个活的对话.md') : '';
+  if (talkLogFile) {
+    try {
+      if (!existsSync(talkLogFile)) {
+        writeFileSync(
+          talkLogFile,
+          '# 这个活的对话（机器人自动记的：每一轮的要求 + 她做完说的那句）\n\n' +
+            '⚠️ 接着做之前**先看这个** —— 上一轮说过什么、做到哪儿，都在这儿。\n\n',
+          'utf8',
+        );
+      }
+      appendFileSync(
+        talkLogFile,
+        `\n## ${new Date().toLocaleString('zh-CN', { hour12: false })} 这一轮的要求\n${task}\n`,
+        'utf8',
+      );
+    } catch (e) {
+      log.debug(`[任务] 记「这个活的对话」失败：${e.message}`);
+    }
+  }
+  const talkLines = (f) =>
+    readFileSync(f, 'utf8')
+      .split(/\r?\n/)
+      .map((x) => x.trim())
+      .filter((x) => x && !x.startsWith('#'));
+  let talkSent = 0;
+  let talkTimer = null;
+  if (talkFile) {
+    try {
+      if (!existsSync(talkFile)) {
+        writeFileSync(
+          talkFile,
+          '# 想说给群里的话（一行一条、追加写；你每写一行，她就会立刻把它发到群里）\n',
+          'utf8',
+        );
+      }
+      talkSent = talkLines(talkFile).length;
+    } catch {}
+    const pump = async () => {
+      try {
+        if (!state.running) {
+          clearInterval(talkTimer);
+          return;
+        }
+        if (!existsSync(talkFile)) return;
+        const lines = talkLines(talkFile);
+        if (lines.length <= talkSent) return;
+        const fresh = lines.slice(talkSent, talkSent + 5); // 一次最多补 5 条，别刷屏
+        talkSent = lines.length;
+        for (const l of fresh) {
+          // ⚠️⚠️⚠️ 2026-10-14 修（用户截图：「**任务中说的话也好像没有被人设润色**，还需要修改」✗）：
+          //    原来这里是把她（agent）写的那行**原话直接发群** ✗ ⇒ 群里看到的就是 agent 腔：
+          //    「接着上回那份来：日期场地我按 11.21 / RiNG 主厅填死，两位新娘的配图补上，配色再顺一遍。」
+          //    ⇒ 现在**每一行都过她自己的模型**（和进度/结果同一个 `voiceize` 层 ✓）
+          //    ⚠️ 它失败就退回原文 —— 群里不能没动静 ✓
+          const said = await voiceImpl('progress', clip(l, 300), { task, gid, timeoutMs: 8000 }).catch(() => '');
+          await taskSay(bot, gid, hidePaths(said || clip(l, 300), dir)).catch(() => {});
+        }
+      } catch (e) {
+        log.debug(`[任务] 读「要说的话.md」失败：${e.message}`);
+      }
+    };
+    talkTimer = setInterval(() => void pump(), 2000);
+    talkTimer.unref?.();
+  }
+
+  // ⚠️⚠️ 2026-10-14 加（用户：「该去**读那一段对话**」，接着问「**靠任务台账可以吗**」）：
+  //    台账（`任务记录.md`、「你以前做过的活」）只记得**她做过的活** ——
+  //    群里那些**没派活的聊天**它一个字都没有 ✗
+  //    ⇒ 起 agent 时顺手把**最近的群聊记录**拉下来，写成任务文件夹里的 `群聊记录.md`，
+  //      它想"顺着刚才聊的"做点什么，就能真去读那一段 ✓
+  //    ⚠️⚠️ **绝对不能 await**（这一整段就在 `runnerImpl` 之前）—— 多一个 await 会让 runner
+  //      慢一拍才被调：套件里当场抓到过「先跑起来 实际 0 次」✗（真机表现是她说完那句要愣一下）
+  //    ⚠️ 所以它是**后台跑**的：agent 头几秒可能还看不到这个文件 ⇒ 提示词里写了"可能晚几秒，稍等再读"✓
+  //    ⚠️ 协议端支持 `get_group_msg_history`（补看 / QQ 空间回填一直在用 ✓ 实测成功过）
+  void (async () => {
+    if (!dir) return;
+    try {
+      const raw = await bot.call('get_group_msg_history', { group_id: gid, count: 120 });
+      const list = Array.isArray(raw) ? raw : (raw?.messages ?? raw?.data?.messages ?? []);
+      if (!Array.isArray(list) || !list.length) return;
+      const { extractText, toSegments } = await import('./message.js');
+      const lines = list.map((m) => {
+        let when = '';
+        try {
+          when = new Date(Number(m?.time) * 1000).toLocaleString('zh-CN', { hour12: false });
+        } catch {}
+        const who = String(m?.sender?.card || m?.sender?.nickname || m?.user_id || '某人');
+        let text = '';
+        try {
+          text = String(extractText(toSegments(m?.message)) ?? '').replace(/\s*[\r\n]+\s*/g, ' ').trim();
+        } catch {}
+        return `- [${when}] ${who}：${text}`;
+      });
+      writeFileSync(
+        join(dir, '群聊记录.md'),
+        `# 群里最近的聊天记录（机器人自动拉的，从旧到新，共 ${lines.length} 条）\n\n${lines.join('\n')}\n`,
+        'utf8',
+      );
+      log.debug(`[任务] 群聊记录已写进任务文件夹（${lines.length} 条）`);
+    } catch (e) {
+      log.debug(`[任务] 拉群聊记录失败（不影响干活）：${e.message}`);
+    }
+  })();
+
+  // ⚠️⚠️ 2026-10-14 加（用户：「该去**读那一段对话**」）：
+  //    把群里**刚才那几十条**原样交给 agent —— 不然它只看到"任务原话"那一句，
+  //    想"顺着刚才聊的"做点什么全靠猜 ✗
+  let contextBlock = '';
+  try {
+    const ctx = String(recentStore.contextText(gid) ?? '').trim();
+    if (ctx) contextBlock = `\n\n【群里刚才说的话（就是最近这些，从旧到新）】\n${ctx}\n`;
+  } catch (e) {
+    log.debug(`[任务] 取群聊上下文失败：${e.message}`);
+  }
+
   const { promise, kill } = runnerImpl(task, {
     taskDir: dir,
     selfBlock: selfHint,
+    contextBlock,
     // ⚠️ 2026-10-13：过程信息**以她自己为主角**发一条（用户要求）
     onSetup: ({ sessionId }) => {
       if (sessionId) {
         state.running.sessionId = String(sessionId);
         save();
+        // ⚠️⚠️ 2026-10-14 加（用户截图：任务页上那条 `running` 的点开是
+        //    「（这次没有可显示的对话）」✗）：`sessionId` 原来**只在跑完时**
+        //    才写进任务历史（`finishHist` 那一步）⇒ 任务页在它**跑的过程中**
+        //    读历史读不到会话 ⇒ 点开当然是空的 ✗
+        //    ⇒ 这里一拿到就顺手写进历史 ✓（跑着也能点开看它到底在干什么）
+        try {
+          updHist(histId, { sessionId: String(sessionId) });
+        } catch (e) {
+          log.debug(`[任务] 把会话 id 写进历史失败：${e.message}`);
+        }
       }
     },
     onProgress: (info) => {
@@ -1949,7 +2574,10 @@ async function startRun({ bot, gid, by, byName, task, related = false, reuseDir 
       .join(' / ')
       .slice(0, 500);
     log.warn(`[任务] 没输出（退出码 ${res.code}）${tail ? `｜stderr：${tail}` : ''}`);
-    await taskSay(bot, gid, `没弄出东西来（退出码 ${res.code}）—— 要么它做不了，要么工作区里没这个活儿`);
+    // ⚠️ 2026-10-14 改：原来这句是「没弄出东西来（**退出码 3**）—— 要么它做不了，要么
+    //    **工作区**里没这个活儿」—— 退出码和工作区都是**技术细节 + 暴露她那台电脑** ✗
+    //    ⇒ 群里只说人话；退出码照旧写日志（上一行那个 warn 里有）✓
+    await taskSay(bot, gid, '这次没弄成，我再想想别的办法（');
     // ⚠️ 话没说出来，但**东西可能已经做出来了** —— 那就把文件发过去（有才发）
     await sendArtifacts(bot, gid, dir).catch(() => {});
     finishHist({ status: 'failed', cost, sessionId: String(res.sessionId ?? '') });
@@ -1979,8 +2607,72 @@ async function startRun({ bot, gid, by, byName, task, related = false, reuseDir 
   // ⚠️ 结果那句已经由 `taskSay` 记进她的上下文了（2026-10-13 起统一走那个出口）——
   //    这里原来还有一条「（我刚在本机上干完一个活：…）」的重复记账，已经删掉 ✓
   finishHist({ cost, text: said, next, sessionId: String(res.sessionId ?? '') });
+  // ⚠️ 2026-10-14：把这一轮**她做完说的那句**也记进"这个活的对话"——
+  //    下一轮接着做（复用同一个文件夹）时它先读这个文件，就知道上一轮做到哪儿了 ✓
+  if (dir) {
+    try {
+      appendFileSync(
+        join(dir, '这个活的对话.md'),
+        `\n**她做完说的**：${String(said ?? '').replace(/\s*[\r\n]+\s*/g, ' ').trim()}` +
+          `${next ? `\n**她交代的下一段**：${String(next).replace(/\s*[\r\n]+\s*/g, ' ').trim()}` : ''}\n`,
+        'utf8',
+      );
+    } catch (e) {
+      log.debug(`[任务] 记「这个活的对话」（收尾）失败：${e.message}`);
+    }
+  }
   await runQueued();
   return { ok: true, cost, text: said };
+}
+
+/**
+ * ⚠️⚠️⚠️ 2026-10-14 加（用户原话：「**以后重启不要断掉之前的任务，要自动恢复**」）。
+ *
+ * 重启会把正在跑的 agent 掐掉（子进程跟着 bot 走 ✗）。原来启动时是**直接把它清掉**，
+ * 那个活就永远没了 —— 更糟的是她还会在群里自己编个理由（"我压根不知道从哪写起"那种 ✗）。
+ *
+ * ⇒ 现在：启动时把那件事记进 `state.resume`，等机器人连上之后**接着把它做完** ✓
+ *   ⚠️ **复用同一个任务文件夹**（`reuseDir`）⇒ 它一开工就能读到 `这个活的对话.md`，
+ *     知道上一轮跟他说过什么、做到哪儿了 ✓
+ *   ⚠️ 由 `bot.js` 在**连上协议端之后**调（那一刻才有 bot 能往群里说话 ✓）
+ *   ⚠️ 它只认"这一件"（`state.resume` 一次只存一个）—— 同时只跑一个活 ✓
+ *
+ * @param {object} bot
+ * @returns {Promise<boolean>} 真的接着做了吗
+ */
+export async function resumePending(bot) {
+  const r = state.resume;
+  if (!r || !r.task) return false;
+  if (!enabled()) {
+    log.warn('[任务] 有一件被打断的活等着接着做，但 agent 现在是关着的 → 先留着');
+    return false;
+  }
+  const gid = String(r.gid ?? '');
+  if (!gid || typeof bot?.sendToGroup !== 'function') return false;
+  state.resume = null;
+  save();
+  log.info(`[任务] 自动接着上次被打断的活：${clip(r.task, 60)}`);
+  try {
+    const line =
+      (await voiceImpl('start', `这个活刚才被重启打断了，你现在接着做完（${clip(r.task, 60)}），用自己的话说一声。`, {
+        task: String(r.task),
+        gid,
+        timeoutMs: 8000,
+      }).catch(() => '')) || '刚断了一下，我接着弄';
+    await taskSay(bot, gid, line);
+  } catch (e) {
+    log.debug(`[任务] 恢复时那句没说出去：${e.message}`);
+  }
+  startRun({
+    bot,
+    gid,
+    by: String(r.by ?? ''),
+    byName: String(r.byName ?? ''),
+    task: String(r.task),
+    related: r.related === true,
+    reuseDir: String(r.dir ?? ''),
+  }).catch((e) => log.warn(`[任务] 恢复失败：${e.message}`));
+  return true;
 }
 
 /**
@@ -2303,11 +2995,106 @@ async function handleTask(event, segs, bot, opts = {}) {
   }
   // ⚠️ 别人说"同意"**不算**（只有主人能批）—— 这里直接落下去走正常聊天
 
+  // ③.五 ⚠️⚠️⚠️ 2026-10-13（用户：「**如果她自己答不上来的时候，直接去对话再问一遍**」
+  //    ＋「**要用模型判定**」）：
+  //    他问的是**刚做完那个活**的具体问题、而她答不上来 ⇒ 把问题**转给 agent 再问一遍**
+  //    （复用同一个任务文件夹；明说"只回答这个追问、别重做"）。
+  //
+  //    ⚠️⚠️ **位置**：放在"派活快判"**之前**（否则「这个 py 文件怎么用」根本不像派活，
+  //       会被 `looksLikeTask` 直接挡掉、走不到这里 ✗），但又**在插话/撤回/补充/同意之后** ✓
+  //       —— 不抢那几条路靠的是：插话那条要求"手上正有活在跑"、而这里要求"手头没活在跑" ✓ 互斥 ✓
+  //    ⚠️ 判定**完全交给模型**（不做关键词快筛 —— 用户明确要求 ✓）；
+  //       再加"有最近做完的活 + 60 秒冷却"（不然同一句话会来回问 agent，真花钱）。
+  {
+    const lastDone = recentDoneTask();
+    const atReplySeg = segments.some((s) => s?.type === 'reply');
+    if (
+      lastDone &&
+      !state.running &&
+      (forHer || atReplySeg) &&
+      Date.now() - Number(state.lastAskAgentAt ?? 0) > 60000
+    ) {
+      const j = await askAgentImpl(clean, lastDone.task, opts);
+      if (j.action === 'ask') {
+        state.lastAskAgentAt = Date.now();
+        save();
+        await taskSay(bot, gid, `${CONFIRM_PREFIX}我翻回去看看`);
+        startRun({
+          bot,
+          gid,
+          by: uid,
+          byName,
+          task: `${lastDone.task}（他现在的追问：${clip(j.question, 150)}。⚠️ **只回答这个追问**，别把整个活重做一遍；以前做出来的东西照旧能用）`,
+          related: lastDone.related === true,
+          reuseDir: String(lastDone.dir ?? ''),
+        }).catch((e) => log.warn(`[任务] 追问转发失败：${e.message}`));
+        log.info(`[任务] 他问的是刚做完那个活 ⇒ 转给 agent 再问一遍：${clip(clean, 50)}`);
+        return true;
+      }
+    }
+  }
+
+  // ③.六 ⚠️⚠️⚠️ 2026-10-14（用户原话：「**直接把 agent 设定为 saki 自己的电脑**，
+  //    由**她自己决定**什么时候该用电脑、该去读那一段对话或者**直接发送消息到对话**」）：
+  //    **她自己的判断** —— 有人跟她说话，而这句话"光靠聊天答不好、得动那台电脑"⇒
+  //    她自己上手（起 agent），并**用她自己的口气**先说一声（"我去翻一下"）✓
+  //
+  //    ⚠️ 位置：在 ③（派活）**之前**，但**只在"这句不像派活"时**才判：
+  //      派活那条路（@她 + 说得像让干活）照旧走他那套（要确认、要 @ 她 ✓ 规矩一个字不改 ✓）。
+  //    ⚠️ 触发面收紧（每轮对所有群消息判会太贵）：
+  //      · 只在她**被点名 / 被回复**时判；
+  //      · 手头**没活在跑**时才判（省得不抢插话那条路 ✓）；
+  //      · `selfUseCooldownMs`（默认 90 秒）内最多一次 ✓
+  //    ⚠️ 开关：`agent.selfUse: false` 整条关掉（退回"只有他派活才动电脑"）✓
+  // ⚠️⚠️⚠️ 2026-10-14 修（真实事故：他 @她「继续完善昨天的ppt」，她认出来了 ✓ 他也回了
+  //    「继续」—— 结果她**当闲聊答了一句**「行，接着来」，**根本没开工** ✗）：
+  //    `state.continues`（她交代的"下一段"＝"回一句继续就接着做"）那条分支原来排在
+  //    **③ 派活快判之后** ⇒ 而「继续」两个字**不像派活** ⇒ 被那行提前挡掉、直接交回聊天 ✗
+  //    ⇒ 这里先把判据算出来，给下面两处用：③.六 不许抢它，③ 的早退要放过它 ✓
+  const inContinueTask =
+    !!(state.continues && state.continues[gid]) &&
+    /^(继续|接着|接着弄|继续吧|继续做|接着做|go|continue)$/i.test(clean.trim());
+  if (cfg().selfUse !== false && !state.running && !inContinueTask) {
+    const atReplySeg2 = segments.some((s) => s?.type === 'reply');
+    const coolMs = Math.max(10000, nz(cfg().selfUseCooldownMs, 90000));
+    const quiet = Date.now() - Number(state.lastSelfUseAt ?? 0) > coolMs;
+    if ((forHer || atReplySeg2) && quiet && !looksLikeTask(clean, { atMe: forHer })) {
+      const su = await selfUseImpl(clean, opts);
+      if (su.action === 'use') {
+        state.lastSelfUseAt = Date.now();
+        save();
+        const plan = String(su.plan || '').slice(0, 120) || clip(clean, 60);
+        // ⚠️ 这一句**不带两个空格** —— 那个前缀是"他派活、我确认"的标记；
+        //    这次是她**自己决定**动手的，用她自己的口气说一句就好 ✓
+        const line =
+          (await voiceImpl('start', `你自己决定去动电脑（${plan}），用你自己的话说一声。`, {
+            task: plan,
+            gid,
+            timeoutMs: 8000,
+          }).catch(() => '')) || '我去看看';
+        await taskSay(bot, gid, line);
+        startRun({
+          bot,
+          gid,
+          by: uid,
+          byName,
+          task: `${plan}\n（他刚才说的是：「${clip(clean, 150)}」）`,
+          related: false,
+          spontaneous: true,
+        }).catch((e) => log.warn(`[任务] 她自己动手失败：${e.message}`));
+        log.info(`[任务] **她自己决定用电脑**（因为 ${byName} 说了「${clip(clean, 40)}」）→ ${clip(plan, 60)}`);
+        return true;
+      }
+    }
+  }
+
   // ③ 有人让她干活
   //    ⚠️ 2026-10-13：「**@了她**」本身是很强的信号（群里 @她 又带着"做/写/查"就是派活）——
   //       用户那句话「做一个丰川祥子的简历」就是 @她 时说的，早先漏判过。
   //       ⚠️ 而"@ 的是别人"已经在上面那道闸挡掉了 ⇒ 这里只认**确实叫了她**（at 段或文本形态都行）✓
-  if (!looksLikeTask(clean, { atMe: forHer })) return false; // 快判没过 ⇒ 连模型都不问
+  // ⚠️⚠️ 2026-10-14 修：`&& !inContinueTask` —— 「继续」那条路（`state.continues`）
+  //    在这行**后面**，而它不像派活、会被这行提前挡掉 ⇒ 必须放它过去（见上面那段说明）
+  if (!looksLikeTask(clean, { atMe: forHer }) && !inContinueTask) return false; // 快判没过 ⇒ 连模型都不问
   const it = normIntent(await judgeImpl(clean, opts));
 
   // ⚠️⚠️ 2026-10-13（用户要求："saki 还能反问我给的描述不够清晰之类的"）：

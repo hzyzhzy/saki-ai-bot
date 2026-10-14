@@ -201,6 +201,39 @@ console.log('\n【7】★★ 收紧度**按群**（<主人> 2026-09-15 晚：「
   check(/const DEFAULT_STRICTNESS = 50/.test(src), '★ 默认值是 50（用户要求：首先默认 50）');
 }
 
+console.log(
+  '\n【8】★★ @ 她穿越白名单（2026-10-14 用户：「@ 不应该直接跳过所有闸来回复吗」' +
+    '＋「除非在不同类机器人名单」）',
+);
+{
+  // 现场：爱音在一个**没进主号白名单**的群里 @ 主号，主号日志只剩一行
+  //   「群 … 不在 allowGroups 白名单里 → 这条（@ 了她）被忽略了」⇒ 用户看到"她没回"✗
+  // ⇒ 入口那道闸改成：**点名 @ 她一律放行**（白名单只管"她自己要不要在这个群搭话"）。
+  const src = (await import('node:fs')).readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  check(
+    /if \(!atMeHere\) return;/.test(src),
+    '★ 入口那道 allowGroups 闸：@ 她 → **放行**（不再无条件 return）',
+  );
+  check(
+    /atMeHere = !!\(this\.selfId && msg\.isAt\(segs, this\.selfId\)\)/.test(src),
+    '★ 判据就是「这条 @ 了她」（用的是 `msg.isAt`，不是文本里的 @）',
+  );
+  check(
+    /不在 allowGroups 里，但这条\$\{why\}\*\*点名了她\*\*/.test(src),
+    '★ 放行时留一行 info 日志（查"她怎么在这个群说话了"时看得见）',
+  );
+  check(
+    /const cmd = \/\^\\s\*\[\\\/／\]\//.test(src),
+    '★ `/` 命令仍然**拦住**（那是"在没让她工作的群里驱动她"，跟被点名不是一回事）',
+  );
+  // ⚠️ 用户补的那句「除非在不同类机器人名单」—— 那道闸**不看 @**，进了池子一律当没看见，
+  //    所以这次改动一个字都不该碰它（这条断言就是防哪天顺手把它也"放行"了）。
+  check(
+    /if \(otherBotsFor\(gid\)\.includes\(uid\)\)/.test(src),
+    '★★ 不同类池那道闸还在，而且**不受 @ 影响**（进了池子 = 不管 @ 不 @ 一律当没看见）',
+  );
+}
+
 try {
   rmSync(join(ROOT, CFG_REL), { force: true });
 } catch {}

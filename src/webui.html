@@ -618,9 +618,14 @@
       <!-- ⚠️ 默认页是 QQ登录（用户要求：进去先看登录状态）—— 这个 class="on" 不许挪 -->
       <button data-tab="qqlogin" class="on">QQ登录</button>
       <button data-tab="status">运行状态</button>
-      <!-- ⚠️⚠️ 2026-10-13 加（用户：「然后加任务页」）：本机 agent 任务那页是**独立的一页**
-           （`/agent-tasks`，自己一套 HTML）—— 不塞进这个 6000 行的前端里，改动小、风险也小 ✓ -->
-      <button onclick="window.open('/agent-tasks','_blank')">本机任务</button>
+      <!-- ⚠️⚠️ 2026-10-13 修（用户截图：「本机任务是空的」）：
+           原来这里写的是 `<button onclick="window.open(...)">` —— 而 nav 里**任何 button**
+           都会被那套"切标签页"的点击逻辑接管（它没有对应页面 ⇒ 主区域**一片空白** ✗）。
+           ⇒ 换成原生 `<a target="_blank">`：不进那套逻辑、也不会被弹窗拦截 ✓ -->
+      <a href="/agent-tasks" target="_blank" rel="noopener"
+         style="display:block;padding:7px 10px;margin:2px 0;color:inherit;text-decoration:none;border-radius:6px;cursor:pointer"
+         onmouseover="this.style.background='rgba(127,127,127,.15)'"
+         onmouseout="this.style.background='transparent'">本机任务</a>
     </div>
     <!-- ⚠️ 2026-09-28 加：作者信息（用户要求「在侧栏单开一个卡片」） -->
     <div class="navsec">
