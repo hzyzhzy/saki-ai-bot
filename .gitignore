@@ -40,7 +40,4 @@ test/essence.json
 test/gh*.json
 test/group-history.json
 test/faces.json
-
-# 编辑器/工具留下的临时目录（2026-10-15 一次误提交抓到的）
-*.tmpdir/
-
+__commit-msg.txt
