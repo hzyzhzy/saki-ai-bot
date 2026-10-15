@@ -46,6 +46,27 @@ function groupsOf(qq, fallback) {
 }
 
 /**
+ * ⚠️⚠️ 2026-10-15 加（用户：「**工作号不要加同类池**」，起因是"界面上这个号删不掉"）——
+ * **工作模式的号不是"同类机器人"**，它整个不参与这个同步：
+ *   · 它扮演的是"<主人> 本人"，跟别的 bot **互相搭话最容易露馅** ✗
+ *   · 也不该被别的号当成"同类"（那是两种完全不同的人格在互刷）
+ *
+ * ⚠️⚠️ 而且这正是"**删不掉**"的真因：`sync()` 会把**我们管的每个号**
+ *    自动补进同群的 `peers`（第 ③ 步）⇒ 用户手动删掉、它下次同步又补回来 ✗
+ *    ⇒ 排除之后，界面上删了就是真删了 ✓
+ *
+ * ⚠️ 判据用**配置里的工作模式开关**（`privateWork.enable`），不写死号 ——
+ *    以后换号 / 再开一个工作号，自动就排除 ✓
+ */
+function isWorkAccount(qq) {
+  try {
+    return (accounts.read(String(qq)) ?? {}).privateWork?.enable === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * 跑一次同步。
  *
  * @param {object} [opt]
@@ -54,10 +75,21 @@ function groupsOf(qq, fallback) {
  * @returns {{ok:boolean, changed:Array, notes:string[]}}
  */
 export function sync(opt = {}) {
-  const ids = (opt.ids ?? accounts.ids()).map(String);
+  // ⚠️⚠️ 2026-10-15：**工作模式的号整个不参与**（用户：「工作号不要加同类池」）——
+  //    既不进别人的 peers，也不给它自己加别人的 peers ✓ 见 `isWorkAccount()` 那段注释
+  const allIds = (opt.ids ?? accounts.ids()).map(String);
+  const work = allIds.filter(isWorkAccount);
+  const ids = allIds.filter((x) => !isWorkAccount(x));
   const notes = [];
   if (ids.length < 2) {
-    return { ok: true, changed: [], notes: ['只有一个号，没有"同类"可加（加第二个号时会自动做）'] };
+    return {
+      ok: true,
+      changed: [],
+      notes: [
+        ...(work.length ? [`工作模式的号不参与同类池：${work.join('、')}`] : []),
+        '只有一个号，没有"同类"可加（加第二个号时会自动做）',
+      ],
+    };
   }
 
   // ① 每个号认哪些群
@@ -125,6 +157,8 @@ export function sync(opt = {}) {
     changed.push(report);
   }
 
+  // ⚠️ 2026-10-15：把"哪些号被排除"也报给界面 —— 用户看到"某某号没进池"时能知道是为什么 ✓
+  if (work.length) notes.push(`工作模式的号不参与同类池：${work.join('、')}`);
   if (!changed.length) notes.push('已经是最新的，没有要补的');
   return { ok: true, changed, notes, otherUnion: [...otherUnion] };
 }

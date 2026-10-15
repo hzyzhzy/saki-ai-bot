@@ -1154,12 +1154,34 @@ export function animeLibNames() {
  * learned.md（群主教的）放在最后并显式声明优先级最高 —— 后出现的更靠近用户提问，
  * 模型通常也更重视后面的系统内容。
  */
+/**
+ * ⚠️⚠️ 2026-10-14 加：**这个号不看哪些共用知识**（`config.privateWork.skipKnowledge`）。
+ *
+ * 为什么需要：`knowledge/` 根下那些是**共用**的（服务器库、群记忆、二次元…）——
+ *   每个号都会读到。而用户给工作号的要求是「**把服务器的知识库移除**」，
+ *   直接删文件会把主号的一起删掉 ✗ ⇒ 只能"按号屏蔽"✓
+ *
+ * ⚠️ 只影响**这一个号**，别的号一个字不变 ✓
+ * ⚠️ 匹配是宽松的（`f.name === s || f.name.includes(s)`），因为 `files` 里存的
+ *    可能是 basename 也可能是带目录的相对路径（`server-*.md` 那套判据就是这么写的）。
+ */
+function skipKnowledge() {
+  const a = config.privateWork?.skipKnowledge;
+  return Array.isArray(a) ? a.map((x) => String(x).trim()).filter(Boolean) : [];
+}
+
 export function knowledgeText(opts = {}) {
   const only = opts.only ? new Set(opts.only) : null;
   const gid = String(opts.groupId ?? '').trim();
+  const skip = skipKnowledge();
+  const skipped = (name) => skip.some((s) => name === s || String(name).includes(s));
+  // 群记忆 / 这个群自己的资料 / 私聊记忆，用一个关键词统一关
+  const skipGroups = skip.some((s) => s.includes('group-memory') || s.includes('groups/'));
+  const skipLearned = skip.some((s) => s.includes('learned'));
 
   const chosen = files.filter((f) => {
     if (isPersona(f.name)) return true; // 人设永远读
+    if (skipped(f.name)) return false; // ⚠️ 按号屏蔽（工作号不读服务器那套）
     if (only) return only.has(f.name);
     return true;
   });
@@ -1193,7 +1215,7 @@ export function knowledgeText(opts = {}) {
   //       （那条 `needMine` 判据），那样 `chosen` 里已经有一份 ——
   //       不去重就是**同一份内容塞两遍**（探针抓到的就是这个）。
   const gf = groupFiles.get(gid);
-  if (gf && !chosen.some((f) => f.name === gf.name)) {
+  if (gf && !skipGroups && !chosen.some((f) => f.name === gf.name)) {
     parts.push(['# 【这个群自己的资料】', '', gf.content].join('\n'));
   }
 
@@ -1204,14 +1226,14 @@ export function knowledgeText(opts = {}) {
   //    （那既会撑爆提示词，也是隐私问题：A 的私聊记忆不该让 B 看见）。
   const dmId = String(opts.dmUserId ?? '').trim();
   const dmKey = dmId ? `dm:${dmId}` : '';
-  if (dmKey && dmKey !== gid) {
+  if (dmKey && dmKey !== gid && !skipGroups) {
     const dm = groupFiles.get(dmKey);
     if (dm) parts.push(['# 【你跟这个人的私聊记忆】', '', dm.content].join('\n'));
   }
 
   // ⚠️ 2026-09-17：`learnedText(text)` 现在**按需挑条目**（原来无条件全带 12.4K）。
   //    传 `opts.text` 才会挑；不传（界面预览那种）仍然全带。
-  const learned = learnedText(opts.text ?? '');
+  const learned = skipLearned ? '' : learnedText(opts.text ?? '');
   if (learned) {
     parts.push(
       [

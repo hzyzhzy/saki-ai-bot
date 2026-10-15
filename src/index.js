@@ -19,6 +19,10 @@ import * as quest from './quest.js';
 import * as affinity from './affinity.js';
 import * as names from './names.js';
 import * as friend from './friend.js';
+// ⚠️ 2026-10-14 加：**私聊工作模式**（那个接单号用的）——
+//    启动时拉一次好友列表（`get_friend_list`）再定时刷新，
+//    「是好友就回他」那条判据靠它（默认开，见 config 的 trigger.allowFriendsPrivate）
+import * as privateWork from './private-work.js';
 import * as remind from './remind.js';
 // ⚠️ 待发箱（2026-09-15 用户要求：没发出去的，通道正常之后自动补发）
 import * as outbox from './outbox.js';
@@ -505,6 +509,15 @@ try {
   console.error(`[同类] 启动失败（不影响其它功能）：${e.message}`);
 }
 
+// ⚠️ 2026-10-14 加：**私聊工作模式**（好友列表 + 那个接单号的工作区）。
+//    ⚠️ 这里只是"拉起" —— 好友名单没拉到之前，好友私聊会被拒，
+//       所以它内部**立刻拉一次**（不等第一个定时周期）✓
+try {
+  privateWork.start(bot);
+} catch (e) {
+  console.error(`[私聊工作] 启动失败（不影响其它功能）：${e.message}`);
+}
+
 // ⚠️ API 余额 = 小祥的「工资」（2026-09-13 用户要求）：
 //    低于 5 元抱怨一次、低于 2 元再抱怨一次；402 也走这套话术。
 try {
@@ -575,7 +588,7 @@ try {
 // 需求：「不能用『你记住』这种模式，只能暗中总结」。
 // 这里只负责**定期去问一句「攒够了吗」**，真正跑总结的是 observe.summarize()，
 // 它自己判断够不够 threshold，不够就直接返回 —— 所以这个定时器很轻。
-if (config.observe?.enable !== false) {
+if (config.observe?.enable !== false && !privateWork.noLearn()) {
   const every = config.observe?.checkIntervalMs ?? 600000;
   setInterval(() => {
     observe.summarize().then((r) => {
@@ -587,6 +600,8 @@ if (config.observe?.enable !== false) {
     }).catch((e) => log.debug(`[观察] 出错：${e.message}`));
   }, every).unref();
   log.info(`群友观察：每 ${Math.round(every / 60000)} 分钟检查一次，攒够 ${config.observe.threshold} 条消息就总结`);
+} else if (privateWork.noLearn()) {
+  log.info('群友观察：**工作模式禁止学习** ⇒ 这个号不跑（攒下来的也不总结）');
 }
 
 // ── 协议端自愈（2026-10-06 用户要求）──
@@ -635,7 +650,12 @@ if (config.cleanup?.enable !== false) {
 //   比如**毕业了**」+「**不用分区，直接修改**」「我可以去检查来修正错误」「**完全后台**」。
 // ⚠️ 这里只管"定期问一句该不该核对"，判断和写入都在 `ownerUpdate.maybeUpdate()` 里。
 //    频率很低（默认 5 分钟问一次，攒够 6 条他私聊的话才真跑）—— 所以这个定时器很轻。
-if (config.ownerUpdate?.enable !== false) {
+// ⚠️⚠️ 2026-10-15 加（用户：「**工作模式下得禁止学习**」）——
+//    `privateWork.noLearn()` 为真时**这两个定时器整个不起**（连问都不问）：
+//      · 资料自动更新：会把他的私聊攒下来核对进 `owner.md`
+//      · 群记忆压缩：会把攒下的观察压进群记忆
+//    工作号是"<主人> 本人"在接活，客户的私聊不该被沉淀成知识 ✗
+if (config.ownerUpdate?.enable !== false && !privateWork.noLearn()) {
   const every = config.ownerUpdate?.checkIntervalMs ?? 300000;
   setInterval(() => {
     ownerUpdate
@@ -649,6 +669,8 @@ if (config.ownerUpdate?.enable !== false) {
     `他的资料自动更新：每 ${Math.round(every / 60000)} 分钟问一次，` +
       `他私聊攒够 ${config.ownerUpdate.minMessages} 条就核对一遍 owner.md（改前自动备份）`,
   );
+} else if (privateWork.noLearn()) {
+  log.info('他的资料自动更新：**工作模式禁止学习** ⇒ 这个号不跑');
 }
 
 // ── 群记忆的「按时间压缩」（2026-09-14 用户要求）──
@@ -656,7 +678,11 @@ if (config.ownerUpdate?.enable !== false) {
 //   但是**性格要不断细化，不能删除**，**好感度也不能修改**」。
 // ⚠️ 这里只负责定期问一句"该压了吗"，判断在 observe.compress() 里
 //    （它看距离上次压缩够不够 minIntervalMs）—— 所以这个定时器很轻。
-if (config.observe?.enable !== false && config.observe?.compress?.enable !== false) {
+if (
+  config.observe?.enable !== false &&
+  config.observe?.compress?.enable !== false &&
+  !privateWork.noLearn()
+) {
   const every = config.observe.compress.checkIntervalMs;
   const minGap = config.observe.compress.minIntervalMs;
   setInterval(() => {
@@ -671,6 +697,8 @@ if (config.observe?.enable !== false && config.observe?.compress?.enable !== fal
     }).catch((e) => log.debug(`[观察] 压缩出错：${e.message}`));
   }, every).unref();
   log.info(`群记忆压缩：每 ${Math.round(every / 3600000)} 小时检查一次，距上次满 ${Math.round(minGap / 3600000)} 小时才压`);
+} else if (privateWork.noLearn()) {
+  log.info('群记忆压缩：**工作模式禁止学习** ⇒ 这个号不跑');
 }
 
 // 表情库完整性自检：index.json 里登记了但文件不在，是很容易踩的坑

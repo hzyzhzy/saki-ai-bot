@@ -60,6 +60,9 @@ import * as meal from './meal.js';
 import * as whereState from './where.js';
 import * as remind from './remind.js';
 import * as friend from './friend.js';
+// ⚠️ 2026-10-14：**私聊工作模式**（那个接单号用的）—— 同步 import，
+//    因为 `privateAllowed()` 是同步判据，而它要查好友缓存
+import * as privateWork from './private-work.js';
 import * as credBackup from './cred-backup.js';
 import * as affinity from './affinity.js';
 import { detectInsult } from './insult.js';
@@ -125,12 +128,51 @@ const chunkCfg = () => ({
  * ⚠️ 没配 `delayMaxMs` 时**不随机**（等价于原来的固定间隔）—— 不动别人已有的手感。
  * ⚠️ 上限写得比下限还小 → 按**下限**走（配置写反了也不倒着算）。
  */
+/**
+ * ⚠️ 最近**发出去**的那段文本 —— 给 `chunkDelay()` 按字算"打字时间"用。
+ * （在 `sendText()` 开头赋值：不管最后发没发出去，"她刚说的那段"就是它。）
+ */
+let lastSentText = '';
+
 export function chunkDelay() {
+  // ⚠️⚠️ 2026-10-14 加（用户：「工作模式的消息分条逻辑改一下吧，就是**下一条消息的间隔要像
+  //    真人在打字**，以**每个字 0.25 秒**为打字速度，到时间再发出下一条」）：
+  //    `chunking.typeDelayPerChar` 一配（毫秒/字）就按**刚发出去那段的字数**算 ——
+  //    打了多少字就等多久，像人真的在那儿敲键盘 ✓
+  //    ⚠️ 默认 **0 = 不启用**（照旧走 `delayMs`）⇒ 别的号**一个字都不变** ✓
+  //    ⚠️ 必须夹上下限：50 个字 × 250ms = 12.5 秒，等太久了 ✗
+  // ⚠️ 2026-10-14：按字算的打字延迟**统一挪到 `sendText()`**（含第一条）——
+  //    放这儿的话，分条之间算一次、第一条又不算，节奏还是不像人 ✗
   const lo = Math.max(0, Number(config.chunking?.delayMs ?? 1000) || 0);
   const rawHi = config.chunking?.delayMaxMs;
   const hi = rawHi === undefined || rawHi === null ? lo : Math.max(lo, Number(rawHi) || lo);
   // ⚠️ `+1` 是为了让**上限取得到**（Math.random() 永远小于 1）
   return hi > lo ? lo + Math.floor(Math.random() * (hi - lo + 1)) : lo;
+}
+
+/**
+ * 按字数算「这一段还要等多久才发」（毫秒）—— **纯函数**，方便测试。
+ *
+ * ⚠️⚠️ 2026-10-15 修（用户截图：「**第二条一瞬间就发出来了**」）：
+ *    现场：群 200000001，03:57:05 开始生成 → 03:57:12 出稿（**一次性生成了两条**）⇒
+ *      第 1 条 47 字：`want` = 8000（顶上限），`spent` = 7000（模型刚想完那 7 秒）→ 等 1 秒发 ✓
+ *      第 2 条 31 字：`want` = 7750，可 `spent` **还是从"本轮生成开始"算** = 8.7 秒
+ *        （第 1 条的 1 秒等待 + 分条间隔 700ms 全被算成"已经等过了"）⇒ `wait` = 0 ✗
+ *    **真因**：那份额度（"模型思考的时间"）只该顶掉**第一条**的等待。
+ *      从第二条起，那是**另打一段字**，必须按自己的字数重新等满 ✗
+ *    ⇒ 所以拆成两个时刻：`genAt`（本轮生成起点，只给第一条用）、
+ *      `typingFrom`（本段的计时起点 = **上一条发出去的那一刻**）✓
+ *
+ * @param {object} o
+ * @param {number} o.n        这一段的字数（不算空白）
+ * @param {number} o.now      现在
+ * @param {number} o.genAt    本轮生成起点（第一条扣它）
+ * @param {number} o.typingFrom 本段计时起点（上一条发出时刻；第一条 = genAt）
+ */
+export function typingWait({ n, now, genAt, typingFrom, perMs, lo, hi }) {
+  const want = Math.min(hi, Math.max(lo, n * perMs));
+  const spent = Math.max(0, now - (typingFrom || genAt));
+  return { want, spent, wait: Math.round(Math.max(0, want - spent)) };
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -619,7 +661,10 @@ const DASH_BREAK = '\u0001';
  *
  * ⚠️ 判据为什么这么写：
  *   · **成对括号 + 里面 2~40 字** ⇒ 剥（「（顿了顿）」「（笑）」都算旁白）✓
- *   · 单个半括号（有人拿「（」当口癖）**不成对** ⇒ 最后那步顺手清掉 ✓
+ *   · ⚠️⚠️ **句尾那个孤零零的「（」要留着**（2026-10-14 用户纠正我：
+ *     「一个不完整的（  **不是想写旁白没写完**，而是**网络口癖** —— 句尾加一个可以**缓和语气**」）
+ *     —— 那是活人味，不是旁白 ✗（原来第 ② 步把"有人拿「（」当口癖"那种也一起清掉了 ✗）
+ *     ⇒ 只认**末尾那一个**：句子**中间**孤零零的括号仍然当"被切碎的旁白"清掉 ✓
  *   · **没括号 ⇒ 原样返回**（最热的那条路零开销）✓
  *   · 剥完可能只剩标点 ⇒ 返回空串，**调用方据此不发**（比发一个「（」强）✓
  */
@@ -654,13 +699,20 @@ export function stripBracketAct(text) {
   //      **括号一去，旁白看着就跟台词一样了** ✗✗（今晚刚同步过去的机器就中招）
   //    ⇒ 判据放最前面：整条被一对括号包住（≤200 字）⇒ 返回空串（调用方据此**不发**）✓
   if (/^\s*[（(][^）)]{1,200}[）)]\s*[。.！!~～…]*\s*$/.test(t)) return '';
-  return t
+  // ⚠️⚠️ 2026-10-14 改（用户纠正：「一个不完整的「（」**不是想写旁白没写完**，
+  //    而是**网络口癖** —— 句尾加一个可以**缓和语气**」）：
+  //    ⇒ 末尾那个半括号是**活人味**，要留着 ✗ 不能当旁白剥掉
+  //    ⇒ 先把**末尾那一个**摘下来，处理完别的再原样拼回去 ✓
+  const mTail = /[（(]\s*$/.exec(t);
+  const body = mTail ? t.slice(0, mTail.index) : t;
+  const out = body
     .replace(/[（(][^）)]{1,40}[）)]/g, '') // ① 成对的动作括号（1 个字的也算：「（笑）」）
     .replace(/[（()）]/g, '') // ② 残留的孤立括号（旁白被切碎的半截）
     .replace(/^[\s。，、,．.]+/, '') // ③ 剥完开头剩下的标点
     .replace(/[\s。，、]+$/, '')
     .replace(/[ \t]{2,}/g, ' ')
     .trim();
+  return mTail ? `${out}（` : out;
 }
 
 export function dropDashBreak(text) {
@@ -1081,6 +1133,10 @@ export class Bot {
     // ⚠️⚠️ 2026-09-20 从上游 fork 挑过来（用户要求：白名单外的人不管发什么都不回）。
     //    原来是 `!config.trigger.privateChat` —— 只要开了私聊就**谁都能触发她** ✗
     //    现在收口成 `privateAllowed()`，和 notice（戳一戳）、`handle()` 共用同一个判据。
+    // ⚠️ 2026-10-14 加（用户：「**只要有新好友加进来就更新名单**」）：
+    //    名单里没这个人 ⇒ 当场重查一次（后台跑，不挡这条路）——
+    //    这样「刚通过的好友」发的第一条消息不会被漏在门外 ✓
+    void privateWork.ensureFreshFriend(payload.user_id, this).catch(() => {});
     if (payload.message_type === 'private' && !this.privateAllowed(payload.user_id)) {
       log.debug(`私聊用户 ${payload.user_id} 不在白名单/私聊已关闭，已忽略`);
       return;
@@ -1231,6 +1287,31 @@ export class Bot {
     ) {
       return;
     }
+    // ⚠️⚠️ 2026-10-14 加：**人工接管**（用户在用手上这个 QQ）——
+    //    这时候：**照常落盘、一条都不回**（连 @ 她、私聊、命令都不回，
+    //    也**不给 agent 派活** —— 所以这一道必须挡在 `agentBridge` **前面**）。
+    //    ⚠️ 顺序很重要：先落盘、再 return。落盘那一步是用户特别点名的
+    //      （「不然回到 bot 模式，bot 会不记得之前的聊天记录」）✗ 别调过来。
+    if (!cmdSenderIsBot && this.takeoverOn()) {
+      this.rememberTakeover(payload);
+      log.debug(`[接管] 这条只落盘、不回：${String(payload.user_id ?? '')}（${payload.message_type}）`);
+      return;
+    }
+
+    // ⚠️⚠️ 2026-10-14 加：**私聊工作模式**（那个接单号用的）——
+    //    ① 把对方发来的文件收进他的工作区；② 推进"接单状态机"。
+    //    ⚠️ 位置在**提示词构建之前**（`handle` 里那一刻就晚了）：这一轮她要说的话
+    //      要靠刚推进完的状态（"该问他要不要开始了""材料还缺什么"）——
+    //      顺序调过来的话，她永远比真实状态慢一拍 ✗
+    //    ⚠️ 它**不接管**这条消息（返回 false）：话还是由她自己说 ✓
+    if (payload.message_type === 'private' && !cmdSenderIsBot) {
+      try {
+        await privateWork.onPrivate(payload, msg.toSegments(payload.message), this);
+      } catch (e) {
+        log.warn(`[私聊工作] 状态推进出错（当普通聊天继续）：${e.message}`);
+      }
+    }
+
     // ⚠️⚠️ 2026-10-13 加（用户要求）：**本机 agent 任务**，全自然语言 ——
     //    · 主人说一句活 → 回「  行，我去弄」（**两个空格开头** = 任务已开始）→ 起 agent
     //    · 别人说 → 先 **@主人** 问一句，主人回「同意」才开
@@ -1341,11 +1422,20 @@ export class Bot {
         .catch(() => {});
       // 同时攒一份素材，将来发 QQ 空间用（只收有一定长度的消息）
       digest.note(payload, { text });
-      // 再喂给「暗中观察」：攒够一批就在后台总结群友性格和群里大事
-      observe.note(payload, text);
-      // ⚠️ 再喂给「他的资料自动更新」（2026-10-03 用户要求）：**只收私聊 + 只对他本人**，
-      //    函数内部自己判断，这里不用管。攒够几条后台核对一遍 `owner.md`。
-      ownerUpdate.note(payload, text);
+      // ⚠️⚠️ 2026-10-15 加（用户：「**工作模式下得禁止学习**」）——
+      //    下面这两条都是"把聊天内容变成知识"的写入路径，工作号**一个字都不记**：
+      //      · `observe.note`  = 群友性格 / 群里大事（给群记忆用）
+      //      · `ownerUpdate.note` = 「他的资料」自动更新
+      //    ⚠️ 只跳"记"，**聊天照旧**（回复那一整套在别处，不受影响）✓
+      if (privateWork.noLearn()) {
+        log.debug('[学习] 工作模式：群观察 / 资料更新都不记（禁止学习）');
+      } else {
+        // 再喂给「暗中观察」：攒够一批就在后台总结群友性格和群里大事
+        observe.note(payload, text);
+        // ⚠️ 再喂给「他的资料自动更新」（2026-10-03 用户要求）：**只收私聊 + 只对他本人**，
+        //    函数内部自己判断，这里不用管。攒够几条后台核对一遍 `owner.md`。
+        ownerUpdate.note(payload, text);
+      }
 
       // ── 复读机：群里刷同一句话时，她也**跟着复读那句原话**（2026-09-17 用户要求）──
       //
@@ -2663,6 +2753,32 @@ export class Bot {
 
       verdict = await judgeSpeak(event, {
         context,
+        // ⚠️⚠️ 2026-10-15 加（用户：「699 群到中午开始疯狂回消息」）——
+        //    上游 429/超时那阵子，「说话判断」每次都失败 ⇒ 它兜底"照常说"
+        //    ⇒ **群里每条消息都接** ✗（一小时 40 条）
+        //    而同一个群里另一种"判不出来"（判断节流）的兜底是**相反**的
+        //    （见上面那处：收紧度 > 2 就不接）⇒ 现在**统一**：
+        //    收紧度 > 2 的群，判不出来就**不接**（判不了别抢话）；≤2 的群照旧"想说就说" ✓
+        //    ⚠️ **只对"主动搭话"那几种 mode 生效**：被 @ / 引用她 / 点名叫她走的是
+        //       **另一条路**（日志里的 `at <-` 那种，根本不进这个 judge）——
+        //       万一以后并进来，这条白名单也能挡住"在跟她说话却静默"✗
+        //    ⚠️⚠️ 2026-10-15 **又改了一次判据**（用户第二次报同一件事：
+        //       爱音在群里被逼着接了「Yandex被乌克兰炸了」—— 她只能自救一句
+        //       「这个我可不敢接话」；日志：`[说话判断] 出错（超时）→ 按兜底「照常说」`）：
+        //       上一版用「收紧度 ≥ 80」——**卡不住**：出问题那个群收紧度才 60，
+        //       而灵敏度 1 的群又不能用太宽的判据（`test/sensitivity.js` 抓过一次）✗
+        //    ⇒ 换成**真正的判据**：判不出来的时候，**只有"像在跟她说话"才照常说** ——
+        //      也就是**问句**（`?？/吗/怎么/为什么/帮我…`）。
+        //      @ 她 / 引用她 / 点名叫她**本来就走另一条路**（`at <-` 那条），进不到这儿 ✓
+        //      其余的（群友闲聊、转发、感叹句）⇒ **一律不接** ✓
+        //    ⚠️ 这条对两个真实案例都对：
+        //      「保底才是常态」「Yandex被乌克兰炸了」⇒ 不接 ✓
+        //      「谁能告诉我这怎么弄」⇒ 接 ✓
+        fallbackSilent:
+          ['chat', 'share', 'followUp', 'sticker', 'echoSticker'].includes(String(join.mode ?? '')) &&
+          !/([?？]|吗|呢|怎么|如何|为什么|为啥|能不能|有没有|是不是|哪里|多少|帮我|请问)/.test(
+            String(this._textOf(event) ?? ''),
+          ),
         // ⚠️ 剧情摘要（命中剧情发言时才有）
         questBrief: questTalk,
         // ⚠️ 命中剧情发言时**不能**按"别人在聊天"短路 —— 那正是被拦掉的原因
@@ -3488,9 +3604,41 @@ export class Bot {
   // ── OneBot API ──────────────────────────────────────
 
   call(action, params = {}) {
+    // ⚠️⚠️ 2026-10-14 加：**人工接管** —— 人在用这个号，一条外发都不许出门。
+    //    这里是**最底层的那道兜底**（`sendText` 那道是第一道）：
+    //    有些定时任务**不走 `sendText`**，直接 `call('send_private_msg' / 'send_group_file' /
+    //    'send_poke' …)`（主动私聊就是这么发出去的）⇒ 光拦 `sendText` 会漏 ✗
+    //    ⚠️ 返回**假装成功**（不是 reject）：让它照常走完 —— 既不触发失败重试、
+    //      也不会被塞进补发箱（`outbox`）等接管结束再"补发一堆" ✗
+    if (this.takeoverOn() && /^send/.test(String(action))) {
+      log.debug(`[接管] 拦下一个外发接口：${action}`);
+      return Promise.resolve({ status: 'ok', retcode: 0, data: { message_id: 0 } });
+    }
     // ⚠️ 发送类接口的成败要**记时间戳** —— `sendLooksBroken()` 靠它判断通道通不通
     //    （2026-09-15：NapCat 会"假在线"，只有真发一次才知道）
     const isSend = /^send/.test(String(action));
+    // ⚠️⚠️ 2026-10-15 加 —— **工作模式的出站闸**（用户：「不能返回错误信息」+
+    //    「**如果无法发出消息，直接不要发出消息，而不是发送错误消息**」）：
+    //    挂在**这里**（最底层）才兜得住 —— 聊天回复、交付文案、定时任务、
+    //    以及那些直接 `call('send_*')` 的路径**全都从这儿出去** ✓
+    //    · 命中 ⇒ **整条不发**、并**假装成功**（不让它触发重试、也别进补发箱）✓
+    //    · ⚠️ 发给**主人**的不拦：那是运维通知，他就是要看真相（工作区路径、超了几轮）✓
+    if (privateWork.enabled() && isSend && params?.message !== undefined) {
+      const owner = String(config.ownerQQ ?? '').trim();
+      const toOwner = !!owner && String(params?.user_id ?? '') === owner;
+      if (!toOwner) {
+        const cleaned = privateWork.cleanOutMessage(params.message);
+        if (cleaned === '' || cleaned === null) {
+          // ⚠️ 用 warn：这条**本该发出去却没发**，只有日志里能看到（用户排障要看）✓
+          log.warn(
+            `[工作模式] 拦下一条带错误痕迹的外发（${action}）：` +
+              `${JSON.stringify(params.message).slice(0, 80)}`,
+          );
+          return Promise.resolve({ status: 'ok', retcode: 0, data: { message_id: 0 } });
+        }
+        params = { ...params, message: cleaned };
+      }
+    }
     return new Promise((resolve, reject) => {
       if (!this.ws || this.ws.readyState !== 1) {
         reject(new Error('尚未连接到 NapCat'));
@@ -3534,6 +3682,56 @@ export class Bot {
    *    ⇒ 默认改成"**图片**"，谁要表情谁显式写 `asSticker: true`（`sendFace` 那两处）。
    */
   async sendText(event, text, { reply = false, faceFile = null, asSticker = false, force = false } = {}) {
+    // ⚠️ 2026-10-14：记下"刚说的这段" —— `chunkDelay()` 要用它的字数算打字时间
+    //    （见那边 `chunking.typeDelayPerChar` 那段注释）
+    lastSentText = String(text ?? '');
+    // ⚠️⚠️ 2026-10-14 加（用户：「这两句话发的速度明显不像人的速度，看看延迟发送生效了吗，
+    //    然后我建议**第一条也要延迟发送**，但是**计时要加上之前生成消息的时间**」）——
+    //    ⇒ 打字时间 = 这段话的字数 × 每字毫秒，**再减去已经花掉的生成时间**：
+    //      模型想那几秒本来也就是"人在想"，那部分不该白等 ✓
+    //    ⚠️ 只在这个号配了 `typeDelayPerChar` 时才生效（别的号一个字不变）✓
+    //    ⚠️ `_genAt` 记"这一轮开始生成"的时刻，超过 60 秒没有下一条就当新一轮 ✓
+    if (!force) {
+      const perMs = Math.max(0, Number(config.chunking?.typeDelayPerChar ?? 0) || 0);
+      if (perMs > 0) {
+        const now = Date.now();
+        // ⚠️ 超过 60 秒没有下一条 = 新一轮 ⇒ 两个时刻一起重置
+        if (!this._genAt || now - this._genAt > 60000) {
+          this._genAt = now;
+          this._typingFrom = now;
+        }
+        const lo = Math.max(0, Number(config.chunking?.typeDelayMinMs ?? 400) || 0);
+        const hi = Math.max(lo, Number(config.chunking?.typeDelayMaxMs ?? 8000) || 0);
+        const n = String(text ?? "").replace(/\s+/g, "").length;
+        // ⚠️⚠️ 2026-10-15：`spent` 只算到**上一条发出去**为止（见 `typingWait()` 那段注释）——
+        //    不然第二条会把第一条的等待啃掉，`wait` 直接算成 0、一瞬间就发出 ✗
+        const { spent, wait } = typingWait({
+          n, now, genAt: this._genAt, typingFrom: this._typingFrom, perMs, lo, hi,
+        });
+        if (wait > 0) {
+          // ⚠️ 2026-10-15：这句从 `debug` 提到 `info` —— 用户就是靠"两条之间隔了多久"
+          //    来判"像不像人"的，打在日志里我才能**直接量**（只在配了 `typeDelayPerChar`
+          //    的号上出现，量很小，不吵）✓
+          log.info(`[打字] 等 ${wait}ms 再发（这段 ${n} 字，已生成 ${spent}ms）`);
+          await sleep(wait);
+        }
+        // ⚠️ 下一条从"这条刚发出去"重新计时 —— 分条间隔那几百毫秒也算它已经在打了 ✓
+        this._typingFrom = Date.now();
+      }
+    }
+    // ⚠️⚠️ 2026-10-14 加：**人工接管** —— 人在用这个号，它一条都不许发。
+    //    放在**最开头**（比旁白那道还早）：接管是"整个人不在这"，不是"少说两句"。
+    //    ⚠️ 这里是所有外发路径的**最后一道**（见下面那段注释）——
+    //      但**不是唯一的一道**：定时任务里那些直连 `call('send_*')` 的由 `call()` 兜底 ✓
+    //    ⚠️ 返回 `null` = "没发出去"（调用方就是按 `sentText !== null` 判的，和下一道同语义）✓
+    //    ⚠️ `force` 也拦：它是用来绕旁白闸的，**不是**用来绕接管的。
+    if (this.takeoverOn()) {
+      log.debug(
+        `[接管] 拦下一条外发（${event?.group_id ? `群 ${event.group_id}` : '私聊'}）：` +
+          `${String(text ?? '').slice(0, 30)}`,
+      );
+      return null;
+    }
     // ⚠️⚠️⚠️ 2026-10-09 修（用户：「**刚才一堆括号消息，看看为什么没拦住**」）：
     //    **真因是闸挂错了层** —— 它原来挂在 `sendChatLike()` 上，可那个函数**不是**
     //    她发言的唯一出口 ✗：`handle()` 的主聊天回复走 `sendChunk`，
@@ -6651,6 +6849,9 @@ export class Bot {
       log.debug(`私聊用户 ${event.user_id} 不在白名单/私聊已关闭，忽略`);
       return;
     }
+    // ⚠️⚠️ 2026-10-14：**私聊工作模式收文件那一步搬到 `onMessage` 里了**
+    //    （见那边 `privateWork.onPrivate` 的调用）—— 因为它必须在**提示词构建之前**落地，
+    //    这里（`handle`）就太晚了：判"材料齐了没"得看着文件判 ✗
     const voluntary = meta.voluntary || null; // 'question' | 'mention' | null
     // ⚠️ 「补看」回来的消息：这条其实是几分钟前发的（掉线期间漏掉的）。
     //    提示词里要**说清这个时间差**，别让她当成"刚刚发的"来答。
@@ -6860,7 +7061,10 @@ export class Bot {
     //    用法：「起始账 2026-09 18.34」—— 数字**直接抄用量页面的"本月累计"**就行，
     //    系统自己减掉已经记账的部分（不然今天会被算两遍）。
     //    「起始账」= 看当前设了什么；传 0 = 取消。
+    // ⚠️⚠️ 2026-10-15 加 `!privateWork.noGimmick()`：工作号不做财务指令
+    //    （它是"<主人> 本人"，回一句「起始账 2026-10：累计 …」就露馅了）✗
     if (
+      !privateWork.noGimmick() &&
       String(event.user_id) === String(config.ownerQQ) &&
       /^起始账/.test(text)
     ) {
@@ -6902,7 +7106,12 @@ export class Bot {
     //      · **数字**：系统算好，写死在 `spend.spendFacts()` 里交给模型
     //      · **说法**：模型组织（`spend.spendReply()`），带她自己的语气
     //      · 模型失败/超时/胡说 → 退回模板 `spendText()`，**绝不能因为润色失败就不报账**
-    if (config.spend?.enable !== false) {
+    //
+    // ⚠️⚠️ 2026-10-15 加 `&& !privateWork.noGimmick()`（用户截图：工作号在群里回
+    //    「天花板看出来了 我这边调用了 148 次 花了 0.58 元」）——
+    //    报账是**直接甩机器数据**，工作号（= "<主人> 本人"）说一次就露馅 ✗
+    //    ⚠️ 配置那边也关了（双保险）—— 这个号上那些开关是手工列的，实测就漏了 `spend` ✗
+    if (config.spend?.enable !== false && !privateWork.noGimmick()) {
       const sq = spend.looksLikeSpendQuestion(promptText);
       if (sq) {
         // ⚠️⚠️ 2026-09-15 修两个真问题（<主人> 截图：「没有自然语言了，然后我接着问没回我」）：
@@ -7014,7 +7223,9 @@ export class Bot {
     //    ⚠️ **只对服主本人** —— 那是他自己的号（群友问"你的视频"不该去查他的 B站）。
     //    ⚠️ 走 `bilibili.ownerVideoFacts()`：数字**代码算好**（它算一列数字必错），
     //       而且内部**带缓存**（B站的 space 接口会限流，实测连拉几次就 -412/-799）。
+    // ⚠️ 2026-10-15 加 `!privateWork.noGimmick()`：工作号不做播报（同报账那条）✗
     if (
+      !privateWork.noGimmick() &&
       bilibili.looksLikeVideoQuestion(
         promptText,
         String(event.user_id) === String(config.ownerQQ),
@@ -7038,7 +7249,15 @@ export class Bot {
     }
 
     // 「清空对话」指令
-    if (/^(清空|重置|reset|clear)(对话|上下文|记忆)?$/i.test(text)) {      history.clearHistory(key);
+    //
+    // ⚠️⚠️ 2026-10-15 加那道工作模式闸（用户：「**工作号的这个在私聊下必须完全屏蔽掉**」）——
+    //    客户是在对着"<主人> 本人"说话，他要是打了「清空」，回一句
+    //    「好的，对话上下文已清空。」就**把机器身份暴露了** ✗
+    //    ⇒ 工作模式的**私聊**里不认任何指令，照常当聊天接住 ✓（群里照旧 —— 那是他自己在用）
+    if (
+      !(privateWork.enabled() && event.message_type === 'private') &&
+      /^(清空|重置|reset|clear)(对话|上下文|记忆)?$/i.test(text)
+    ) {      history.clearHistory(key);
       // 顺便重置表情频率计数 —— 新开一段对话，头几条就该有机会发表情
       // （测试脚本也用这个指令来隔离各个测试段，不然计数会跨段累积）
       this.replyCount = 0;
@@ -7051,7 +7270,12 @@ export class Bot {
     // 停止正在生成的回复
     if (event.message_type === 'group') {
       const running = this.running?.get(key);
-      if (running && /^(停止|停下|别说了|stop)$/i.test(text)) {
+      // ⚠️ 2026-10-15：工作模式的私聊同样不认这个指令（同上面「清空对话」那道闸）
+    if (
+      running &&
+      !(privateWork.enabled() && event.message_type === 'private') &&
+      /^(停止|停下|别说了|stop)$/i.test(text)
+    ) {
         running.abort(new Error('用户要求停止'));
         this.running.delete(key);
         await this.sendText(event, '好的，已停止。', { reply: true });
@@ -9125,6 +9349,12 @@ export class Bot {
     const { teach } = config;
     if (!teach.enable) return false;
 
+    // ⚠️⚠️ 2026-10-15 加（用户原话：「**工作模式下得禁止学习**」）——
+    //    工作号**谁都不许教**：明确教学（「记住…」）和**自然教学**都走这里，
+    //    一道就够（`tryNaturalTeach` 开头就是 `canTeach`）✓
+    //    ⚠️ 只是"不给资格"—— 那句话照旧当**普通聊天**接住，不回执、不报错 ✓
+    if (privateWork.noLearn()) return false;
+
     const uid = String(event.user_id);
 
     // ⚠️ **机器人不能教它。**
@@ -9600,6 +9830,12 @@ export class Bot {
       // ⚠️ 别把原始报错甩进群里 —— 那些是「模型没有返回可解析的 json: 」
       //    「判断知识失败 HTTP 500 :: {...}」这种内部信息，群友看不懂也很难看。
       //    用户反馈过：群里直接出现一长串英文报错。
+      // ⚠️⚠️ 2026-10-15：**工作模式下连这句都不说**（用户：「如果无法发出消息，
+      //    直接不要发出消息，而不是发送错误消息」）—— "我卡住了"本身就是错误消息 ✗
+      if (privateWork.enabled()) {
+        log.warn('[教学] 整理知识失败 —— 工作模式，一个字都不发');
+        return;
+      }
       await this.sendText(
         event,
         '抱歉，我整理这条知识时卡住了。稍后再发一次试试，或者换个说法。',
@@ -9708,6 +9944,15 @@ export class Bot {
   /** 针对不同身份的态度要求 */
   attitudeFor(role, event) {
     const name = event.sender?.card || event.sender?.nickname || '对方';
+    // ⚠️⚠️⚠️ 2026-10-15 加（**真实泄底事故**：工作号把主人的真 QQ 号报给了陌生客户 ——
+    //    「加我微信啊，号跟我的一样，xxxxxxxxx」）。
+    //    那个号就是**从下面这段注入进去的**（「## 当前对话者：**<主人> 本人**（QQ …）」）✗
+    //    工作模式那个号里**根本没有"主人"这个概念**（来找它的都是陌生客户）⇒
+    //    这段对它一点用都没有，只会把真号带进上下文、再被它说出去 ✗✗
+    //    ⇒ **开着工作模式的号：主人那套整段不注入** ✓
+    try {
+      if (privateWork.enabled()) return '';
+    } catch {}
     if (role === 'owner') {
       // ⚠️ 你和他之间的**关系**已经挪到 `knowledge/relationship.md` ——
       //    那样用户能直接编辑，又**只在服主说话时加载**（不会让群友的提示词里
@@ -10461,15 +10706,65 @@ export class Bot {
    *    ⇒ 白名单外的人私聊戳一下**也会被回复**（真实漏过）。
    *    ⇒ 收口成一个判据，`onRaw`（message + notice）、`handle()`、`pokeBack()` 共用。
    */
+  /**
+   * ⚠️ 2026-10-14 加：**人工接管**开着吗（人在用手上这个 QQ）。
+   *
+   * 一号一份（`accounts/<QQ>.yml` 的 `humanTakeover.enable`，**默认关**）——
+   * 判据只有这一处，别在别处自己读 `config.humanTakeover`（多处读 = 迟早对不上）。
+   */
+  takeoverOn() {
+    return config.humanTakeover?.enable === true;
+  }
+
+  /**
+   * ⚠️ 接管期间**只做一件事：把这条消息记进上下文**。
+   *
+   * 用户特别点名的：「聊天消息要**落盘**，不然回到 bot 模式，bot **会不记得之前的聊天记录**」。
+   * ⚠️ 所以这段**不能省** —— 少了它，接管一结束它就等于"刚睡醒"，接不上刚才那些话 ✗
+   *
+   * ⚠️ 和 `onMessage` 里那段完整记录比，这里**省掉了 `atNames`**（"这条 @ 了谁"）：
+   *    接管期间不派活、不接话，缺它只影响"回看上下文时知不知道这条 @ 了谁"，不值得为它
+   *    在这儿再查一遍群名片。真需要的话，接管结束后的第一批消息会把上下文补齐。
+   */
+  rememberTakeover(payload) {
+    try {
+      const segs = msg.toSegments(payload?.message);
+      const text = msg.stripLeadingAt(msg.tidy(msg.extractText(segs)));
+      recent.remember(payload, {
+        text,
+        isAtMe: this.selfId ? msg.isAt(segs, this.selfId) : false,
+        imageFiles: segs
+          .filter((s) => s.type === 'image')
+          .map((s) => String(s.data?.file ?? ''))
+          .filter(Boolean),
+      });
+    } catch (e) {
+      log.debug(`[接管] 落盘失败（不影响接管本身）：${e.message}`);
+    }
+  }
+
   privateAllowed(userId) {
     if (config.trigger.privateChat === false) return false;
     const uid = String(userId ?? '');
     if (!uid) return false;
+    // ⚠️⚠️ 2026-10-14 加（用户：「**每个好友是否主动回复不用一号一份，而且默认开启**」）：
+    //    **是好友就正常回他** —— 好友列表本身就是白名单（名单是他自己一个个同意加的）。
+    //    ⚠️ 它**不看 `affinity`（好感度）**、也**不是** `friend.js` 那个"每天挑一个主动私聊"
+    //      （用户明确要求「一定不是之前的主动私聊功能，也不要调用之前的好感度模块」）✓
+    //    ⚠️ 想关掉这条：`config.yml` 里 `trigger.allowFriendsPrivate: false`（退回只认下面的名单）
+    if (privateWork.isAllowedFriend(uid)) return true;
     return (config.trigger.allowPrivateUsers ?? []).includes(uid);
   }
 
   async pokeBack(payload) {
     if (config.poke?.enable === false) return;
+    // ⚠️ 2026-10-14 加：**人工接管**期间连戳一戳都不回拍（人在用这个号）——
+    //    ⚠️ 位置在最前面：下面那些白名单判断都**不拦**"回拍"这件事，
+    //      只有这一道能保证"接管时一声不吭"✓
+    if (this.takeoverOn()) {
+      log.debug('[接管] 有人在戳，不回拍');
+      return;
+    }
 
     const uid = String(payload.user_id ?? '');
 
@@ -11346,6 +11641,13 @@ export class Bot {
           "  **不用每句都一本正经**。",
           "  ⚠️ 但两条：**一条回复里最多一个**、而且**想不起来用就不用**（硬凑反而假）✓",
           "  ⚠️ 用多少看你自己的性格 —— 自来熟爱闹的多来点，正经/冷淡的就少用 ✓",
+          "",
+          // ⚠️⚠️ 2026-10-14 加（用户纠正：「一个不完整的「（」**不是想写旁白没写完**，
+          //    而是**网络口癖** —— 句尾加一个可以**缓和语气**」）：
+          //    ⇒ 明确许可这个写法（以前代码还把它当旁白剥掉 ✗ 现在留着了 ✓）
+          "⚠️ **想缓和语气时，句尾带一个「（」也行** —— 那是网上的习惯写法，算活人味 ✓",
+          "  （例：「行行行，我改（」「真拿你没办法（」）",
+          "  🚫 但**别写成成对的旁白括号**（「（顿了顿）」「（笑）」那种一律不许）。",
         ].join("\n"),
       );
       parts.push('\n# 以下是人格设定与知识库，请严格遵守\n');
@@ -11544,7 +11846,9 @@ export class Bot {
     //    「赚了多少钱就是我给祥子每个月发的工资，工资 = API 消耗 ×100，
     //     这样就能自圆其说了，能看到花了多少钱余额也不像 ai 机器人花费」
     //    见 src/spend.js 的 salaryOf / salaryNote。
-    if (config.spend?.enable !== false) {
+    // ⚠️⚠️ 2026-10-15 加 `&& !privateWork.noGimmick()`：这条是**把工资 / 花费喂进提示词**，
+    //    工作号一旦带上，她随时可能自己说出来（截图那次就是这么冒出去的）✗
+    if (config.spend?.enable !== false && !privateWork.noGimmick()) {
       const sn = spend.salaryNote();
       if (sn) parts.push(sn);
     }
@@ -11580,7 +11884,7 @@ export class Bot {
             '',
             '# 【这次要回的是连着发的几条】',
             '',
-            `⚠️ 他没一次说完，**连着发了 ${srcs.length} 条**（按时间顺序）：`,
+            `⚠️ ${multi ? `**这几条不是同一个人发的** —— 是 **${uniqSpeakers.length} 个人**在群里挨着说的（每句是谁说的，下面都标了）` : `他没一次说完，**连着发了 ${srcs.length} 条**`}（按时间顺序）：`,
             '',
             ...srcs.map(
               (s, i) =>
@@ -11590,6 +11894,18 @@ export class Bot {
             '',
             '## 怎么回',
             '',
+            // ⚠️⚠️ 2026-10-15 加（用户截图：Anon 把黑祥/<主人> 三个人连着说的三条
+            //    当成"一个人连发"合并理解了 ——「这几条是三个人说的吧，你全糊一块儿发我了」）
+            //    ⇒ 根因就是下面那句「拼成一个意思」：它被套用到**多人**合并上 ✗
+            ...(multi
+              ? [
+                  '⚠️⚠️ **这次是几个人一起说的** ——',
+                  '  **别把不同人的话拼成一个人的意思**，也**别当成一条转发 / 聊天记录** ✗',
+                  '  就是群里几个人前后脚说了话（每句谁说的上面标了）✓',
+                  '  该回谁就回谁；几个人都在问你 → 分开答；只回最后那个也说得过去 ✓',
+                  '',
+                ]
+              : []),
             '### ① 先把这几条**拼成一个意思**，再开口',
             '- ⚠️⚠️ **他很可能是一条话被拆开、或者打错字重发** ——',
             '  **把几条连起来读**，还原出他**真正想问的那一件事**，然后**回答那一件事**',
@@ -13059,6 +13375,20 @@ export class Bot {
               ]),
         ].join('\n'),
       );
+    }
+
+    // ⚠️⚠️ 2026-10-14 加：**私聊工作模式的接单状态**（`src/private-work.js` 的 `noteFor()`）。
+    //    它是"这个私聊现在走到哪一步 + 你这次该说什么"——比如"还缺东西，先问他要"
+    //    或者"他答应了，说一句行、先别报时间"。
+    //    ⚠️ 排在**最末尾**：那是"这次说话当下"的状态，末尾最不容易被漏
+    //      （和上面那两段"会变的排最后"是同一个道理）。
+    //    ⚠️ 必须**同步**（不能 await）—— 它在提示词构建的热路径上，多一个 await
+    //      会把整个回复拖慢一拍。所以状态全在内存里，落盘在别的时机做 ✓
+    try {
+      const pwNote = privateWork.noteFor(event);
+      if (pwNote) parts.push(pwNote);
+    } catch (e) {
+      log.debug(`[私聊工作] 状态块注入失败（不影响聊天）：${e.message}`);
     }
 
     return parts.join('\n');

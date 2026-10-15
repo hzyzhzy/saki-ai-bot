@@ -277,6 +277,31 @@ console.log('\n【★★】报账那条路必须「记一笔对话」（<主人>
   check(/touchConversation\(event\)/.test(seg2), '★★ B站那条提前 return 的路也补了 `touchConversation`');
 }
 
+// ⚠️⚠️ 2026-10-15 加（用户截图：他在群里说「**能看见天花板**」，她当场报了一遍这个月的账：
+//    「本月花了 196 元，调用 20159 次、331828334 token。上个月花 128 元，工资 12804 元」）——
+//    `looksLikeSpendQuestion` 里**两个很宽的判据叠在一起**：
+//      · 裸 `花` 命中了「天**花**板」
+//      · `ask` 里的裸 `看` 命中了「能**看**见」
+//    ⇒ 判成"在问这个月花了多少"，**整条聊天回复被顶掉**、直接甩出一段账单 ✗
+//    修法：`花` 后面必须是钱的语境；`ask` 去掉裸 `看` ✓ 这一节把两头都钉住。
+console.log('\n【★】★★ 「能看见天花板」不许被当成问账（"花"和"看"都别乱认）');
+{
+  for (const q of ['能看见天花板', '今晚看烟花', '你这花里胡哨的', '看看这个']) {
+    check(spend.looksLikeSpendQuestion(q) === null, `「${q}」不算问账`);
+  }
+  // 反过来：**真问账的照旧要认出来**（收紧不能收过头）
+  for (const [q, type] of [
+    ['这个月花了多少钱', 'spend'],
+    ['花了多少了', 'spend'],
+    ['你这月花费多少', 'spend'],
+    ['看一下这个月花了多少', 'spend'],
+    ['余额还有多少', 'spend'],
+    ['你工资多少', 'earn'],
+  ]) {
+    check(spend.looksLikeSpendQuestion(q)?.type === type, `「${q}」照旧认出来（${type}）`);
+  }
+}
+
 cleanup();
 console.log(`\n结果: ${failures === 0 ? '全部通过 ✅' : `${failures} 项失败 ❌`}\n`);
 process.exit(failures === 0 ? 0 : 1);

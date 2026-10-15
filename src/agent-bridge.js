@@ -1210,7 +1210,15 @@ export async function ensureGroupFolder(bot, gid) {
     log.warn(`[任务] 建群文件夹没拿到 id：${JSON.stringify(r).slice(0, 200)}`);
   } catch (e) {
     // ⚠️ "已经存在" 也会抛错 ⇒ 回头再找一遍（并发/上次建过）
-    log.debug(`[任务] 建群文件夹失败（回头再找一遍）：${e.message}`);
+    //
+    // ⚠️⚠️ 2026-10-15 改成 **warn**（用户报「那个号的产物**全散在群文件根目录**」）——
+    //    原来是 `log.debug`，而默认日志级别是 **info** ⇒ **一个字都不写** ✗
+    //    实测：某个号的所有任务**一次都没成功建过群文件夹**，而日志里
+    //    **完全看不出为什么**（只能靠"主号那条有文件夹、它这条没有"反推）✗
+    log.warn(
+      `[任务] 建群文件夹失败（回头再找一遍）：${e.message ?? e}` +
+        `｜群=${g} 想用的名字「${name}」`,
+    );
     try {
       const again = idOf(await bot.call('get_group_root_files', { group_id: g }));
       if (again) {
@@ -1220,6 +1228,12 @@ export async function ensureGroupFolder(bot, gid) {
       }
     } catch {}
   }
+  // ⚠️ 走到这儿 = 这个号**建不了群文件夹**（多半是权限：那个群只有管理员能建）
+  //    ⇒ 调用方会退回根目录直传（文件不会丢 ✓ 但会散在根目录，用户会看到 ✗）
+  log.warn(
+    `[任务] 这个号拿不到群文件夹 ⇒ 产物会直接传到**群文件根目录**｜群=${g} 名字「${name}」` +
+      `（若是权限问题：把她在那个群里设成管理员就行）`,
+  );
   return '';
 }
 
@@ -1893,7 +1907,10 @@ function pickNewSession(before) {
  *    `startRun` 里定时报（见那边），不是靠工具事件触发。
  */
 function cliRunner(taskText, hooks = {}) {
-  const ws = workspace();
+  // ⚠️ 2026-10-14：**私聊工作模式**（`src/private-work.js`）要在**它自己的工作区**里跑 ——
+  //    那边是"一个私聊一个固定目录、永远复用"（用户：「每个私聊只开一个对话，不开新对话」）。
+  //    所以 cwd 允许**按次覆盖**；不传 = 老行为（群任务那个工作区）逐字不变 ✓
+  const ws = String(hooks.cwd ?? '').trim() || workspace();
   const r = runner();
   // ⚠️ 任务文件夹（`startRun` 建好传进来的）—— 钉在提示词**末尾**，长上下文里末尾最不容易漏
   const taskDir = String(hooks.taskDir ?? '').trim();
@@ -1906,13 +1923,27 @@ function cliRunner(taskText, hooks = {}) {
   const contextHint = String(hooks.contextBlock ?? '');
   // ⚠️ 顺序：规则 → 任务原话 → 群聊上下文 → 任务文件夹路径 → 私货 → 分段规则
   //    （文件夹路径 + 分段规则钉在**末尾** —— 长上下文里末尾最不容易漏 ✓）
-  const prompt = `${RULES}${taskText}${contextHint}${dirHint}${selfHint}${SECTION_RULES}`;
+  // ⚠️ 2026-10-14：`hooks.rawPrompt` = **整段提示词由调用方自己给** ——
+  //    私聊工作模式那套规矩（"先摸需求、只在这个文件夹里干活"）和群任务**不是一回事**，
+  //    套 `RULES` 会把群里那套（群文件夹、产物发群）灌进去 ✗
+  //    不传 = 老行为**逐字不变** ✓
+  const prompt = hooks.rawPrompt
+    ? String(taskText ?? '')
+    : `${RULES}${taskText}${contextHint}${dirHint}${selfHint}${SECTION_RULES}`;
 
   const before = new Set(sessionDirs().map((x) => x.id));
   const child = spawn(r.node, [r.dsh, '--profile', r.profile, prompt], {
     cwd: ws,
     windowsHide: true,
-    env: { ...process.env, DSH_HOME: dshHome(), DSH_PERMISSION_MODE: 'workspace-write' },
+    // ⚠️ 2026-10-14：**按次指定权限** —— 私聊工作模式"收到文件先预读一遍"那一步要 **只读**
+    //    （`hooks.permission = 'read-only'`）：看明白文件是什么，**但一个字都不许改**
+    //    （用户：「agent 这时是只读，不要开始工作」）✓
+    //    ⚠️ 不传 = 老行为（`workspace-write`）**逐字不变** ✓
+    env: {
+      ...process.env,
+      DSH_HOME: dshHome(),
+      DSH_PERMISSION_MODE: String(hooks.permission ?? '').trim() || 'workspace-write',
+    },
   });
   let killed = false;
   let out = '';
@@ -1971,6 +2002,54 @@ let runnerImpl = cliRunner;
 /** 测试专用：换掉"真的起进程"那一步 */
 export function __setRunner(fn) {
   runnerImpl = typeof fn === 'function' ? fn : cliRunner;
+}
+
+/**
+ * ⚠️ 2026-10-14 加：**私聊工作模式的活也要进「本机任务」面板** ——
+ *    用户截图：「**任务面板看不到这个对话**」（面板上只有主号那些群任务）。
+ *
+ * 为什么单独开一个口：`startRun` 是**群任务**那条路（要 gid、要群文件夹、要 @他…），
+ *   私聊的活走的是 `private-work.js`，不经过它 ⇒ 历史里当然没有 ✗
+ *
+ * ⚠️ 历史是**按号存**的（`state/accounts/<QQ>/agent.json`）⇒ 工作号的活在**它自己那个界面**
+ *    （3101）的「本机任务」里看得到；在主号那个 3099 上看不到（各看各的，这是对的）✓
+ */
+export function addPrivateHist(rec = {}) {
+  const id = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  addHist({
+    id,
+    gid: '',
+    by: String(rec.by ?? ''),
+    byName: String(rec.byName ?? '私聊'),
+    task: clip(String(rec.task ?? ''), 200),
+    dir: String(rec.dir ?? ''),
+    startedAt: Date.now(),
+    status: 'running',
+    related: false,
+    // ⚠️ 标一下"这是私聊的单"（面板上跟群任务分得开）
+    // ⚠️ 标一下这是哪种单（面板上跟群任务分得开）：
+    //    `dm` = 真开工了；`dm-read` = **只读预读**（看一遍文件是什么，没动它）
+    kind: String(rec.kind ?? 'dm'),
+  });
+  return id;
+}
+
+/** 私聊那单的收尾（跑完 / 交付完都调它） */
+export function patchPrivateHist(id, patch = {}) {
+  updHist(String(id), { endedAt: Date.now(), status: 'done', ...patch });
+}
+
+/**
+ * ⚠️ 2026-10-14 加：**让别的模块也能起一次 agent**（目前只有 `src/private-work.js` 用）。
+ *
+ * 为什么从这里走而不是那边自己 `spawn`：起 agent 这件事**只有一份实现**最好 ——
+ *   kill（连整棵树）、超时、会话 id 回捞、`DSH_HOME` 显式传递，全在这一个地方 ✓
+ *   两边各写一份的话，迟早出现"一边修好了、另一边还是老毛病"。
+ *
+ * ⚠️ 调用方负责的东西：`cwd`（它自己的工作区）、`timeoutMs`、`rawPrompt`（它自己那套规矩）。
+ */
+export function runTask(taskText, hooks = {}) {
+  return runnerImpl(taskText, hooks);
 }
 
 // ⚠️ 「这是不是一句派活 / 同意 / 不同意」那次**模型判定**也要能被套件换掉
@@ -3058,7 +3137,16 @@ async function handleTask(event, segs, bot, opts = {}) {
     const atReplySeg2 = segments.some((s) => s?.type === 'reply');
     const coolMs = Math.max(10000, nz(cfg().selfUseCooldownMs, 90000));
     const quiet = Date.now() - Number(state.lastSelfUseAt ?? 0) > coolMs;
-    if ((forHer || atReplySeg2) && quiet && !looksLikeTask(clean, { atMe: forHer })) {
+    // ⚠️⚠️⚠️ 2026-10-15 改（用户：「**在群聊没被 @ 就不能开工**」）——
+    //    原来这里放行两种：`forHer`（@ 了她）**和 `atReplySeg2`（消息里有个引用段）**。
+    //    而 `atReplySeg2` **不看引用的是谁** —— 群里任何人引用任何一条东西都算 ✗
+    //    **真实事故**（2026-10-15 18:12）：另一个机器人在群里引用了一条消息说话 ⇒
+    //      她「**她自己决定用电脑**」⇒ 当场开工，还反复跑了好几轮 ✗
+    //    ⇒ 现在**群里只认 @ 了她**（引用不算、"@ 别人"更不算——那在外面就挡了）；
+    //      私聊照旧（那边 `forHer || 引用` 都是"在跟她说话"）✓
+    const selfUseOk =
+      event?.message_type === 'group' ? forHer : forHer || atReplySeg2;
+    if (selfUseOk && quiet && !looksLikeTask(clean, { atMe: forHer })) {
       const su = await selfUseImpl(clean, opts);
       if (su.action === 'use') {
         state.lastSelfUseAt = Date.now();

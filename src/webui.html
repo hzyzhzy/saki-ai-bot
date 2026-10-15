@@ -612,6 +612,7 @@
       <button data-tab="life">日常事件</button>
       <button data-tab="quest">二级剧情</button>
       <button data-tab="affinity">好感度 / 好友</button>
+      <button data-tab="workmode">工作模式</button>
     </div>
     <div class="navsec">
       <div class="navgrp">运行</div>
@@ -638,6 +639,83 @@
        直接在基础卡片新增一个切换正在控制的 QQ 的页面」。
        一个号一个后台进程，各自回各自群里的消息；这一页决定
        **下面那些页面改的是哪个号**（模型页除外，那是所有号共用的）。 -->
+  <!-- ⚠️⚠️ 2026-10-14 加（用户要求）：「工作模式要新增一个页面，放在功能块，
+       把两个开关移动在页面顶端，然后下面是一些工作模式的设置还有分好友的设置，
+       好感度那边的好友设置不是为工作模式设计的」。
+       ⇒ 所以：两个开关从「QQ 号」页**搬到这里**；下面才是这个模式自己的设置。 -->
+  <section id="tab-workmode" class="hidden">
+    <div class="card">
+      <h2>两个开关</h2>
+      <p class="hint">
+        <b>私聊工作模式</b>：打开后这个号的好友私聊按<b>接单</b>走 ——
+        先问清要求和材料 → 条件齐了才问他「要不要开始」→ 他点头才动手 →
+        告诉他<b>大概多久</b>（按真人做的速度估）→ <b>到点了才把东西发给他</b>。<br>
+        ⚠️ <b>不是</b>「主动私聊」那个功能，也<b>不碰好感度</b>；
+        「好友私聊回不回」是另一件事（默认就开着，不受这里影响）。<br>
+        ⚠️ 两个开关都是<b>这个号自己的</b>设置（<span class="mono">accounts/&lt;QQ&gt;.yml</span>），保存后立刻生效。
+      </p>
+      <div class="btns">
+        <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer">
+          <input type="checkbox" id="acc-workmode"> <span>私聊工作模式</span>
+        </label>
+        <button class="act" onclick="accSaveWorkMode()">保存</button>
+        <span class="msg" id="msg-acc-workmode"></span>
+      </div>
+      <hr style="border:none;border-top:1px solid rgba(127,127,127,.25);margin:14px 0">
+      <p class="hint">
+        <b>人工接管</b>：你要<b>自己上手用这个号</b>的时候打开它 —— 机器人从此<b>一条消息都不发</b>
+        （@ 她、私聊、命令一律不回，主动搭话 / 日常事件 / 剧情 / 提醒也全停），
+        但<b>聊天记录照常存着</b>，关掉之后它接得上刚才那些话。
+      </p>
+      <div class="btns">
+        <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer">
+          <input type="checkbox" id="acc-takeover"> <span>人工接管这个号</span>
+        </label>
+        <button class="act" onclick="accSaveTakeover()">保存</button>
+        <span class="msg" id="msg-acc-takeover"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>工作模式的设置</h2>
+      <p class="hint">这个号接单时的默认参数。⚠️ 关于「大概多久」：估的是<b>一个真人</b>做这活要多久，不是程序跑多久。</p>
+      <div class="row">
+        <div><label>单个活最多跑多久（分钟）</label><input type="number" id="pw-timeout" min="1" max="60"></div>
+        <div><label>跟他说"大概多久"的下限（分钟）</label><input type="number" id="pw-etamin" min="1" max="600"></div>
+        <div><label>上限（分钟）</label><input type="number" id="pw-etamax" min="1" max="600"></div>
+      </div>
+      <div class="row">
+        <div><label>到点后再浮动（0.25 = ±25%）</label><input type="number" id="pw-jitter" min="0" max="0.6" step="0.05"></div>
+        <div><label>他发来的文件上限（MB）</label><input type="number" id="pw-inmb" min="1"></div>
+        <div><label>发回去的文件上限（MB）</label><input type="number" id="pw-outmb" min="1"></div>
+      </div>
+      <div class="row">
+        <div><label>产物多于几个就打包</label><input type="number" id="pw-direct" min="1" max="20"></div>
+        <div><label>一天最多接几单（0 = 不限）</label><input type="number" id="pw-daily" min="0"></div>
+        <div><label>同时最多跑几个（并发上限）</label><input type="number" id="pw-maxconc" min="1" max="20"></div>
+        <div><label>好友名单多久刷一次（分钟）</label><input type="number" id="pw-refresh" min="1"></div>
+      </div>
+      <p class="hint">工作区根目录：<span class="mono" id="pw-root">（读取中）</span>（要改得改 <span class="mono">config.yml</span> 里的 <span class="mono">privateWork.rootDir</span>）</p>
+      <div class="btns">
+        <button class="act" onclick="saveWorkCfg()">保存</button>
+        <span class="msg" id="msg-pw-cfg"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>分好友的设置</h2>
+      <p class="hint">
+        这里只管<b>工作模式</b>的事 —— 和「好感度 / 好友」那页的<b>不是一回事</b>（两边各存各的）。<br>
+        ⚠️ 「允许派活」关掉 = 这个人<b>只跟你聊天、不接单</b>。
+        ⚠️ 别的项<b>留空就跟着上面的全局设置走</b>。
+      </p>
+      <div id="pw-friends"><span class="hint">读取中…</span></div>
+      <div class="btns">
+        <button class="ghost" onclick="renderWorkMode()">刷新</button>
+        <span class="msg" id="msg-pw-friends"></span>
+      </div>
+    </div>
+  </section>
   <section id="tab-accounts" class="hidden">
     <div class="card">
       <h2>正在控制哪个 QQ</h2>
@@ -2438,6 +2516,142 @@ async function initAccounts() {
   accPaintNav();
 }
 
+/**
+ * ⚠️ 2026-10-14 加：**私聊工作模式**（一号一份、默认关）——
+ * 打开后这个号的好友私聊按"接单"走（先摸需求 → 问要不要开始 → 到点交付）。
+ * 后端 `POST /api/config` → `splitPatch()`：`privateWork` 不在共用段里 ⇒
+ * 自动写进 `accounts/<QQ>.yml`（只有这个号变）✓
+ */
+// ⚠️ 2026-10-14：工作模式那一页的读取（两个开关的状态走 /api/accounts，和 QQ 号页同一份）
+async function renderWorkMode() {
+  await renderAccounts();
+  const r = await api("/api/config").catch(() => null);
+  const cfg = (r && (r.config || r)) || {};
+  const w = cfg.privateWork || {};
+  const set = (id, v) => { const el = $(id); if (el && v !== undefined && v !== null) el.value = v; };
+  set("pw-timeout", Math.round((Number(w.agentTimeoutMs) || 900000) / 60000));
+  set("pw-etamin", w.etaMinMin === undefined ? 8 : w.etaMinMin);
+  set("pw-etamax", w.etaMaxMin === undefined ? 240 : w.etaMaxMin);
+  set("pw-jitter", w.etaJitter === undefined ? 0.25 : w.etaJitter);
+  set("pw-inmb", w.maxIncomingMB === undefined ? 50 : w.maxIncomingMB);
+  set("pw-outmb", w.maxSendMB === undefined ? 30 : w.maxSendMB);
+  set("pw-direct", w.maxFilesDirect === undefined ? 3 : w.maxFilesDirect);
+  set("pw-daily", w.dailyMax === undefined ? 5 : w.dailyMax);
+  set("pw-maxconc", w.maxConcurrent === undefined ? 5 : w.maxConcurrent);
+  set("pw-refresh", Math.round((Number(w.friendRefreshMs) || 600000) / 60000));
+  // ⚠️ 分好友那张表（好友名单来自协议端，各人的设置来自这个号的 privateWork.friends）
+  const box = $("pw-friends");
+  if (box) {
+    const d = await api("/api/private-work").catch(() => null);
+    if (!d || !d.ok) box.innerHTML = "<span class=\"hint\">读不到好友名单（服务端出错了）</span>";
+    else if (d.off) box.innerHTML = "<span class=\"hint\">这个号还没开「私聊工作模式」—— 开了之后这里会列出它的好友。</span>";
+    else if (!d.friends.length) box.innerHTML = "<span class=\"hint\">好友名单还是空的（协议端刚起来，等十分钟它自己刷一次）。</span>";
+    else box.innerHTML = pwFriendTable(d);
+  }
+  const root = $("pw-root");
+  if (root) root.textContent = String(w.rootDir || "（默认：%LOCALAPPDATA%\\DeepSeekHarness\\private-work）");
+}
+
+/** ⚠️ 分好友那张表（列宽用行内样式，不去动全局 CSS） */
+function pwFriendTable(d) {
+  const STAGE = { intake: "在聊需求", confirming: "等他点头", running: "在做", waiting: "等交付", done: "上一个完了" };
+  const rows = d.friends.map((f) => {
+    const c = f.cfg || {};
+    const q = esc(f.qq);
+    const st = STAGE[f.stage] || "";
+    return "<tr>"
+      + "<td style=\"padding:6px 8px\"><b>" + esc(f.name || f.qq) + "</b>"
+      + "<div class=\"hint mono\">" + q + "</div>"
+      + (st ? "<div class=\"hint\">" + st + "</div>" : "") + "</td>"
+      + "<td style=\"padding:6px 8px\"><input type=\"checkbox\" id=\"pwf-allow-" + q + "\"" + (c.allow === false ? "" : " checked") + "></td>"
+      + "<td style=\"padding:6px 8px\"><input type=\"number\" id=\"pwf-timeout-" + q + "\" placeholder=\"" + d.defaults.timeoutMin + "\" value=\"" + (c.timeoutMin == null ? "" : c.timeoutMin) + "\" style=\"width:74px\"></td>"
+      + "<td style=\"padding:6px 8px\"><input type=\"number\" id=\"pwf-etamin-" + q + "\" placeholder=\"" + d.defaults.etaMinMin + "\" value=\"" + (c.etaMinMin == null ? "" : c.etaMinMin) + "\" style=\"width:64px\"> ~ "
+      + "<input type=\"number\" id=\"pwf-etamax-" + q + "\" placeholder=\"" + d.defaults.etaMaxMin + "\" value=\"" + (c.etaMaxMin == null ? "" : c.etaMaxMin) + "\" style=\"width:64px\"></td>"
+      + "<td style=\"padding:6px 8px\"><input type=\"text\" id=\"pwf-note-" + q + "\" placeholder=\"（自己看的）\" value=\"" + esc(c.note || "") + "\" style=\"width:104px\"></td>"
+      + "<td style=\"padding:6px 8px\"><button class=\"act\" onclick=\"saveFriendCfg('" + q + "')\">存</button></td>"
+      + "</tr>";
+  }).join("");
+  return "<table style=\"width:100%;border-collapse:collapse\">"
+    + "<thead><tr style=\"text-align:left\"><th style=\"padding:6px 8px\">好友</th><th style=\"padding:6px 8px\">允许派活</th>"
+    + "<th style=\"padding:6px 8px\">单活上限(分)</th><th style=\"padding:6px 8px\">估时区间(分)</th>"
+    + "<th style=\"padding:6px 8px\">备注</th><th></th></tr></thead><tbody>" + rows + "</tbody></table>"
+    + "<p class=\"hint\">留空 = 跟着全局走（单活 " + d.defaults.timeoutMin + " 分 / 估时 " + d.defaults.etaMinMin + "~" + d.defaults.etaMaxMin + " 分 / 一天最多 " + d.defaults.dailyMax + " 单）。</p>";
+}
+
+async function saveFriendCfg(qq) {
+  const el = $("msg-pw-friends");
+  const g = (p) => $("pwf-" + p + "-" + qq);
+  const num = (p) => { const v = Number(g(p) && g(p).value); return Number.isFinite(v) && v > 0 ? v : null; };
+  const allowEl = g("allow");
+  const noteEl = g("note");
+  const one = {
+    allow: allowEl ? !!allowEl.checked : true,
+    timeoutMin: num("timeout"),
+    etaMinMin: num("etamin"),
+    etaMaxMin: num("etamax"),
+    note: noteEl && noteEl.value.trim() ? noteEl.value.trim().slice(0, 40) : null,
+  };
+  const body = { privateWork: { friends: {} } };
+  body.privateWork.friends[qq] = one;
+  const r = await api("/api/config", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  flash(el, r.ok, r.ok ? "已保存" : ("保存失败：" + r.error));
+  if (r.ok) await renderWorkMode();
+}
+async function saveWorkCfg() {
+  const el = $("msg-pw-cfg");
+  const n = (id, d) => { const v = Number($(id) && $(id).value); return Number.isFinite(v) ? v : d; };
+  const r = await api("/api/config", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ privateWork: {
+      agentTimeoutMs: Math.round(n("pw-timeout", 15) * 60000),
+      etaMinMin: n("pw-etamin", 8),
+      etaMaxMin: n("pw-etamax", 240),
+      etaJitter: n("pw-jitter", 0.25),
+      maxIncomingMB: n("pw-inmb", 50),
+      maxSendMB: n("pw-outmb", 30),
+      maxFilesDirect: n("pw-direct", 3),
+      dailyMax: n("pw-daily", 5),
+      maxConcurrent: n("pw-maxconc", 5),
+      friendRefreshMs: Math.round(n("pw-refresh", 10) * 60000),
+    } }),
+  });
+  flash(el, r.ok, r.ok ? "已保存（立刻生效）" : ("保存失败：" + r.error));
+}
+async function accSaveWorkMode() {
+  const el = $('msg-acc-workmode');
+  const on = !!$('acc-workmode')?.checked;
+  const r = await api('/api/config', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ privateWork: { enable: on } }),
+  });
+  flash(el, r.ok, r.ok
+    ? (on ? '已开启：这个号的好友私聊按接单走' : '已关闭')
+    : ('保存失败：' + r.error));
+  if (r.ok) await renderAccounts();
+}
+
+/**
+ * ⚠️ 2026-10-14 加：**人工接管**（一号一份、默认关）——
+ * 打开时那个号一条消息都不发（连 @ 都不回），但**聊天照常落盘**（关掉后接得上）。
+ * 后端是 `POST /api/config` → `splitPatch()`：`humanTakeover` 不在共用段里 ⇒
+ * 它会自动写进 `accounts/<QQ>.yml`（只有这个号变）✓
+ */
+async function accSaveTakeover() {
+  const el = $('msg-acc-takeover');
+  const on = !!$('acc-takeover')?.checked;
+  const r = await api('/api/config', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ humanTakeover: { enable: on } }),
+  });
+  flash(el, r.ok, r.ok
+    ? (on ? '已接管：这个号现在一条都不发了（消息照常记着）' : '已交还：机器人恢复说话')
+    : ('保存失败：' + r.error));
+  if (r.ok) await renderAccounts();
+}
+
 async function renderAccounts() {
   const box = $('acc-list');
   if (box) box.innerHTML = '<span class="hint">读取中…</span>';
@@ -2448,6 +2662,15 @@ async function renderAccounts() {
   }
   ACC_LIST = r.accounts || [];
   accPaintNav();
+  // ⚠️ 2026-10-14 加：把「人工接管」那个开关刷成**当前这个号**的真实值
+  //    （`a.self` = 这个进程正在控制的号；别的号的接管状态不在这儿显示）
+  {
+    const me = ACC_LIST.find((a) => a.self);
+    const el = $('acc-takeover');
+    if (el) el.checked = !!(me && me.takeover);
+    const wm = $('acc-workmode');
+    if (wm) wm.checked = !!(me && me.workMode);
+  }
 
   // ⚠️⚠️ 拆分状态**每次都同步进 ACC_SELF**（2026-10-07 修）。
   //    它原来只在页面打开时从 `/api/whoami` 取一次 —— 用户在别处拆过之后，
@@ -2804,7 +3027,7 @@ document.querySelectorAll('nav button').forEach(b => {
     b.classList.add('on');
     // ⚠️ 这个列表必须跟 nav 里的 data-tab 一一对应 —— 漏了哪个，哪个标签就切不过去
     //    （qzone 就漏过一阵子，面板永远显示不出来）
-    ['model','groups','faces','knowledge','persona','qzone','life','quest','groupcfg','affinity','qqlogin','status','about','accounts'].forEach(t => {
+    ['model','groups','faces','knowledge','persona','qzone','life','quest','groupcfg','affinity','workmode','qqlogin','status','about','accounts'].forEach(t => {
       const el = $('tab-' + t);
       if (el) el.classList.toggle('hidden', t !== b.dataset.tab);
     });
@@ -2821,6 +3044,8 @@ document.querySelectorAll('nav button').forEach(b => {
     if (b.dataset.tab === 'affinity') renderAffinity();
     if (b.dataset.tab === 'qqlogin') qqRefresh();
     if (b.dataset.tab === 'accounts') renderAccounts();
+    // ⚠️ 2026-10-14：工作模式自己一页（两个开关也搬到它顶上了）
+    if (b.dataset.tab === 'workmode') renderWorkMode();
   };
 });
 

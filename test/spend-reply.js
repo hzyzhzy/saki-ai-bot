@@ -167,6 +167,26 @@ console.log('\n【1】分类：问花销 / 问工资 要分开');
   for (const q of ['今天天气不错', '这个月服务器要重启吗', '我赚了钱请你吃饭']) {
     check(spend.looksLikeSpendQuestion(q) === null, `「${q}」不会被当成问账`);
   }
+  // ⚠️⚠️ 2026-10-15 加（用户截图：「能看见天花板」→ 她当场报了一遍这个月的账）——
+  //    「天花**花**板」的"花" + 「能**看**见」的"看"，两个宽判据一叠就误判了 ✗
+  check(
+    spend.looksLikeSpendQuestion('能看见天花板') === null,
+    '★★ 「能看见天花板」**不许**被当成问账（"花"字和"看"字都别乱认）',
+  );
+  check(spend.looksLikeSpendQuestion('今晚看烟花') === null, '★ 「今晚看烟花」也不算');
+  check(spend.looksLikeSpendQuestion('你这花里胡哨的') === null, '★ 「花里胡哨」也不算');
+  check(spend.looksLikeSpendQuestion('看看这个') === null, '★ 光一个「看看」不算（裸"看"已经去掉）');
+  // 反过来：**真问账的照旧要认出来**（收紧不能收过头）
+  for (const [q, type] of [
+    ['这个月花了多少钱', 'spend'],
+    ['花了多少了', 'spend'],
+    ['你这月花费多少', 'spend'],
+    ['看一下这个月花了多少', 'spend'],
+    ['余额还有多少', 'spend'],
+    ['你工资多少', 'earn'],
+  ]) {
+    check(spend.looksLikeSpendQuestion(q)?.type === type, `★ 「${q}」照旧认出来（${type}）`);
+  }
 }
 
 console.log('\n【2】事实数据：问工资就不掺花费明细');

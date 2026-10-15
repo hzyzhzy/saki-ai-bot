@@ -848,6 +848,12 @@ const routes = {
         alive,
         pid: info?.pid ?? 0,
         hasFile: accounts.has(qq),
+        // ⚠️ 2026-10-14 加：**人工接管**（一号一份，存在 `accounts/<QQ>.yml` 里）——
+        //    界面那个开关直接读它就够了，不用再为它单开一个接口
+        takeover: a.humanTakeover?.enable === true,
+        // ⚠️ 2026-10-14 加：**私聊工作模式**（同样一号一份、默认关）——
+        //    就是那个"接单号"用的：好友私聊按"先摸需求 → 问要不要开始 → 到点交付"走
+        workMode: a.privateWork?.enable === true,
         // ⚠️ 协议端那边：这个号**登录过没有**（有没有它的配置文件）、
         //    以及它的 OneBot 端口配了没（界面上的"接协议端"按钮用这两个判断）
         protoSupported: providerAccounts.supported(),
@@ -881,6 +887,23 @@ const routes = {
    * ⚠️ 这个接口故意**不跟着"当前号"转发** —— 它是"管所有号"的接口，
    *    由用户当前连着的那个进程处理就行（都是同一个磁盘上的文件）。
    */
+  /**
+   * ⚠️ 2026-10-14 加：**「工作模式」页里那张「分好友的设置」表**要的数据 ——
+   *    好友名单（协议端拉回来的那份）+ 每个人现在的状态 + 他自己的设置 + 全局默认值。
+   *    ⚠️ 它和 `affinity`（好感度那套好友设置）**没有半点关系**（用户特意说过）。
+   */
+  'GET /api/private-work': async (_req, res) => {
+    try {
+      const pw = await import('./private-work.js');
+      if (!pw.enabled()) {
+        return send(res, 200, { ok: true, off: true, friends: [], counting: 0, defaults: {} });
+      }
+      return send(res, 200, pw.uiData());
+    } catch (e) {
+      send(res, 500, { ok: false, error: e.message });
+    }
+  },
+
   'POST /api/accounts': async (req, res) => {
     let body = {};
     try {
