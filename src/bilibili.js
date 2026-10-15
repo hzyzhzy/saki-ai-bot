@@ -489,6 +489,80 @@ async function biliSearch({ keyword, order = 'click', tids = 0, pubtime = 0, pag
  *    （实测直接回 `code=-799 请求过于频繁`，而且模块自己会把那个接口封 45 分钟）。
  *    搜索接口**稳定可用**。
  */
+/**
+ * 从一段文字里抠出所有 BV 号（2026-10-16 加）。
+ * ⚠️ 只认标准的「BV + 10 位」—— 群里那些链接长这样：
+ *    `https://www.bilibili.com/video/BV1xx411c7mD/?share_source=copy_web`
+ */
+export function pickVideoIds(text) {
+  const s = String(text ?? '');
+  const raw = [];
+  // ⚠️ **两种都要认**：BV 号（`BV1xx411c7mD`）和 av 号（`av115324569524470`）——
+  //    B 站分享链接里两种都常见（截图那条就是 av ✗）
+  for (const m of s.matchAll(/BV[0-9A-Za-z]{10}/g)) raw.push(m[0]);
+  for (const m of s.matchAll(/\bav(\d{6,})/gi)) raw.push(`av${m[1]}`);
+  const seen = new Set();
+  return raw.filter((x) => (seen.has(x) ? false : (seen.add(x), true)));
+}
+
+/** 按 BV 取过的视频信息（内存缓存，同一支视频别反复打接口） */
+const _bvCache = new Map();
+
+/**
+ * 按 BV 号取「这个视频大概是什么」（2026-10-16 加）。
+ *
+ * 用户截图：「**saki 回应的有点不对，最好 saki 也去看一遍视频的大概再回**」——
+ *   群里有人甩了条链接，她只能回「你笑点是不是有点低」这种**没接内容**的话 ✗
+ *
+ * ⚠️ 走 `web-interface/view`（按 BV 查详情），**不是**搜索接口 —— 我们手里已经有 BV 号了 ✓
+ * ⚠️ **失败也缓存一小会儿** —— 接口抽风时别每条消息都去打一次 ✓
+ * ⚠️ 超时压到 4 秒：它挡在拼提示词前面，不能把回复拖住 ✗
+ *
+ * @returns {Promise<{bvid:string,title:string,up:string,desc:string,play:number}|null>}
+ */
+export async function videoInfo(bvid) {
+  const bv = String(bvid ?? '').trim();
+  // ⚠️ 兼容 av 号（`?aid=` 那条路）—— 分享链接里 av 很常见 ✓
+  const qs = /^BV[0-9A-Za-z]{10}$/.test(bv)
+    ? `bvid=${bv}`
+    : /^av\d{6,}$/i.test(bv)
+      ? `aid=${bv.slice(2)}`
+      : '';
+  if (!qs) return null;
+  const hit = _bvCache.get(bv);
+  if (hit && Date.now() - hit.at < 6 * 3600 * 1000) return hit.info;
+  try {
+    const r = await fetch(`https://api.bilibili.com/x/web-interface/view?${qs}`, {
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+        Referer: 'https://www.bilibili.com/',
+        Cookie: cookieHeader(),
+      },
+      signal: AbortSignal.timeout(4000),
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const j = await r.json();
+    if (j?.code !== 0) throw new Error(`code=${j?.code}`);
+    const d = j.data ?? {};
+    const info = {
+      bvid: bv,
+      title: String(d.title ?? '').trim(),
+      up: String(d.owner?.name ?? '').trim(),
+      desc: String(d.desc ?? '').replace(/\s+/g, ' ').trim().slice(0, 200),
+      play: Number(d.stat?.view) || 0,
+    };
+    if (!info.title) throw new Error('没标题');
+    _bvCache.set(bv, { info, at: Date.now() });
+    return info;
+  } catch (e) {
+    log.debug(`[B站] 取视频信息失败（${bv}）：${e.message}`);
+    // ⚠️ 失败也记一下（10 分钟内别重试），但**不记成成功**
+    _bvCache.set(bv, { info: null, at: Date.now() - 6 * 3600 * 1000 + 600 * 1000 });
+    return null;
+  }
+}
+
 export async function searchVideos(keyword, { limit = 8, order = 'click', tids = 0, pubtime = 0 } = {}) {
   const list = await biliSearch({ keyword, order, tids, pubtime, pageSize: Math.max(30, limit) });
   if (!list.length) throw new Error('搜不到结果');

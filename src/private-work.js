@@ -164,6 +164,21 @@ export function allowFor(uid) {
   return friendCfg(uid).allow !== false;
 }
 
+/**
+ * 这个人**被我人工接管**了吗（2026-10-15 用户要求）。
+ *
+ * 用户原话：「**把工作模式的分好友设置也加一个人工接管开关**」。
+ *
+ * 语义跟**号级**那个（`config.humanTakeover`）一模一样，只是范围只有这一个人：
+ *   他的私聊**由我自己回**，机器人一声不吭 ✗
+ * ⚠️ 但**照常落盘** —— `recent` 那边在收到消息时就记了 ⇒
+ *   我接管完、切回机器人，它还认得这段聊天 ✓（号级接管也是这么定的）
+ * ⚠️ 判据只有这一处，别在别处自己读 `friendCfg(uid).takeover`（多处读 = 迟早对不上）
+ */
+export function friendTakeover(uid) {
+  return friendCfg(uid).takeover === true;
+}
+
 /** 按好友覆盖的分钟数（没配 / 配歪了就用全局默认） */
 export function minutesFor(uid, key, dflt) {
   const v = Number(friendCfg(uid)[key]);
@@ -176,7 +191,12 @@ export function uiData() {
     const s = st.uid[qq] ?? {};
     return {
       qq,
-      name: friends[qq]?.name ?? '',
+      // ⚠️⚠️ 2026-10-16 改（用户截图：「为什么工作模式好友界面的**昵称不显示了**」）——
+      //    名字原来**只认协议端刷新的那一份**（`friends`）⇒ 协议端某次没带回昵称的，
+      //    表格就直接退回显示 QQ 号 ✗（截图里一半的行都只有号码）
+      //    ⇒ 改成**三级回退**：协议端 → **她自己状态里存过的名字**（`st.uid[qq].name`，
+      //      开工时就记下来的，比如 "Saki"）→ 空（前端最后再退回 QQ 号）✓
+      name: friends[qq]?.name || s.name || '',
       cfg: friendCfg(qq),
       stage: String(s.stage ?? ''),
       etaAt: Number(s.etaAt) || 0,
@@ -1475,11 +1495,25 @@ export async function onPrivate(event, segs, bot) {
     void preRead(uid, bot);
   }
 
+  // 2026-10-16 修（真 bug，运行时才炸）：下面那几个 if 用到 text / had，
+  // 而它们原来声明在这一段**后面**（原 1546 / 1551 行）⇒ 只要任务正在跑就必报
+  // Cannot access had before initialization（日志里实测过，被 try/catch 兜住，
+  // 表现只是"补充没带上"，所以一直没被发现）。
+  // 跟下面"收款码"那段是同一个坑（那边注释写了"位置只能在 text/had 之后"）——
+  // 10-14 加"插话 / 补充"时又犯了一次 ⇒ 这两个计算挪到最前面。
   // ⚠️⚠️ 2026-10-14 加（用户：「开工之后接的文件也要丢到 agent 里，
   //    但是要看**对方补充了什么**」）——
   //    agent **正在跑**的时候他又说了话 / 又发了文件 ⇒ 先记一笔，
   //    这一轮跑完 `startJob` 会**立刻再起一轮**把补充带上 ✓
   //    （headless 是一次性进程，没法真"中途喂给它"——这是等效做法）
+  let text = '';
+  try {
+    const { extractText, toSegments } = await import('./message.js');
+    text = String(extractText(segs ?? toSegments(event?.message)) ?? '').trim();
+  } catch {}
+  const had = pushNeed(s, text);
+  // ⚠️ save()；必须在 if 之前 —— 它原来紧跟在 had 后面（搬动时别落下它）
+  save();
   if (jobs.has(uid) && s.stage === 'running' && (savedN > 0 || had)) {
     // ⚠️⚠️ 2026-10-14 加（用户：「**之前你不是说加了可以打断中途插话的功能吗**」）——
     //    群任务那套有「插话 → 停掉重来」（`looksLikeInterject` + 复用同一个文件夹）；
@@ -1523,13 +1557,6 @@ export async function onPrivate(event, segs, bot) {
     }
   }
 
-  let text = '';
-  try {
-    const { extractText, toSegments } = await import('./message.js');
-    text = String(extractText(segs ?? toSegments(event?.message)) ?? '').trim();
-  } catch {}
-  const had = pushNeed(s, text);
-  save();
 
   // ⚠️⚠️ 2026-10-14 加（用户：「**接上付款码吧，当对面说付钱或者项目做完了该付钱时发给对方**」）——
   //    他先提到钱（怎么付 / 多少钱 / 转账…）⇒ 把收款码发过去 ✓

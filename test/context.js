@@ -244,5 +244,56 @@ console.log('\n【8】★★ 上下文里的「同款机器人」要标出来（
   recent.clear(G);
 }
 
+console.log('\n【7】★★ 主人给的活 ⇒ 她那句回执**不进上下文**（2026-10-16 用户要求）');
+{
+  // 用户原话：「**这种指令相关的消息不要进上下文**，比如按这个来」。
+  // 判据（用户选的）：「**上游是主人**」—— 群里主人跟她说了话（多半是给活干），
+  // 她那句执行回执（「行，就按这个来，等我一下」）就不该进上下文 ✗
+  // ⚠️ 实测代价：她在群里回了这么一句，旁边的爱音把它当台词接，
+  //    追问「等我一下是等谁啊」✗（<主人> 截图，群 200000007）
+  const OWNER = '10000001';
+  recent.clearAll();
+  recent.rememberBot(
+    { message_type: 'group', group_id: G, user_id: OWNER, sender: { nickname: '<主人>' } },
+    '行，就按这个来，等我一下（',
+  );
+  check(!recent.contextText(G).includes('就按这个来'), '★★ 主人给的活，她那句回执不进上下文');
+
+  // ⚠️ 别一刀切：群友说话时她的回复**照旧记**
+  recent.rememberBot(
+    { message_type: 'group', group_id: G, user_id: '30001', sender: { nickname: '甲' } },
+    '这是我自己的看法。',
+  );
+  check(recent.contextText(G).includes('我自己的看法'), '★ 群友说话时她的回复照旧记（没一刀切）');
+
+  // ⚠️ 只管**群里**：私聊主人照旧记（不然她就不记得跟主人聊过什么、答应过什么了）。
+  // ⚠️ 私聊在 `recent` 里的 key **不是 QQ 号**（见 `contextKey`），所以这里读不回来 ——
+  //    只验"这道判据没有顺手把私聊也拦掉"（拉了 `mt === 'group'` 那道闸就够）✓
+  recent.clearAll();
+  let threw = false;
+  try {
+    recent.rememberBot({ message_type: 'private', user_id: OWNER }, '知道了，我这就改。');
+  } catch {
+    threw = true;
+  }
+  check(!threw, '★★ 私聊主人照旧记（那道判据只管群里，不误伤私聊）');
+
+  // ⚠️⚠️ 再加一类：**她自己的系统面板**（剧情结算那种）⇒ 不进上下文
+  //    （用户截图：面板发到群里，爱音追问「你那边还带结算面板的？」✗）
+  recent.clearAll();
+  recent.rememberBot(
+    { message_type: 'group', group_id: G, user_id: '30001', sender: { nickname: '甲' } },
+    '【本次剧情结束 · 好结局】\n好感度 +3（参与 2 人）：\n1. Anon 54 → 57\n2. <主人> 62 → 65',
+  );
+  check(!recent.contextText(G).includes('好感度'), '★★ 剧情结算面板不进上下文（系统信息不是聊天内容）');
+  // ⚠️ 但正常的「【标题】链接」那种分享**不许**被误杀
+  recent.clearAll();
+  recent.rememberBot(
+    { message_type: 'group', group_id: G, user_id: '30001', sender: { nickname: '甲' } },
+    '【爱素：谢谢，我不吃】 https://www.bilibili.com/video/BV1xx',
+  );
+  check(recent.contextText(G).includes('爱素'), '★ 正常的「【标题】链接」分享照旧记（判据够窄）');
+}
+
 console.log(`\n结果: ${failures === 0 ? '全部通过 ✅' : `${failures} 项失败 ❌`}\n`);
 process.exit(failures === 0 ? 0 : 1);

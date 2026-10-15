@@ -706,6 +706,9 @@
 
     <div class="card">
       <h2>分好友的设置</h2>
+      <div style="margin:8px 0"><input type="text" id="pw-friend-search" placeholder="搜好友名 / QQ 号，快速定位…"
+        style="width:100%;box-sizing:border-box" oninput="filterPwFriends()"></div>
+      <div class="hint" id="pw-friend-hint"></div>
       <p class="hint">
         这里只管<b>工作模式</b>的事 —— 和「好感度 / 好友」那页的<b>不是一回事</b>（两边各存各的）。<br>
         ⚠️ 「允许派活」关掉 = 这个人<b>只跟你聊天、不接单</b>。
@@ -2598,7 +2601,11 @@ async function renderWorkMode() {
     if (!d || !d.ok) box.innerHTML = "<span class=\"hint\">读不到好友名单（服务端出错了）</span>";
     else if (d.off) box.innerHTML = "<span class=\"hint\">这个号还没开「私聊工作模式」—— 开了之后这里会列出它的好友。</span>";
     else if (!d.friends.length) box.innerHTML = "<span class=\"hint\">好友名单还是空的（协议端刚起来，等十分钟它自己刷一次）。</span>";
-    else box.innerHTML = pwFriendTable(d);
+    else {
+      box.innerHTML = pwFriendTable(d);
+      // ⚠️ 2026-10-15：表刚重建 ⇒ 把搜索框里的条件**再套一次**（不然一刷新就又全列出来了）✓
+      filterPwFriends();
+    }
   }
   const root = $("pw-root");
   if (root) root.textContent = String(w.rootDir || "（默认：%LOCALAPPDATA%\\DeepSeekHarness\\private-work）");
@@ -2616,6 +2623,8 @@ function pwFriendTable(d) {
       + "<div class=\"hint mono\">" + q + "</div>"
       + (st ? "<div class=\"hint\">" + st + "</div>" : "") + "</td>"
       + "<td style=\"padding:6px 8px\"><input type=\"checkbox\" id=\"pwf-allow-" + q + "\"" + (c.allow === false ? "" : " checked") + "></td>"
+      // ⚠️ 2026-10-15（用户：「分好友设置也加一个人工接管开关」）—— 勾上 = 这个人的私聊我自己回
+      + "<td style=\"padding:6px 8px\"><input type=\"checkbox\" id=\"pwf-takeover-" + q + "\"" + (c.takeover === true ? " checked" : "") + "></td>"
       + "<td style=\"padding:6px 8px\"><input type=\"number\" id=\"pwf-timeout-" + q + "\" placeholder=\"" + d.defaults.timeoutMin + "\" value=\"" + (c.timeoutMin == null ? "" : c.timeoutMin) + "\" style=\"width:74px\"></td>"
       + "<td style=\"padding:6px 8px\"><input type=\"number\" id=\"pwf-etamin-" + q + "\" placeholder=\"" + d.defaults.etaMinMin + "\" value=\"" + (c.etaMinMin == null ? "" : c.etaMinMin) + "\" style=\"width:64px\"> ~ "
       + "<input type=\"number\" id=\"pwf-etamax-" + q + "\" placeholder=\"" + d.defaults.etaMaxMin + "\" value=\"" + (c.etaMaxMin == null ? "" : c.etaMaxMin) + "\" style=\"width:64px\"></td>"
@@ -2625,9 +2634,32 @@ function pwFriendTable(d) {
   }).join("");
   return "<table style=\"width:100%;border-collapse:collapse\">"
     + "<thead><tr style=\"text-align:left\"><th style=\"padding:6px 8px\">好友</th><th style=\"padding:6px 8px\">允许派活</th>"
+    + "<th style=\"padding:6px 8px\">人工接管</th>"
     + "<th style=\"padding:6px 8px\">单活上限(分)</th><th style=\"padding:6px 8px\">估时区间(分)</th>"
     + "<th style=\"padding:6px 8px\">备注</th><th></th></tr></thead><tbody>" + rows + "</tbody></table>"
     + "<p class=\"hint\">留空 = 跟着全局走（单活 " + d.defaults.timeoutMin + " 分 / 估时 " + d.defaults.etaMinMin + "~" + d.defaults.etaMaxMin + " 分 / 一天最多 " + d.defaults.dailyMax + " 单）。</p>";
+}
+
+/**
+ * ⚠️ 2026-10-15 加（用户：「加个**搜索筛选框**来快捷找到要控制的好友卡片」）。
+ * 纯前端过滤：按**昵称 / QQ 号 / 备注**匹配，命中的行留着、其余藏起来 ✓
+ * ⚠️ 表是 `renderWorkMode()` 重建的，而搜索框本身不在表里（值会留着）——
+ *    所以重建完要**再过滤一次**（见 `renderWorkMode` 里那一句）✓
+ */
+function filterPwFriends() {
+  const el = $("pw-friend-search");
+  const kw = String((el && el.value) || "").trim().toLowerCase();
+  const box = $("pw-friends");
+  if (!box) return;
+  const rows = box.querySelectorAll("tbody tr");
+  let shown = 0;
+  rows.forEach((tr) => {
+    const hit = !kw || String(tr.textContent || "").toLowerCase().includes(kw);
+    tr.style.display = hit ? "" : "none";
+    if (hit) shown++;
+  });
+  const tip = $("pw-friend-hint");
+  if (tip) tip.textContent = kw ? `筛出 ${shown} / ${rows.length} 个好友` : "";
 }
 
 async function saveFriendCfg(qq) {
@@ -2635,9 +2667,12 @@ async function saveFriendCfg(qq) {
   const g = (p) => $("pwf-" + p + "-" + qq);
   const num = (p) => { const v = Number(g(p) && g(p).value); return Number.isFinite(v) && v > 0 ? v : null; };
   const allowEl = g("allow");
+  const takeEl = g("takeover");
   const noteEl = g("note");
   const one = {
     allow: allowEl ? !!allowEl.checked : true,
+    // ⚠️ 2026-10-15（用户要求）：人工接管 = 这个人的私聊我自己回，机器人别出声 ✓
+    takeover: takeEl ? !!takeEl.checked : false,
     timeoutMin: num("timeout"),
     etaMinMin: num("etamin"),
     etaMaxMin: num("etamax"),

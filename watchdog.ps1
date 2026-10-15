@@ -1,4 +1,4 @@
-# NapCat 看门狗：NapCat 挂了就自动拉起来，不需要人工介入。
+﻿# NapCat 看门狗：NapCat 挂了就自动拉起来，不需要人工介入。
 #
 # 背景：NapCat 崩过一次（NapCatWinBootMain 进程消失、3001 端口没了），
 # 机器人在那之后默默重连了 9 分钟，群里完全没反应，用户只能干等。
@@ -344,7 +344,7 @@ function Start-Bot {
   #    真实后果：用户报「刚才我发的消息没回」，我翻日志只看得到启动信息，
   #    重启前那段对话凭空消失 —— 而 10-02 这一晚机器人几乎全是看门狗拉起来的 ✗
   #    现在日志走 `logs\bot-YYYY-MM-DD.log`（bat 里按天**追加**），这里不要再动它。
-  Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', '_run-bot.bat' -WorkingDirectory $BotDir -WindowStyle Hidden
+  Start-Process -FilePath 'wscript.exe' -ArgumentList '//nologo', '_run-bot-hidden.vbs' -WorkingDirectory $BotDir -WindowStyle Hidden
   # ⚠️ 文件名必须和 `_run-bot.bat` 里写的那份**完全一致**，否则这里永远等不到「已连接」。
   $log = Join-Path $BotDir ("logs\bot-{0}.log" -f (Get-Date -Format 'yyyy-MM-dd'))
   for ($i = 0; $i -lt 30; $i++) {
@@ -448,7 +448,7 @@ function Sync-ExtraBots {
     if ($ExtraLastStart.ContainsKey($qq) -and ((Get-Date) - $ExtraLastStart[$qq]).TotalSeconds -lt 90) { continue }
     $ExtraLastStart[$qq] = Get-Date
     Say "❌ 号 $qq 不在了 —— 重新拉起"
-    Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', '_run-bot.bat', $qq -WorkingDirectory $BotDir -WindowStyle Hidden
+  Start-Process -FilePath 'wscript.exe' -ArgumentList '//nologo', '_run-bot-hidden.vbs' -WorkingDirectory $BotDir -WindowStyle Hidden
   }
 }
 

@@ -1,4 +1,4 @@
-﻿import { config, ROOT, KNOWLEDGE_DIR, paramsFor, peersFor, otherBotsFor, stateDir, isMainAccount } from './config.js';
+import { config, ROOT, KNOWLEDGE_DIR, paramsFor, peersFor, otherBotsFor, stateDir, isMainAccount } from './config.js';
 // ⚠️ 2026-10-07 加（合照）：要按同类池里的号去读它自己的 `persona.id`
 //    —— 「那个号演的是谁」。`accounts.js` 只依赖 node 内建，不成环。
 import * as accounts from './accounts.js';
@@ -6844,6 +6844,24 @@ export class Bot {
   }
 
   async handle(event, meta = {}) {
+    // ⚠️⚠️ 2026-10-16 加（用户截图：「**saki 回应的有点不对，最好 saki 也去看一遍
+    //    视频的大概再回**」）——
+    //    群里（群友 / 同类）甩 B 站链接时，她原来只知道"有个链接"，不知道视频讲什么
+    //    ⇒ 只能回「你笑点是不是有点低」这种**没接内容**的话 ✗
+    //    ⇒ 在**这里**（async，而且早于拼提示词）先把链接抓一次 ——
+    //      拼提示词那边是同步的，只能同步读 `linkNote()` ✓
+    //    ⚠️ 只抓**最新那一条**：用户明确说「**不要对甩过来的视频计数，不像人类**」✗
+    //    ⚠️ 带缓存、单条超时 4 秒 ⇒ 不会把回复拖住 ✓
+    if (event?.message_type === 'group') {
+      try {
+        await biliShare.warmBiliLinks([
+          this._textOf(event),
+          ...recent.recentItems(String(event.group_id), 5).map((m) => m.text),
+        ]);
+      } catch (e) {
+        log.debug(`[B站分享] 预热链接跳过：${e.message}`);
+      }
+    }
     // ⚠️⚠️ 2026-09-20 私聊**根本防线**（用户要求：白名单外的人不管发什么类型都不回）。
     //    放在 handle 最前面 —— 所有"构造假私聊事件"的入口（戳一戳、补看、将来的新功能）
     //    最终都要经过这里，这一道挡住就不会再漏（onRaw 那两处是第一道，这里是第二道）。
@@ -10754,6 +10772,11 @@ export class Bot {
     //    ⚠️ 它**不看 `affinity`（好感度）**、也**不是** `friend.js` 那个"每天挑一个主动私聊"
     //      （用户明确要求「一定不是之前的主动私聊功能，也不要调用之前的好感度模块」）✓
     //    ⚠️ 想关掉这条：`config.yml` 里 `trigger.allowFriendsPrivate: false`（退回只认下面的名单）
+    // ⚠️⚠️ 2026-10-15 加（用户：「**把工作模式的分好友设置也加一个人工接管开关**」）——
+    //    这个人被我接管了 ⇒ **不回他**（跟号级接管一个语义，但只管他一个）✓
+    //    ⚠️ 放在最前面：别等白名单判完再说，接管就是最高优先级 ✓
+    //    ⚠️ 消息照常落盘（`recent` 在收到时就记了）⇒ 我切回机器人它还认得这段 ✓
+    if (privateWork.friendTakeover(uid)) return false;
     if (privateWork.isAllowedFriend(uid)) return true;
     return (config.trigger.allowPrivateUsers ?? []).includes(uid);
   }
@@ -11566,6 +11589,18 @@ export class Bot {
       //    B站分享是**定时任务**发的，不在对话流里 —— 群里有人接着问「你发这个干嘛」，
       //    她原来手里只有那条消息本身，**不知道那是自己分享的、也不知道视频讲了什么** ✗
       //    ⇒ 刚分享过（6 小时内）就把「那是你自己发的 + 标题 + 简介」附在知识后面 ✓
+      // ⚠️⚠️ 2026-10-16 加（用户截图：「**saki 回应的有点不对，最好 saki 也去看一遍
+      //    视频的大概再回**」）—— 群里（群友 / 同类）甩 B 站链接时，她原来只知道
+      //    "有个链接"，不知道视频讲什么 ⇒ 只能回「你笑点是不是有点低」这种没接内容的 ✗
+      //    ⇒ 拼提示词前把「当前这条 + 最近几条」里的 BV 号**先抓一遍**（带缓存，很快），
+      //      再把「标题 / UP / 简介」附给她 ✓
+      //    ⚠️ 只抓没缓存的那**一条**、单条超时 4 秒 —— 它挡在回复前面，别拖节奏 ✗
+      try {
+        const _linkNote = biliShare.linkNote();
+        if (_linkNote) k += `\n${_linkNote}\n`;
+      } catch (e) {
+        log.debug(`[B站分享] 链接预热跳过：${e.message}`);
+      }
       const _shareNote = biliShare.shareNote(scopeId);
       if (_shareNote) k += `\n${_shareNote}\n`;
       if (picked.skipped.length) {
@@ -17980,7 +18015,28 @@ export function splitChatText(raw, opts = {}) {
           out.push(cur);
           cur = '';
         }
-        for (let i = 0; i < s.length; i += CHUNK) out.push(s.slice(i, i + CHUNK));
+        // ⚠️⚠️ 2026-10-16 改（用户截图问：「**这句话为什么截断了**」）——
+        //    原来这里**按 CHUNK（60 字）硬切**，完全不管标点 ⇒ 一句长话被切成两个半句，
+        //    前一条结尾停在「……坐她对面前那副」这种**词中间**，看着就像被截断了 ✗
+        //    （实测那条：爱音回 73 字，被切成「…坐她对面前那副」+ 后半截，
+        //      用户看到的正是前半截 ⇒ 他以为消息断了 ✗）
+        //    ⇒ 切点**从右往左找最近的标点**（，、；。！？：…），在那儿切 ✓
+        //      实在没有标点才真硬切（长数字串 / 一长串英文那种）✓
+        //    ⚠️ 这样切出来是「说到一半停了一下」，跟真人打字的节奏一样 ✓
+        let rest = s;
+        while (rest.length > CHUNK) {
+          let cut = -1;
+          for (let k = CHUNK; k >= Math.floor(CHUNK * 0.55); k--) {
+            if (/[，、；。！？：…]/.test(rest[k - 1] ?? '')) {
+              cut = k;
+              break;
+            }
+          }
+          if (cut < 0) cut = CHUNK;
+          out.push(rest.slice(0, cut));
+          rest = rest.slice(cut);
+        }
+        if (rest) out.push(rest);
         continue;
       }
       const floor = out.length === 0 ? FIRST_FLOOR : SOFT_FLOOR;

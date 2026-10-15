@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 私聊工作模式（2026-10-14 用户要求）套件。
  *
  * ## 这个套件盯的是这几条（都是用户原话定的）
@@ -994,6 +994,38 @@ try {
   rmSync(join(ROOT, CFG_REL), { force: true });
   rmSync(join(ROOT, PERSONA), { force: true });
 } catch {}
+
+console.log('\n【27】★★ 分好友的「人工接管」开关 + 搜索框（2026-10-15 用户要求）');
+{
+  // 用户原话：「把工作模式的**分好友设置也加一个人工接管开关**」
+  //   +「加个**搜索筛选框**来快捷找到要控制的好友卡片」。
+  // 语义：跟号级那个一样，只是范围只有这一个人 —— 他的私聊由用户自己回，机器人一声不吭；
+  //   ⚠️ 但**照常落盘** ⇒ 接管完切回机器人，它还认得这段聊天 ✓
+  // ⚠️ 名单也要摆好 —— uiData() 列的是**协议端那份好友名单**里的
+  pw.__setFriends({ [FRIEND]: '小明', [STRANGER]: '路人' });
+  config.privateWork.friends = { [FRIEND]: { takeover: true }, [STRANGER]: {} };
+  check(pw.friendTakeover(FRIEND) === true, '★★ 勾了「人工接管」⇒ 这个人的私聊由我自己回');
+  check(pw.friendTakeover(STRANGER) === false, '★ 没勾的人照旧（默认关）');
+  check(pw.friendTakeover('99999999') === false, '★ 完全没配过的人也是关的');
+
+  const d27 = pw.uiData();
+  check(
+    d27.friends.some((f) => f.qq === FRIEND && f.cfg.takeover === true),
+    '★ `uiData` 把接管状态带给界面那张表',
+  );
+
+  // ⚠️⚠️ **bot 那边的判据里也得有它** —— 不然界面上勾了没人管 ✗
+  const b27 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
+  check(
+    /if \(privateWork\.friendTakeover\(uid\)\) return false;/.test(b27),
+    '★★ 私聊回复判据里真的拦了（勾了就不回他）',
+  );
+
+  // 前端：搜索框 + 那一列（⚠️ 这两样只能扫源码 —— 它们是纯 DOM 的事）
+  const w27 = readFileSync(join(ROOT, 'src', 'webui.html'), 'utf8');
+  check(/id="pw-friend-search"/.test(w27) && /function filterPwFriends/.test(w27), '★★ 搜索筛选框在');
+  check(/pwf-takeover-/.test(w27) && /人工接管<\/th>/.test(w27), '★★ 分好友那张表里有「人工接管」这一列');
+}
 
 console.log(`\n结果: ${failures === 0 ? '全部通过 ✅' : `${failures} 项失败 ❌`}\n`);
 process.exit(failures === 0 ? 0 : 1);

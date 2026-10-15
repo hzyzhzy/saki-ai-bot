@@ -452,6 +452,66 @@ export function recentShareFor(gid = '', withinMs = 6 * 3600 * 1000) {
   return r;
 }
 
+/** 上一轮 `warmBiliLinks()` 抓到的东西（同一轮内马上用，不跨轮） */
+let _lastLinkInfo = [];
+
+/**
+ * 把这几段文字里的 B 站链接**先抓一遍**（2026-10-16 加）。
+ *
+ * 用户截图：「**saki 回应的有点不对，最好 saki 也去看一遍视频的大概再回**」——
+ *   群里（群友 / 同类）甩链接时，她原来只知道"有个链接"，不知道视频讲什么 ⇒
+ *   只能回「你笑点是不是有点低」这种没接内容的话 ✗
+ *
+ * ⚠️ **必须在拼提示词之前 await 它**（拼提示词那儿是同步的）。
+ * ⚠️ 只抓**没缓存过的**、**只抓最新那一条**（⚠️ 别列多条 —— 用户：「不要对甩过来的视频**计数**，不像人类」✗） —— 它挡在回复前面，别把节奏拖住 ✗
+ * ⚠️ 失败就算了（返回空，不影响回话）✓
+ */
+export async function warmBiliLinks(texts = []) {
+  _lastLinkInfo = [];
+  try {
+    const bili = await import('./bilibili.js');
+    const bvs = [];
+    for (const t of Array.isArray(texts) ? texts : []) {
+      for (const bv of bili.pickVideoIds(t)) if (!bvs.includes(bv)) bvs.push(bv);
+      if (bvs.length >= 1) break;
+    }
+    for (const bv of bvs.slice(0, 1)) {
+      const info = await bili.videoInfo(bv);
+      if (info) _lastLinkInfo.push(info);
+    }
+  } catch (e) {
+    log.debug(`[B站分享] 预热链接失败：${e.message}`);
+  }
+  return _lastLinkInfo;
+}
+
+/**
+ * 把刚抓到的链接信息拼成一段提示词（没有就返回空串）。
+ *
+ * ⚠️ 跟 `shareNote()` 分工不同：那个说的是"**你自己**分享的"，
+ *    这个说的是"**群里刚才那条链接**"（**谁发的都可能**）✓
+ */
+export function linkNote() {
+  if (!_lastLinkInfo.length) return '';
+  const lines = _lastLinkInfo.map((v) => {
+    const bits = [`《${v.title}》`];
+    if (v.up) bits.push(`UP：${v.up}`);
+    if (v.desc) bits.push(`简介：${v.desc}`);
+    return `- ${bits.join('｜')}`;
+  });
+  return [
+    '',
+    '## ⚠️ 群里刚才那条 B 站链接，**你点开看过了**',
+    ...lines,
+    '',
+    '⚠️ 规矩：',
+    '- 上面就是**那支视频大概是什么** —— 有人甩链接、或者聊到它的时候，**照这个接** ✓',
+    '- 🚫 **别把简介念出来**、别逐条复述、也别写"视频简介说…"这种话 ✗',
+    '- ✅ 就当你自己刷到过：可以评一句、可以吐槽、可以只接半句 —— 跟平时说话一样 ✓',
+    '',
+  ].join('\n');
+}
+
 /**
  * 把「你刚分享过这个视频」拼成一段提示词（没分享过就返回空串）。
  *
