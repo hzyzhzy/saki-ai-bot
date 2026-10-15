@@ -239,10 +239,22 @@ console.log('\n【6】★★ 可以**自己起个头**（用户：互相 @ 不�
   const cap2 = [];
   const fake2 = async (p) => {
     cap2.push(String(p.user ?? ''));
-    return '嗯';
+    return '行，那说好了';
   };
   await pc.compose(G, '1001', 20 * 60 * 1000, 1000, { rng: () => 0, phrase: fake2 });
   check(/接着上面那些话/.test(cap2.at(-1) ?? ''), '★ selfTopicChance=0 → 永远是承接（可回退）');
+  // ⚠️ 2026-10-15 加（用户报：「**看看为什么就发一个点**」）——
+  //    生成不出成句的东西（比如「（.）」）：先换方向**重试一次**，还不行**这次不搭话** ✓
+  const cap3 = [];
+  const fake3 = async (p) => {
+    cap3.push(String(p.user ?? ""));
+    return "（.）";
+  };
+  const bad = await pc.compose(G, "1001", 20 * 60 * 1000, 1000, { rng: () => 0, phrase: fake3 });
+  check(cap3.length >= 2, "★★ 生成不成句 ⇒ **换方向重试一次**", `问了 ${cap3.length} 次`);
+  check(/不用接群里刚才的话题/.test(cap3.at(-1) ?? ""), "★★ 重试时走的是「自己起个头」那套");
+  check(bad === "", "★★ 两次都不成句 ⇒ **这次不搭话**（宁可不说，也不 @ 一个人只发个点）");
+
   config.peerChat = keep;
 }
 

@@ -1093,14 +1093,33 @@ export function commit(planObj, text, at = Date.now(), opts = {}) {
  *    把**某个群**单独关掉（它就不收日常事件了）。
  *    例：大群不想刷屏、小群想多发几条 —— 用这个，不用动全局。
  */
-export function targetGroups() {
+/**
+ * **进事件系统的群**（= 档位 1 + 在 `trigger.allowGroups` 里）—— **不管 `life.enable`**。
+ *
+ * ⚠️⚠️ 2026-10-15 抽出这个函数（用户报：「**另一个群也是 1 级群，为什么这里没显示**」）。
+ *    起因：**B站分享**要的是「1 档群」，我当时却接了 `targetGroups()` ——
+ *    那个是**「现在开着日常事件的群」**（末尾多一条 `life.enable !== false` 的过滤）✗
+ *    ⇒ 用户把某个群的日常事件关掉之后，那个群就从 B站分享的下拉里**消失了** ✗
+ *    ⚠️ 这两套判据本来就说好是分开的 —— 见下面 `isEventGroup` 的注释：
+ *      「`life.enable=false` 的群**仍然算"进事件系统"**（只是被单独关掉了日常事件）」。
+ *    ⇒ 要「1 档群」用**这个**；要「现在该发日常事件的群」用 `targetGroups()` ✓
+ */
+export function eventGroups() {
   const allow = (config.trigger?.allowGroups ?? []).map(String);
   const lv = config.trigger?.groupRespondTo ?? {};
   return Object.keys(lv)
     .map(String)
     .filter((g) => Number(lv[g]) === 1)
-    .filter((g) => !allow.length || allow.includes(g))
-    .filter((g) => config.groupParams?.[g]?.life?.enable !== false);
+    .filter((g) => !allow.length || allow.includes(g));
+}
+
+/**
+ * 日常事件该发到哪些群 —— **1 档群，再排掉自己单独关掉日常事件的那些**。
+ * ⚠️ 只在 `life.js` 内部（和「今天该发几条」那套）用；要「1 档群」的场合
+ *    （B站分享、手动开剧情…）请用 `eventGroups()` —— 别再用这个（2026-10-15 栽过一次）✗
+ */
+export function targetGroups() {
+  return eventGroups().filter((g) => config.groupParams?.[g]?.life?.enable !== false);
 }
 
 /**
@@ -1155,6 +1174,8 @@ export function status(groupId = '') {
     lateToleranceMs: lateToleranceMs(gid),
     nowInWindow: Date.now() >= start && Date.now() < end,
     targets: targetGroups(),
+    // ⚠️ 2026-10-15 加：**1 档群**（不管日常事件开没开）—— B站分享的下拉用它 ✓
+    targetsAll: eventGroups(),
     // ⚠️⚠️ `fired` 一律是「**这个群今天记账了几条**」（= `todayPlan().fired`）。
     //
     //    2026-09-15 修：原来 `...stats` 放在最后，把 `fired` **覆盖**成了

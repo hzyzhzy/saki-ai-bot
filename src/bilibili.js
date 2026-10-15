@@ -427,13 +427,28 @@ function cookieHeader() {
 }
 
 /** 打一次搜索接口（原始结果，不做筛选） */
+/**
+ * B 站搜索接口认的排序值（2026-10-15 加）。
+ *
+ * ⚠️⚠️ 起因（用户截图报：「**b站上能直接搜到**」）：
+ *   网页搜「安岛」出来的**全是**《安达与岛村》相关内容，而我们这边搜「安岛」
+ *   出来的是「32男1女被困孤岛」「乌尔比安用三技能上岛」那类**热门但不相关**的 ✗
+ *   真因：这里原来写的是 `order === 'pubdate' ? 'pubdate' : 'click'` ——
+ *   **除了 pubdate 一律塌成 `click`（按播放量排）** ⇒ 短关键词（「安岛」「MYGO」）
+ *   回来的就是"按点击量泛化出来的全网热门"，跟关键词基本无关 ✗
+ *   网页默认是**综合排序** = `totalrank`（按相关性）⇒ 同一个词搜出来完全不同 ✓
+ *   ⚠️ 而"要挑热门那条"是调用方**自己按 play 排**的（见 `bili-share.js` 的 `pickReal`）
+ *      ⇒ 搜索排序用 `click` 属于"多此一举还把相关性搞丢"，别再拿它换热度 ✗
+ */
+const SEARCH_ORDERS = ['totalrank', 'click', 'pubdate', 'dm', 'stow', 'scores'];
+
 async function biliSearch({ keyword, order = 'click', tids = 0, pubtime = 0, pageSize = 30 }) {
   const kw = String(keyword ?? '').trim();
   if (!kw) throw new Error('没给关键词');
   const url =
     'https://api.bilibili.com/x/web-interface/search/type?search_type=video' +
     `&page_size=${Math.max(1, Math.min(50, pageSize))}` +
-    `&keyword=${encodeURIComponent(kw)}&order=${order === 'pubdate' ? 'pubdate' : 'click'}` +
+    `&keyword=${encodeURIComponent(kw)}&order=${SEARCH_ORDERS.includes(order) ? order : 'click'}` +
     (tids ? `&tids=${tids}` : '') +
     (pubtime ? `&pubtime=${pubtime}` : '');
   const r = await fetch(url, {
@@ -454,6 +469,14 @@ async function biliSearch({ keyword, order = 'click', tids = 0, pubtime = 0, pag
       up: String(v.author ?? '').trim(),
       play: Number(v.play) || 0,
       date: Number(v.pubdate) || 0,
+      // ⚠️ 2026-10-15 加（用户：「bot 要知道**视频大概讲了什么**」）——
+      //    搜索接口的返回项**自带 `description`**（就是简介），
+      //    里面同样会带 `<em class="keyword">` 高亮标签 ⇒ 走 `cleanSearchTitle` 同一套清洗 ✓
+      //    ⚠️ 别去额外打 `web-interface/view` —— 白多一次请求、还容易吃风控 ✗
+      desc: cleanSearchTitle(v.description ?? '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 200),
       url: String(v.arcurl ?? (v.bvid ? `https://www.bilibili.com/video/${v.bvid}` : '')),
     }))
     .filter((v) => v.title);
@@ -492,7 +515,10 @@ export async function topicVideos(keyword, { limit = 8, tids = 0, match = null, 
   // ⚠️ `deny`：**蹭字的标题**（实测「我的世界」会搜出《这是我的世界》AI剧集、
   //    《世界上的另一个我》这种，光靠 match 拦不住，得点名排掉）
   const grab = async (useTids) =>
-    (await biliSearch({ keyword: kw, order: 'click', tids: useTids ? tids : 0 })).filter(
+    // ⚠️ 2026-10-15：`order` 用 **`totalrank`（综合排序 = 按相关性）**，
+    //    不是 `click`（按播放量）—— 后者会把「安岛」搜成「困孤岛」那类泛化热门 ✗
+    //    （见 `SEARCH_ORDERS` 上面那段注释）
+    (await biliSearch({ keyword: kw, order: 'totalrank', tids: useTids ? tids : 0 })).filter(
       (v) => hit(v.title) && !(deny && deny.test(v.title)),
     );
   let list = tids ? await grab(true) : await grab(false);

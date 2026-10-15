@@ -12,7 +12,8 @@ import * as observe from './observe.js';
 // ⚠️ 「他的资料」自动更新（2026-10-03 用户要求）：他私聊里聊到生活变化 → 自动改 owner.md
 import * as ownerUpdate from './owner-update.js';
 import * as life from './life.js';
-// ⚠️ 2026-10-05 加：同类机器人主动搭话（群里冷场时 @ 它 / 戳它一下）
+// ⚠️ 2026-10-15 加：B 站视频分享（只发链接、只发 1 档群、默认关）
+import * as biliShare from './bili-share.js';// ⚠️ 2026-10-05 加：同类机器人主动搭话（群里冷场时 @ 它 / 戳它一下）
 import * as peerChat from './peer-chat.js';
 import * as storyline from './storyline.js';
 import * as quest from './quest.js';
@@ -866,6 +867,50 @@ if (true) {
           return `${g} 今天 ${s.fired}/${s.target}`;
         })
         .join('、') || '现在没有 1 档群'),
+  );
+}
+
+// ── B 站视频分享（2026-10-15 用户要求）────────────────────────
+//
+// 用户原话：「这个插件可以让 bot 也能看到 b 站视频，或者能自己分享视频吗」
+//   → 选「**只发链接**」（卡片被 QQ 挡了：`json`/`share` 段都回
+//     「**发送者版本过低，无法展示内容**」⇒ 见 `src/bili-share.js` 开头那段实测）
+//   → 「加个**看的视频的关键词**，要不然容易转群友都不感兴趣的视频」
+//   → 「关键词是**列表**；**只在一档群发**，和日常事件一样有开启按钮，**默认关闭**」
+//
+// ⚠️ 它**自己判断该不该发**（每个群各判各的：开关 / 关键词 / 今天条数 / 时段 / 冷却），
+//    这里只管"每隔一会儿问一句" ✓
+// ⚠️ 2026-10-15 改成**按群**（用户：「b站分享也要分群调节」）——
+//    所以这里问的是"**有没有任何一个 1 档群开着**"，挂了之后由 `runOnce` 逐群判 ✓
+// ⚠️ 开机**先等 2 分钟** —— 别刚开机就往群里甩链接（和"日常事件等 60 秒"一个道理）✓
+// ⚠️ 2026-10-15 改：用 `eventGroups()`（**1 档群**，不管日常事件开没开）——
+//    原来用 `targetGroups()` ⇒ 把日常事件关掉的群**从 B站分享里消失了** ✗
+//    （用户报：「另一个群也是 1 级群，为什么这里没显示」）
+const biliGroups = life.eventGroups();
+if (biliShare.anyEnabled(biliGroups)) {
+  const every = Math.max(60000, Number(config.biliShare?.checkIntervalMs) || 10 * 60 * 1000);
+  const tickBili = () => {
+    biliShare
+      .runOnce(bot, life.eventGroups())
+      .then((r) => {
+        if (r.sent) return; // 发成功那边已经记了 info ✓
+        // ⚠️ "没开 / 没配关键词 / 今天 0 条"这种是**正常状态**，别刷日志 ✗
+        if (!/没开|没配关键词|条数是 0|今天都不/.test(r.why)) log.debug(`[B站分享] 这次没发：${r.why}`);
+      })
+      .catch((e) => log.warn(`[B站分享] 出错：${e.message}`));
+  };
+  setInterval(tickBili, every).unref();
+  setTimeout(tickBili, 120 * 1000).unref();
+  const detail = biliGroups
+    .filter((g) => biliShare.enabled(g))
+    .map((g) => {
+      const c = biliShare.uiCfg(g);
+      return `${g}（关键词 ${c.keywords.length} 个｜每天 ${c.minPerDay}~${c.maxPerDay} 条｜${c.startHour}~${c.endHour} 点）`;
+    })
+    .join('、');
+  log.info(
+    `B站分享：每 ${Math.round(every / 60000)} 分钟看一次（**只发 1 档群**）；` +
+      `开着的有：${detail || '（一个都没有）'}`,
   );
 }
 

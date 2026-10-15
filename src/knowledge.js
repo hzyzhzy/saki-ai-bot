@@ -290,6 +290,12 @@ load();
  */
 export function reloadKnowledge() {
   load();
+  // ⚠️ 2026-10-15 加：**CP 名那份名单也要跟着失效**。
+  //    `cpNamesFor()` 把结果缓存在 `_cpCache` 里（每条消息的判定都读它，不缓存就白算）——
+  //    而缓存**不会自己失效** ⇒ 用户改了 `anime/<库>.md` 里那张 CP 表、界面上点了保存，
+  //    判定里用的还是旧名单（要重启才认）✗
+  //    ⇒ 热重载时一起清掉 ✓（不然就是"我明明改了，她怎么还是不认识"那种坑）
+  _cpCache = null;
   return { files: files.length, names: files.map((f) => f.name) };
 }
 
@@ -575,6 +581,44 @@ export function mentionsAnyTerm(text, fileName) {
   if (!f) return false;
   return mentionsAnyTermIn(f.content, text);
 }
+
+/**
+ * **和我有关的 CP 名**（2026-10-15 用户要求）。
+ *
+ * 用户原话：「刚才 saki 发了一个**爱素**的视频，按道理应该算提到了爱音，应该要回的」。
+ *
+ * 为什么需要：`anime/<库>.md` 里那张 CP 表是给**聊天**看的，判定模型不一定看得到 ——
+ *    而它不认识「爱素」这种圈内词（里面就是「爱音」），于是判成"普通分享链接，没点名" ✗
+ *    （实测日志：`20:39:07 [说话判断] 不说（普通分享链接，没点名）→ 这条不接`）
+ *
+ * ⚠️ 判据从**表本身**抠出来（表格行 `| **爱素** | 千早爱音 × 长崎素世 | … |`），
+ *    **不另外维护一份名单** —— 往 CP 表里加一行就自动生效 ✓
+ *
+ * @param {string[]} names 我这个角色的名字 / 别人怎么叫我（`charName()` + `callNames()`）
+ * @returns {string[]} 跟我有关的 CP 名（「爱素」「爱祥」…）
+ */
+export function cpNamesFor(names = []) {
+  const mine = (Array.isArray(names) ? names : [])
+    .map((x) => String(x ?? '').trim())
+    .filter((x) => x.length >= 2); // ⚠️ 单字（「爱」）不参与匹配，太容易撞普通词
+  if (!mine.length) return [];
+  const key = mine.join('|');
+  if (_cpCache?.key === key) return _cpCache.list;
+  const out = new Set();
+  for (const f of files.filter((x) => x.name.startsWith('anime/'))) {
+    for (const line of String(f.content).split('\n')) {
+      const m = /^\|\s*\*\*(.{2,20}?)\*\*\s*\|([^|]{2,60})\|/.exec(line.trim());
+      if (!m) continue;
+      if (!m[2].includes('×')) continue; // ⚠️ 只认「A × B」那种配对行
+      if (!mine.some((n) => m[2].includes(n))) continue;
+      out.add(m[1].trim());
+    }
+  }
+  const list = [...out];
+  _cpCache = { key, list };
+  return list;
+}
+let _cpCache = null;
 
 /** `mentionsAnyTerm` 的实际实现（按**内容**判，全局文件和群资料库共用） */
 function mentionsAnyTermIn(content, text) {

@@ -40,4 +40,3 @@ test/essence.json
 test/gh*.json
 test/group-history.json
 test/faces.json
-__commit-msg.txt

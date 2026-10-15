@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 一级日常事件（`src/life.js`）回归。
  *
  * ## 这个套件盯的四件事（都是用户明确要求的）
@@ -299,7 +299,7 @@ console.log('\n【8】★ compose：把同类往事喂给模型（群友的话�
   const text = await life.compose(p);
   check(typeof text === 'string' && text.length > 0, '拿到了润色结果', text);
   const call = seen[seen.length - 1];
-  check(call.stream === false, '★ `phrase()` 是非流式的（假模型答对了格式）');
+  check(call?.stream === false, '★ `phrase()` 是非流式的（假模型答对了格式）');
   check(/外卖/.test(call.user), '★ 喂进去的 user 里带了同类往事');
   check(/有关联的往事/.test(call.user), '★ 明确标了"你记得，要前后呼应"');
   check(/改个地址/.test(call.user), '★ 具体内容也在（能写出"改了地址又被偷"）');

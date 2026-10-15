@@ -344,8 +344,9 @@ attitude:
   allowAnger: true
   allowRetort: true
   denyBeingBot: true
+# 日常事件（她按点自己发消息）默认**关** —— 想开去管理界面「按群设定」里按群开
 life:
-  enable: true
+  enable: false
   minPerDay: 3
   maxPerDay: 10
   startHour: 7

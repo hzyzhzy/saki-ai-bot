@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 「同类机器人」主动搭话 —— 群里**冷场**时，她 @ 一下同类池里的号说一句。
  *
  * ## 用户需求
@@ -147,6 +147,19 @@ export function note(gid, peer, now = Date.now(), text = '') {
   //    提醒"别再问同一件事"（她跟同一个号的对话就那么几个话题，不摆出来会天天问同一句）。
   const t = String(text ?? '').replace(/\s+/g, ' ').trim();
   if (t) {
+    // ⚠️⚠️ 2026-10-15 加（用户截图：她 @Anon「周末有空吗，陪我去趟秋叶原」，
+    //    Anon 回「祥祥你主动约我？」，**她下一句却否认说自己没约** ✗）——
+    //    真因：同类搭话是**她主动发**的，那句话**压根没进群聊上下文** ⇒
+    //    下一轮 Anon 提起时，她**不记得自己说过**，只能否认，甚至现编一句 ✗
+    //    ⇒ 发出去之后，按「我自己说的」记进上下文（`rememberBot`）——
+    //      跟主聊天回复一个待遇 ✓（`recent` 那边早就说了：不记自己的发言，
+    //      模型就不知道上一句自己说了什么 ✗）
+    try {
+      recent.rememberBot({ message_type: "group", group_id: String(gid) }, String(text ?? ""), "");
+    } catch (e) {
+      log.debug(`[同类] 搭话没记进上下文：${e.message}`);
+    }
+
     state.lastTexts ??= {};
     const k = String(gid);
     const arr = Array.isArray(state.lastTexts[k]) ? state.lastTexts[k] : [];
@@ -180,6 +193,27 @@ export const SELF_TOPIC_ROLLS = Object.freeze([
   '吐槽一句，或者顺着你们俩那条"不太对付、又有点在意"的线撩一下',
 ]);
 
+/** 把模型吐出来的东西清成「能直接发的一句」（去 @、去引号、掐长度） */
+function cleanPeerText(s) {
+  return String(s ?? "")
+    .replace(/@\S{1,24}/g, "")
+    .replace(/^[「『"']|[」』"']$/g, "")
+    .trim()
+    .slice(0, 60);
+}
+
+/**
+ * 这句话**能不能发**（2026-10-15 加）。
+ *
+ * ⚠️ 用户报的原话：「**看看为什么就发一个点**」—— 实测她 @ 了对方，
+ *    正文只有「（.）」✗ ⇒ 抠掉标点 / 符号 / 空白之后**至少得剩 3 个字**，
+ *    而且里面得有中文（别是纯符号、也别是别国语言）✓
+ */
+function peerTextOk(s) {
+  const t = String(s ?? "").replace(/[\s\p{P}\p{S}]/gu, "");
+  return t.length >= 3 && /[\u4e00-\u9fa5]/.test(t);
+}
+
 /** 生成那句话（开场白）—— **模型按当下情况现想**（用户拍板） */
 export async function compose(gid, peer, idleMs, timeoutMs = 25000, opts = {}) {
   const name = names.of(peer, gid) || String(peer);
@@ -191,6 +225,11 @@ export async function compose(gid, peer, idleMs, timeoutMs = 25000, opts = {}) {
   const rng = typeof opts.rng === 'function' ? opts.rng : Math.random;
   const ask = typeof opts.phrase === 'function' ? opts.phrase : phrase;
   const selfChance = Math.min(1, Math.max(0, nz(cfg().selfTopicChance, 0.5)));
+  // ⚠️ 2026-10-15 加（用户报「**就发一个点**」）：群里**没什么可接的话**的时候，
+  //    必须走「自己起个头」那条路 —— 不然模型硬憋，实测憋出过一个「（.）」✗
+  // ⚠️ 2026-10-15 注意：这里**故意不看**"群里有没有话可接" ——
+  //    一度想"没话可接就强制自己起头"，但那会**干掉 `selfTopicChance: 0` 的回退**
+  //    （用户想永远承接时就没法退了）✗ ⇒ 兜底放在下面那道"生成不成句就重试"里 ✓
   const self = rng() < selfChance;
   const roll =
     SELF_TOPIC_ROLLS[Math.floor(rng() * SELF_TOPIC_ROLLS.length) % SELF_TOPIC_ROLLS.length];
@@ -245,6 +284,39 @@ export async function compose(gid, peer, idleMs, timeoutMs = 25000, opts = {}) {
     .join('\n');
 
   const out = await ask({ system: personaText(), user, maxTokens: 120, timeoutMs });
+  let text = cleanPeerText(out);
+  // ⚠️⚠️ 2026-10-15 加（用户报：「**看看为什么就发一个点**」）——
+  //    实测她 @ 了对方，正文只有「（.）」✗ 而且这种事**根本不该发出去**：
+  //    宁可这次不搭话，也不能在群里 @ 一个人然后只发个句号。
+  //    ⇒ ① 先按「自己起个头」重来一次（多半是"群里没话可接"憋出来的）；
+  //       ② 还不成句就**返回空**（调用方会报"没生成出内容"，不会把垃圾发出去）✓
+  if (!peerTextOk(text)) {
+    log.warn(`[同类] 生成的内容不成句（「${text}」）→ 换成「自己起个头」再试一次`);
+    const retryRoll =
+      SELF_TOPIC_ROLLS[Math.floor(rng() * SELF_TOPIC_ROLLS.length) % SELF_TOPIC_ROLLS.length];
+    const retryUser = [
+      `【现在的情况】你想找「${name}」搭一句 —— 就说**一句**，短一点。`,
+      "",
+      "⚠️⚠️ **必须用中文说** —— 她平时在群里就是中文，🚫 一个外文词都不许混进来。",
+      "",
+      "⚠️ **这次不用接群里刚才的话题** —— 是你自己突然想找她。",
+      "",
+      "🎲 方向（**挑一个**）：",
+      `· ${retryRoll}`,
+      "",
+      "· ⚠️ **贴着你们俩的关系**写（人设里写着你怎么看她）；",
+      "· ✅ 像「约她出去玩 / 一起去干什么」或者「问一件你自己想知道的、关于她的事」都行；",
+      "· 🚫 别写成通知、别把时间地点排得像日程表、别打听得太直接；",
+      "· 🚫 别提她名字、别自己加 @（@ 由代码加）。",
+      "直接给那句话本身。",
+    ].join("\n");
+    text = cleanPeerText(await ask({ system: personaText(), user: retryUser, maxTokens: 120, timeoutMs }));
+    if (!peerTextOk(text)) {
+      log.warn("[同类] 两次都没生成出成句的内容 → 这次不搭话（不发垃圾）");
+      return "";
+    }
+  }
+  return text;
   return String(out ?? '')
     .replace(/@\S{1,24}/g, '')
     .replace(/^[「『"']|[」』"']$/g, '')

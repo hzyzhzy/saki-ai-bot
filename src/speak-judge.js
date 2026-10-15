@@ -24,6 +24,7 @@ import { config } from './config.js';
 import { log } from './log.js';
 import { streamChat } from './llm.js';
 import * as persona from './persona.js';
+import { cpNamesFor } from './knowledge.js';
 
 const PROMPT = `【说话判断】你是一个 QQ 群里**假装成真人群友**的机器人。你要决定：**现在这条消息，我该不该开口。**
 
@@ -222,6 +223,24 @@ export async function judgeSpeak(event, opts = {}) {
     .map((s) => s.data?.text ?? '')
     .join('')
     .trim();
+
+  // ⚠️⚠️ 2026-10-15 加（用户：「刚才 saki 发了一个**爱素**的视频，按道理应该算提到了爱音，
+  //    应该要回的」）——
+  //    起因（日志原文，爱音那个号）：`20:39:07 [说话判断] 不说（普通分享链接，没点名，2273ms）` ✗
+  //    B站分享那种消息长这样：「这什么鬼东西【【爱素】谢谢，我不吃】 http://…」
+  //    里面**带着群里某个号的角色名 / CP 名**，可判定模型不认识这些圈内词，
+  //    就当成「别人顺手甩了条链接」⇒ 按死 ✗
+  //    ⇒ 代码层直接判：消息里出现**跟我有关的 CP 名**（判据从 `anime/<库>.md` 的 CP 表抠出来，
+  //      见 `cpNamesFor()`）⇒ **直接开口**，不劳模型（还省一次调用 ✓）
+  //    ⚠️ 只认**跟我相关**的那些 —— 群里提「素世」不该让爱音接话 ✓
+  if (text) {
+    const myCp = cpNamesFor([persona.charName(), ...persona.callNames()]);
+    const hit = myCp.find((n) => text.includes(n));
+    if (hit) {
+      log.info(`[说话判断] 消息里有跟我相关的叫法（${hit}）→ 直接说（不判）`);
+      return { speak: true, why: `提到了我（${hit}）`, length: 'short', ms: Date.now() - t0 };
+    }
+  }
   const sender = event?.sender?.card || event?.sender?.nickname || String(event?.user_id ?? '');
   const isMedia = segs.some((s) => s.type === 'image' || s.type === 'face');
 

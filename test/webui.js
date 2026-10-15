@@ -615,11 +615,27 @@ async function main() {
     check(Number(sp2.params?.chat?.strictness) === 12, '★ 设成 12 也生效');
     const sp3 = await post('/api/group-params', { groupId: G699, patch: { chat: { strictness: null } } });
     check(
-      sp3.ok === true && Number(sp3.params?.chat?.strictness) === 50,
-      '★★ 传 `null` = 删掉覆盖 → **回到默认 50**（现在没有「全局」那一份了）',
+      // ⚠️ 2026-10-15：默认从 50 改成 **80**（用户：「把默认收紧度改成 80」）⇒ 断言跟着改 ✓
+      sp3.ok === true && Number(sp3.params?.chat?.strictness) === 80,
+      '★★ 传 `null` = 删掉覆盖 → **回到默认 80**（现在没有「全局」那一份了）',
       `现在是 ${sp3.params?.chat?.strictness}`,
     );
     check(/strict-group/.test(html) && /fillStrictForGroup/.test(html), '★★ 界面上有「哪个群 + 收紧度」的下拉框');
+    // ⚠️⚠️ 2026-10-15 加：**每个 tab 都要出现在"切页那个数组"里**（自动对账）——
+    //    那个数组漏一个，对应的标签点过去就是**一片空白**（它的 section 一直挂着 `hidden`）✗
+    //    这个坑**踩过两次**：qzone 一次（注释里写着）、2026-10-15 加「B站分享」又一次 ✗
+    //    ⇒ 别再靠人记了，让断言来对 ✓
+    {
+      const tabs = [...html.matchAll(/data-tab="([a-z]+)"/g)].map((m) => m[1]);
+      const arrM = /\['model'[^\]]*\]/.exec(html);
+      const list = arrM ? [...arrM[0].matchAll(/'([a-z]+)'/g)].map((m) => m[1]) : [];
+      const missing = [...new Set(tabs)].filter((t) => !list.includes(t));
+      check(
+        tabs.length > 5 && missing.length === 0,
+        '★★ nav 里每个 tab 都在"切页数组"里（漏一个 ⇒ 那个标签永远是空白页）',
+        missing.length ? `漏了：${missing.join('、')}` : `${new Set(tabs).size} 个都对上了`,
+      );
+    }
     // ⚠️ 2026-09-16 改成「下拉选群 + 一整张表单」之后，收紧度的 id 也换成 `gp-chat-strict`
     check(
       /gp-chat-strict/.test(html) && /id="gp-group"/.test(html),

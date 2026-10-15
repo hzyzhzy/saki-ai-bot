@@ -329,6 +329,16 @@ export async function* streamChat(messages, outerSignal, opts = {}) {
               return Number.isFinite(b) && b > 0 ? { thinking: { type: 'enabled', budget_tokens: b } } : {};
             })()),
         stream: true,
+        // ⚠️⚠️ 2026-10-15 加（用户：黑祥那台用的是**中转站**的同款模型）——
+        //    **中转站不认 DeepSeek 的 `thinking:{type:`disabled`}`** ⇒ 它照样思考，
+        //    而有些中转的适配层会把思考**拼进 content** ⇒ 推理混进正文 ✗
+        //    客户端没法把"已经混进 content 的推理"再分离（那已经是正文了），
+        //    但可以**换一种关法**：给配置开个口子，把"那家中转认的参数"原样塞进请求体 ——
+        //      `llm.extraBody: { enable_thinking: false }` /
+        //      `chat_template_kwargs: { thinking: false }` / `reasoning_effort: none`
+        //    ⚠️ 具体认哪个**得看那家中转的文档**，但改配置就能试，不用改代码 ✓
+        //    ⚠️ 放在最后 ⇒ 它**覆盖**前面算出来的同名字段（想手工压过默认行为就靠这个）✓
+        ...(llmCfg().extraBody && typeof llmCfg().extraBody === "object" ? llmCfg().extraBody : {}),
         // ⚠️ 加了这行，流式响应才会在**最后一块**带 `usage`
         //    （记账要用它，见 spend.js；不加的话只能估算）
         stream_options: { include_usage: true },
@@ -826,6 +836,26 @@ export async function phraseMoney(p = {}) {
  * @param {number} num
  * @returns {string}
  */
+/**
+ * 剥掉**带标记的**思考块（2026-10-15 加）。
+ *
+ * 起由：用户报「黑祥把推理混进正文了」，而那台用的是**中转站**的同款模型 ——
+ *   中转站不认 `thinking:{type:`disabled`}`，有的还会把思考拼进 content ✗
+ *   混进 content 的那部分客户端**没法**再分离（它已经是正文了），
+ *   但**带标签**的那种能剥（`<thinking>…</thinking>`、`<reasoning>…</reasoning>`）。
+ *
+ * ⚠️ 只认 HTML 式标签 —— 她平时聊天**不可能**写出这种东西 ⇒ 零误伤 ✓
+ * ⚠️ 只有开标签、没有闭标签（被 max_tokens 截断）⇒ 从开头剥到结尾（宁可少说一句）✓
+ */
+export function stripThinking(text) {
+  let s = String(text ?? "");
+  s = s.replace(/<think(?:ing)?\s*>[\s\S]*?<\/think(?:ing)?\s*>/gi, "");
+  s = s.replace(/<reasoning\s*>[\s\S]*?<\/reasoning\s*>/gi, "");
+  s = s.replace(/^\s*<think(?:ing)?\s*>[\s\S]*$/i, "");
+  s = s.replace(/^\s*<reasoning\s*>[\s\S]*$/i, "");
+  return s.trim();
+}
+
 export function cjkNum(num) {
   const v = Math.round(Number(num) || 0);
   if (!Number.isFinite(v) || v < 0 || v > 99999999) return String(v);

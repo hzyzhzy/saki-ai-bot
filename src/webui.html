@@ -610,6 +610,8 @@
       <!-- ⚠️ 2026-09-16：按群设定<b>单独一页</b>（它管日常事件 + 二级剧情 + 收紧度三样） -->
       <button data-tab="groupcfg">按群设定</button>
       <button data-tab="life">日常事件</button>
+      <!-- ⚠️ 2026-10-15 加：B 站视频分享（只发链接、只发 1 档群、默认关） -->
+      <button data-tab="bili">B站分享</button>
       <button data-tab="quest">二级剧情</button>
       <button data-tab="affinity">好感度 / 好友</button>
       <button data-tab="workmode">工作模式</button>
@@ -1548,6 +1550,56 @@
       <div class="btns">
         <button class="act" onclick="saveQzone()">保存设置</button>
         <span class="msg" id="msg-qzone-cfg"></span>
+      </div>
+    </div>
+  </section>
+  <!-- ⚠️ 2026-10-15 加：B 站视频分享（用户要求）——
+       只发**链接**（QQ 卡片被挡了：json/share 段都回「发送者版本过低」✗）、
+       只在 **1 档群**发、**默认关闭**、**没填关键词不会发** ✓ -->
+  <section id="tab-bili" class="hidden">
+    <div class="card">
+      <h3>B 站视频分享</h3>
+      <!-- ⚠️ 2026-10-15 加（用户：「b站分享也要分群调节」）——**按群**一套参数 ✓ -->
+      <div style="margin:10px 0">
+        <b>哪个群</b>
+        <select id="bili-group" style="width:auto;margin:0 8px"
+          onchange="localStorage.setItem('bili-group', this.value); renderBili()"></select>
+        <span class="d" style="display:inline">这是<b>按群</b>设的 —— 每个群各有一套（开关 / 关键词 / 条数）✓</span>
+      </div>
+      <p class="d">
+        到点了自己搜一条 B 站视频，把<b>链接</b>发到 1 档群（QQ 会自己把它展开）。
+        ⚠️ <b>卡片发不了</b> —— 实测 QQ 对协议端发的卡片回「发送者版本过低」，所以只发链接 ✓<br>
+        ⚠️ <b>不填关键词不会发</b>（免得转一堆群友不感兴趣的）✓
+      </p>
+      <div class="switch">
+        <input type="checkbox" id="bili-enable">
+        <div><div class="t">开启</div><div class="d">默认关闭。开了之后每天按下面的条数自己发。</div></div>
+      </div>
+      <div style="margin:10px 0">
+        <div class="t">看哪些类型（一行一个；逗号/顿号也行）</div>
+        <textarea id="bili-keywords" rows="4" style="width:100%;box-sizing:border-box"
+          placeholder="Minecraft 地铁&#10;MTR 模组&#10;城市建造"></textarea>
+        <div class="d">每天随机挑一个去搜；某个搜不到就换下一个 ✓ 挑播放量最高的那条发。</div>
+      </div>
+      <div class="kvs">
+        <div class="kv"><b>每天最少</b><span><input type="number" id="bili-min" min="0" max="20" style="width:70px"></span></div>
+        <div class="kv"><b>每天最多</b><span><input type="number" id="bili-max" min="0" max="20" style="width:70px"></span></div>
+        <div class="kv"><b>几点开始</b><span><input type="number" id="bili-sh" min="0" max="23" style="width:70px"></span></div>
+        <div class="kv"><b>几点结束</b><span><input type="number" id="bili-eh" min="1" max="24" style="width:70px"></span></div>
+        <div class="kv"><b>两条间隔（分钟）</b><span><input type="number" id="bili-cool" min="10" max="1440" style="width:80px"></span></div>
+        <!-- ⚠️ 2026-10-15 加（用户：「一半概率会触发的 bot 自己对这个视频想说的话」+「分条发送」）——
+             她会先说一句自己的想法（单独一条），隔一会儿再甩链接 ✓ 这里填"多大比例带那句" -->
+        <div class="kv"><b>带她自己想法的概率</b><span><input type="number" id="bili-chance" min="0" max="100" style="width:70px"> %（50 = 一半）</span></div>
+      </div>
+      <div style="margin:10px 0">
+        <div class="t">标题里不要的词（正则，可留空）</div>
+        <input id="bili-deny" style="width:100%;box-sizing:border-box" placeholder="挡「蹭字」的假结果，例如 我的世界|世界上的">
+      </div>
+      <div id="bili-status" class="kvs"></div>
+      <div class="btns">
+        <button class="act" onclick="saveBili()">保存设置</button>
+        <button class="act" onclick="sendBiliNow()" style="background:#16a34a">立刻发送一条</button>
+        <span class="msg" id="msg-bili"></span>
       </div>
     </div>
   </section>
@@ -3026,8 +3078,11 @@ document.querySelectorAll('nav button').forEach(b => {
     document.querySelectorAll('nav button').forEach(x => x.classList.remove('on'));
     b.classList.add('on');
     // ⚠️ 这个列表必须跟 nav 里的 data-tab 一一对应 —— 漏了哪个，哪个标签就切不过去
-    //    （qzone 就漏过一阵子，面板永远显示不出来）
-    ['model','groups','faces','knowledge','persona','qzone','life','quest','groupcfg','affinity','workmode','qqlogin','status','about','accounts'].forEach(t => {
+    //    （qzone 就漏过一阵子，面板永远显示不出来；
+    //     2026-10-15 加「B站分享」时**又漏了一次** —— `bili` 没加进这个数组 ⇒
+    //     点过去是一片空白（连卡片都不显示，因为它的 section 一直挂着 `hidden`）✗
+    //     ⇒ 现在有一条套件断言**自动对账**（`test/webui.js`：每个 `data-tab` 都得在这个数组里）✓）
+    ['model','groups','faces','knowledge','persona','qzone','life','bili','quest','groupcfg','affinity','workmode','qqlogin','status','about','accounts'].forEach(t => {
       const el = $('tab-' + t);
       if (el) el.classList.toggle('hidden', t !== b.dataset.tab);
     });
@@ -3037,6 +3092,8 @@ document.querySelectorAll('nav button').forEach(b => {
     if (b.dataset.tab === 'groups') { loadGroupRespond(); fillStrictForGroup(); }
     if (b.dataset.tab === 'qzone') renderQzone();
     if (b.dataset.tab === 'life') renderLife();
+    // ⚠️ 2026-10-15 加：B 站分享那一页
+    if (b.dataset.tab === 'bili') renderBili();
     if (b.dataset.tab === 'quest') { renderQuest(); renderStoryline(); startQuestPoll(); }
     else stopQuestPoll();
     // ⚠️ 2026-09-16：按群设定自己一页了（原来挤在二级剧情页里）
@@ -5450,8 +5507,98 @@ async function qzoneManualPost() {
   if (r.ok) { $('qz-manual').value = ''; await renderQzone(); }
 }
 
-async function saveQzone() {
-  const el = $('msg-qzone-cfg');
+// ── B 站分享（2026-10-15 加）────────────────────────────────
+//    **按群**设（用户：「b站分享也要分群调节」）：先选群，再调那一套 ✓
+//    只发链接、只发 1 档群、默认关、没关键词不发 ✓（见 src/bili-share.js）
+async function renderBili() {
+  const box = $('bili-status');
+  try {
+    // ① 先填"哪个群"那个下拉（跟「日常事件」页同一个来源：/api/state 的 life.status.targets）
+    const st = await api('/api/state');
+    // ⚠️ 2026-10-15 改：用 `targetsAll`（**1 档群**，不管日常事件开没开）——
+    //    原来用 `targets` ⇒ 把日常事件关掉的 1 档群**在下拉里看不到**（用户报的）✗
+    const gids = (st.life?.status?.targetsAll || st.life?.status?.targets || []).map(String);
+    const sel = $('bili-group');
+    if (sel) {
+      const keep = String(sel.value || localStorage.getItem('bili-group') || '');
+      sel.innerHTML = gids.map((g) => `<option value="${g}">${g}</option>`).join('');
+      if (keep && gids.includes(keep)) sel.value = keep;
+    }
+    const gid = String(sel?.value || gids[0] || '');
+    if (!gid) {
+      box.textContent = '现在没有 1 档群 —— 先去「群与触发」把某个群调成 1 档，这里才能按群设';
+      return;
+    }
+    const r = await api('/api/bili-share?groupId=' + encodeURIComponent(gid));
+    const c = r.cfg || {};
+    $('bili-enable').checked = !!c.enable;
+    $('bili-keywords').value = (c.keywords || []).join('\n');
+    $('bili-min').value = c.minPerDay ?? 1;
+    $('bili-max').value = c.maxPerDay ?? 1;
+    $('bili-sh').value = c.startHour ?? 9;
+    $('bili-eh').value = c.endHour ?? 23;
+    $('bili-cool').value = c.cooldownMinutes ?? 240;
+    $('bili-chance').value = c.chancePercent ?? 50;
+    $('bili-deny').value = c.deny || '';
+    const s = r.status || {};
+    const next = s.next || {};
+    box.innerHTML =
+      '<div class="kv"><b>这个群今天</b><span>' + (s.fired ?? 0) + ' / ' + (s.target ?? 0) + ' 条</span></div>' +
+      '<div class="kv"><b>现在能不能发</b><span>' + (next.due ? '能 ✓' : '不能：' + (next.why || '')) + '</span></div>' +
+      '<div class="kv"><b>发过几条（全局去重池）</b><span>' + (s.sentCount ?? 0) + '</span></div>';
+  } catch (e) {
+    box.textContent = '读不到：' + e.message;
+  }
+}
+
+async function saveBili() {
+  const el = $('msg-bili');
+  const gid = String($('bili-group')?.value || '');
+  if (!gid) return flash(el, false, '先选个群（这是按群设的）');
+  try {
+    const r = await api('/api/bili-share', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        groupId: gid,
+        enable: $('bili-enable').checked,
+        keywords: $('bili-keywords').value,
+        minPerDay: Number($('bili-min').value),
+        maxPerDay: Number($('bili-max').value),
+        startHour: Number($('bili-sh').value),
+        endHour: Number($('bili-eh').value),
+        cooldownMinutes: Number($('bili-cool').value),
+        chancePercent: Number($('bili-chance').value),
+        deny: $('bili-deny').value,
+      }),
+    });
+    flash(el, r.ok, r.ok ? `已保存到群 ${gid} 并生效` : '保存失败：' + r.error);
+    if (r.ok) renderBili();
+  } catch (e) {
+    flash(el, false, '保存失败：' + e.message);
+  }
+}
+
+// ⚠️ 立刻发送：跳过"时段/冷却"，但仍排除发过的、仍记账 ✓ **只发选中的那个群**
+async function sendBiliNow() {
+  const el = $('msg-bili');
+  const gid = String($('bili-group')?.value || '');
+  if (!gid) return flash(el, false, '先选个群（这是按群设的）');
+  el.textContent = '正在挑一条…';
+  try {
+    const r = await api('/api/bili-share/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ groupId: gid }),
+    });
+    flash(el, r.ok, r.ok ? '已发出：' + (r.url || '') : '没发成：' + (r.error || r.why || '未知'));
+    renderBili();
+  } catch (e) {
+    flash(el, false, '发失败：' + e.message);
+  }
+}
+
+async function saveQzone() {  const el = $('msg-qzone-cfg');
   const r = await api('/api/config', {
     method: 'POST', headers: {'Content-Type':'application/json'},
     body: JSON.stringify({ qzone: {

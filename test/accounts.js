@@ -315,8 +315,13 @@ async function main() {
   const gid = '999000001';
   const lsA = await apiAt(PORT_A, `/api/life/status?groupId=${gid}`);
   const lsB = await apiAt(PORT_B, `/api/life/status?groupId=${gid}`);
-  check(lsA.status.enable === true, '主号：这个群的日常事件照旧是开的');
-  check(lsB.status.enable === false, '二号（非主号）：自己没开过 ⇒ 默认关着（config.yml 里写着开也不算）');
+  // ⚠️⚠️ 2026-10-15 改（用户：「**把随机事件默认开关设为关闭**」）——
+  //    原来这里断言"**主号**：这个群的日常事件照旧是开的"（主号继承 config.yml 那份 ⇒ 默认开）✗
+  //    现在内置默认是**关** ⇒ **谁都没配过的群一律关**（主号也一样）✓
+  //    ⚠️ 他自己配过的那两个群（`config.yml` 的 200000001、账号文件里的 200000006）
+  //       都是**显式** `enable: true` ⇒ 照样开 ✓（那条"没改他的设置"另有断言在别处验）
+  check(lsA.status.enable === false, '主号：**没配过的群**现在也是关的（2026-10-15 默认改关）');
+  check(lsB.status.enable === false, '二号（非主号）：自己没开过 ⇒ 默认关着');
 
   // 要开只能在**它自己的** `accounts/<QQ>.yml` 里显式写 —— 界面「按群设定」保存的就是那个文件
   await apiAt(PORT_B, '/api/config', {
@@ -334,10 +339,51 @@ async function main() {
   });
   const lsB3 = await apiAt(PORT_B, `/api/life/status?groupId=${gid}`);
   check(lsB3.status.enable === false, '再关掉 ⇒ 又回到不开');
+  // ⚠️ 2026-10-15：默认改成"关"之后，这条**反而验得更有力**了 ——
+  //    二号把**它自己**那个群显式开成 true，主号那个群**不许**跟着变 true
+  //    （主号没配过 ⇒ 还是默认关）；要还是原来那个 `=== true` 就测不出来了 ✗
   check(
-    (await apiAt(PORT_A, `/api/life/status?groupId=${gid}`)).status.enable === true,
-    '这一通操作**一点没碰到主号**（主号还是开的）',
+    (await apiAt(PORT_A, `/api/life/status?groupId=${gid}`)).status.enable === false,
+    '这一通操作**一点没碰到主号**（那个群没被二号的开关带开）',
   );
+
+  console.log('\n[10] 按群段：**存进去必须能读回来**（2026-10-15 修的白名单丢段 bug）');
+  // 用户报的原话：「**保存不了**」（B站分享页，点保存没反应/回读还是旧的）。
+  // 真因：`config.js` 的 `load()` 里把 `groupParams` **整段重建** ——
+  //   只挑 life / quest / chat / peers / otherBots 这几段，
+  //   新加的 `biliShare` 没登记 ⇒ 保存**确实写进了账号文件**（日志也有），
+  //   但重载后**内存里没有** ⇒ 界面回读是旧值 ⇒ 用户看到的就是"保存不了" ✗
+  //   （同一个坑 2026-10-09 在 `otherBots` 上踩过一次 —— 那次也是"保存不了"。）
+  // ⇒ 这条断言就是「存进去必须读得回来」：**以后再加按群段、漏登记，当场红** ✓
+  const bgid = '999000002';
+  const bSaved = await apiAt(PORT_B, '/api/bili-share', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      groupId: bgid,
+      enable: true,
+      keywords: '安岛',
+      minPerDay: 1,
+      maxPerDay: 1,
+      startHour: 9,
+      endHour: 23,
+      cooldownMinutes: 240,
+      chancePercent: 50,
+      deny: '',
+    }),
+  });
+  check(bSaved.ok === true, '按群保存「B站分享」：接口成功');
+  const bBack = await apiAt(PORT_B, `/api/bili-share?groupId=${bgid}`);
+  check(bBack.cfg.enable === true, '★ 存进去的开关**能读回来**（有段被丢掉就会在这儿红）');
+  check((bBack.cfg.keywords || []).includes('安岛'), '★ 关键词也能读回来');
+  check(
+    (await apiAt(PORT_B, '/api/bili-share?groupId=999000003')).cfg.enable === false,
+    '没配过的群照样是关的（按群隔离，没被带开）',
+  );
+  // ⚠️ 只验内存不够 —— 还要确认**真的落到了那个号的私有文件**里
+  //    （"内存对、文件没写"是另一种表现完全一样的"保存不了"）
+  const bFile = readFileSync(acc.fileOf(SECOND), 'utf8');
+  check(bFile.includes(bgid) && bFile.includes('biliShare'), '而且真的写进了二号的账号文件（不是只活在内存里）');
 
   cleanup();
   console.log(

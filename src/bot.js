@@ -1,4 +1,4 @@
-import { config, ROOT, KNOWLEDGE_DIR, paramsFor, peersFor, otherBotsFor, stateDir, isMainAccount } from './config.js';
+﻿import { config, ROOT, KNOWLEDGE_DIR, paramsFor, peersFor, otherBotsFor, stateDir, isMainAccount } from './config.js';
 // ⚠️ 2026-10-07 加（合照）：要按同类池里的号去读它自己的 `persona.id`
 //    —— 「那个号演的是谁」。`accounts.js` 只依赖 node 内建，不成环。
 import * as accounts from './accounts.js';
@@ -15,13 +15,15 @@ const DEFAULT_STRICTNESS = 50;
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs';
 import { extname, join } from 'node:path';
 import { log } from './log.js';
-import { streamChat, quickAck, phrase } from './llm.js';
+import { streamChat, quickAck, phrase, stripThinking } from './llm.js';
 import * as msg from './message.js';
 // ⚠️ 2026-10-13：本机 agent 任务桥（自然语言派活 / 主人审批 / `/任务撤回`）——
 //    ⚠️ 它**不进聊天上下文那条链**：命中就在 `handle()` 里拦掉、自己回话（和 `/剧情` 同一层）
 import * as agentBridge from './agent-bridge.js';
 import * as history from './history.js';
 import { knowledgeText, hasKnowledge, selectFor as knowledgeSelect, mentionsAnyTerm, whoIsBrief, aliasesOf, animeLibNames, reloadKnowledge, personaText, castRoleOf, castBands } from './knowledge.js';
+// ⚠️ 2026-10-15 加：群里聊到「她刚分享的视频」时要把内容注入回去（见 `shareNote`）
+import * as biliShare from './bili-share.js';
 // ⚠️ 2026-09-20 从上游 fork 挑过来：梗库（`knowledge/memes.md`）**按需**注入 ——
 //    只有对方这句话里命中了触发词才贴上来，且自带"拿不准按字面回"的总规则（防"看什么都像梗"）。
 import { memesFor } from './memes.js';
@@ -11560,6 +11562,12 @@ export class Bot {
           `<!-- FACES:BEGIN -->\n${menu}\n<!-- FACES:END -->`,
         );
       }
+      // ⚠️⚠️ 2026-10-15 加（用户：「**bot 要知道她自己在分享视频，也要知道视频大概讲了什么**」）
+      //    B站分享是**定时任务**发的，不在对话流里 —— 群里有人接着问「你发这个干嘛」，
+      //    她原来手里只有那条消息本身，**不知道那是自己分享的、也不知道视频讲了什么** ✗
+      //    ⇒ 刚分享过（6 小时内）就把「那是你自己发的 + 标题 + 简介」附在知识后面 ✓
+      const _shareNote = biliShare.shareNote(scopeId);
+      if (_shareNote) k += `\n${_shareNote}\n`;
       if (picked.skipped.length) {
         log.debug(`[知识库] 只读 ${picked.names.join(', ') || '(仅人设)'}；跳过 ${picked.skipped.join(', ')}`);
       }
@@ -15167,6 +15175,12 @@ export class Bot {
     } catch {}
     // ⚠️⚠️ 2026-09-18：任何路径说出去的话，先把号码打掉（见上面 maskPhone 的注释）。
     //    放在**这里**是因为它是她所有发言的**唯一出口**（主聊天 / 剧情 / 日常事件都走它）。
+    // ⚠️⚠️ 2026-10-15 加（用户报：黑祥那台「把推理混进正文」）——
+    //    那台用的是**中转站**的同款模型，中转不认 `thinking:{type:`disabled`}`，
+    //    有的还会把思考**拼进 content** ⇒ 剥不掉（已经是正文了）✗
+    //    ⇒ 至少把**带标记**的那种剥掉（`<thinking>…</thinking>`，见 `llm.stripThinking`）✓
+    //    ⚠️ 挂在她所有发言的**唯一出口**上 ⇒ 一处生效，主聊天/剧情/日常事件/同类搭话全覆盖 ✓
+    text = stripThinking(text);
     const masked = this.maskPhone(text);
     if (masked !== text) {
       log.warn(`[安全] 她的话里带真实号码/证件号 → 已打码（群 ${groupId}）：${String(text).slice(0, 60)}`);

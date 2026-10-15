@@ -904,6 +904,79 @@ const routes = {
     }
   },
 
+  // ── B 站视频分享（2026-10-15 用户要求）──────────────────────
+  // ⚠️⚠️ **按群**存的（用户：「b站分享也要分群调节」）——
+  //    写 `accounts/<QQ>.yml` 的 `groupParams.<群>.biliShare` ✓
+  //    （跟「按群设定」页同一套机制：`accounts.patch` 深合并 ⇒ 不冲掉别的段）✓
+  'GET /api/bili-share': async (req, res) => {
+    try {
+      const bs = await import('./bili-share.js');
+      const gid = String(new URL(req.url, 'http://x').searchParams.get('groupId') ?? '').trim();
+      return send(res, 200, { ok: true, groupId: gid, cfg: bs.uiCfg(gid), status: bs.status(gid) });
+    } catch (e) {
+      send(res, 500, { ok: false, error: e.message });
+    }
+  },
+  // ⚠️ 「立刻发送」（2026-10-15 用户要求）—— 界面上点一下**马上**给选中的那个群发一条。
+  //    跳过时段/冷却判定（`force`），但仍然**排除发过的**、仍然记账（手动发的也算那个群今天一条）✓
+  'POST /api/bili-share/send': async (req, res) => {
+    let body = {};
+    try {
+      body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+    } catch {}
+    try {
+      const bs = await import('./bili-share.js');
+      const gid = String(body.groupId ?? '').trim();
+      if (!gid) return send(res, 400, { ok: false, error: '先选个群' });
+      // ⚠️⚠️ 2026-10-15 用户要求：「**手动发一条视频不开自动发也要能发**」
+      //    ⇒ 这里**不再看那个群的开关** —— 那个开关管的是"**定时自动发**"，
+      //      手动点一下是另一回事（原来把它一起拦了，用户点了会看到"开关还没打开"✗）
+      //    ⚠️ 但"这个群有没有关键词"还得管 —— 没关键词压根搜不到东西，
+      //      这种要**说清楚**（不然界面上只会显示"没挑到能发的视频"，看不出为什么）✓
+      if (!bs.keywordsOf(gid).length) {
+        return send(res, 400, {
+          ok: false,
+          error: '这个群还没填关键词（自动发的开关可以关着，但关键词得先填一个）',
+        });
+      }
+      const life = await import('./life.js');
+      // ⚠️ 2026-10-15：用 `eventGroups()`（1 档群）—— 手动发不该被「日常事件开关」挡住 ✓
+      const r = await bs.runOnce(bot, life.eventGroups(), { force: true, groupId: gid });
+      log.info(`[B站分享] 界面上手动发了群 ${gid} 一条：${r.sent ? r.url : '没发成（' + r.why + '）'}`);
+      return send(res, 200, { ok: r.sent === true, ...r });
+    } catch (e) {
+      send(res, 500, { ok: false, error: e.message });
+    }
+  },
+  'POST /api/bili-share': async (req, res) => {
+    let body = {};
+    try {
+      body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+    } catch {
+      return send(res, 400, { ok: false, error: '请求体不是合法 JSON' });
+    }
+    try {
+      const bs = await import('./bili-share.js');
+      const gid = String(body.groupId ?? '').trim();
+      if (!gid) return send(res, 400, { ok: false, error: '先选个群（这是按群设的）' });
+      const clean = bs.normalizeCfg(body); // ⚠️ 规矩在模块里（界面和手写 yml 同一套）✓
+      if (!ACCOUNT.id || !accounts.has(ACCOUNT.id)) {
+        return send(res, 400, { ok: false, error: '读不到当前账号，没法按号保存' });
+      }
+      // ⚠️ 写进 `groupParams.<群>.biliShare`（深合并 ⇒ 不冲掉这个群的别的段）✓
+      accounts.patch(ACCOUNT.id, { groupParams: { [gid]: { biliShare: clean } } });
+      // ⚠️ 写完让内存里的 config 跟着变（不然要重启才生效）✓
+      reloadConfig();
+      log.info(
+        `管理界面改了 B站分享（群 ${gid}）：enable=${clean.enable} ` +
+          `关键词=${JSON.stringify(clean.keywords)} 每天 ${clean.minPerDay}~${clean.maxPerDay} 条`,
+      );
+      return send(res, 200, { ok: true, cfg: clean });
+    } catch (e) {
+      send(res, 500, { ok: false, error: e.message });
+    }
+  },
+
   'POST /api/accounts': async (req, res) => {
     let body = {};
     try {
@@ -2509,7 +2582,7 @@ const routes = {
       const text = await peerChat.compose(gid, peer, 15 * 60 * 1000, 30000);
       if (!text) return send(res, 200, { ok: false, error: '模型没生成出内容（再试一次看看）' });
       await bot.sendToGroup(gid, text, { at: peer, atName: names.of(peer, gid) || '' });
-      peerChat.note(gid, peer);
+      peerChat.note(gid, peer, text);
       log.info(`管理界面手动触发同类搭话 → 群 ${gid}，@「${peerName}」：「${text}」`);
       send(res, 200, { ok: true, gid, peer, name: peerName, text });
     } catch (e) {
