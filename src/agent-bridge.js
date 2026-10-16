@@ -42,7 +42,7 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { appendFileSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, extname, join } from 'node:path';
+import { basename, dirname, extname, join } from 'node:path';
 import { config, ROOT, stateDir } from './config.js';
 import { log } from './log.js';
 // ⚠️⚠️ 2026-10-14 加（用户：「该去**读那一段对话**」）：要给 agent 带上"群里刚才那些话"。
@@ -118,10 +118,65 @@ function updHist(id, patch) {
     notifyTaskChange();
   }
 }
+/** 正在跑的**群任务**的 gid（没有就空串）—— 给"收拾僵尸记录"的判据用 ✓ */
+export function runningGid() {
+  try {
+    return String(state.running?.gid ?? '');
+  } catch {
+    return '';
+  }
+}
+
 /** 任务历史（**新的在前**；管理界面那页用的就是它） */
 export function taskHistory(limit = 50) {
   const n = Math.max(1, Math.min(200, Number(limit) || 50));
   return hist.tasks.slice(-n).reverse().map((x) => ({ ...x }));
+}
+
+/**
+ * ⚠️⚠️ 2026-10-16 加（用户截图：「**看看为什么这个是被杀的状态，现在不应该有被杀掉的
+ *    状态吧，要么重启了之后自动继续，要么是做完了**」）——
+ *
+ * 开机**收拾僵尸记录**：上次重启把活带走时，那条记录会停在 `killed`（或 `running`）✗，
+ * 而面板上没人再管它 ⇒ 用户看到的就是"怎么还有个被打断的"。
+ *
+ * ⇒ 只碰 `killed` / `running` 两种：
+ *   · `isLive(t)` 说它**还在跑** ⇒ 标回 `running`（正在接着做 ✓）
+ *   · 没人管的 ⇒ **标 `done`**（不在面板上永远挂一个"被打断了" ✗）
+ * ⚠️ 别的状态（`done` / `failed` / `asking`）一个字都不动 ✓
+ * ⚠️ 默认的 `isLive`：看**群任务**那个"正在跑"的（`state.running`）——
+ *    私聊的活由调用方把 `jobs` 传进来判 ✓
+ *
+ * ⚠️⚠️ 2026-10-16 修正 `minAgeMs` **60 秒 → 10 秒**（用户第二次截图：「**现在不应该有
+ *    被杀掉的状态吧**」）——真因是这个窗口卡得太死：
+ *      · 启动那一刻本文件会把历史里所有 `running` 标成 `killed`（`endedAt = 启动时刻`）
+ *      · 而调用方是**启动后 45 秒**来收拾 ⇒ 那条记录的年龄只有 ~45 秒
+ *      · 45 < 60 ⇒ **被窗口挡掉** ⇒ 面板上就永远挂着"被打断了" ✗（实测就是这么挂的）
+ *    ⇒ 窗口放到 10 秒（"刚结束的先别动"只要躲开同一瞬间那几步就够了 ✓）
+ */
+export function tidyStaleTasks(isLive, { minAgeMs = 10000 } = {}) {
+  const live =
+    typeof isLive === 'function'
+      ? isLive
+      : (t) => !!state.running && String(state.running.gid ?? '') === String(t.gid ?? '');
+  let n = 0;
+  for (const t of hist.tasks ?? []) {
+    if (!t || (t.status !== 'killed' && t.status !== 'running')) continue;
+    const at = Number(t.endedAt || t.startedAt || 0);
+    if (at && Date.now() - at < minAgeMs) continue; // 刚结束的先别动（可能正要标 done）
+    let alive = false;
+    try {
+      alive = !!live(t);
+    } catch {}
+    if (alive) {
+      if (t.status !== 'running') updHist(String(t.id), { status: 'running', endedAt: 0 });
+      continue;
+    }
+    updHist(String(t.id), { status: 'done' });
+    n++;
+  }
+  if (n) log.info(`[任务] 开机收拾了 ${n} 条"上次被打断"的旧记录 ⇒ 改成"做好了"（不留僵尸 ✗）`);
+  return n;
 }
 loadHist();
 
@@ -194,6 +249,72 @@ export async function readSessionTalk(sessionId, { maxChars = 20000 } = {}) {
   } catch (e) {
     log.warn(`[任务] 读会话失败（${sid}）：${e.message}`);
     return [];
+  }
+}
+
+/**
+ * ⚠️⚠️ 2026-10-16 加（用户：「**再做个记账吧，在工作模式分好友设置那里再加个这个私聊一共花了多少钱的显示**」）——
+ *    把一条会话里**每一次模型调用的用量**加起来（`assistant/message` 里的 `usage` ✓）。
+ *
+ * 为什么从会话里取：headless runner 的 stdout 只有"最后那句话" ✗ 拿不到用量；
+ *   而**会话文件里每次调用都记着** `{inputTokens, outputTokens, cacheReadTokens}` ✓
+ *   （实测：`{"inputTokens":6850,"outputTokens":199,…}` —— 这是**单次**的量，不是累计 ✓）
+ *
+ * @returns {Promise<{calls:number, promptTokens:number, completionTokens:number, cachedTokens:number}>}
+ */
+export async function readSessionUsage(sessionId) {
+  const zero = { calls: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0 };
+  const sid = String(sessionId ?? '').trim();
+  if (!sid || !/^session-[\w-]+$/.test(sid)) return zero;
+  const root = join(dshHome(), 'sessions');
+  let file = '';
+  try {
+    for (const ws of readdirSync(root, { withFileTypes: true })) {
+      if (!ws.isDirectory()) continue;
+      const f = join(root, ws.name, sid, 'session.v3.jsonl.zstd');
+      if (existsSync(f)) {
+        file = f;
+        break;
+      }
+    }
+  } catch {}
+  if (!file) return zero;
+  try {
+    const zlib = await import('node:zlib');
+    const buf = readFileSync(file);
+    const magic = Buffer.from([0x28, 0xb5, 0x2f, 0xfd]);
+    const idx = [];
+    for (let i = 0; i + 4 <= buf.length; i++) if (buf.compare(magic, 0, 4, i, i + 4) === 0) idx.push(i);
+    const out = { ...zero };
+    for (let k = 0; k < idx.length; k++) {
+      const seg = buf.slice(idx[k], k + 1 < idx.length ? idx[k + 1] : buf.length);
+      let text = '';
+      try {
+        text = zlib.zstdDecompressSync(seg).toString('utf8');
+      } catch {
+        continue;
+      }
+      for (const line of text.split('\n')) {
+        if (!line.includes('inputTokens')) continue;
+        if (line[0] !== '{') continue;
+        let j;
+        try {
+          j = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        const u = j?.usage ?? j?.data?.usage;
+        if (!u) continue;
+        out.calls += 1;
+        out.promptTokens += Math.max(0, Number(u.inputTokens) || 0);
+        out.completionTokens += Math.max(0, Number(u.outputTokens) || 0);
+        out.cachedTokens += Math.max(0, Number(u.cacheReadTokens) || 0);
+      }
+    }
+    return out;
+  } catch (e) {
+    log.warn(`[任务] 读会话用量失败（${sid}）：${e.message}`);
+    return zero;
   }
 }
 
@@ -363,6 +484,10 @@ export function __reset() {
     resume: null,
     queuedExtra: {},
   };
+  // ⚠️ 2026-10-16：**群按住表要清**（不然套件之间互相影响）✓
+  //    ⚠️ 但 `peekImpl` **不在这里复位** —— 套件是在开头一次性设桩的，
+  //    每次 reset 都复位的话它又会去真起 agent ✗
+  groupHolds.clear();
   save();
 }
 export function __state() {
@@ -1888,11 +2013,51 @@ function sessionDirs() {
 }
 
 /** 跑完之后：**新出现的**那个会话就是本次的（headless 的 sessionId 是它自己生成的） */
-function pickNewSession(before) {
+function pickNewSession(before, wsTail = '') {
   const known = before instanceof Set ? before : new Set();
-  const fresh = sessionDirs().filter((x) => !known.has(x.id));
+  const tail = /^[\w.-]{4,}$/.test(String(wsTail ?? '')) ? String(wsTail) : '';
+  const fresh = sessionDirs().filter((x) => {
+    if (known.has(x.id)) return false;
+    // ⚠️ 同时有好几个活（不同私聊 / 群任务）在跑时，**别捞到别人的那个会话** ——
+    //    按工作区目录名尾巴认领（末段是 QQ 号 / 群号，纯 ASCII，DSH 编码时原样保留）✓
+    if (tail && !basename(dirname(x.dir)).includes(`-${tail}--`)) return false;
+    return true;
+  });
   fresh.sort((a, b) => b.mtime - a.mtime);
   return fresh[0]?.id ?? '';
+}
+
+/**
+ * ⚠️⚠️ 2026-10-16 加（用户：「**正在跑的能不能也把对话显示出来**」）：
+ *    **按任务反查会话** —— 历史里 `sessionId` 空着时（老任务 / 还没跑完的），
+ *    用它把会话找回来，面板点开才看得到那次到底聊了什么 ✓
+ *
+ * 为什么需要它：`sessionId` 是**扫会话目录**扫出来的，而"扫"这件事原来只在
+ *   子进程**退出之后**做 ⇒ 跑着的那几十分钟里历史里一直是空的 ✗
+ *   （用户点开面板看到的就是「（这次没有可显示的对话）」）
+ *
+ * 怎么认领（两条一起用）：
+ *   ① **工作区**：任务的 `dir` 末段（私聊是对方 QQ、群任务是群号）是**纯 ASCII** ⇒
+ *      DSH 编码工作区目录名时**原样保留**（非 ASCII 才变成 `~XXXX~`）✓
+ *      ⇒ 拿它去比 `sessions/<工作区目录名>` 的 `-<末段>--` 尾巴 ✓
+ *      （末段不是纯 ASCII 就不做这道过滤 —— 免得用编码过的中文乱配）
+ *   ② **时间窗**：会话目录 mtime 落在"开工前 1 分钟 ~ 收工后 5 分钟"内
+ *      （没写收工时间 = 还在跑 ⇒ 上界取 `now + 1 分钟`）✓
+ */
+export function sessionIdForTask(t = {}) {
+  const dir = String(t?.dir ?? '').trim();
+  const tail = dir ? basename(dir).trim() : '';
+  const asciiTail = /^[\w.-]{4,}$/.test(tail) ? tail : '';
+  const t0 = Number(t?.startedAt) || 0;
+  const t1 = Number(t?.endedAt) || 0;
+  const lo = t0 ? t0 - 60000 : 0;
+  const hi = t1 ? t1 + 300000 : Date.now() + 60000;
+  const cands = sessionDirs().filter((x) => {
+    if (asciiTail && !basename(dirname(x.dir)).includes(`-${asciiTail}--`)) return false;
+    return x.mtime >= lo && x.mtime <= hi;
+  });
+  cands.sort((a, b) => b.mtime - a.mtime);
+  return cands[0]?.id ?? '';
 }
 
 /**
@@ -1940,6 +2105,9 @@ function cliRunner(taskText, hooks = {}) {
     : `${RULES}${taskText}${contextHint}${dirHint}${selfHint}${SECTION_RULES}`;
 
   const before = new Set(sessionDirs().map((x) => x.id));
+  // ⚠️ 认"本次那个会话"除了"新增"，还要看**工作区尾巴** ——
+  //    同时有别的活（另一个私聊 / 群任务）在跑时，别捞到别人的会话 ✗
+  const wsTail = basename(ws);
   const child = spawn(r.node, [r.dsh, '--profile', r.profile, prompt], {
     cwd: ws,
     windowsHide: true,
@@ -1958,16 +2126,44 @@ function cliRunner(taskText, hooks = {}) {
   let err = '';
   let done = false;
 
+  /**
+   * ⚠️⚠️ 2026-10-16 加（用户：「**正在跑的能不能也把对话显示出来**」）：
+   *    **真因**：会话 id 原来只在子进程 `close` 之后（`settle` 里）才扫出来 ⇒
+   *      跑着的那几十分钟里任务历史**根本没有 `sessionId`** ⇒
+   *      面板点开显示「（这次没有可显示的对话）」✗
+   *    **实测**：会话目录**开工那一刻就建好了**，而且边跑边写
+   *      （开工 26 秒就 297 KB）⇒ 早扫就有 ✓
+   *    ⇒ 这里每 2 秒扫一次"新增的那个"，**一捞到就立刻**交给 `onSetup`（只交一次）✓
+   */
+  let liveSid = '';
+  const grabSid = () => {
+    if (liveSid || done) return;
+    const sid = pickNewSession(before, wsTail);
+    if (!sid) return;
+    liveSid = sid;
+    try {
+      hooks.onSetup?.({ sessionId: sid });
+    } catch {}
+  };
+  const sidTimer = setInterval(grabSid, 2000);
+  sidTimer.unref?.();
+
   const promise = new Promise((resolve) => {
     const settle = (code) => {
       if (done) return;
       done = true;
+      try {
+        clearInterval(sidTimer);
+      } catch {}
       // ⚠️ 会话目录是它**退出前**写的 —— 留 300ms 让落盘收尾，再扫一次"新增的那个"
       setTimeout(() => {
-        const sid = pickNewSession(before) || `session-${randomUUID()}`;
-        try {
-          hooks.onSetup?.({ sessionId: sid });
-        } catch {}
+        const sid = liveSid || pickNewSession(before, wsTail) || `session-${randomUUID()}`;
+        // ⚠️ 跑着的时候已经交过一次的就**别再交第二遍**（免得历史里的 id 被覆盖成别的）
+        if (!liveSid) {
+          try {
+            hooks.onSetup?.({ sessionId: sid });
+          } catch {}
+        }
         resolve({ code, stdout: out.trim(), stderr: err, killed, sessionId: sid });
       }, 300).unref?.();
     };
@@ -2071,6 +2267,18 @@ export function __setJudge(fn) {
 let interjectImpl = judgeInterject;
 export function __setInterject(fn) {
   interjectImpl = typeof fn === 'function' ? fn : judgeInterject;
+}
+
+/**
+ * ⚠️ 2026-10-16 加：**给别的模块用的"可被套件替换"的入口**。
+ *
+ * 为什么不能直接调 `judgeInterject`：`__setInterject` 换的是**模块内变量** `interjectImpl`
+ *   ⇒ 别的模块（`private-work` 的返工判定、群任务自己）直接调导出的 `judgeInterject`
+ *   ⇒ **绕过桩** ⇒ 套件里会真调模型（还判错）✗
+ * ⇒ 要判"这句是不是在改这一单"就统一走这里 ✓
+ */
+export function judgeInterjectVia(text, task, opts = {}) {
+  return interjectImpl(text, task, opts);
 }
 
 // ⚠️ 「这条群消息是不是在问那个刚做完的活」也过一次模型 —— 套件里换掉
@@ -2962,13 +3170,32 @@ async function handleTask(event, segs, bot, opts = {}) {
   //    ⚠️ 判定归判定、权限归权限：**判定说"在改/在停"之后，还要看说话人是不是发起者**。
   if (state.running && String(state.running.gid) === gid && looksLikeInterject(clean, segments, bot)) {
     const r = state.running;
-    const act = await interjectImpl(clean, r.task, opts);
+    // ⚠️⚠️ 2026-10-16 加（用户：「**把所有模型判据都加上 bot 自己说的话**」+
+    //    「**把修改逻辑复用到其他几个号的群聊工作模式**」）——
+    //    群里也要带上"她自己刚说过的那句"：她刚在群里问「要不要加一页」、
+    //    群友回「要」⇒ 那就是**改要求** ✓（单看"要"这个字判不出来 ✗）
+    let prevSay = '';
+    try {
+      const lines = recentStore.lastBotLines(gid, { n: 3 });
+      prevSay = String(Array.isArray(lines) ? lines[lines.length - 1] ?? '' : '').trim().slice(0, 200);
+    } catch {}
+    const act = await interjectImpl(clean, r.task, { ...opts, prev: prevSay });
     if (act === 'ask') {
-      const line = await voiceImpl('progress', '他在催/问进度：回一句还在做、快好了（别展开）。', {
-        task: r.task,
-        gid,
-        timeoutMs: 8000,
-      }).catch(() => '');
+      // ⚠️⚠️ 2026-10-16 改（用户：「**催促逻辑也一并改了**」）——
+      //    原来这里**直接凭空**生成一句"还在做、快好了" ⇒ 进度是**编的** ✗
+      //    ⇒ 和私聊那套一样：**先起一个只读小代理看进度**（清单打了几个勾、产物在不在）
+      //      ⇒ 拿到真实情况 ⇒ 再回**一句短的** ✓
+      //    ⚠️ 还要**按住她那条**（回太快像在摸鱼 ✗）—— 群按住走 `holdGroup` ✓
+      holdGroup(gid, 90 * 1000);
+      const does = await peekForChange(String(r.dir ?? ''), '', 'progress').catch(() => '');
+      const line = await voiceImpl(
+        'progress',
+        does
+          ? `他问进度。**现在实际是**：${clip(does, 160)}。⇒ 回一句短的（10~20 字），让他觉得还在做；别报百分比、别列做过什么。`
+          : '他在催/问进度：回一句还在做、快好了（别展开）。',
+        { task: r.task, gid, timeoutMs: 8000 },
+      ).catch(() => '');
+      holdGroup(gid, 0);
       await taskSay(bot, gid, line || `还在弄「${clip(r.task, 20)}」，好了就发你`);
       return true;
     }
@@ -2992,11 +3219,19 @@ async function handleTask(event, segs, bot, opts = {}) {
         //      · 话术是「行，我加上」——**不说停、不说重做** ✓
         //      · 产物和任务文件夹都复用 ✓（新一轮接着用同一个）
         //      · 代价：那一轮白跑（已经花掉的模型钱收不回来）—— 但"立刻"是他要的 ✓
-        const merged = `${r.task}（追加：${clip(clean, 120)}）`;
+        // ⚠️⚠️ 2026-10-16 加（用户：「**把修改逻辑复用到其他几个号的群聊工作模式**」）——
+        //    **先起一个只读子代理探查现状**（几十秒）⇒ 拿到"这一步该怎么改" ⇒
+        //    拼进新一轮的任务里 ⇒ 那一轮是照**探查过的方案**改，不是自己瞎猜 ✓
+        //    ⚠️ 探查失败 = 空串 ⇒ 照旧走老的"直接带新要求重跑" ✓（绝不卡住活）
+        //    ⚠️⚠️ `dir` 必须**先声明**（下面要用它）—— 这个项目在 TDZ 上栽过好几次 ✗
         const dir = String(r.dir ?? '');
         const by = r.by;
         const byName2 = r.byName;
         const related = r.related === true;
+        const hint = await peekForChange(dir, clean).catch(() => '');
+        const merged = hint
+          ? `${r.task}（追加：${clip(clean, 120)}）\n\n（⚠️ 刚有人看过了现状，建议这样改 —— 优先照它做：${hint}）`
+          : `${r.task}（追加：${clip(clean, 120)}）`;
         log.info(`[任务] 发起者插话加要求 → 立刻收掉这轮、带上新要求重跑：${clip(clean, 60)}`);
         // ⚠️ 不走 `cancel()`：那条会发一句「行，那个我停了」✗（用户明确不要这个）
         killCurrent();
@@ -3297,9 +3532,21 @@ export async function judgeInterject(text, task, opts = {}) {
     '· 都**不是**（普通聊天、聊别的、跟这个活无关） → 回答：无',
     '',
     '⚠️ 只有**明确在说这个活**才算；只是提到相关词、或者顺口聊到 → 一律「无」。',
+    // ⚠️⚠️ 2026-10-16 加（用户抓的现场 + 他的建议）——
+    //    现场：她问了「你学号要不一样也发我，一块改」，他回「**学号是114514**」——
+    //    单看这一句**看不出是修改**（像闲聊）⇒ 判成「无」⇒ **没进修改流程** ✗
+    //    ⇒ 判据里必须**带上她自己刚说的那句**：
+    '⚠️⚠️ **如果机器人（她自己）刚问过他什么**（比如"你学号要不要也发我""名字要不要换"），',
+    '   那**他接着答的那个东西就是对这一单的补充要求** ⇒ 算「改」✓',
+    '   （例：她问"学号要不要也发我"，他回"学号是114514" ⇒ 这是改，不是闲聊 ✗）',
     '⚠️ 只回答一个字：改、停、催、无。不要解释、不要标点。',
   ].join('\n');
-  const user = `这句话：「${t.slice(0, 200)}」`;
+  const user = [
+    opts.prev ? `机器人（她自己）刚回过他一句：「${String(opts.prev).slice(0, 200)}」` : '',
+    `这句话：「${t.slice(0, 200)}」`,
+  ]
+    .filter(Boolean)
+    .join('\n');
   let raw = '';
   try {
     if (ask) raw = await ask({ system, user });
@@ -3319,6 +3566,121 @@ export async function judgeInterject(text, task, opts = {}) {
 }
 
 /**
+ * ⚠️⚠️ 2026-10-16 加（用户：「**把修改逻辑复用到其他几个号的群聊工作模式**」）——
+ *    私聊工作那套「**改需求 ⇒ 先起一个只读子代理探查现状 ⇒ 再带着建议重开**」
+ *    （`private-work.js` 的 `peekProject`）搬一份到**群任务**这边。
+ *
+ * 为什么群任务也需要：现在是**一收到"改"就立刻杀掉重跑** ⇒ 新一轮只能照着聊天记录猜
+ *   "该怎么改" ✗；先探查一次（只读、几十秒）⇒ 那一轮是**照探查过的方案改** ✓
+ *   ⚠️ 代价：多一次只读 agent 调用 + 多等几十秒（群任务本来就有 CONFIRM 前缀那套话术，
+ *      用户看得见"行，我加上"✓ 不会显得卡住）
+ *
+ * ⚠️ 只读、超时 3 分钟；**失败一律当作"没探查"**（照旧用老的"直接重跑"那条路 ✓ 绝不卡住任务）
+ */
+let peekImpl = null; // ⚠️ 测试可替换（见 `__setPeek`）；null = 真的起只读小代理 ✓
+/** ⚠️ 测试专用：把"探查现状"那一步换成桩（不然套件会真起一次 agent、又慢又花钱） */
+export function __setPeek(fn) {
+  peekImpl = typeof fn === 'function' ? fn : null;
+}
+
+async function peekForChange(dir, why, mode = 'change') {
+  const ws = String(dir ?? '').trim();
+  if (!ws || !existsSync(ws)) return '';
+  if (peekImpl) return peekImpl(ws, why, mode);
+  try {
+    // ⚠️ 2026-10-16 加（用户：「**催促逻辑也一并改了**」）——
+    //    催进度那条只要"现在做到哪了"，**不要给改法建议**（那是另一回事）✓
+    const asking = mode === 'progress';
+    const prompt = asking
+      ? [
+          '# 看一眼这个活**做到哪一步了**（⚠️ 只读，一个字都不许改）',
+          '',
+          '- 项目文件就在这个文件夹里；清单在 `要交的东西.md`（打勾的就是做完的）',
+          '',
+          '## 只看两件事',
+          '1. 清单上打了几个勾、还剩几条（这就是"做到哪了"）',
+          '2. 产物有没有东西、最近有没有在改（看文件时间）',
+          '',
+          '## 交什么',
+          '**一句话**说清现在到什么程度了（例：界面已经能跑通，报告刚起了个开头）。',
+          '⚠️ 给"她"拿去回客户的 ⇒ 说人话、别提文件名/路径/工具 ✓',
+        ]
+          .filter(Boolean)
+          .join('\n')
+      : [
+          '# 先探查一下这个项目，然后**写一份"怎么改"的建议**（⚠️ 只读，一个字都不许改）',
+          '',
+          '- 项目文件就在**这个文件夹**里（别改 ✗）',
+          '',
+          why ? `## 他刚提的要求：「${String(why).slice(0, 200)}」` : '',
+          '',
+          '## 第一步：看明白现状',
+          '什么语言/框架、有哪些文件、做到哪一步了（扫关键文件就行）。',
+          '',
+          '## 第二步：**只写下面这一段**（⚠️ 标题一个字都别改）',
+          '',
+          '【给改代码那个人的建议】',
+          '具体怎么改：改哪个文件、加什么、注意什么坑（可以提文件名、可以技术一点，三五行就够）。',
+          '⚠️ 如果这个改动其实不用改代码，就写"不用改"。',
+        ]
+          .filter(Boolean)
+          .join('\n');
+    // ⚠️⚠️ 2026-10-16 改：这里**必须走 `runnerImpl`**（也就是 `runTask` 那个可被替换的 runner）✗
+    //    第一版我自己 `spawn` 了一个 ⇒ **绕过了套件里的 `__setRunner` 桩** ⇒
+    //    `agent-bridge` 套件 4 秒变 **216 秒**、还真的花了一次 agent 的钱 ✗✗
+    // 用 `runnerImpl` 之后：生产上是真起只读 agent，套件里被桩掉 ⇒ 又快又不花钱 ✓
+    const { promise } = runnerImpl(prompt, {
+      cwd: ws,
+      rawPrompt: true,
+      permission: 'read-only',
+      timeoutMs: 180000,
+    });
+    const text = String((await promise)?.stdout ?? '').trim();
+    if (mode === 'progress') return String(text).trim().slice(0, 400);
+    const hint = String(text).replace(/^[\s\S]*?【给改代码那个人的建议】/, '').trim();
+    if (hint) log.info(`[任务] 探查完了 ⇒ 给这一轮的改法建议 ${hint.length} 字`);
+    return hint.slice(0, 900);
+  } catch (e) {
+    log.warn(`[任务] 探查现状失败（照旧直接重跑）：${e.message}`);
+    return '';
+  }
+}
+
+/**
+ * ⚠️⚠️ 2026-10-16 加（用户：「**催促逻辑也一并改了**」）——
+ *    群里催进度时，先把**她那条秒回**按住（回太快像在摸鱼 ✗），
+ *    等只读小代理看完"做到哪了"，再由 `taskSay` 主动发**一句短的** ✓
+ *
+ * ⚠️ 挂到最底层出站口（`bot.js` 的 `send_*` 闸）才拦得干净 —— 和私聊那套一个道理 ✓
+ * ⚠️ 自带 90 秒上限（`holdGroup(gid, 90*1000)`）⇒ 小代理卡住也不会把她永久闭麦 ✗
+ */
+const groupHolds = new Map();
+
+export function holdGroup(gid, ms) {
+  try {
+    const g = String(gid ?? '');
+    if (!g) return;
+    if (Number(ms) > 0) groupHolds.set(g, Date.now() + Number(ms));
+    else groupHolds.delete(g);
+  } catch {}
+}
+
+export function isGroupHeld(gid) {
+  try {
+    const g = String(gid ?? '');
+    const until = groupHolds.get(g) || 0;
+    if (!until) return false;
+    if (Date.now() > until) {
+      groupHolds.delete(g);
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * 插话的**快筛**（省一次模型调用）。
  *
  * ⚠️ 任务跑着的时候群里每条消息都判一次模型**太贵**（任务一分钟里群里能刷十几条）⇒
@@ -3335,7 +3697,14 @@ export function looksLikeInterject(text, segments = null, bot = null) {
   const me = String(bot?.selfId ?? '');
   const segs = Array.isArray(segments) ? segments : [];
   if (me && segs.some((s) => (s?.type === 'at' && String(s?.data?.qq ?? '') === me) || s?.type === 'reply')) return true;
-  return /(做完|弄完|写完了|好了没|好了吗|好没好|怎么样了|进度|那个活|这个活|任务|别写|别弄|别做|不用了|算了|改成|换成|再加|再多|再写|加上|补上|重做|重来|继续|停一下|停下)/.test(
+  // ⚠️⚠️ 2026-10-16 加（用户：「这个**应该默认是打断现在正在进行的任务**，
+  //    或者给已经完成的最近的产物进行修改」）——
+  //    现场：客户说「那个 webui 的界面整的好看一点」「你现在正在做的那个」，
+  //    结果**两句都没命中**这里的关键词 ⇒ 走的是"记下、等这一轮跑完再补一轮" ✗
+  //    ⇒ 而他那一轮要跑 90 分钟 ⇒ 新要求得等一个半小时才进去，白做一轮 ✗
+  //    ⇒ 所以补上"**改动意图**"这一类词（改 / 换 / 加上 / 好看 / 排版 / 样式 / 界面 …）✓
+  //    ⚠️ 仍然只在**有活在跑**的时候才判它（调用点会先看 `jobs.has(uid)`）✓
+  return /(做完|弄完|写完了|好了没|好了吗|好没好|怎么样了|进度|那个活|这个活|任务|别写|别弄|别做|不用了|算了|改成|换成|再加|再多|再写|加上|补上|重做|重来|继续|停一下|停下|好看|美观|美化|好看点|弄好看|排版|样式|风格|页面|界面|润色|润一遍|正在做|在做的|调整|改一下|改改|改个|换个|做成|弄成|删掉|去掉|补一下|加一点)/.test(
     t,
   );
 }

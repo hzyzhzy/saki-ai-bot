@@ -105,6 +105,10 @@ ab.__setVoice(async (kind, facts) => String(facts ?? ''));
 //    不桩的话它会**真调模型**（每句 @她的消息都要等 8 秒 ✗），而且会抢插话那条路 ✗
 //    （要测它的那一段自己覆盖成 `action:'ask'` ✓ 见【27】）
 ab.__setAskAgent(async () => ({ action: '', question: '' }));
+// ⚠️⚠️ 2026-10-16 加：**"插话前先探查现状"那一步也要桩掉**（`peekForChange`）——
+//    它是**一次真的只读 agent 调用** ⇒ 不桩的话：① 本套件从 4 秒变 **216 秒**；
+//    ② 真花一次 agent 的钱 ✗（要验的是"探查之后有没有带上建议重跑"，不是探查质量）
+ab.__setPeek(async () => '');
 // ⚠️⚠️ 2026-10-14（用户：「**直接把 agent 设定为 saki 自己的电脑**，由**她自己决定**
 //    什么时候该用电脑…」）：那道"她自己决定要不要动电脑"的判定也是**一次真模型调用** ——
 //    默认桩成「不用」，否则**套件里每一句 @她的话都会真调模型**（等 6 秒 + 花钱 ✗）。
@@ -558,6 +562,39 @@ console.log('\n【14】★★ 把会话登记进 GUI 的工作区列表（用户
   check(!!mine && mine[1].title === '__test-agent-ws', '★ 标题取的是目录名');
   config.agent.workspace = keep;
   delete process.env.QQBOT_DSH_HOME;
+}
+
+console.log('\n【14.5】★★ 会话反查：**"正在跑的活"也要能在任务面板上看对话**');
+{
+  // ⚠️⚠️ 2026-10-16 加（用户：「**正在跑的能不能也把对话显示出来**」）——
+  //    会话 id 是**扫会话目录**扫出来的，而"扫"原来只在子进程**退出之后**才做 ⇒
+  //    跑着的那几十分钟里任务历史里是空的 ⇒ 面板点开显示「（这次没有可显示的对话）」✗
+  //    ⇒ 现在两条兜底：① 跑着时每 2 秒扫一次（`cliRunner` 里的 `grabSid`）；
+  //                    ② 真没有就按「工作区尾巴 + 时间窗」反查（`sessionIdForTask`）✓
+  //    这里测 ②（① 要真起一个 dsh 进程，套件里太慢 ✗）
+  const home = join(ROOT, 'logs', '__test-agent-dsh-sid');
+  rmSync(home, { recursive: true, force: true });
+  const uid = '10000002';
+  // 工作区目录名就是 DSH 那套编码：非 ASCII 变成 `~XXXX~`，**中文尾段的号原样保留** ✓
+  const wsName = '--C-x--agentwork-~79C1~804A-10000002--';
+  const sid = 'session-11111111-2222-3333-4444-555555555555';
+  mkdirSync(join(home, 'sessions', wsName, sid), { recursive: true });
+  writeFileSync(join(home, 'sessions', wsName, sid, 'session.v3.jsonl.zstd'), 'x', 'utf8');
+  const keepHome = process.env.QQBOT_DSH_HOME;
+  process.env.QQBOT_DSH_HOME = home;
+  const at = Date.now();
+  const hit = ab.sessionIdForTask({ dir: join(ROOT, WS_REL, '私聊', uid), startedAt: at, endedAt: 0 });
+  check(hit === sid, '★★ 按"工作区尾巴 + 时间窗"把会话反查出来了', hit || '（没查到）');
+  const other = ab.sessionIdForTask({ dir: join(ROOT, WS_REL, '私聊', '9999999999'), startedAt: at, endedAt: 0 });
+  check(other === '', '★ **别的号**的活不会捞到这条会话（认工作区尾巴）', other || '（对的，空的）');
+  const old = ab.sessionIdForTask({
+    dir: join(ROOT, WS_REL, '私聊', uid),
+    startedAt: at - 86400000,
+    endedAt: at - 86400000 + 1000,
+  });
+  check(old === '', '★ 时间对不上的老任务也不乱认（时间窗兜着）', old || '（对的，空的）');
+  if (keepHome === undefined) delete process.env.QQBOT_DSH_HOME;
+  else process.env.QQBOT_DSH_HOME = keepHome;
 }
 
 console.log('\n【15】★★ 做完的**文件**发进群（用户要的是那份产物，不是一句"做好了"）');
@@ -1619,6 +1656,56 @@ console.log('\n【33】★★ 群里必须 @ 她 + 群聊记录只是背景（20
   check(
     /建群文件夹失败（回头再找一遍）/.test(src33) && /^\s+log\.warn\(/m.test(src33),
     '★ 建群文件夹失败提到了 warn（不然"产物为什么散在群文件根目录"查不出来）',
+  );
+}
+
+console.log(
+  '\n【34】★★★ 任务面板**不留"被打断了"的僵尸记录**（2026-10-16 用户两次截图问）',
+);
+{
+  // 用户原话：「**看看为什么这个是被杀的状态，现在不应该有被杀掉的状态吧，
+  //   要么重启了之后自动继续，要么是做完了**」
+  //   ⚠️ 第二次截图（重启之后又出现）：真因是 `tidyStaleTasks` 的窗口 60 秒
+  //      —— 启动那一刻会把历史里的 `running` 全标成 `killed`（endedAt = 启动时刻），
+  //         而调用方是**启动后 45 秒**来收拾 ⇒ 45 < 60 ⇒ **被窗口挡掉** ⇒ 永远挂着 ✗
+  const idOld = ab.addPrivateHist({ by: '10000009', task: '旧的被打断的' });
+  ab.patchPrivateHist(idOld, { status: 'killed', endedAt: Date.now() - 30000 });
+  const idNew = ab.addPrivateHist({ by: '10000009', task: '刚刚被打断的' });
+  ab.patchPrivateHist(idNew, { status: 'killed', endedAt: Date.now() });
+  const idLive = ab.addPrivateHist({ by: '10000010', task: '其实还在跑的' });
+  ab.patchPrivateHist(idLive, { status: 'killed', endedAt: Date.now() - 30000 });
+  const idAsk = ab.addPrivateHist({ by: '10000009', task: '当时在问他' });
+  ab.patchPrivateHist(idAsk, { status: 'asking' });
+
+  const n = ab.tidyStaleTasks((t) => String(t.by) === '10000010');
+  const find = (id) => ab.taskHistory(200).find((x) => x.id === id) || {};
+  check(
+    find(idOld).status === 'done',
+    '★★★ 半分钟前那条"被打断了" ⇒ 收拾成"做好了"（面板不留僵尸 ✓）',
+    find(idOld).status,
+  );
+  check(
+    find(idLive).status === 'running',
+    '★★ 其实**还在跑**的那条 ⇒ 标回"正在做"（不许误标成做好了 ✓）',
+    find(idLive).status,
+  );
+  check(find(idNew).status === 'killed', '★ 刚刚（10 秒内）那条先别动（可能正要自己标 done ✓）', find(idNew).status);
+  check(find(idAsk).status === 'asking', '★ "当时在问他"那种一个字都不动（它不是在跑 ✓）', find(idAsk).status);
+  check(n >= 1, '★ 返回"收拾了几条"（日志里要看得出 ✓）', String(n));
+
+  const s34 = readFileSync(join(ROOT, 'src', 'agent-bridge.js'), 'utf8');
+  check(
+    /minAgeMs = 10000/.test(s34),
+    '★★★ 窗口是 **10 秒**（60 秒会把"启动时标的那批"漏掉 ⇒ 面板永远挂着 ✗）',
+  );
+  const p34 = readFileSync(join(ROOT, 'src', 'private-work.js'), 'utf8');
+  check(
+    /setTimeout\(tidyOnce, 45000\)/.test(p34) && /setInterval\(tidyOnce, 10 \* 60 \* 1000\)/.test(p34),
+    '★★ 开机 45 秒收拾一次 + 之后**每 10 分钟**再收拾一遍（只清一次不够 ✓）',
+  );
+  check(
+    /if \(tidyTimer\) clearInterval\(tidyTimer\)/.test(p34),
+    '★ `stop()` 会把那个定时器清掉',
   );
 }
 

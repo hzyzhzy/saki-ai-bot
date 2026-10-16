@@ -391,7 +391,19 @@ export function logBlock(parsed) {
   return parts.join('\n');
 }
 
-/** 判断一个消息段是不是「日志文件」 */
+/**
+ * 判断一个消息段是不是「日志文件」。
+ *
+ * ⚠️⚠️ 2026-10-16 修（用户截图 + 日志实证的真 bug）：
+ *    现场：工作号那个**客户发来的 `实训.zip`（90MB 实训项目）** 被判成"崩溃日志"⇒
+ *      ① 绕过「接不接」的判定（`hit: 'logfile'`）；② **真去把 90MB 拖下来了**
+ *      （`[日志] 取到「实训.zip」…94398192 字节`）然后才说"太大不分析" ✗；
+ *      ③ 那一轮用的是"崩溃日志"那套提示词 ✗
+ *    真因：老判据把 `.zip / .json / .md / .txt / .yml …` **一律**当日志 ⇒
+ *      世界上所有压缩包都成了"崩溃日志" ✗
+ *    ⇒ 现在：**`.log` 无歧义、直接算**；别的扩展名**必须名字里有"像日志"的线索**
+ *      （`crash` / `latest` / `error` / `崩溃` / `报错` / `日志`）才算 ✓
+ */
 export function looksLikeLogFile(seg) {
   // ⚠️ 2026-09-29：段类型的大小写/别名都容一手（协议端换过，SnowLuma 给的是小写 file，
   //    但别的实现可能是 `File`）。
@@ -401,5 +413,12 @@ export function looksLikeLogFile(seg) {
   //    认不出名字就等于**默默跳过整个文件**（现场那次就是这么漏的）。
   const d = seg.data ?? {};
   const n = String(d.name ?? d.file ?? d.filename ?? d.file_name ?? d.fileName ?? '');
-  return /\.(log|txt|zip|gz|crash|json|yml|yaml|toml|md)$/i.test(n);
+  if (!n) return false;
+  if (/\.log$/i.test(n)) return true;
+  return /(crash|latest|error|exception|stacktrace|崩溃|报错|错误日志|日志)/i.test(n);
+}
+
+/** 崩溃日志分析的大小上限（`bot.js` 在**下载之前**先拿它比一下 ✓） */
+export function maxLogBytes() {
+  return MAX_BYTES;
 }

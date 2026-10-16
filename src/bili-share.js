@@ -67,24 +67,92 @@ const STATE_FILE = process.env.QQBOT_BILI_SHARE_FILE
 /**
  * 落盘的状态（重启不能忘）：
  *   · `by[群]` = { fired, target, lastAt } —— **按群**记今天几条 / 上次何时发的 ✓
- *   · `sent`  = 发过的 BV（**共用**去重池，最多留 80 条）✓
+ *   · `sent`  = 发过的 BV（老的**共用**去重池，最多留 80 条；留着兜底 ✓）
+ *   · `sentByGid[群]` = **这个群**发过的 BV（每组留 300 条）✓
+ *     ⚠️⚠️ 2026-10-16 加（用户：「**注意同一个群发的视频不要有重复的**」）——
+ *        原来只有那个**共用**、只留 80 条的池子 ⇒ 那个群发得多了、老记录被挤掉 ⇒
+ *        **同一个群里又推一遍** ✗ ⇒ 现在**按群**记 ✓（跨群重复不再管：那本来就不算重复 ✓）
  */
-let st = { day: '', by: {}, sent: [], recent: {} };
+let st = { day: '', by: {}, sent: [], sentByGid: {}, recent: {}, nowKw: {} };
+
+const PER_GROUP_SENT_MAX = 800;
+/** ⚠️ 2026-10-16 用户：「**两个月清一次已发视频记录，要不然会无限堆**」⇒ 保留 60 天 ✓ */
+const SENT_KEEP_DAYS = 60;
+
+/**
+ * 把"这个群发过的记录"里**太老的**清掉（保留 `keepDays` 天）—— **纯函数**，好测 ✓
+ * @param {Array<{id:string, at:number}>} list
+ * @returns {Array<{id:string, at:number}>}
+ */
+export function pruneSentEntries(list, now = Date.now(), keepDays = SENT_KEEP_DAYS) {
+  const cut = now - Math.max(1, Number(keepDays) || SENT_KEEP_DAYS) * 24 * 60 * 60 * 1000;
+  return (Array.isArray(list) ? list : [])
+    .map((x) =>
+      typeof x === 'string'
+        ? { id: x, at: now } // ⚠️ 老格式（只有 id）⇒ 当"刚记的"看，两个月后自然淘汰 ✓
+        : { id: String(x?.id ?? ''), at: Number(x?.at ?? 0) || now },
+    )
+    .filter((x) => x.id && x.at >= cut)
+    .slice(-PER_GROUP_SENT_MAX);
+}
 
 function load() {
   try {
     const j = JSON.parse(readFileSync(STATE_FILE, 'utf8'));
+    const now = Date.now();
     st = {
       day: String(j?.day ?? ''),
       by: j?.by && typeof j.by === 'object' ? j.by : {},
       sent: Array.isArray(j?.sent) ? j.sent.map(String).slice(-80) : [],
+      sentByGid:
+        j?.sentByGid && typeof j.sentByGid === 'object' && !Array.isArray(j.sentByGid)
+          ? Object.fromEntries(
+              Object.entries(j.sentByGid).map(([k, v]) => [String(k), pruneSentEntries(v, now)]),
+            )
+          : {},
       // ⚠️ 2026-10-15：按群记「刚分享过什么」（标题 / UP / 简介）
       recent: j?.recent && typeof j.recent === 'object' ? j.recent : {},
+      // ⚠️ 2026-10-16：界面「立刻发送」那格填过的词 / 评论选框（**按群记** ⇒ 刷新不丢 ✓）
+      nowKw: j?.nowKw && typeof j.nowKw === 'object' && !Array.isArray(j.nowKw) ? j.nowKw : {},
     };
+    // ⚠️ 老状态（升级前）里**没有** `sentByGid` ⇒ 这时才让那份共用池参与去重 ✓
+    gidDataSeen = Object.values(st.sentByGid).some((v) => Array.isArray(v) && v.length > 0);
   } catch {
     /* 第一次还没有 */
   }
 }
+
+/** 这个群发过这条没有（**按群**判定 ✓） */
+function isSent(gid, bvid) {
+  const g = String(gid ?? '');
+  const id = String(bvid ?? '');
+  if (!id) return false;
+  const mine = pruneSentEntries(st.sentByGid?.[g]);
+  if (mine.some((x) => x.id === id)) return true;
+  // ⚠️⚠️ 老状态兜底（**只在"按群记账"这套还没启用时**才看那份共用池）——
+  //    升级前发的那些仍然挡得住（不会一升级又把最近 80 条推一遍 ✓）；
+  //    一旦**任何**群按群记过一笔（`gidDataSeen`）⇒ 就彻底按群判 ⇒
+  //    同一个视频**发到另一个群不算重复** ✓（用户要的就是"**同一个群**别重复"）
+  if (!gidDataSeen && Array.isArray(st.sent) && st.sent.includes(id)) return true;
+  return false;
+}
+
+/** "按群记账"这套有没有真的启用过（老状态升级用；见 `isSent`）✓ */
+let gidDataSeen = false;
+
+/** 记一笔"这个群发过这条" ✓（顺手把两个月前的老记录清掉 —— 用户要求 ✓） */
+function markSent(gid, bvid) {
+  const g = String(gid ?? '');
+  const id = String(bvid ?? '');
+  if (!g || !id) return;
+  st.sentByGid ??= {};
+  const cur = pruneSentEntries(st.sentByGid[g]);
+  st.sentByGid[g] = pruneSentEntries([...cur.filter((x) => x.id !== id), { id, at: Date.now() }]);
+  // ⚠️ 老那份共用池照旧维护（别的老代码/界面还看它 ✓）—— 但**不再参与去重**（见 `isSent`）
+  st.sent = [...new Set([...st.sent, id])].slice(-80);
+  gidDataSeen = true;
+}
+
 function save() {
   try {
     mkdirSync(stateDir(), { recursive: true });
@@ -199,11 +267,18 @@ export function pendingGroups(groups = []) {
 /**
  * 挑一条视频（关键词随机 ⇒ 搜 ⇒ **排除发过的** ⇒ 挑播放量最高的）。
  *
+ * ⚠️⚠️ 2026-10-16 加（用户：「**把立即发送一条独立出来，单独给它加个关键词框，
+ *    这样就不用动自动发送那里的设置了**」）——
+ *    ⇒ `kws` 可以**临时传进来**（界面上"立刻发送"那格填的词）：
+ *      只影响这一次手动发送，**不碰**这个群配置里的关键词 ✓
+ *
+ * @param {string} gid
+ * @param {string[]} [kwsOverride] 这次就用这几个词（不给就按这个群的设置来）
  * @returns {Promise<{title:string, up:string, play:number, url:string, bvid:string, keyword:string}|null>}
  */
-export async function pick(gid = '') {
+export async function pick(gid = '', kwsOverride = null) {
   if (pickerImpl) return pickerImpl(gid);
-  return pickReal(gid);
+  return pickReal(gid, kwsOverride);
 }
 
 /** ⚠️ 套件要能换掉"真去搜 B 站"这一步（不然跑套件会真打接口）✓ 和项目里别的模块一个路子 */
@@ -212,42 +287,75 @@ export function __setPicker(fn) {
   pickerImpl = typeof fn === 'function' ? fn : null;
 }
 
-async function pickReal(gid = '') {
-  const kws = keywordsOf(gid);
-  if (!kws.length) return null;
-  const w = cfgFor(gid);
+async function pickReal(gid = '', kwsOverride = null) {
+  const kws = (Array.isArray(kwsOverride) ? kwsOverride : []).map(String).filter(Boolean);
+  const limit = Math.max(4, Math.min(20, Number(cfgFor(gid).maxResults ?? 8) || 8));
+  const deny = cfgFor(gid).deny ? new RegExp(String(cfgFor(gid).deny)) : null;
+
+  // ⚠️⚠️ 2026-10-16 用户说清了两者的区别：
+  //   「和自动发送的框不同，那个是**每次发视频选一个关键词**，这个**是一次选多个关键词**」
+  //   ⇒ · 自动那份：**随机挑一个**词搜，命中就拿（老逻辑 ✓）
+  //      · 界面"立刻发送"那格填的：**这几个词一起搜**，
+  //        从**合起来的结果**里挑播放量最高的那条 ✓（要一次试好几个词时不用来回改设置 ✓）
+  if (kws.length) {
+    const bili = await import('./bilibili.js');
+    log.info(`[B站分享] 这次用**临时关键词一起搜**：${kws.join('、')}（不动群设置 ✓）`);
+    const all = [];
+    for (const kw of kws) {
+      try {
+        const list = await bili.topicVideos(kw, { limit, deny });
+        for (const v of list ?? []) {
+          if (v?.url && !isSent(gid, bvidOf(v.url))) all.push({ v, kw });
+        }
+      } catch (e) {
+        log.warn(`[B站分享] 搜「${kw}」失败：${e.message}`);
+      }
+    }
+    return bestOf(all);
+  }
+
+  const use = keywordsOf(gid);
+  if (!use.length) return null;
   const bili = await import('./bilibili.js');
   // ⚠️ 打乱后依次试：某个关键词搜不到（或结果全发过）就换下一个 ✓
-  const order = kws.slice().sort(() => Math.random() - 0.5);
-  const limit = Math.max(4, Math.min(20, Number(w.maxResults ?? 8) || 8));
-  const deny = w.deny ? new RegExp(String(w.deny)) : null;
+  const order = use.slice().sort(() => Math.random() - 0.5);
   for (const kw of order) {
     try {
       const list = await bili.topicVideos(kw, { limit, deny });
-      const fresh = list.filter((v) => v.url && !st.sent.includes(bvidOf(v.url)));
+      const fresh = list.filter((v) => v.url && !isSent(gid, bvidOf(v.url)));
       if (!fresh.length) {
         log.info(`[B站分享] 「${kw}」搜到的都发过了，换下一个关键词`);
         continue;
       }
       // ⚠️ 挑**播放量最高的**那条（"播放量像样的" —— 太冷门的转过去群友没兴趣 ✗）
-      fresh.sort((a, b) => b.play - a.play);
-      const v = fresh[0];
-      return {
-        title: v.title,
-        up: v.up,
-        play: v.play,
-        url: v.url,
-        bvid: bvidOf(v.url),
-        keyword: kw,
-        // ⚠️ 2026-10-15（用户：「bot 要知道视频大概讲了什么」）—— 简介来自搜索接口，
-        //    不用额外打 view 接口（见 bilibili.js 的 biliSearch）
-        desc: String(v.desc ?? ''),
-      };
+      return bestOf(fresh.map((v) => ({ v, kw })));
     } catch (e) {
       log.warn(`[B站分享] 搜「${kw}」失败：${e.message}`);
     }
   }
   return null;
+}
+
+/**
+ * 从一堆候选里挑**播放量最高的那条** —— **纯函数**（多关键词合并那条路要用，也好测 ✓）
+ * @param {Array<{v:object, kw:string}>} cands
+ */
+export function bestOf(cands = []) {
+  const list = (Array.isArray(cands) ? cands : []).filter((x) => x?.v?.url);
+  if (!list.length) return null;
+  list.sort((a, b) => Number(b.v.play ?? 0) - Number(a.v.play ?? 0));
+  const { v, kw } = list[0];
+  return {
+    title: v.title,
+    up: v.up,
+    play: v.play,
+    url: v.url,
+    bvid: bvidOf(v.url),
+    keyword: kw,
+    // ⚠️ 2026-10-15（用户：「bot 要知道视频大概讲了什么」）—— 简介来自搜索接口，
+    //    不用额外打 view 接口（见 bilibili.js 的 biliSearch）
+    desc: String(v.desc ?? ''),
+  };
 }
 
 /** 从链接里抠出 BV 号（去重用） */
@@ -261,11 +369,17 @@ function bvidOf(url) {
  *
  * @returns {Promise<string>} 没触发 / 想不出来 ⇒ `''`（那就只发链接那一条）✓
  */
-async function myTake(gid, v) {
+async function myTake(gid, v, { force = null } = {}) {
+  // ⚠️⚠️ 2026-10-16 加（用户：「**再独立加一个是否配 bot 自己评论的选框**」）——
+  //    手动那一下可以**明确要带 / 明确不带**（`force:true/false`）✓
+  //    ⚠️ 只影响这一次手动发送，**不动**这个群配置里那个概率 ✓
+  if (force === false) return '';
   const w = cfgFor(gid);
-  const chance = Math.min(1, Math.max(0, Number(w.chance ?? 0.5)));
-  if (chance <= 0) return '';
-  if (Math.random() >= chance) return ''; // ⚠️ 一半概率触发（用户要的"有时候才说"✓）
+  if (force !== true) {
+    const chance = Math.min(1, Math.max(0, Number(w.chance ?? 0.5)));
+    if (chance <= 0) return '';
+    if (Math.random() >= chance) return ''; // ⚠️ 一半概率触发（用户要的"有时候才说"✓）
+  }
   if (takeImpl) return takeImpl(gid, v); // 套件用
   try {
     const { phrase } = await import('./llm.js');
@@ -321,14 +435,15 @@ export function __setTake(fn) {
  * @param {{force?:boolean, groupId?:string}} [opts]
  * @returns {Promise<{sent:boolean, why:string, url?:string, gid?:string}>}
  */
-export async function runOnce(bot, groups = [], { force = false, groupId = '' } = {}) {
+export async function runOnce(bot, groups = [], { force = false, groupId = '', keywords = null, take = null } = {}) {
   const list = (Array.isArray(groups) ? groups : []).map(String).filter(Boolean);
 
   // ① 界面上手动点发：**就发它选的那个群**（没给群号才从 1 档群里随便挑）✓
+  //    ⚠️ `keywords` / `take`：界面上"立刻发送"那两格填的**临时**选择 ⇒ 只影响这一次 ✓
   if (force) {
     const gid = String(groupId ?? '').trim() || list[0] || '';
     if (!gid) return { sent: false, why: '没有 1 档群' };
-    return await sendOne(bot, gid, { force: true });
+    return await sendOne(bot, gid, { force: true, keywords, take });
   }
 
   // ② 定时：逐群看谁该发（顺序随机，免得永远先照顾排前面的群）✓
@@ -344,13 +459,23 @@ export async function runOnce(bot, groups = [], { force = false, groupId = '' } 
 }
 
 /** 给一个群发一条（判定 + 挑 + 发 + 记账） */
-async function sendOne(bot, gid, { force = false } = {}) {
+async function sendOne(bot, gid, { force = false, keywords = null, take = null } = {}) {
   const g = String(gid ?? '').trim();
   const d = force ? { due: true, why: '界面上手动点发' } : due(g);
   if (!d.due) return { sent: false, why: d.why, gid: g };
 
-  const v = await pick(g);
+  const v = await pick(g, keywords);
   if (!v) return { sent: false, why: '没挑到能发的视频', gid: g };
+
+  // ⚠️⚠️ 2026-10-16 兜底一道（用户：「**注意同一个群发的视频不要有重复的**」）——
+  //    `pickReal` 里已经按群过滤过一次，这里**再挡一道**：
+  //      · "立刻发送"那条路可以带着**临时关键词**走，套件/别处也可能直接调 `pick`；
+  //      · 真正的重复对群友来说是**一眼可见**的尴尬 ⇒ 多一道就多一层保险 ✓
+  //    ⚠️ **只挡同一个群** —— 同一个视频发到**另一个**群不算重复（本来就不算 ✓）
+  if (isSent(g, v.bvid ?? bvidOf(v.url))) {
+    log.info(`[B站分享] 群 ${g} 已经发过「${v.title}」⇒ 跳过（不重复发 ✓）`);
+    return { sent: false, why: '这条在这个群发过了', gid: g, dup: true };
+  }
 
   // ⚠️ 只发**链接 + 标题**（用户选的 A 方案 —— 卡片发不出去，见文件头那段实测）✗
   //
@@ -363,10 +488,10 @@ async function sendOne(bot, gid, { force = false } = {}) {
 
   // ⚠️⚠️ 用户：「再加一个**一半概率**会触发的 bot 自己对这个视频想说的话」+「**分条发送**」
   //    ⇒ **两条**：先一句她自己的话（像随手打的），隔一会儿再甩出「【标题】 链接」✓
-  const take = await myTake(g, v);
-  if (take) {
+  const take2 = await myTake(g, v, { force: take });
+  if (take2) {
     try {
-      await bot.sendText({ message_type: 'group', group_id: g }, take);
+      await bot.sendText({ message_type: 'group', group_id: g }, take2);
     } catch (e) {
       log.warn(`[B站分享] 那句想法没发出去（不影响发链接）：${e.message}`);
     }
@@ -390,6 +515,8 @@ async function sendOne(bot, gid, { force = false } = {}) {
   s.fired += 1;
   s.lastAt = Date.now();
   st.sent = [...st.sent, v.bvid].slice(-80);
+  // ⚠️ 2026-10-16：**按群**也记一笔（同一个群不许重复发同一条 ✓，见 `isSent`）
+  markSent(g, v.bvid);
   // ⚠️⚠️ 2026-10-15 加（用户：「**bot 要知道她自己在分享视频，也要知道视频大概讲了什么**」）：
   //    把这次分享的内容按群记下来 —— 之后有人问「祥祥你发这个干嘛」，
   //    拼提示词时会通过 `shareNote()` 注入回去 ✓
@@ -411,24 +538,69 @@ async function sendOne(bot, gid, { force = false } = {}) {
   return { sent: true, why: d.why, url: v.url, gid: g, title: v.title };
 }
 
+/**
+ * ⚠️⚠️ 2026-10-16 加（用户：「**独立视频发送那里的关键词框还是没有被保存**」）——
+ *
+ * 那个框（界面上的「立刻发送一条」）本来是**纯临时**的：填完点发送、一刷新就空了 ✗
+ * ⇒ 现在**按群记下来**（落盘 ⇒ 重启也不忘 ✓）：
+ *   · 填过就记住，打开界面时填回框里 ✓
+ *   · ⚠️ 记住的只是**那个框里的内容** —— **不动**自动发送那份设置
+ *     （那正是用户要的："这样就不用动自动发送那里的设置了" ✓）
+ *
+ * @returns {{keywords:string, take:boolean|null, at:number}}
+ */
+export function nowPick(gid = '') {
+  const g = String(gid ?? '').trim();
+  const one = g ? st.nowKw?.[g] : null;
+  return {
+    keywords: String(one?.keywords ?? ''),
+    take: typeof one?.take === 'boolean' ? one.take : null,
+    at: Number(one?.at ?? 0) || 0,
+  };
+}
+
+/** 把"立刻发送"那格的内容记下来（**空字符串也记** —— 他清空了就该记住是空的 ✓） */
+export function saveNowPick(gid = '', { keywords, take } = {}) {
+  const g = String(gid ?? '').trim();
+  if (!g) return false;
+  st.nowKw ??= {};
+  const cur = st.nowKw[g] ?? {};
+  st.nowKw[g] = {
+    keywords: keywords === undefined ? String(cur.keywords ?? '') : String(keywords ?? ''),
+    // ⚠️ `take` 不给（没传 / 传了 null）⇒ 沿用上次那个选框 ✓
+    take: typeof take === 'boolean' ? take : typeof cur.take === 'boolean' ? cur.take : null,
+    at: Date.now(),
+  };
+  save();
+  return true;
+}
+
 /** 状态（界面上那个"当天状态"用它 —— 按群看）✓ */
 export function status(gid = '') {
   rollDay();
   const g = String(gid ?? '').trim();
   const s = g ? slot(g) : null;
+  const p = nowPick(g);
   return {
     enable: g ? enabled(g) : config.biliShare?.enable === true,
     keywords: keywordsOf(g),
     fired: s?.fired ?? 0,
     target: g ? targetToday(g) : 0,
-    sentCount: st.sent.length,
+    // ⚠️ 2026-10-16：给群号时报**这个群**去重池的条数（按群去重、**只留两个月** ✓）
+    sentCount: g ? pruneSentEntries(st.sentByGid?.[g]).length : st.sent.length,
+    sentKeepDays: SENT_KEEP_DAYS,
     lastAt: s?.lastAt ?? 0,
+    // ⚠️⚠️ 2026-10-16 加（用户：「**独立视频发送那里的关键词框还是没有被保存**」）——
+    //    手动那格填的词 / 那个评论选框**按群记下来**，界面打开时填回去 ✓
+    nowKeywords: p.keywords,
+    nowTake: p.take,
     next: g ? due(g) : { due: false, why: '没给群号' },
   };
 }
 
 export function __reset() {
-  st = { day: '', by: {}, sent: [], recent: {} };
+  st = { day: '', by: {}, sent: [], sentByGid: {}, recent: {}, nowKw: {} };
+  gidDataSeen = false; // 重置后"按群记账"从头开始 ⇒ 老兜底那道也恢复（套件要用 ✓）
   save();
 }
 

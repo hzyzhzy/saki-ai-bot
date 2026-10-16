@@ -942,6 +942,115 @@ function keywordHit(lower, k) {
   return new RegExp(`(^|[^a-z0-9])${key}([^a-z0-9]|$)`).test(lower);
 }
 
+/**
+ * 群成员名单缓存（群号 → [{uid, name, nick}]）—— ⚠️ 协议端对 `get_group_member_list`
+ * 会限流 ⇒ **只在开机播种那一次**（见 `noteGroupNames` 那条路）顺手存下来，
+ * 平时**只读缓存、绝不额外发请求** ✓
+ */
+const memberCache = new Map();
+
+/**
+ * 「她写的那个名字 → 群里那个人的 uid」——**同步**匹配（不要 await！调用方在 `call()` 里）✓
+ *
+ * ⚠️⚠️ 2026-10-16 现场：她写的是「@千早爱音」（**设知名**），可群里那个号的**群名片
+ *    其实是 `anon`** ⇒ 光按名字表查**匹配不到**（实测：`findByName('爱音')` 返回空，
+ *    `findByName('anon')` 才有 uid）⇒ 所以这里再加一层：
+ *    拿**群成员名单 + 知识库里的别名**（`aliasesOf(uid)`：「又叫/AKA/游戏ID」那些）反查 ✓
+ */
+function matchNameToUid(name, groupId = '') {
+  const q = String(name ?? '').trim().toLowerCase().replace(/^@/, '');
+  if (!q) return '';
+  try {
+    const hit = names.findByName(q, groupId);
+    if (hit) return hit;
+  } catch {}
+  const list = memberCache.get(String(groupId ?? '').trim()) ?? [];
+  for (const m of list) {
+    let al = [];
+    try {
+      al = aliasesOf(m.uid);
+    } catch {}
+    const pool = [m.name, m.nick, ...(Array.isArray(al) ? al : [])];
+    if (pool.some((x) => String(x ?? '').trim().toLowerCase() === q)) return m.uid;
+  }
+  // 最后再试一次"包含"（她写「爱音」、名片是「anon酱」这种）——
+  // ⚠️ 只在**唯一命中**时才认（两个人名字都含同一个词 ⇒ 宁可不转 ✓）
+  const loose = list.filter((m) => {
+    let al = [];
+    try {
+      al = aliasesOf(m.uid);
+    } catch {}
+    return [m.name, m.nick, ...(Array.isArray(al) ? al : [])].some((x) => {
+      const s = String(x ?? '').trim().toLowerCase();
+      return s && (s.includes(q) || q.includes(s));
+    });
+  });
+  return loose.length === 1 ? loose[0].uid : '';
+}
+
+/**
+ * ⚠️⚠️ 2026-10-16 加（用户截图：「**这个 @ 的名字不对，要自动填充上群昵称，
+ *    最好是蓝色字的格式**」）——
+ *
+ * 把消息里的**纯文本 `@某某`** 换成 **at 段**（`{type:'at', data:{qq}}`）：
+ *   · QQ 会用**群昵称**渲染它 ⇒ 名字一定是对的、而且是**蓝色可点**的 ✓
+ *   · 纯文本的 `@某某` 则是灰字，而且那名字是她自己写的（不一定对）✗
+ *
+ * ⚠️ 找 uid 只用**本地名字表**（`names.findByName`，不打协议端接口）✓
+ * ⚠️ **认不出来的人一律原样保留** —— 绝不猜、绝不改字（猜错比不转更糟）✓
+ * ⚠️ 返回新数组；**什么都没改就返回原值**（调用方靠这个判断要不要替换 ✓）
+ */
+function atifyText(message, groupId = '') {
+  const segs = Array.isArray(message)
+    ? message
+    : [{ type: 'text', data: { text: String(message ?? '') } }];
+  const out = [];
+  let changed = false;
+  for (const seg of segs) {
+    const t = seg && seg.type === 'text' ? String(seg.data?.text ?? '') : '';
+    if (!t || !t.includes('@')) {
+      out.push(seg);
+      continue;
+    }
+    const re = /@([^\s@]{1,16})/g;
+    let last = 0;
+    let m;
+    let hit = false;
+    while ((m = re.exec(t))) {
+      // 去掉粘在名字后面的标点（「@小爱，」「@小爱。」这种）
+      const name = m[1].replace(/[，。、！？~,.!?：:；;）)】」"']+$/g, '').trim();
+      const uid = name ? matchNameToUid(name, groupId) : '';
+      if (!uid) continue; // ⚠️ 不认就不动 ✓
+      out.push({ type: 'text', data: { text: t.slice(last, m.index) } });
+      out.push({ type: 'at', data: { qq: String(uid) } });
+      last = m.index + m[0].length;
+      hit = true;
+    }
+    if (!hit) {
+      out.push(seg);
+      continue;
+    }
+    const tail = t.slice(last);
+    if (tail) out.push({ type: 'text', data: { text: tail } });
+    changed = true;
+  }
+  if (!changed) return message;
+  // 空的 text 段清掉（不然会多出空白）
+  return out.filter((x) => !(x && x.type === 'text' && String(x.data?.text ?? '') === ''));
+}
+
+/**
+ * ⚠️⚠️ 2026-10-16 加（用户：「**堵上**」）——**每隔这么久，主动断开重连一次** ws。
+ *
+ * 为什么要有它（真事故）：爱音那个号从 21:59 起**再没收到过任何群事件**，
+ * 可它**每 30 秒的心跳一直是通的** ⇒ 「心跳超时 → 重连」那道闸**抓不到**这种
+ * "能发不能收"的半死状态 ✗ ⇒ 用户在群里 @ 它，协议端压根没推给它，它一声不响 ✗
+ *
+ * ⚠️ 只**断 ws**、**不重启进程** ⇒ **不会打断正在跑的 agent 活** ✓
+ * ⚠️ 3 小时：远大于正常对话间隔，又远小于"发现时已经过了两小时"✓
+ */
+const RECONNECT_EVERY_MS = 3 * 60 * 60 * 1000;
+
 export class Bot {
   constructor() {
     this.ws = null;
@@ -967,9 +1076,34 @@ export class Bot {
     //    （LLBot 的 OneBot 也是 3001）。写死"已连接到 NapCat"会误导看日志的人
     //    （换 LLBot 那天日志里还在说 NapCat，差点让我以为没切成功）。
     log.info(`已连接到协议端（${config.provider?.name || 'napcat'}），等待消息…`);
+    // ⚠️⚠️ 2026-10-16 加（用户：「**堵上**」）——**每 3 小时主动重连一次**。
+    //
+    //    现场（真事故）：爱音那个号从 21:59 起**再没收到过任何群事件**，
+    //    可它**每 30 秒的 `get_login_info` 心跳一直是通的** ⇒ 现有那道
+    //    「心跳超时 → 断开重连」的闸**抓不到这种"能发不能收"的半死状态** ✗
+    //    于是用户在 752 群 @ 它，协议端**压根没把那条推给它**，它一声不响 ——
+    //    最后是靠人工重启才恢复的 ✗
+    //
+    //    ⇒ 加一条保险：**定时主动断开**，让现成的重连逻辑（每 3 秒试一次）接手 ✓
+    //    ⚠️ 这样做**不重启进程** ⇒ **不会打断正在跑的 agent 活** ✓（这比看门狗定时
+    //       重启进程温和得多，也正好治"半死连接"）
+    //    ⚠️ 3 小时这个数：远大于"一次正常对话的间隔"，也远小于"发现时已经过了两小时"✗
+    this._reconnectTimer?.clear?.();
+    this._reconnectTimer = setTimeout(() => {
+      try {
+        if (this.closed || !this.ws) return;
+        log.warn('[连接] 到点了 ⇒ 主动断开重连一次（防"能发心跳、收不到消息"那种半死状态）✓');
+        this.ws.close();
+      } catch (e) {
+        log.debug(`[连接] 主动断开失败（不影响）：${e.message}`);
+      }
+    }, RECONNECT_EVERY_MS);
+    this._reconnectTimer.unref?.();
   }
 
   onClose() {
+    if (this._reconnectTimer) clearTimeout(this._reconnectTimer);
+    this._reconnectTimer = null;
     this.ws = null;
     for (const [, p] of this.pending) {
       clearTimeout(p.timer);
@@ -1131,6 +1265,14 @@ export class Bot {
     }
 
     if (payload.post_type !== 'message') return;
+    // ⚠️⚠️ 2026-10-16 加：**自己发出去的消息被协议端回显回来** ⇒ 整个忽略
+    //    （不忽略的话她会把"自己刚发的文件"当成对方发来的 ⇒ 视角反了 + 白跑一次预读 ✗）
+    if (this.isOwnEcho(payload)) {
+      log.info(
+        `[自己发的·忽略回显] ${payload.message_type === 'group' ? `群${payload.group_id}` : `私聊${payload.user_id}`}`,
+      );
+      return;
+    }
     if (payload.message_type === 'group' && !config.trigger.groupChat) return;
     // ⚠️⚠️ 2026-09-20 从上游 fork 挑过来（用户要求：白名单外的人不管发什么都不回）。
     //    原来是 `!config.trigger.privateChat` —— 只要开了私聊就**谁都能触发她** ✗
@@ -1296,6 +1438,14 @@ export class Bot {
     //      （「不然回到 bot 模式，bot 会不记得之前的聊天记录」）✗ 别调过来。
     if (!cmdSenderIsBot && this.takeoverOn()) {
       this.rememberTakeover(payload);
+      // ⚠️⚠️ 2026-10-16 加（用户：「补收文件要自动补收，要不然很容易漏」）——
+      //    接管期间 `onPrivate` 压根没跑 ⇒ **文件没收下来** ✗
+      //    ⇒ 记一笔"这个人有文件欠着"，等会儿自动补收会优先补他 ✓（只记、不说话 ✓）
+      try {
+        if (payload.message_type === 'private') {
+          privateWork.noteMissedFile?.(payload, msg.toSegments(payload.message));
+        }
+      } catch {}
       log.debug(`[接管] 这条只落盘、不回：${String(payload.user_id ?? '')}（${payload.message_type}）`);
       return;
     }
@@ -3037,6 +3187,20 @@ export class Bot {
       try {
         const list = await this.call('get_group_member_list', { group_id: gid });
         const arr = Array.isArray(list) ? list : list?.data ?? [];
+        // ⚠️ 2026-10-16 加：顺手把这份名单**缓存下来**（给"文本 @ → at 段"用）——
+        //    见 `memberCache` / `matchNameToUid` 上面那段；只在这条开机播种的路上取一次 ✓
+        try {
+          memberCache.set(
+            String(gid),
+            arr
+              .map((m) => ({
+                uid: String(m?.user_id ?? m?.uin ?? ''),
+                name: String(m?.card ?? '').trim(),
+                nick: String(m?.nickname ?? '').trim(),
+              }))
+              .filter((x) => x.uid && (x.name || x.nick)),
+          );
+        } catch {}
         const n = names.noteFromList(gid, arr);
         total += n;
         const r = memberBirthday.noteList(gid, arr);
@@ -3551,6 +3715,64 @@ export class Bot {
     }
   }
 
+  /**
+   * ⚠️⚠️ 2026-10-16 加（用户截图抓到的真 bug）：
+   *    **自己刚发出去的消息，被协议端回显成"收到的消息"** ✗
+   *
+   * 现场（工作号，证据齐全）：它把做好的 pptx 私聊发给对方，8 秒后**同一个文件**被当成
+   *   "对方发来的文件"推回来 —— 同名、同字节数、**SHA256 一模一样**；
+   *   而那 8 秒里对方一个字都没发（对方那个号的日志里也没有任何发文件的记录）✓
+   *   ⇒ 后果：起了一次**只读预读**（白花钱），她还回了一句
+   *     「噢，那不就是我发你那个吗」（用户一眼看出不对：视角反了）✗
+   *
+   * 判据（**只有这两条**，别再加"user_id 就是本机号"那种宽判据 ✗）：
+   *   ① `post_type === 'message_sent'` —— OneBot 里"自己发的消息"是这个类型；
+   *   ② **文件指纹**：刚发出去的那批文件（10 分钟内）在**私聊**里又"收到"一模一样的
+   *      （名字 + 字节数都对上）—— 协议端回显时会把 `user_id` 填成会话对端，
+   *      所以只能靠指纹认它 ✓
+   *
+   * ⚠️⚠️ 为什么**不能**按 `user_id === 本机号` 判（2026-10-16 写完当场踩了）：
+   *    "她自己说的那句话"进上下文时，本来就有 `user_id = 本机号` 这种形态
+   *    （套件 `test/sensitivity.js` 第 219 行就是这么造的，真实里也用来记她自己的话）——
+   *    上一版按这个判据挡，结果 `sensitivity` 直接红 **16 项**（@ 了之后正常回、机器人回复了…全挂）✗
+   *    ⇒ 宽判据会**把正常消息也吃掉**，只有"文件指纹"这种精确判据才安全 ✓
+   *
+   * ⚠️ 保守：② 要求**这一条里的文件全都是**刚发出去的那些，才判回显 ——
+   *    对方真发别的东西进来，一律不受影响 ✓
+   */
+  isOwnEcho(payload) {
+    try {
+      if (String(payload?.post_type ?? '') === 'message_sent') return true;
+      // 只认私聊（回显发生在私聊；群里同名文件被人重发不该被吃掉）
+      if (String(payload?.message_type ?? '') !== 'private') return false;
+
+      const sent = Array.isArray(this.__sentFiles) ? this.__sentFiles : [];
+      const recent = sent.filter((x) => Date.now() - Number(x.at || 0) < 10 * 60 * 1000);
+      if (!recent.length) return false;
+      const segs = msg.toSegments(payload?.message);
+      const got = (segs ?? []).filter((x) => x?.type === 'file' || x?.type === 'image');
+      if (!got.length) return false;
+      return got.every((g) => {
+        const name = String(g?.data?.name ?? g?.data?.file ?? '');
+        const size = Number(g?.data?.size ?? g?.data?.file_size ?? 0);
+        return recent.some((it) => String(it.name) === name && (!size || !it.size || Number(it.size) === size));
+      });
+    } catch {
+      return false;
+    }
+  }
+
+  /** 记一笔"我刚发出去的文件"（`isOwnEcho` 的文件指纹靠它） */
+  noteSentFile(uid, name, size) {
+    try {
+      if (!Array.isArray(this.__sentFiles)) this.__sentFiles = [];
+      this.__sentFiles.push({ at: Date.now(), uid: String(uid ?? ''), name: String(name ?? ''), size: Number(size) || 0 });
+      if (this.__sentFiles.length > 30) this.__sentFiles.splice(0, this.__sentFiles.length - 30);
+    } catch {
+      /* 记不上就算了，不能影响发送本身 */
+    }
+  }
+
   enqueue(event, meta = {}) {
     // ⚠️ 2026-09-29：这条路径（@ 她的 / 主动接话）原来完全不打日志，
     //    现在和 `scheduleHandle` 共用同一个记录点。
@@ -3605,7 +3827,14 @@ export class Bot {
 
   // ── OneBot API ──────────────────────────────────────
 
-  call(action, params = {}) {
+  /**
+   * @param {string} action
+   * @param {object} params
+   * @param {{timeoutMs?:number}} [opts] ⚠️ 2026-10-16 加：**大文件上传要放宽超时** ——
+   *   原来固定 30 秒，而传一个 80MB 的包**肯定超过 30 秒** ⇒ 每次都判"超时"、
+   *   重试三次全废（现场：`调用 upload_private_file 超时` ×3 ⇒ 客户拿不到那个服务 ✗）
+   */
+  call(action, params = {}, opts = {}) {
     // ⚠️⚠️ 2026-10-14 加：**人工接管** —— 人在用这个号，一条外发都不许出门。
     //    这里是**最底层的那道兜底**（`sendText` 那道是第一道）：
     //    有些定时任务**不走 `sendText`**，直接 `call('send_private_msg' / 'send_group_file' /
@@ -3615,6 +3844,26 @@ export class Bot {
     if (this.takeoverOn() && /^send/.test(String(action))) {
       log.debug(`[接管] 拦下一个外发接口：${action}`);
       return Promise.resolve({ status: 'ok', retcode: 0, data: { message_id: 0 } });
+    }
+    // ⚠️⚠️ 2026-10-16 加（用户截图：「**这个 @ 的名字不对，要自动填充上群昵称，
+    //    最好是蓝色字的格式**」）——
+    //    她说话时写成「@某某」的话，那**只是一段纯文本** ⇒ QQ 里显示成灰字，
+    //    而且那个名字还是**她自己编的**（跟群里那个人的群名片不一定对得上）✗
+    //    ⇒ 在这里统一把**文本 @** 换成 **at 段**：QQ 会按**群昵称**渲染成**蓝色可点** ✓
+    //    ⚠️ 找 uid 只用**本地名字表**（`names.findByName`，不打协议端接口 ✓）；
+    //      **认不出来就原样保留**（绝不猜、绝不改字 ✓）
+    //    ⚠️ 挂在 `call()` 这个**最底层出口** ⇒ 主聊天 / 剧情 / 日常事件 /
+    //      那些直接 `call('send_*')` 的定时任务**全都覆盖** ✓
+    if (/^send_(group|private)_msg$/.test(String(action)) && params?.message !== undefined) {
+      try {
+        const fixed = atifyText(params.message, String(params.group_id ?? ''));
+        if (fixed !== params.message) {
+          log.info('[消息] 把文本里的 @ 换成了 at 段（QQ 会按群昵称显示成蓝色 ✓）');
+          params = { ...params, message: fixed };
+        }
+      } catch (e) {
+        log.debug(`[消息] @ 转换出错（照原样发）：${e.message}`);
+      }
     }
     // ⚠️ 发送类接口的成败要**记时间戳** —— `sendLooksBroken()` 靠它判断通道通不通
     //    （2026-09-15：NapCat 会"假在线"，只有真发一次才知道）
@@ -3629,6 +3878,27 @@ export class Bot {
       const owner = String(config.ownerQQ ?? '').trim();
       const toOwner = !!owner && String(params?.user_id ?? '') === owner;
       if (!toOwner) {
+        // ⚠️⚠️ 2026-10-16 加（用户：「**如果是催进度的话，回的太快了对面会觉得在摸鱼，
+        //    所以收到催进度的消息只要 agent 回了回复建议之后再回复就行了，不需要立刻回复**」）——
+        //    他在催进度 ⇒ 她那条**先别发**（由 `private-work` 那边等子代理看完"做到哪了"，
+        //    再主动发一条短的 ✓）⏳ 挂 90 秒兜底（子代理卡住也不能把她永久闭麦 ✗）
+        //    ⚠️ 拦在**这里**（最底层唯一出口）才拦得干净 —— 上面那些 `已回复 N 字` 只是日志 ✓
+        // ⚠️⚠️ 2026-10-16 修（真 bug）：判据原来是 `params.message_type !== 'group'` ✗
+        //    而**群消息的发送参数里根本没有 `message_type`**（只有 `group_id`）⇒
+        //    那个判断恒为 true ⇒ 群消息也可能被这条闸拦住 ✗
+        //    ⇒ 改成看 `group_id`：**有 group_id 就是群消息，一律别按** ✓
+        if (!params?.group_id && privateWork.holdReply({ message_type: 'private', user_id: params?.user_id })) {
+          log.info(`[工作模式] 他在催进度 ⇒ 这条先按住（等看进度的子代理回来）✓`);
+          return Promise.resolve({ status: 'ok', retcode: 0, data: { message_id: 0 } });
+        }
+        // ⚠️⚠️ 2026-10-16 加（用户：「**催促逻辑也一并改了**」）——
+        //    群任务那条也是"催进度先按住"（见 `agent-bridge.js` 的 `holdGroup`）：
+        //    有人在群里问她"做到哪了" ⇒ 她这条**先别发**，等只读小代理看完现状，
+        //    再由群任务那边主动发**一句短的** ✓（回太快像在摸鱼 ✗）
+        if (params?.group_id && agentBridge.isGroupHeld?.(params.group_id)) {
+          log.info(`[工作模式] 群里在催进度 ⇒ 这条先按住（等看完进度的子代理回来）✓`);
+          return Promise.resolve({ status: 'ok', retcode: 0, data: { message_id: 0 } });
+        }
         const cleaned = privateWork.cleanOutMessage(params.message);
         if (cleaned === '' || cleaned === null) {
           // ⚠️ 用 warn：这条**本该发出去却没发**，只有日志里能看到（用户排障要看）✓
@@ -3641,16 +3911,65 @@ export class Bot {
         params = { ...params, message: cleaned };
       }
     }
+    // ⚠️⚠️ 2026-10-16 加（用户：「**改了之后会不会出现说发码但是却没发的情况？我建议在
+    //    判定这是一个要发二维码的消息时先不要发送出去**，如果 20 条内没有二维码，就正常
+    //    发送消息；如果 20 条内有，就**重新生成消息**，大概是"码在上面已经发过了"」）——
+    //    "像要发码"的那句**先扣住**：判完再决定 原样发 / 原样发+发码 / **换一句** ✓
+    //    （原来顺序是"先发话、发完再判要不要补码" ⇒ 判不发的那些话就成了空头承诺 ✗）
+    // ⚠️ 只在**纯文字**那条路上做（图片/表情那种 `message` 是数组，不动 ✓）
+    // ⚠️⚠️ **主人那条也不豁免**（和上面那些"错误信息过滤"不一样）：
+    //    用户就是拿主人号在测；而且这条管的是"**别让她撒谎**"，两种会话都得过 ✓
+    if (
+      privateWork.enabled() &&
+      isSend &&
+      !params?.__payChecked &&
+      !params?.__internal &&
+      !params?.group_id &&
+      typeof params?.message === 'string' &&
+      params.message
+    ) {
+      if (
+        privateWork.payHoldPending?.(
+          { message_type: 'private', user_id: params?.user_id },
+          params.message,
+        )
+      ) {
+        const p2 = { ...params, __payChecked: true };
+        log.info('[工作模式] 这句像"要发收款码" ⇒ 先按住，判完再决定原样发还是换个说法 ✓');
+        // ⚠️⚠️ **要等它判完再返回**（不是 `void`）—— 不然这条被判的句子会**晚于后面几条**
+        //    才发出去（分条顺序乱掉 ✗），而且调用方拿不到真回包（`sentFirst` / 分条计数会错 ✗）
+        return privateWork.settlePayHold(String(params?.user_id ?? ''), params.message, this, (out) =>
+          out == null
+            ? Promise.resolve({ status: 'ok', retcode: 0, data: { message_id: 0 } })
+            : this.call(action, { ...p2, message: out }),
+        );
+      }
+    }
+    // ⚠️ `__payChecked` / `__internal` 只是**我们自己的记号**（"这句话已经判过收款码了" /
+    //    "这是内部通知"）—— 别发到协议端去（有的实现参数校验很严，多一个字段就报错 ✗）
+    if (params?.__payChecked || params?.__internal) {
+      const { __payChecked: _payPass, __internal: _internal, ...rest } = params;
+      params = rest;
+    }
     return new Promise((resolve, reject) => {
       if (!this.ws || this.ws.readyState !== 1) {
         reject(new Error('尚未连接到 NapCat'));
         return;
       }
       const echo = `e${++this.echoSeq}`;
-      const timer = setTimeout(() => {
-        this.pending.delete(echo);
-        reject(new Error(`调用 ${action} 超时`));
-      }, 30000);
+      // ⚠️ 默认 30 秒；传大文件时调用方显式放宽（见上面 `opts.timeoutMs` 那段）✓
+      // ⚠️⚠️ 2026-10-16：**`0` = 不限时**（用户：「**进入了上传过程就不要限时了**」）——
+      //    大包传起来可能十几分钟，掐掉它反而永远传不完 ✗；真断线由 `onClose()`
+      //    把挂着的调用 reject 掉（那边会回"连接已断开"）⇒ 上层**自己重传** ✓
+      const rawWait = opts?.timeoutMs;
+      const waitMs = rawWait === 0 ? 0 : Math.max(1000, Number(rawWait) || 30000);
+      const timer =
+        waitMs > 0
+          ? setTimeout(() => {
+              this.pending.delete(echo);
+              reject(new Error(`调用 ${action} 超时`));
+            }, waitMs)
+          : null;
       // ⚠️ 把 action 一起存下来 —— 回包要按"是不是发送类接口"区别对待 1200，
       //    见 `onRaw` 里那段（2026-09-15）。
       this.pending.set(echo, { resolve, reject, timer, action });
@@ -6110,6 +6429,17 @@ export class Bot {
     }
 
     if (event.message_type === 'private') {
+      // ⚠️⚠️ 2026-10-16 加（用户：「**私聊也得加一个进入告别或者无意义聊天时自动切断的机制**，
+      //    要不然也是不像人」）——
+      //    她刚说过收场话（「行，你睡吧」）⇒ 他紧接着那几句「嗯」「行」「好」
+      //    **不再接**（不然就是一人一句来回刷、一眼机器 ✗）
+      //    ⚠️ 有内容的话（长句/问句）、以及工作模式等他点头那会儿，照常接 ✓
+      try {
+        if (privateWork.looksPointlessAfterFarewell?.(event.user_id, text)) {
+          log.info('[私聊] 她刚收过场 ⇒ 这句"嗯/行/好"不接了（像人一样就此打住）✓');
+          return { ...out, hit: null };
+        }
+      } catch {}
       return { ...out, hit: 'private' };
     }
 
@@ -6342,6 +6672,20 @@ export class Bot {
    * @returns {Promise<{buf:Buffer,name:string}|null>}
    */
   async fetchLogFile(event, d, name, fileId) {
+    // ⚠️⚠️ 2026-10-16 加（顺序反了：原来是**先拖 90MB、再说"太大不分析"** ✗）——
+    //    段里带着 `file_size` / `size` ⇒ **下之前先比一下上限**，
+    //    超了直接不下、直接返回（省带宽、省那一轮的十几秒）✓
+    try {
+      const declared = Number(d?.file_size ?? d?.size ?? d?.fileSize ?? 0);
+      const cap = mclog.maxLogBytes?.() ?? 40 * 1024 * 1024;
+      if (declared > cap) {
+        log.info(
+          `[日志] 「${name}」声明就有 ${(declared / 1048576).toFixed(1)}MB > ` +
+            `${(cap / 1048576).toFixed(0)}MB ⇒ **不下了**（下完也只会被拒 ✗）`,
+        );
+        return null;
+      }
+    } catch {}
     const grab = async (u) => {
       const res = await fetch(u, { signal: AbortSignal.timeout(60000) });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -6700,6 +7044,25 @@ export class Bot {
     // 一串等太久了 → 从这里重新算，免得刷屏的人把她的嘴永远堵住
     const capped = maxMs > 0 && nowMs - burstStart >= maxMs;
     if (capped) burstStart = nowMs;
+    // ⚠️⚠️ 2026-10-16 加（用户：「**我感觉工作模式需要增大消息合并的窗口**」）——
+    //    工作模式（私聊接单）里他常常**分几条发**：先扔一张图、隔几秒再补一句
+    //    「把 webui 的背景改成这个」——普通窗口只有 900/1200ms ⇒ **根本合不上** ✗
+    //    ⇒ 结果她答一次、状态机也推一次，两条各走一遍（今天就撞上：图片那条判成"无"，
+    //      后面那句才触发重开）⇒ 还容易把"一句话拆成两次活" ✗
+    //    ⇒ 这个号的工作模式私聊：**窗口统一放大**（2026-10-16 用户要求调到 **20 秒**，
+    //      原来 4 秒 —— 他常常"先甩个文件、隔半分钟再补一句说明"，
+    //      4 秒根本合不上 ⇒ 她答一次、那句说明又答一次、内容还重复 ✗）
+    //      可配 `privateWork.mergeMs` ✓
+    //    ⚠️ 代价：工作模式私聊要**等他说完 20 秒**她才开口（他就一个人，等得起）✓
+    //    ⚠️ 只对工作模式的私聊生效：普通私聊、群聊一行没动 ✓
+    if (String(event.message_type ?? '') === 'private' && privateWork.enabled()) {
+      const workMs = Math.max(0, Number(config.privateWork?.mergeMs ?? 20000));
+      if (workMs > waitMs) {
+        waitMs = workMs;
+        log.debug(`[${bkey}] 工作模式私聊 ⇒ 合并窗口放到 ${workMs}ms（他把要求分几条发）`);
+      }
+    }
+
     if (!capped && isFragment && !atMe && !hasReply && quietMs > waitMs) {
       // ⚠️⚠️ 2026-09-23：**单字**碎片要等更久（`burstQuietMs1`，默认 5 秒）。
       //    实测（他连发「你」「睡」「了」「吗」）：**间隔约 5 秒** > 2.5 秒的窗口 ⇒
@@ -8942,11 +9305,28 @@ export class Bot {
           this.botFarewellAt.set(g0, Date.now());
           log.info('[同类] 她自己说了收场的话 → 记下"本群收过尾"（同类 10 分钟内不接；真人不受影响）');
         }
+        // ⚠️⚠️ 2026-10-16 加（用户：「**私聊也得加一个进入告别或者无意义聊天时自动切断的机制**，
+        //    要不然也是不像人」）——
+        //    私聊里她说一句收场话（「行，你睡吧」「到点见」）⇒ 记一笔；
+        //    之后 10 分钟里他再发「嗯/行/好」这种**没有新信息的语气词**就**不再接** ✓
+        //    （长句/问句照常回；`confirming` 等他准话时也照常回 —— 见 private-work 里的豁免）
+        if (event?.message_type === 'private' && this.isFarewell(stripMarkers(full))) {
+          try {
+            privateWork.noteFarewell(event.user_id);
+          } catch {}
+        }
         // ⚠️ 如果这句里带了「我去搜搜」这种**承诺**，就记下"欠着一件事" ——
         //    他接着说「快去搜」时要**真的去查**（2026-09-15 用户要求）。
         this.noteLookupPromise(event, stripMarkers(full).trim(), promptText);
       }
       log.info(`[${who}] 已回复 ${stripMarkers(full).trim().length} 字`);
+      // ⚠️⚠️ 2026-10-16 加（用户：「**润色时必须参考那个修改建议发过来之后 bot 立刻回答的
+      //    那个消息**」）—— 把她这句记一笔，好让后到的"回话建议"接得上 ✓
+      //    ⚠️ 不走 `recent`：那条路对**主人**的私聊是故意不记的（执行回执不进上下文 ✗），
+      //       而用户测试用的号正好是主人号 ⇒ 那边捞出来永远是空的 ✗
+      try {
+        privateWork.noteMyReply(event, stripMarkers(full).trim(), this);
+      } catch {}
 
       // ── 「说完又想补充」（2026-09-13 用户要求）────────────────────
       // 见 src/follow-up.js 顶部注释（为什么必须克制、和 maxChain 的区别）。
@@ -13434,7 +13814,147 @@ export class Bot {
       log.debug(`[私聊工作] 状态块注入失败（不影响聊天）：${e.message}`);
     }
 
+    // ⚠️⚠️ 2026-10-15 加（用户截图 + 原话：「**如果是点手动 @ 一下同类机器人的话，而且两分钟内
+    //    她们有过对话，@ 的内容就直接靠两分钟之前那个对话说**」）：
+    //
+    //    现场：爱音在群里连着甩了两条（「那视频名字怎么听着这么怪啊」「诶诶诶，那名字里怎么
+    //      还有我啊」）紧跟着**手动 @ 她**问「祥祥周六有空吗，我请你吃甜品」——
+    //      她只回了一句「周六啊……我得看看那天有没有班。你请？太阳打西边出来了」，
+    //      **完全没接前面那段** ⇒ 看着像突然插一句，不像在跟人聊天 ✗
+    //
+    //    为什么接不上：群聊上下文是一大坨（几十条、几万字），那段"正在聊的"淹没在里面，
+    //      模型很容易只盯着 @ 的那一句答。
+    //
+    //    ⇒ 满足两个条件就把**两分钟内那段对话原样拎出来**、放在最末尾（末尾最不容易被漏）：
+    //      ① 这条是**手动 @ 她**的（at 段里有她，或者正文里 @ 了她的名字）；
+    //      ② 这两分钟里**她和对方都说过话**（= 真的在对话，不是各说各的）。
+    //    ⚠️ 缺一个就一个字都不加 —— 别把"老早以前聊过"也算成"刚才那段"。
+    try {
+      const carry = this.carryOnBlock(event, currentText);
+      if (carry) parts.push(carry);
+    } catch (e) {
+      log.debug(`[承接] 提示词块注入失败（不影响聊天）：${e.message}`);
+    }
+
     return parts.join('\n');
+  }
+
+  /**
+   * 「他这句 @ 你是**接着刚才那段**说的」——把那两分钟内的对话拎出来。
+   *
+   * 用户要的原话（2026-10-15）：**「如果是点手动 @ 一下同类机器人的话，而且两分钟内她们有过
+   * 对话，@ 的内容就直接靠两分钟之前那个对话说」**。
+   *
+   * 判据（**不用模型判**，纯客观条件 —— 时间窗 + 谁说过话）：
+   *   ① 群里 + 手动 @ 她（`at` 段里有她 **或** 正文里 @ 了她的名字/号）；
+   *   ② 往回 `chat.carryWindowMs`（默认 2 分钟）里，**她和这个人（@ 她的那个）都说过话**。
+   * ⇒ 成立就把那几句按时间顺序拼出来（她是"你"），并明确要求**顺着它答**。
+   *
+   * ⚠️ 三条边界：
+   *   · **当前这条**（他正在 @ 的那句）要剔掉 —— 不然她自己看着自己的问题被列一遍；
+   *   · 只说**这一段**，别把整个上下文的压缩版再贴一遍（模型会被带跑）；
+   *   · 她是"你"、@ 她的人是名字、**别人**（第三个人）也照实标出来（群里常有旁人说话）。
+   *
+   * @param {object} event OneBot 事件
+   * @param {string} [currentText] 他这条的正文（剥过 @ 的）
+   * @param {{now?:number}} [opts] 测试用：把"现在"钉住
+   * @returns {string} 注入块；不满足条件时返回 ''
+   */
+  carryOnBlock(event, currentText = '', opts = {}) {
+    if (!event || event.message_type !== 'group') return '';
+    const gid = String(event.group_id ?? '');
+    const uid = String(event.user_id ?? '');
+    if (!gid || !uid) return '';
+    let segs = [];
+    try {
+      segs = msg.toSegments(event.message);
+    } catch {
+      segs = [];
+    }
+    // ① 手动 @ 她：at 段认一次，**正文里的 @** 再认一次（协议端常把 @ 退化成纯文本）
+    //
+    //    ⚠️⚠️ 正文那一路**不能只靠 `atCalledInText()`**（实测踩的）：它按"@ 后面紧接名字"
+    //    的严格边界匹配，而真实群名片是 `@saki酱saki酱saki酱` 这种**长串** ⇒ 它认不出来 ✗
+    //    ⇒ 这里补一层"**包含**她的任一叫法就算"的兜底（先排掉"@ 的是同类池里的别人"）。
+    const me = String(this.selfId ?? '');
+    const atSeg = segs.some((s) => s?.type === 'at' && String(s?.data?.qq ?? '') === me);
+    if (!atSeg) {
+      let atText = '';
+      try {
+        atText = this.atCalledInText('', segs, gid);
+      } catch {
+        atText = '';
+      }
+      if (!(me && atText === me)) {
+        let body = '';
+        try {
+          body = String(msg.extractText(segs) ?? '');
+        } catch {
+          body = '';
+        }
+        const tok = (/@\s*([^\s@]{1,24})/.exec(body)?.[1] ?? '').toLowerCase();
+        if (!tok) return '';
+        // 先排掉"@ 的是别人"：同类池里别人的名字精确相等 → 那不是叫她
+        try {
+          for (const p of this.atTargetsOf(gid)) {
+            if (String(p.uid) === me) continue;
+            if ((p.keys ?? []).some((k) => tok === String(k).toLowerCase())) return '';
+          }
+        } catch {}
+        const names = [
+          me,
+          ...(Array.isArray(config.trigger?.callNames) ? config.trigger.callNames : []),
+          ...persona.callNames(),
+        ]
+          .map((x) => String(x ?? '').toLowerCase())
+          .filter(Boolean);
+        if (!names.some((n) => tok === n || tok.includes(n))) return '';
+      }
+    }
+
+    // ② 两分钟窗口里，她和对方**都**说过话
+    const windowMs = Math.max(20000, Number(config.chat?.carryWindowMs) || 2 * 60 * 1000);
+    const now = Number(opts.now) || Date.now();
+    const win = recent
+      .recentItems(gid, 24)
+      .filter((m) => m.time && now - m.time <= windowMs)
+      .filter((m) => !event.message_id || m.messageId !== String(event.message_id));
+    if (!win.length) return '';
+    const mine = win.some((m) => m.self);
+    const theirs = win.some((m) => !m.self && String(m.userId) === uid);
+    if (!mine || !theirs) return '';
+
+    // ③ 拼那一段（从早到晚，最多 8 条）
+    const lines = win
+      .slice(-8)
+      .map((m) => {
+        const who = m.self ? '你' : String(m.userId) === uid ? String(m.name || '他') : `${String(m.name || '别人')}（别人）`;
+        const said = String(m.text ?? '')
+          .replace(/\s*[\r\n]+\s*/g, ' ')
+          .trim()
+          .slice(0, 120);
+        return said ? `${who}：${said}` : '';
+      })
+      .filter(Boolean);
+    if (lines.length < 2) return '';
+
+    const his = String(currentText ?? '')
+      .replace(/\s*[\r\n]+\s*/g, ' ')
+      .trim()
+      .slice(0, 60);
+    return [
+      '',
+      '',
+      '# ⏮️ 他这句是**接着刚才那段**说的',
+      '',
+      '⚠️ 你们**两分钟内**刚聊过下面这些（从早到晚）：',
+      ...lines.map((l) => `  ${l}`),
+      '',
+      `他这句「${his}」是**顺着上面那段**说的 —— 回的时候**接着它答**：`,
+      '  · 🚫 别当成一个从零开始的新话题（那样像突然插话）；',
+      '  · 🚫 别把上面的话重复一遍、也别把每一条都挨个回应一遍；',
+      '  · ✅ 只回**他这一句**，但语气和话题要跟刚才那段连着。',
+    ].join('\n');
   }
 
   /**

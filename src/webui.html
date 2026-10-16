@@ -662,6 +662,7 @@
         </label>
         <button class="act" onclick="accSaveWorkMode()">保存</button>
         <span class="msg" id="msg-acc-workmode"></span>
+        <span class="hint" id="state-acc-workmode" style="margin-left:6px"></span>
       </div>
       <hr style="border:none;border-top:1px solid rgba(127,127,127,.25);margin:14px 0">
       <p class="hint">
@@ -675,6 +676,7 @@
         </label>
         <button class="act" onclick="accSaveTakeover()">保存</button>
         <span class="msg" id="msg-acc-takeover"></span>
+        <span class="hint" id="state-acc-takeover" style="margin-left:6px"></span>
       </div>
     </div>
 
@@ -719,6 +721,20 @@
         <button class="ghost" onclick="renderWorkMode()">刷新</button>
         <span class="msg" id="msg-pw-friends"></span>
       </div>
+      <!-- ⚠️⚠️ 2026-10-16 加（用户：「我在测试接管之后文件还能不能下载下来…能不能对他发的文件进行补回」）——
+           **人工接管期间文件是收不下来的**（`bot.js` 那条闸直接 return、`onPrivate` 压根没跑）⇒
+           接管一趟下来他发的文件就漏了。这个按钮：拉最近私聊历史，把「历史里有、工作区里没有」的
+           文件**补下来**（不重复下、不推进状态机、不主动回话）✓ -->
+      <div class="btns" style="margin-top:10px">
+        <input type="text" id="pw-backfill-qq" placeholder="QQ 号" style="width:140px">
+        <button class="act" onclick="pwBackfill()">补收他的文件</button>
+        <span class="msg" id="msg-pw-backfill"></span>
+      </div>
+      <p class="hint">
+        补收用在：<b>人工接管</b>期间漏下的文件、或者机器人没跑的时候他发的文件。
+        ⚠️ 补完她会**主动回一句**「收到了、我看下」（他那边是"发完文件没人理"的状态）✓<br>
+        ⚠️ QQ 的文件有有效期，**要补趁早**（过期就只能让他重发）。
+      </p>
     </div>
   </section>
   <section id="tab-accounts" class="hidden">
@@ -1601,8 +1617,38 @@
       <div id="bili-status" class="kvs"></div>
       <div class="btns">
         <button class="act" onclick="saveBili()">保存设置</button>
-        <button class="act" onclick="sendBiliNow()" style="background:#16a34a">立刻发送一条</button>
         <span class="msg" id="msg-bili"></span>
+      </div>
+    </div>
+
+    <!-- ⚠️⚠️ 2026-10-16 用户要求：「**把立即发送一条独立出来，单独给它加个关键词框，
+         这样就不用动自动发送那里的设置了**」+「**再独立加一个是否配 bot 自己评论的选框**」——
+         这一块是"**手动试一条**"：临时关键词 + 要不要带她自己那句评论，
+         都**只影响这一次**，不写进上面那份自动设置 ✓ -->
+    <div class="card">
+      <h2>立刻发送一条（手动试，不动上面的设置）</h2>
+      <p class="hint">
+        点一下**马上**给上面选的那个群发一条（跳过时段 / 冷却 ✓，当天计数照样算 ✓）。<br>
+        ⚠️ 下面这两样**是"这次手动发"用的**：填了就按它搜，不填就用上面那个群的关键词 ✓<br>
+        ⚠️ 这里填的**多个关键词会一起搜**（自动那份是每次随机挑一个词 —— 两者不一样）✓<br>
+        ✅ **这格会自己记住**（按群记、敲完就存 ✓ 刷新和重启之后还在，不用怕白填）—— 但它**不动**上面那份自动设置 ✓
+      </p>
+      <div style="margin:10px 0">
+        <div class="t">这次就搜这些词（一行一个，可留空）</div>
+        <textarea id="bili-now-kw" rows="3" style="width:100%;box-sizing:border-box"
+          oninput="saveBiliNowSoon()"
+          placeholder="这里填几个词，一行一个（逗号/顿号也行）：
+爱祥
+mygo
+安达与岛村&#10;⚠️ 这几个词会**一起搜**，从合起来的结果里挑播放最高的那条发（跟上面那份自动设置不一样 —— 那个是每次随机挑一个词）&#10;✅ 填过就记住了，下次打开还在"></textarea>
+      </div>
+      <div class="btns" style="align-items:center">
+        <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer">
+          <input type="checkbox" id="bili-now-take" checked onchange="saveBiliNowSoon()">
+          <span>带上她自己的一句评论</span>
+        </label>
+        <button class="act" onclick="sendBiliNow()" style="background:#16a34a">立刻发送一条</button>
+        <span class="msg" id="msg-bili-now"></span>
       </div>
     </div>
   </section>
@@ -2613,15 +2659,47 @@ async function renderWorkMode() {
 
 /** ⚠️ 分好友那张表（列宽用行内样式，不去动全局 CSS） */
 function pwFriendTable(d) {
-  const STAGE = { intake: "在聊需求", confirming: "等他点头", running: "在做", waiting: "等交付", done: "上一个完了" };
-  const rows = d.friends.map((f) => {
+  const STAGE = { intake: "在聊需求", confirming: "等他点头", running: "在做", waiting: "等交付", done: "上一个完了", sendfail: "没发出去，等他催" };
+  // ⚠️ 2026-10-16 加（用户：「好友排序改成**按最近对话时间**排，有新对话的排在上面」）✓
+  const sorted = d.friends.slice().sort((a, b) => (Number(b.talkAt) || 0) - (Number(a.talkAt) || 0));
+  const rows = sorted.map((f) => {
     const c = f.cfg || {};
     const q = esc(f.qq);
     const st = STAGE[f.stage] || "";
-    return "<tr>"
-      + "<td style=\"padding:6px 8px\"><b>" + esc(f.name || f.qq) + "</b>"
+    // ⚠️⚠️ 2026-10-16 加（用户：「工作模式分好友界面加**工作进度**：对话状态、任务完成状态、
+    //    还有多久自动发送产物，再加一个**手动立刻发送产物**按钮」）——
+    //    · 倒计时写成 `data-eta`，交给 `pwTickEta()` **每秒本地刷**（不重拉接口 ⇒ 表不闪）✓
+    //    · 有产物、并且这条活已经做到"等交付 / 交付过 / 发失败"⇒ 给一个「立刻发送产物」按钮 ✓
+    const arts = Array.isArray(f.arts) ? f.arts : [];
+    // ⚠️⚠️ 2026-10-16 用户报的：「**没看到立即发送的按钮**」——
+    //    原来只有"等交付 / 交付过 / 发失败"才给按，可 `stage` 常常已经回到 `intake`
+    //    （客户又开始聊下一件了）⇒ 产物明明在、按钮却不见了 ✗
+    //    ⇒ 改成：**只要有产物就给按**（他要手动发就发，不设门槛）✓
+    const canSend = arts.length > 0;
+    const busy = f.busy === true;
+    return "<tr style=\"border-top:1px solid #333\">"
+      + "<td style=\"padding:12px 8px;vertical-align:top\"><b>" + esc(f.name || f.qq) + "</b>"
       + "<div class=\"hint mono\">" + q + "</div>"
-      + (st ? "<div class=\"hint\">" + st + "</div>" : "") + "</td>"
+      // ⚠️ 2026-10-16 用户：「**有点乱了 ⇒ 加一下分割线**」——
+      //    名字 / QQ 归上面，进度那几行用**一条虚线**隔开（一眼分清"人"和"进度"）✓
+      + "<div style=\"margin-top:6px;padding-top:6px;border-top:1px dashed #3a3a4a\">"
+      + (st || busy ? "<div class=\"hint\">" + (busy ? "🔧 " : "") + esc(st || "") + "</div>" : "")
+      // ⚠️ 2026-10-16：「最近对话时间」——一眼看出谁刚说过话（排序也是按它）✓
+      + (f.talkAt ? "<div class=\"hint\">" + esc(pwAgo(f.talkAt)) + "</div>" : "")
+      + (arts.length ? "<div class=\"hint\">产物（" + arts.length + "）：" + esc(arts.map((a) => a.name).join("、")) + "</div>" : "")
+      // ⚠️ 2026-10-16 加（用户：「**在工作模式分好友设置那里再加个这个私聊一共花了多少钱的显示**」）
+      + (f.costYuan
+        ? "<div class=\"hint\">这个私聊一共花了 " + esc(pwYuan(f.costYuan)) + "（" + (f.costCalls || 0) + " 次调用）</div>"
+        : "")
+      + (f.stage === "waiting" && f.etaAt ? "<div class=\"hint pw-eta\" data-eta=\"" + f.etaAt + "\">…</div>" : "")
+      + (f.stage === "sendfail" ? "<div class=\"hint\">上次一个都没发出去（等他催，或你点下面那个）</div>" : "")
+      + (f.sentAt
+        ? "<div class=\"hint\">已发 " + (f.sentCount || 0) + " 个（" + new Date(f.sentAt).toLocaleString("zh-CN", { hour12: false }) + "）</div>"
+        : "")
+      + (canSend
+        ? "<div style=\"margin-top:6px\"><button class=\"act\" onclick=\"pwDeliverNow('" + q + "')\">立刻发送产物</button> <span class=\"hint\" id=\"pwf-msg-" + q + "\"></span></div>"
+        : "")
+      + "</div></td>"
       + "<td style=\"padding:6px 8px\"><input type=\"checkbox\" id=\"pwf-allow-" + q + "\"" + (c.allow === false ? "" : " checked") + "></td>"
       // ⚠️ 2026-10-15（用户：「分好友设置也加一个人工接管开关」）—— 勾上 = 这个人的私聊我自己回
       + "<td style=\"padding:6px 8px\"><input type=\"checkbox\" id=\"pwf-takeover-" + q + "\"" + (c.takeover === true ? " checked" : "") + "></td>"
@@ -2660,6 +2738,103 @@ function filterPwFriends() {
   });
   const tip = $("pw-friend-hint");
   if (tip) tip.textContent = kw ? `筛出 ${shown} / ${rows.length} 个好友` : "";
+}
+
+/** ⚠️ 2026-10-16 加：把"花了多少钱"写成人看的样子（小额要 4 位小数，不然显示成 0.00） */
+function pwYuan(v) {
+  const c = Number(v) || 0;
+  if (c === 0) return "0 元";
+  if (c < 0.0001) return "不到 0.0001 元";
+  if (c < 0.1) return c.toFixed(4) + " 元";
+  return c.toFixed(2) + " 元";
+}
+
+/** ⚠️ 2026-10-16 加：「多久之前」——好友表里显示、也是排序的直观依据 ✓ */
+function pwAgo(t) {
+  const d = Date.now() - Number(t || 0);
+  if (!t || d < 0) return "";
+  const m = Math.floor(d / 60000);
+  if (m < 1) return "刚刚说过话";
+  if (m < 60) return m + " 分钟前说过话";
+  const h = Math.floor(m / 60);
+  if (h < 24) return h + " 小时前说过话";
+  return Math.floor(h / 24) + " 天前说过话";
+}
+
+/**
+ * ⚠️⚠️ 2026-10-16 加（用户：「分好友界面加……**还有多久自动发送产物**」）——
+ *    倒计时**每秒本地刷**（不重拉接口：表不会闪，也不会打断你正在填的输入框）✓
+ */
+function pwTickEta() {
+  document.querySelectorAll(".pw-eta").forEach((el) => {
+    const t = Number(el.getAttribute("data-eta") || 0);
+    if (!t) return;
+    const left = Math.round((t - Date.now()) / 1000);
+    if (left <= 0) { el.textContent = "到点了，马上发"; return; }
+    el.textContent = "还有 " + pwLeft(left) + "自动发送产物";
+  });
+}
+/**
+ * 剩余秒数 → 人话（天 / 小时 / 分钟 / 秒）。
+ *
+ * ⚠️⚠️ 2026-10-16 加（用户：「**一两个小时做完还显得太快了…估计时间还可以延长一点**」）——
+ *    说好的时间拉长到 2 小时~2 天之后，原来那句「还有 1440 分钟自动发送产物」根本没法看 ✗
+ */
+function pwLeft(sec) {
+  if (sec >= 86400) {
+    const d = Math.floor(sec / 86400);
+    const h = Math.round((sec % 86400) / 3600);
+    return d + " 天" + (h ? " " + h + " 小时" : "") + " ";
+  }
+  if (sec >= 3600) {
+    const h = Math.floor(sec / 3600);
+    const m = Math.round((sec % 3600) / 60);
+    return h + " 小时" + (m ? " " + m + " 分钟" : "") + " ";
+  }
+  if (sec >= 60) return Math.round(sec / 60) + " 分钟";
+  return sec + " 秒";
+}
+setInterval(pwTickEta, 1000);
+
+/**
+ * ⚠️ 2026-10-16 加（用户：「**有新对话的排在上面**」）——
+ *    表原来只在切页 / 点刷新时重建 ⇒ 新来的对话不会自己冒到顶上 ✗
+ *    ⇒ 每 30 秒**悄悄重拉一次**（⚠️ 你正在表里填东西时跳过，别把输入框清空）✓
+ */
+setInterval(async () => {
+  try {
+    if (document.hidden) return;
+    const box = $("pw-friends");
+    if (!box || !box.querySelector("tbody")) return;
+    if (document.activeElement && box.contains(document.activeElement)) return;
+    const d = await api("/api/private-work").catch(() => null);
+    if (!d || !d.ok || d.off || !d.friends || !d.friends.length) return;
+    box.innerHTML = pwFriendTable(d);
+    filterPwFriends();
+  } catch {}
+}, 30000);
+
+/**
+ * ⚠️ 2026-10-16 加（用户：「再加一个**手动立刻发送产物**按钮」）——
+ *    走的就是服务端那个 `POST /api/private-work/deliver`（和"做完自动交付"**同一条路**）✓
+ *    ⚠️ 一个文件都没发出去时**如实说**，别显示成成功 ✓
+ */
+async function pwDeliverNow(qq) {
+  const msg = $("pwf-msg-" + qq);
+  const say = (t) => { if (msg) msg.textContent = t; };
+  say("发着呢…");
+  try {
+    const r = await api("/api/private-work/deliver", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ uid: qq }),
+    });
+    if (r && r.ok) say("发出 " + (r.sent || 0) + " 个 ✓");
+    else say("没发出去（" + ((r && r.error) || "重试两次都没成") + "）");
+  } catch (e) {
+    say("出错：" + e.message);
+  }
+  pwTickEta();
 }
 
 async function saveFriendCfg(qq) {
@@ -2739,6 +2914,77 @@ async function accSaveTakeover() {
   if (r.ok) await renderAccounts();
 }
 
+/**
+ * ⚠️⚠️ 2026-10-16 加（用户截图：「**这两个开关的状态不显示了**」）——
+ * 把「私聊工作模式 / 人工接管」两个勾选框刷成**这个号真实的**状态，
+ * 并且在旁边写一句**当前状态**（勾选框万一没刷上，这句还在，一眼就能看出来）✓
+ *
+ * ⚠️ 它必须**自己 try 掉、而且排在画名单之前** —— 原来那段排在 `accPaintNav()` 后面，
+ *    那一步抛一次异常，勾选框就永远停在"没勾"，界面上还什么都看不到 ✗
+ */
+function accPaintSwitches() {
+  try {
+    const me = (ACC_LIST || []).find((a) => a.self);
+    const wm = $('acc-workmode');
+    const tk = $('acc-takeover');
+    if (wm) wm.checked = !!(me && me.workMode);
+    if (tk) tk.checked = !!(me && me.takeover);
+    const sw = $('state-acc-workmode');
+    const st = $('state-acc-takeover');
+    if (!me) {
+      // 服务端没报出"这个进程在控制的号" ⇒ 明说读不到，别让人以为"是关着的" ✗
+      if (sw) sw.textContent = '当前：读不到状态（刷新一次试试）';
+      if (st) st.textContent = '';
+      return;
+    }
+    if (sw) sw.textContent = me.workMode ? '当前：已开启' : '当前：已关闭';
+    if (st) {
+      st.textContent = me.takeover
+        ? '⚠️ 当前：已接管 —— 这个号一条消息都不发'
+        : '当前：未接管';
+    }
+  } catch (e) {
+    // 不让它影响后面画名单 ✓
+  }
+}
+
+/**
+ * ⚠️⚠️ 2026-10-16 加（用户：「我在测试**接管之后文件还能不能下载下来**，现在我把开关关了，
+ *   **能不能对他发的文件进行补回**」）——
+ * 人工接管期间文件是收不下来的（那条闸直接 return）⇒ 接管一趟下来他发的文件就漏了。
+ * 这个按钮去把最近私聊历史里**有、工作区里没有**的文件补下来 ✓
+ */
+async function pwBackfill() {
+  const qq = String($('pw-backfill-qq')?.value || '').trim();
+  const el = $('msg-pw-backfill');
+  if (!qq) {
+    flash(el, false, '先填 QQ 号');
+    return;
+  }
+  flash(el, true, '正在拉历史、补文件…（大的包要等一会儿）');
+  const r = await api('/api/private-work/backfill', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ qq }),
+  }).catch((e) => ({ ok: false, error: e.message }));
+  if (!r || !r.ok) {
+    flash(el, false, '没成：' + (r?.error || '不知道为啥'));
+    return;
+  }
+  const saved = r.saved || [];
+  const skipped = r.skipped || [];
+  flash(
+    el,
+    true,
+    saved.length
+      ? `补下来 ${saved.length} 个：${saved.join('、')}` +
+          (skipped.length ? `；${skipped.length} 个没下来（${skipped[0]}）` : '')
+      : `扫了 ${r.scanned} 个文件段，**没有新的**（工作区里都有了）` +
+          (skipped.length ? `；${skipped.length} 个没下来（${skipped[0]}）` : ''),
+  );
+  await renderWorkMode();
+}
+
 async function renderAccounts() {
   const box = $('acc-list');
   if (box) box.innerHTML = '<span class="hint">读取中…</span>';
@@ -2748,16 +2994,20 @@ async function renderAccounts() {
     return;
   }
   ACC_LIST = r.accounts || [];
+  // ⚠️⚠️ 2026-10-16 修（用户截图：「**这两个开关的状态不显示了**」）——
+  //    现场：工作模式那一页两个勾选框**显示成没勾**，可她明明已经开着（旁边那句
+  //    "已开启"是我上次点保存留下的），而且**这时候再点保存会把开着的关掉** ✗✗
+  //    真因（两条叠在一起）：
+  //      ① 这段刷状态的代码原来**排在 `accPaintNav()` 后面** —— 那一步只要抛一次，
+  //         勾选框就永远停在 HTML 的默认值（没勾）✗ 而且**静默**，界面上什么都看不出来。
+  //      ② 界面上**只有勾选框**：勾少了没有第二处显示当前状态 ⇒ 看不出是"真关了"还是"没刷上"✗
+  //    ⇒ ① 提到最前面 + 自己 try 掉（它坏了也不影响后面画名单）；
+  //      ② 两个开关旁边各加一句**当前状态**（已开启/已关闭），勾选框骗人的时候一眼能看出来 ✓
+  accPaintSwitches();
   accPaintNav();
   // ⚠️ 2026-10-14 加：把「人工接管」那个开关刷成**当前这个号**的真实值
   //    （`a.self` = 这个进程正在控制的号；别的号的接管状态不在这儿显示）
-  {
-    const me = ACC_LIST.find((a) => a.self);
-    const el = $('acc-takeover');
-    if (el) el.checked = !!(me && me.takeover);
-    const wm = $('acc-workmode');
-    if (wm) wm.checked = !!(me && me.workMode);
-  }
+  // ⚠️ 2026-10-16：这段**挪到上面 `accPaintSwitches()`** 里去了（见那边的注释）✓
 
   // ⚠️⚠️ 拆分状态**每次都同步进 ACC_SELF**（2026-10-07 修）。
   //    它原来只在页面打开时从 `/api/whoami` 取一次 —— 用户在别处拆过之后，
@@ -4214,11 +4464,30 @@ async function renderGroupParams() {
     //    下拉里光有群号认不出是哪个群 ⇒ 顺便把**群名**也拉回来
     //    （`GET /api/qq/groups` 本来就返回 `{id, name, count}`，只是这一页之前没用）。
     //    ⚠️ 取不到就退回只显示群号，别让整页读不出来。
-    const [st, sl, gq] = await Promise.all([
+    // ⚠️⚠️ 2026-10-16 修（用户：「**按群设定读取不到还没修好**」）——
+    //    原来这三个是 `Promise.all` 一起 await ⇒ **只要有一个失败，整页就废** ✗
+    //    实测：机器人跟协议端"半死"的那一两分钟（日志里全是「心跳」超时）里，
+    //    `/api/state` 拿不到 → 整页只剩一句含糊的 `读取失败：Unexpected end of JSON input`，
+    //    用户根本看不出来"是机器人掉线了、等会儿刷新就好"✗
+    //    ⇒ 现在：`/api/storyline/state`、`/api/qq/groups` 各自容错（拿不到就少显示一点），
+    //      只有 `/api/state`（群列表的来源）真失败才报错，而且报的是**人话** ✓
+    const [stR, slR, gqR] = await Promise.allSettled([
       api('/api/state'),
       api('/api/storyline/state'),
-      api('/api/qq/groups').catch(() => null),
+      api('/api/qq/groups'),
     ]);
+    if (stR.status !== 'fulfilled' || !stR.value) {
+      const why = stR.status === 'rejected' ? String(stR.reason?.message ?? '') : '空的';
+      box.innerHTML =
+        '<p class="hint">⚠️ 这会儿**读不到机器人的群列表** —— 多半是它刚跟协议端断开、正在重连' +
+        `（日志里会有一串「心跳」超时）。<br>⚠️ 原始报错：${esc(why)}<br>` +
+        '等 5 秒，然后点下面这个按钮再读一次就行，**不用重启**。<br>' +
+        '<button class="ghost" onclick="renderGroupParams()">重新读一次</button></p>';
+      return;
+    }
+    const st = stR.value;
+    const sl = slR.status === 'fulfilled' ? slR.value : null;
+    const gq = gqR.status === 'fulfilled' ? gqR.value : null;
     const nameOf = new Map(
       ((gq && gq.groups) || []).map((g) => [String(g.id), String(g.name || '')]),
     );
@@ -4229,7 +4498,7 @@ async function renderGroupParams() {
     };
     const lv = (st.config && st.config.trigger && st.config.trigger.groupRespondTo) || {};
     const allow = ((st.config && st.config.trigger && st.config.trigger.allowGroups) || []).map(String);
-    const inSl = ((sl.status && sl.status.byGroup) || []).map((x) => String(x.groupId));
+    const inSl = ((sl && sl.status && sl.status.byGroup) || []).map((x) => String(x.groupId));
     // ⚠️⚠️ **只有 1 档群才进事件系统**（<主人> 2026-09-15：
     //    「挡位 2 不能进事件系统，只有 1 才能设置」）—— 所以下拉里**只有 1 档群**。
     const isEvent = (g) => Number(lv[g]) === 1 && (!allow.length || allow.includes(g));
@@ -4254,7 +4523,17 @@ async function renderGroupParams() {
     }
     await fillGroupParams();
   } catch (e) {
-    box.innerHTML = `<p class="hint">读取失败：${esc(e.message)}</p>`;
+    // ⚠️ 2026-10-16：这里要报"人话"，别把 `Unexpected end of JSON input` 甩给用户 ✗
+    const msg = String(e?.message ?? '');
+    const netish = /JSON|Failed to fetch|NetworkError|timeout|超时|断开|连接/i.test(msg);
+    box.innerHTML =
+      '<p class="hint">' +
+      (netish
+        ? '⚠️ 这会儿**读不到机器人状态** —— 多半是它刚跟协议端断开、正在重连。' +
+          '<br>等 5 秒再点一次下面那个按钮就行，**不用重启**。'
+        : '读取失败：' + esc(msg)) +
+      `<br>⚠️ 原始报错：${esc(msg)}<br>` +
+      '<button class="ghost" onclick="renderGroupParams()">重新读一次</button></p>';
   }
 }
 
@@ -5545,9 +5824,11 @@ async function qzoneManualPost() {
 // ── B 站分享（2026-10-15 加）────────────────────────────────
 //    **按群**设（用户：「b站分享也要分群调节」）：先选群，再调那一套 ✓
 //    只发链接、只发 1 档群、默认关、没关键词不发 ✓（见 src/bili-share.js）
+// ⚠️ 2026-10-16：「立刻发送」那格**这一轮渲染的是哪个群**（换群时才知道要不要换内容 ✓）
+let biliNowGid = '__none__';
+
 async function renderBili() {
-  const box = $('bili-status');
-  try {
+  const box = $('bili-status');  try {
     // ① 先填"哪个群"那个下拉（跟「日常事件」页同一个来源：/api/state 的 life.status.targets）
     const st = await api('/api/state');
     // ⚠️ 2026-10-15 改：用 `targetsAll`（**1 档群**，不管日常事件开没开）——
@@ -5580,10 +5861,82 @@ async function renderBili() {
     box.innerHTML =
       '<div class="kv"><b>这个群今天</b><span>' + (s.fired ?? 0) + ' / ' + (s.target ?? 0) + ' 条</span></div>' +
       '<div class="kv"><b>现在能不能发</b><span>' + (next.due ? '能 ✓' : '不能：' + (next.why || '')) + '</span></div>' +
-      '<div class="kv"><b>发过几条（全局去重池）</b><span>' + (s.sentCount ?? 0) + '</span></div>';
+      '<div class="kv"><b>发过几条（全局去重池）</b><span>' + (s.sentCount ?? 0) + '</span></div>' +
+      '<div class="kv"><b>已发记录保留</b><span>' + (s.sentKeepDays ?? 60) + ' 天</span></div>';
+    // ⚠️⚠️ 2026-10-16 加（用户：「**独立视频发送那里的关键词框还是没有被保存**」）——
+    //    把"立刻发送"那格**上次填的**填回去（**按群**记的 ✓）
+    //    ⚠️ 正打着字的时候不许盖（焦点在框里就不动 ✗）
+    //    ⚠️ **换了群** ⇒ 换成那个群自己那份（服务端存过就用它，没存过用本地兜底那份 ✓）
+    try {
+      const kwEl = $('bili-now-kw');
+      const tkEl = $('bili-now-take');
+      const saved = String(s.nowKeywords ?? '');
+      const localGet = (k) => {
+        try {
+          return localStorage.getItem(k);
+        } catch {
+          return null;
+        }
+      };
+      if (kwEl && document.activeElement !== kwEl) {
+        if (biliNowGid !== gid) kwEl.value = saved || String(localGet('bili-now-kw:' + gid) ?? '');
+        else if (!String(kwEl.value || '').trim() && saved) kwEl.value = saved;
+      }
+      if (tkEl) {
+        if (typeof s.nowTake === 'boolean') tkEl.checked = s.nowTake;
+        else if (biliNowGid !== gid) {
+          const lt = localGet('bili-now-take:' + gid);
+          if (lt !== null) tkEl.checked = lt === '1';
+        }
+      }
+      biliNowGid = gid;
+    } catch {}
   } catch (e) {
     box.textContent = '读不到：' + e.message;
   }
+}
+
+/**
+ * ⚠️⚠️ 2026-10-16 加（用户：「**独立视频发送那里的关键词框还是没有被保存**」）——
+ * 那格敲完**自动存**（防抖 700ms ⇒ `POST /api/bili-share/now`）⇒ 刷新、换浏览器、重启都还在 ✓
+ * ⚠️ 存的只是这一格，**不动**上面那份"自动发送"的设置 ✓
+ * ⚠️ 再往 localStorage 也压一份（接口万一断了也不至于丢字 ✓）
+ */
+let biliNowTimer = null;
+function saveBiliNowSoon() {
+  const gid = String($('bili-group')?.value || '');
+  if (!gid) return;
+  const kw = String($('bili-now-kw')?.value || '');
+  const take = !!$('bili-now-take')?.checked;
+  try {
+    localStorage.setItem('bili-now-kw:' + gid, kw);
+    localStorage.setItem('bili-now-take:' + gid, take ? '1' : '0');
+  } catch {}
+  if (biliNowTimer) clearTimeout(biliNowTimer);
+  biliNowTimer = setTimeout(async () => {
+    const el = $('msg-bili-now');
+    try {
+      const r = await api('/api/bili-share/now', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ groupId: gid, keywords: kw, take }),
+      });
+      if (el) flash(el, r.ok !== false, r.ok === false ? '没存上：' + (r.error || '') : '记住了 ✓');
+    } catch (e) {
+      // ⚠️⚠️ 2026-10-16（用户截图）：进程还是旧代码时没这个接口 ⇒ 服务端回的是纯文本
+      //    `Not found`（不是 JSON）⇒ `api()` 解析失败抛错 ⇒ 界面弹一个吓人的红字 ✗
+      //    ⇒ 这种"服务端还没跟上"的情况**不算保存失败**：本地那一份已经写进去了，
+      //      重启之后打开页面会自动用本地那份填回来、下一次敲字就存到服务端了 ✓
+      const soft = /Not found|Unexpected token|not valid JSON|404/i.test(String(e?.message ?? ''));
+      if (el) {
+        flash(
+          el,
+          soft,
+          soft ? '先存在本地了 ✓（服务端这个接口要重启才带上，重启后自动补上）' : '没存上（本地留了一份）：' + e.message,
+        );
+      }
+    }
+  }, 700);
 }
 
 async function saveBili() {
@@ -5615,16 +5968,24 @@ async function saveBili() {
 }
 
 // ⚠️ 立刻发送：跳过"时段/冷却"，但仍排除发过的、仍记账 ✓ **只发选中的那个群**
+/**
+ * ⚠️⚠️ 2026-10-16 改（用户：「**把立即发送一条独立出来，单独给它加个关键词框，
+ *   这样就不用动自动发送那里的设置了**」+「**再独立加一个是否配 bot 自己评论的选框**」）——
+ * 手动试一条：**临时关键词** + **要不要带她那句评论**，都只影响这一次 ✓
+ * （原来它跟自动设置共用一份关键词 ⇒ 想试一个词就得改自动设置 ✗）
+ */
 async function sendBiliNow() {
-  const el = $('msg-bili');
+  const el = $('msg-bili-now') || $('msg-bili');
   const gid = String($('bili-group')?.value || '');
   if (!gid) return flash(el, false, '先选个群（这是按群设的）');
+  const kw = String($('bili-now-kw')?.value || '').trim();
+  const take = !!$('bili-now-take')?.checked;
   el.textContent = '正在挑一条…';
   try {
     const r = await api('/api/bili-share/send', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ groupId: gid }),
+      body: JSON.stringify({ groupId: gid, keywords: kw, take }),
     });
     flash(el, r.ok, r.ok ? '已发出：' + (r.url || '') : '没发成：' + (r.error || r.why || '未知'));
     renderBili();

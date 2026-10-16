@@ -152,8 +152,14 @@ console.log('\n【6】★★ 入口顺序：**先落盘、再 return**，而且�
   check(i < iAgent, '★★ 它挡在 `agentBridge.handle` **前面**（接管时不许给 agent 派活）');
 
   check(
-    /this\.rememberTakeover\(payload\);[\s\S]{0,220}?return;/.test(s),
+    // ⚠️ 窗口放宽到 600：2026-10-16 在"落盘"和 `return` 中间加了「记一笔他发的文件」
+    //    （自动补收要用）⇒ 原来那段只有 220 字符的窗口就够不着 `return` 了（假红 ✗）
+    /this\.rememberTakeover\(payload\);[\s\S]{0,600}?return;/.test(s),
     '★★ **先落盘再 return**（顺序调过来就等于没记）',
+  );
+  check(
+    /this\.rememberTakeover\(payload\);[\s\S]{0,600}?noteMissedFile[\s\S]{0,200}?return;/.test(s),
+    '★★ 接管期间"他发的文件"也记下来了（也要在 return **之前** —— 不然等于没记 ✓）',
   );
 }
 

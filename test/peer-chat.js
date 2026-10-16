@@ -258,6 +258,47 @@ console.log('\n【6】★★ 可以**自己起个头**（用户：互相 @ 不�
   config.peerChat = keep;
 }
 
+// ⚠️⚠️ 2026-10-16 加（用户截图：「**这个 @ 一下虽然显示发送失败，但是实际发送出去了**」，
+//    界面报的是 `没成: Invalid time value`）——
+//    真因：界面那个「立刻试一次」调的是 `note(gid, peer, text)`，
+//    而 `note` 的第三位是 **`now`（时间戳）**、第四位才是 `text` ⇒
+//    `new Date('那句中文话').toISOString()` 抛 `RangeError: Invalid time value` ✗ ⇒
+//    **消息已经发出去了，界面却报"没成"**（用户会以为没发、再点一次 ⇒ 群里刷两遍 ✗✗）
+{
+  const srcPc = readFileSync(join(ROOT, 'src', 'peer-chat.js'), 'utf8');
+  const srcWu = readFileSync(join(ROOT, 'src', 'webui.js'), 'utf8');
+
+  // ① 调用处：话必须传在**第四位**（第三位是时间戳）
+  check(
+    /peerChat\.note\(gid, peer, Date\.now\(\), text\)/.test(srcWu),
+    '★★ 界面那个按钮：`note(gid, peer, Date.now(), text)`（话不许再塞进时间戳那一位 ✗）',
+  );
+  // ② 记账单独 try 掉：**发出去是不可逆的**，记账失败不该把成功报成失败
+  check(
+    /记账失败（消息已经发出去了）/.test(srcWu),
+    '★★ 记账出错**不影响**"已发出"的结论（不然界面报没成 ⇒ 他会再点一次 ⇒ 群里两遍 ✗）',
+  );
+  // ③ 兜底：参数不是有效时间戳 ⇒ 按"现在"算，别再抛
+  check(
+    /Number\.isFinite\(t0\) && t0 > 0 \? t0 : Date\.now\(\)/.test(srcPc),
+    '★★ `note()` 自己兜底：时间戳不认识就按现在算（谁再传错也不会把成功变失败）',
+  );
+
+  // ④ 真的调一遍老写法（把话传在第三位）—— 不许抛，而且那句话要照样记得住 ✓
+  let threw = '';
+  try {
+    pc.note('999000001', '10000001', '她刚说的一句话');
+  } catch (e) {
+    threw = e.message;
+  }
+  check(threw === '', '★★ 老写法（话在第三位）不再抛 Invalid time value', threw);
+  const st = pc.__stateForTest?.() ?? null;
+  if (st) {
+    const n = Number(st.lastAt?.['999000001'] ?? 0);
+    check(n > Date.now() - 60000, '★★ 而且记下来的时间是**现在**（不是那串中文）', String(n));
+  }
+}
+
 try {
   rmSync(join(ROOT, 'logs', '__test-peerchat.json'), { force: true });
 } catch {}

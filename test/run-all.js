@@ -182,6 +182,8 @@ const SUITES = [
   'schedule',
   'join-scope',
   'at-other',
+  // ★ 有人**手动 @ 她**、且两分钟内她们刚聊过 ⇒ 得**接着那段**答（用户 2026-10-15 截图报的）
+  'at-carry',
   'tone',
   'watchdog-state',
   'qq-qrcode',

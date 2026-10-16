@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 「同类机器人」主动搭话 —— 群里**冷场**时，她 @ 一下同类池里的号说一句。
  *
  * ## 用户需求
@@ -133,16 +133,32 @@ export function pickPeer(gid, peers, rng = Math.random) {
   return pool[Math.floor(rng() * pool.length) % pool.length];
 }
 
-/** 记一次"主动过了"（冷却 + 当日计数），供发送成功后调用 */
+/**
+ * 记一次"主动过了"（冷却 + 当日计数），供发送成功后调用。
+ *
+ * ⚠️⚠️ 2026-10-16 修（用户截图：「**这个 @ 一下虽然显示发送失败，但是实际发送出去了**」，
+ *    报错就是 `没成: Invalid time value`）——
+ *    现场：界面那个「立刻试一次」调的是 `note(gid, peer, text)`，
+ *    而本函数的第三个参数是 **`now`（时间戳）**、第四个才是 `text` ✗ ⇒
+ *    时间戳变成了那句中文话 ⇒ `new Date('…').toISOString()` 直接抛
+ *    `RangeError: Invalid time value` ⇒ **消息明明发出去了，界面却报"没成"** ✗✗
+ *    （调用处已经改对了；这里再兜一道：**参数不是有效时间戳就按"现在"算**，
+ *      以后谁再传错也不会把一次成功的发送变成"失败" ✓）
+ */
 export function note(gid, peer, now = Date.now(), text = '') {
-  const d = dayOf(now);
+  const t0 = Number(now);
+  const at = Number.isFinite(t0) && t0 > 0 ? t0 : Date.now();
+  const d = dayOf(at);
   if (state.day !== d) {
     state.day = d;
     state.counts = {};
   }
   state.counts[String(gid)] = Number(state.counts?.[String(gid)] ?? 0) + 1;
-  state.lastAt[String(gid)] = now;
+  state.lastAt[String(gid)] = at;
   state.lastPeer[String(gid)] = String(peer ?? '');
+  // ⚠️ 有人把 `text` 传在第三位时（老写法）⇒ 顺手把话也一起记下来，别把它当时间戳丢掉 ✓
+  const maybeText = typeof now === 'string' ? now : '';
+  text = String(text ?? '').trim() || maybeText;
   // ⚠️ 2026-10-13：记下**最近发过的原话**（只留 5 条）—— 下次拼提示词时摆给她看，
   //    提醒"别再问同一件事"（她跟同一个号的对话就那么几个话题，不摆出来会天天问同一句）。
   const t = String(text ?? '').replace(/\s+/g, ' ').trim();

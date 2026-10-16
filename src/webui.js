@@ -9,6 +9,29 @@
  *   - 改完热重载，不用重启机器人
  */
 import { createServer } from 'node:http';
+import { Agent, fetch as undiciFetch } from 'undici';
+
+/**
+ * ⚠️⚠️ 2026-10-17 修的真 bug（用户截图：「**主号/谷雨/爱音 显示没在跑**」+「读不到数据」）——
+ *
+ * **本机（127.0.0.1）的请求绝不能走代理** ✗
+ *
+ * 因果链：`_run-bot.bat` 里写死了 `HTTPS_PROXY=127.0.0.1:7890` ⇒ `llm.js` 的
+ * `applyEgress()` 把 **undici 的全局 dispatcher** 换成了 `ProxyAgent` ⇒
+ * 而 node 的**内置 `fetch` 也是 undici** ⇒ 它跟着走代理 ⇒
+ * 于是 `http://127.0.0.1:3101/...` 这种**本机**请求被丢给 Clash ⇒ 打不到 ⇒ 失败 ✗
+ *
+ * 症状（全是这一条引起的）：
+ *   · 号列表里别的号一直显示「**没在跑**」（探活 fetch 失败）
+ *   · 在一个号的界面看**别的号**的页面 ⇒ 转发失败 ⇒ **空响应** ⇒
+ *     前端报 `Unexpected end of JSON input` / `Failed to execute 'json' on 'Response'` ✗
+ *
+ * ⇒ 本机请求统一走这个 `localFetch`（**显式直连 Agent**）✓
+ *   ⚠️ 必须用 **undici 自己的 `fetch`**：内置 fetch 不认这里传的 `dispatcher` ✗
+ *     （见 `src/llm.js` 顶部那段踩坑记录）
+ */
+const localAgent = new Agent();
+const localFetch = (url, opts = {}) => undiciFetch(url, { ...opts, dispatcher: localAgent });
 import { readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync, unlinkSync, statSync, copyFileSync } from 'node:fs';
 import { join, extname, basename } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -228,7 +251,23 @@ function send(res, code, body, type = 'application/json; charset=utf-8') {
   if (Buffer.isBuffer(body) || body instanceof Uint8Array) {
     return sendBinary(res, code, body, type);
   }
-  const payload = typeof body === 'string' ? body : JSON.stringify(body);
+  // ⚠️⚠️ 2026-10-17 加固（用户截图：某个页面报「读不到… 原始报错：Unexpected end of JSON input」）——
+  //    真因是这里可能发出去一个**空 body**：
+  //      · `JSON.stringify(undefined)` **不抛错、返回 undefined** ⇒ `res.end(undefined)`
+  //        ⇒ 状态 200 + **零字节** ⇒ 前端 `res.json()` 报 `Unexpected end of JSON input` ✗✗
+  //      · 对象里有**循环引用 / BigInt** 时 `stringify` 会抛 ⇒ 也在这一行炸 ✗
+  //    ⇒ 现在：**序列化失败也绝不发空 body** —— 一律发一个合法 JSON + 把真因写日志 ✓
+  let payload;
+  try {
+    payload = typeof body === 'string' ? body : JSON.stringify(body);
+  } catch (e) {
+    log.error(`管理界面响应序列化失败（${String(code)}）：${e.message}`);
+    payload = JSON.stringify({ ok: false, error: `服务端拼响应失败：${e.message}` });
+  }
+  if (payload === undefined || payload === null || payload === '') {
+    log.error(`管理界面响应是空的（${String(code)}）⇒ 兜一个合法 JSON，别让前端报 JSON 解析错`);
+    payload = JSON.stringify({ ok: false, error: '服务端这次没拼出响应（内容为空）' });
+  }
   res.writeHead(code, { 'Content-Type': type, 'Cache-Control': 'no-store' });
   res.end(payload);
 }
@@ -734,13 +773,39 @@ const AGENT_TASKS_HTML = [
   '</div><script>',
   'function esc(s){return String(s==null?"":s).replace(/[&<>]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;"}[c]})}',
   'function fmt(t){try{return new Date(t).toLocaleString("zh-CN",{hour12:false})}catch(e){return ""}}',
+  // ⚠️⚠️ 2026-10-16 加：**"看对话"要能在跑着的时候看**（用户：「正在跑的能不能也把对话显示出来」）——
+  //    · `openIds`：刷新（SSE 推来的）之后，**原来展开的那几条保持展开** ✓
+  //    · `talkTimers`：**正在跑**的那条每 5 秒自动重拉（对话还在长）✓ 收起就停 ✗
+  'var openIds={},talkTimers={};',
+  'function stopTalk(id){if(talkTimers[id]){clearInterval(talkTimers[id]);delete talkTimers[id]}}',
+  'async function fillTalk(id,box){',
+  '  try{',
+  '    var r=await fetch("/api/agent-task?id="+encodeURIComponent(id));var j=await r.json();',
+  '    if(!j.ok){box.textContent=j.error||"读不到";return ""}',
+  '    if(!j.talk||!j.talk.length){box.textContent="（这次没有可显示的对话）";return (j.task&&j.task.status)||""}',
+  '    box.innerHTML=j.talk.map(function(x){',
+  '      return "<pre class=\\""+(x.role==="user"?"u":"a")+"\\">"+(x.role==="user"?"我：":"她：")+esc(x.text)+"</pre>"',
+  '    }).join("");',
+  '    return (j.task&&j.task.status)||""',
+  '  }catch(e){box.textContent="出错："+e.message;return ""}',
+  '}',
+  'async function toggleTalk(el){',
+  '  var id=el.getAttribute("data-id");var box=document.getElementById("talk-"+id);',
+  '  if(!box)return;',
+  '  if(box.style.display==="block"){box.style.display="none";delete openIds[id];stopTalk(id);return}',
+  '  openIds[id]=1;',
+  '  box.style.display="block";box.textContent="加载对话…";',
+  '  var st=await fillTalk(id,box);',
+  '  stopTalk(id);',
+  '  if(st==="running"){talkTimers[id]=setInterval(function(){fillTalk(id,box)},5000)}',
+  '}',
   'async function load(){',
   '  var r=await fetch("/api/agent-tasks?limit=50");var j=await r.json();',
   '  var L=document.getElementById("list");',
   '  if(!j.tasks||!j.tasks.length){L.textContent="还没有任务";return}',
   '  L.innerHTML=j.tasks.map(function(t){',
   '    var arts=(t.arts||[]).map(function(a){return a.name}).join("、");',
-  '    return "<div class=\\"t\\" data-id=\\""+esc(t.id)+"\\">"+',
+  '    return "<div class=\\"t\\" data-id=\\""+esc(t.id)+"\\" data-status=\\""+esc(t.status||"")+"\\">"+',
   '      "<div><b>"+esc(t.task||"")+"</b><span class=\\"s "+esc(t.status||"")+"\\">"+esc(t.status||"")+"</span></div>"+',
   '      "<div class=\\"m\\">"+fmt(t.startedAt)+" ｜ "+esc(t.byName||t.by||"")+(t.cost?" ｜ "+t.cost+" 秒":"")+(t.gid?" ｜ 群 "+esc(t.gid):"")+"</div>"+',
   '      (t.text?"<div class=\\"m\\">她说的："+esc(String(t.text).slice(0,140))+"</div>":"")+',
@@ -748,21 +813,13 @@ const AGENT_TASKS_HTML = [
   '      "<div class=\\"talk\\" id=\\"talk-"+esc(t.id)+"\\"></div></div>"',
   '  }).join("");',
   '  Array.prototype.forEach.call(L.querySelectorAll(".t"),function(el){',
-  '    el.addEventListener("click",function(){openTalk(el)})',
+  '    el.addEventListener("click",function(){toggleTalk(el)})',
   '  })',
-  '}',
-  'async function openTalk(el){',
-  '  var id=el.getAttribute("data-id");var box=document.getElementById("talk-"+id);',
-  '  if(box.style.display==="block"){box.style.display="none";return}',
-  '  box.style.display="block";box.textContent="加载对话…";',
-  '  try{',
-  '    var r=await fetch("/api/agent-task?id="+encodeURIComponent(id));var j=await r.json();',
-  '    if(!j.ok){box.textContent=j.error||"读不到";return}',
-  '    if(!j.talk||!j.talk.length){box.textContent="（这次没有可显示的对话）";return}',
-  '    box.innerHTML=j.talk.map(function(x){',
-  '      return "<pre class=\\""+(x.role==="user"?"u":"a")+"\\">"+(x.role==="user"?"我：":"她：")+esc(x.text)+"</pre>"',
-  '    }).join("");',
-  '  }catch(e){box.textContent="出错："+e.message}',
+  // ⚠️ 重建列表之后，**原来展开的那几条要重新展开**（顺便把"正在跑"的自动刷新挂回去）✓
+  '  Object.keys(openIds).forEach(function(id){',
+  '    var el=L.querySelector(\'.t[data-id="\'+id+\'"]\');if(!el)return;',
+  '    var b=document.getElementById("talk-"+id);if(b)toggleTalk(el)',
+  '  })',
   '}',
   'load();',
   'document.getElementById("rf").addEventListener("click",function(e){e.preventDefault();load()});',
@@ -825,7 +882,8 @@ const routes = {
         : null;
       if (!self && port) {
         try {
-          const r = await fetch(`http://127.0.0.1:${port}/api/whoami`, {
+          // ⚠️ 本机探活**必须直连**（走代理会打不到 ⇒ 界面永远显示"没在跑"）—— 见 `localFetch` 那段 ✓
+          const r = await localFetch(`http://127.0.0.1:${port}/api/whoami`, {
             signal: AbortSignal.timeout(1500),
           });
           if (r.ok) {
@@ -904,6 +962,30 @@ const routes = {
     }
   },
 
+  /**
+   * ⚠️ 2026-10-16 加（用户：「**把 PPT 做完然后发过来就行了**」）：
+   *    **手动补一次交付** —— 活已经做完了（产物在 `产物/` 里），只差"发给他"那一步。
+   *    ⚠️ 走的就是**跑完自动交付**那条路（`deliver`），不是另写一套发文件的代码 ✓
+   *    （不然"自动发的"和"手动补发的"迟早出现一边修好、另一边还是老毛病 ✗）
+   */
+  'POST /api/private-work/deliver': async (req, res) => {
+    let body = {};
+    try {
+      body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+    } catch {}
+    try {
+      const uid = String(body.uid ?? '').trim();
+      if (!uid) return send(res, 400, { ok: false, error: '要 uid' });
+      const pw = await import('./private-work.js');
+      if (!pw.enabled()) return send(res, 400, { ok: false, error: '私聊工作模式没开' });
+      const r = (await pw.deliver(uid, bot)) ?? {};
+      log.info(`[私聊工作] 界面上手动交付（${uid}）：发出 ${r.sent ?? 0}/${r.total ?? 0} 个文件`);
+      return send(res, 200, { ok: (r.sent ?? 0) > 0, ...r });
+    } catch (e) {
+      send(res, 500, { ok: false, error: e.message });
+    }
+  },
+
   // ── B 站视频分享（2026-10-15 用户要求）──────────────────────
   // ⚠️⚠️ **按群**存的（用户：「b站分享也要分群调节」）——
   //    写 `accounts/<QQ>.yml` 的 `groupParams.<群>.biliShare` ✓
@@ -933,23 +1015,67 @@ const routes = {
       //      手动点一下是另一回事（原来把它一起拦了，用户点了会看到"开关还没打开"✗）
       //    ⚠️ 但"这个群有没有关键词"还得管 —— 没关键词压根搜不到东西，
       //      这种要**说清楚**（不然界面上只会显示"没挑到能发的视频"，看不出为什么）✓
-      if (!bs.keywordsOf(gid).length) {
+      // ⚠️⚠️ 2026-10-16 用户要求：「**把立即发送一条独立出来，单独给它加个关键词框，
+      //    这样就不用动自动发送那里的设置了**」+「**再独立加一个是否配 bot 自己评论的选框**」——
+      //    ⇒ 这两个只影响**这一次手动发送**，**不写进**群配置 ✓
+      const tmpKw = (Array.isArray(body.keywords) ? body.keywords : String(body.keywords ?? '').split(/[\n,，、]/))
+        .map((x) => String(x ?? '').trim())
+        .filter(Boolean)
+        .slice(0, 10);
+      // ⚠️ 临时词给了就不要求这个群配过关键词（正是"不用动自动设置"的意思 ✓）
+      if (!tmpKw.length && !bs.keywordsOf(gid).length) {
         return send(res, 400, {
           ok: false,
-          error: '这个群还没填关键词（自动发的开关可以关着，但关键词得先填一个）',
+          error: '这个群还没填关键词（自动发的开关可以关着，但关键词得先填一个，或者在这格里临时填一个）',
         });
       }
       const life = await import('./life.js');
+      // ⚠️⚠️ 2026-10-16 加（用户：「**独立视频发送那里的关键词框还是没有被保存**」）——
+      //    点"立刻发送"时把这一格的内容**按群记下来**（落盘 ⇒ 刷新/重启都在 ✓）
+      //    ⚠️ 记的是**这一格**，不动那个群"自动发送"的关键词 ✓
+      bs.saveNowPick(gid, { keywords: tmpKw, take: body.take });
       // ⚠️ 2026-10-15：用 `eventGroups()`（1 档群）—— 手动发不该被「日常事件开关」挡住 ✓
-      const r = await bs.runOnce(bot, life.eventGroups(), { force: true, groupId: gid });
+      const r = await bs.runOnce(bot, life.eventGroups(), {
+        force: true,
+        groupId: gid,
+        keywords: tmpKw,
+        // ⚠️ `take`：界面上那个"带上她自己的一句评论"选框 ⇒ true/false；
+        //    没传（undefined）= 按这个群的**概率设置**来 ✓
+        take: typeof body.take === 'boolean' ? body.take : null,
+      });
       log.info(`[B站分享] 界面上手动发了群 ${gid} 一条：${r.sent ? r.url : '没发成（' + r.why + '）'}`);
       return send(res, 200, { ok: r.sent === true, ...r });
     } catch (e) {
       send(res, 500, { ok: false, error: e.message });
     }
   },
-  'POST /api/bili-share': async (req, res) => {
+  // ⚠️⚠️ 2026-10-16 加（用户：「**独立视频发送那里的关键词框还是没有被保存**」）——
+  //    **只存不发**：界面上那格填完就自动往这儿存一份（防抖）⇒ 刷新/换浏览器/重启都还在 ✓
+  //    ⚠️ 存的只是"立刻发送"那一格的内容，**不动**自动发送的设置 ✓
+  'POST /api/bili-share/now': async (req, res) => {
     let body = {};
+    try {
+      body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+    } catch {}
+    try {
+      const bs = await import('./bili-share.js');
+      const gid = String(body.groupId ?? '').trim();
+      if (!gid) return send(res, 400, { ok: false, error: '先选个群' });
+      const kws = (Array.isArray(body.keywords) ? body.keywords : String(body.keywords ?? '').split(/[\n,，、]/))
+        .map((x) => String(x ?? '').trim())
+        .filter(Boolean)
+        .slice(0, 10);
+      bs.saveNowPick(gid, {
+        // ⚠️ 存**原样的文本**（不只存拆出来的词）—— 界面上要一字不差地填回去 ✓
+        keywords: String(body.keywords ?? ''),
+        take: body.take,
+      });
+      return send(res, 200, { ok: true, groupId: gid, keywords: kws, ...bs.nowPick(gid) });
+    } catch (e) {
+      send(res, 500, { ok: false, error: e.message });
+    }
+  },
+  'POST /api/bili-share': async (req, res) => {    let body = {};
     try {
       body = JSON.parse((await readBody(req)).toString('utf8') || '{}');
     } catch {
@@ -2117,8 +2243,12 @@ const routes = {
     const ab = await import('./agent-bridge.js');
     const t = ab.taskHistory(200).find((x) => String(x.id) === id);
     if (!t) return send(res, 200, { ok: false, error: '没有这条任务（可能太老了，只留最近 200 条）' });
-    const talk = t.sessionId ? await ab.readSessionTalk(t.sessionId).catch(() => []) : [];
-    send(res, 200, { ok: true, task: t, talk });
+    // ⚠️⚠️ 2026-10-16 加（用户：「正在跑的能不能也把对话显示出来」）——
+    //    历史里 `sessionId` 空着时（老任务 / 还没跑完的），**按工作区 + 时间反查**会话目录 ✓
+    //    不然点开就是「（这次没有可显示的对话）」
+    const sid = String(t.sessionId ?? '') || ab.sessionIdForTask(t);
+    const talk = sid ? await ab.readSessionTalk(sid).catch(() => []) : [];
+    send(res, 200, { ok: true, task: { ...t, sessionId: sid }, talk });
   },
 
   'GET /api/group-params': async (req, res) => {
@@ -2582,7 +2712,17 @@ const routes = {
       const text = await peerChat.compose(gid, peer, 15 * 60 * 1000, 30000);
       if (!text) return send(res, 200, { ok: false, error: '模型没生成出内容（再试一次看看）' });
       await bot.sendToGroup(gid, text, { at: peer, atName: names.of(peer, gid) || '' });
-      peerChat.note(gid, peer, text);
+      // ⚠️⚠️ 2026-10-16 修（用户截图：「**这个 @ 一下虽然显示发送失败，但是实际发送出去了**」）——
+      //    ① 参数传错了：`note(gid, peer, text)` 把话填进了 **`now`（时间戳）** 那一位 ⇒
+      //       `new Date('那句中文话')` 抛 `Invalid time value` ✗（正确写法是第 4 位 ✓）
+      //    ② 更要紧的是**记账出错不该把"已经发出去的成功"报成失败** —— 发出去是不可逆的，
+      //       界面报"没成"会让人以为没发、再点一次 ⇒ **群里刷两遍** ✗
+      //       ⇒ 记账单独 try 掉，发送成功就一律回 ok ✓
+      try {
+        peerChat.note(gid, peer, Date.now(), text);
+      } catch (e) {
+        log.warn(`管理界面手动触发同类搭话：记账失败（消息已经发出去了）：${e.message}`);
+      }
       log.info(`管理界面手动触发同类搭话 → 群 ${gid}，@「${peerName}」：「${text}」`);
       send(res, 200, { ok: true, gid, peer, name: peerName, text });
     } catch (e) {
@@ -2607,6 +2747,60 @@ const routes = {
    *    不可逆），所以只给本机诊断用，不做任何自动调用 ✓
    * ⚠️ `at !== false` 时会在消息前面加一个"@她"的段 —— 模拟"别人点名她"。
    */
+  /**
+   * ⚠️⚠️ 2026-10-16 加（用户：「我在测试**接管之后文件还能不能下载下来**，现在我把开关关了，
+   *    **能不能对他发的文件进行补回**」）——
+   *
+   * **人工接管期间文件收不下来**（`bot.js` 那条闸直接 return ⇒ `onPrivate` 压根没跑）⇒
+   * 接管一趟下来他发的文件就漏了 ⇒ 这个接口去把漏的补回来 ✓
+   *   · 拉最近私聊历史（协议端 `get_friend_msg_history`），把里面**有、工作区里没有**的
+   *     文件段补下来（不重复下、不推进状态机、不主动回话）
+   *   · 补下来之后顺手起一次**只读预读**（和正常收到文件一个待遇）✓
+   *   ⚠️ QQ 的文件有有效期 —— 要补趁早（过期只能让他重发）
+   */
+  'POST /api/private-work/backfill': async (req, res) => {
+    if (!bot?.selfId) return send(res, 200, { ok: false, error: 'QQ 没在线' });
+    let b = {};
+    try {
+      b = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+    } catch {}
+    const qq = String(b.qq ?? '').trim();
+    if (!/^\d{5,12}$/.test(qq)) return send(res, 200, { ok: false, error: '要填 QQ 号' });
+    try {
+      const pw = await import('./private-work.js');
+      const r = await pw.backfillFiles(qq, bot, Math.max(20, Number(b.count) || 40), {
+        // ⚠️ 默认**顺带回他一句**（用户：「帮我补发一下收到文件之后回复的消息」）——
+        //    想只补文件不打扰他，就传 `say:false` ✓
+        say: b.say !== false,
+      });
+      return send(res, 200, r);
+    } catch (e) {
+      return send(res, 200, { ok: false, error: e.message });
+    }
+  },
+
+  /**
+   * ⚠️⚠️ 2026-10-16 加（用户：「如果对面发了 QQ 红包…**然后跑给微信收款码的逻辑**」
+   *    +「**先补发一下收款码和话术再改**」）——
+   *    手动把**收款码 + 那句话**补发给某个人 ✓（红包那条路也走它）
+   */
+  'POST /api/private-work/paycode': async (req, res) => {
+    if (!bot?.selfId) return send(res, 200, { ok: false, error: 'QQ 没在线' });
+    let b = {};
+    try {
+      b = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+    } catch {}
+    const qq = String(b.qq ?? '').trim();
+    if (!/^\d{5,12}$/.test(qq)) return send(res, 200, { ok: false, error: '要填 QQ 号' });
+    try {
+      const pw = await import('./private-work.js');
+      const ok = await pw.sendPayCodeNow(qq, bot, { say: b.say !== false });
+      return send(res, 200, { ok: !!ok, sent: !!ok });
+    } catch (e) {
+      return send(res, 200, { ok: false, error: e.message });
+    }
+  },
+
   'POST /api/replay-message': async (req, res) => {
     if (!bot?.selfId) return send(res, 200, { ok: false, error: 'QQ 没在线' });
     let b = {};
@@ -3597,7 +3791,9 @@ async function proxyToAccount(qq, req, res, url) {
     if (req.headers[k]) headers[k] = req.headers[k];
   }
   try {
-    const up = await fetch(`http://127.0.0.1:${port}${url.pathname}${url.search}`, {
+    // ⚠️ 2026-10-17：转发到**别的号**的界面也必须直连 —— 走代理 ⇒ 转发失败 ⇒ 页面拿到**空响应** ✗
+    //    （见文件顶部 `localFetch` 那段：内置 fetch 会被 ProxyAgent 接管）
+    const up = await localFetch(`http://127.0.0.1:${port}${url.pathname}${url.search}`, {
       method: req.method,
       headers,
       body: body && body.length ? body : undefined,

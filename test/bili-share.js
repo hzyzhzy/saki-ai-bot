@@ -15,7 +15,7 @@
  *
  * 用法: node test/bili-share.js
  */
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -205,10 +205,16 @@ console.log('\n【7】一半概率带"她自己的想法"，而且**分条发**�
   clearGroups();
   setGroup(A, { enable: true, keywords: ['地铁'], minPerDay: 9, maxPerDay: 9, cooldownMs: 0, startHour: 0, endHour: 24 });
   const bot = fakeBot();
-  bs.__setPicker(async () => ({
-    title: 'EasyElevator｜我在 MC 坐电梯', up: 'TPPDXM', play: 1663,
-    url: 'https://www.bilibili.com/video/BV1ropy6HEGw', bvid: 'BV1ropy6HEGw', keyword: '地铁',
-  }));
+  // ⚠️ 2026-10-16：这一节要**同一个群连发好几次**（验"带不带那句话"），
+  //    而"同一个群不许重复发同一条"现在是硬规则 ⇒ 每次得给**不同的** BV 号 ✓
+  let n7 = 0;
+  bs.__setPicker(async () => {
+    const b = `BV1ropy6HEG${n7++}`;
+    return {
+      title: 'EasyElevator｜我在 MC 坐电梯', up: 'TPPDXM', play: 1663,
+      url: `https://www.bilibili.com/video/${b}`, bvid: b, keyword: '地铁',
+    };
+  });
 
   setGroup(A, { ...config.groupParams[A].biliShare, chance: 1, gapMs: 200 });
   bs.__setTake(async () => '这电梯有点东西');
@@ -312,5 +318,178 @@ try {
   rmSync(join(ROOT, 'logs', '__test-bili-share.json'), { force: true });
   rmSync(join(ROOT, 'logs', '__test-bili.yml'), { force: true });
 } catch {}
+console.log(
+  '\n【10】★★ 「立刻发送一条」独立成块：临时关键词（可多个）+ 要不要带她的评论（2026-10-16 用户要求）',
+);
+{
+  // 用户原话：「**把立即发送一条独立出来，单独给它加个关键词框，这样就不用动自动发送
+  //   那里的设置了**」+「**再独立加一个是否配 bot 自己评论的选框**」
+  //   +「**独立发送的框支持多关键词同时选择吗**」⇒ 支持：**一行一个 / 逗号也行**，
+  //     多个词就**从里面随机挑一个**搜（跟自动那份一个道理）✓
+  const w10 = readFileSync(join(ROOT, 'src', 'webui.html'), 'utf8');
+  check(/<textarea id="bili-now-kw"/.test(w10), '★★ 临时关键词框是**多行**的（一行一个词 ✓）');
+  check(/id="bili-now-take"/.test(w10), '★★ 有「带上她自己的一句评论」那个选框 ✓');
+  check(
+    /立刻发送一条（手动试，不动上面的设置）/.test(w10),
+    '★★ 它**独立成一块**了（不再和"保存设置"挤在一起 ✓）',
+  );
+  check(
+    /keywords: kw, take \}/.test(w10) || /keywords: kw,\s*take/.test(w10),
+    '★ 点那个按钮时，临时词和评论选框**都会传给服务端** ✓',
+  );
+
+  const j10 = readFileSync(join(ROOT, 'src', 'webui.js'), 'utf8');
+  check(
+    /split\(\/\[\\n,，、\]\/\)/.test(j10),
+    '★★ 服务端把临时词**按 换行/逗号/顿号 切开**（多关键词同时填 ✓）',
+  );
+  check(
+    /take: typeof body\.take === 'boolean' \? body\.take : null/.test(j10),
+    '★★ 评论选框：true/false 就照它来；没传才按群里的概率 ✓',
+  );
+
+  const s10 = readFileSync(join(ROOT, 'src', 'bili-share.js'), 'utf8');
+  check(
+    /export async function pick\(gid = '', kwsOverride = null\)/.test(s10),
+    '★★ 临时关键词走 `pick(gid, kwsOverride)` ✓',
+  );
+  // ⚠️⚠️ 用户说清了两者的区别：「**那个是每次发视频选一个关键词，这个是一次选多个关键词**」
+  check(
+    /这几个词会\*\*一起搜\*\*/.test(w10) || /一起搜/.test(w10),
+    '★★★ 界面上写明"这几个词**一起搜**"（和自动那份"每次挑一个"区分开 ✓）',
+  );
+  check(
+    /export function bestOf\(cands = \[\]\)/.test(s10) &&
+      /return bestOf\(all\)/.test(s10) &&
+      /for \(const kw of kws\)/.test(s10),
+    '★★★ 多个临时词**都搜一遍、合起来挑播放最高的**（这才是"一次选多个" ✓）',
+  );
+  {
+    // 纯函数那步直接验：三个词各自搜到一条 ⇒ 取播放最高的那条 ✓
+    const got = bs.bestOf([
+      { v: { title: 'A', url: 'https://www.bilibili.com/video/BV1aaaaaaaaa', play: 100 }, kw: '甲' },
+      { v: { title: 'B', url: 'https://www.bilibili.com/video/BV1bbbbbbbbb', play: 9000 }, kw: '乙' },
+      { v: { title: 'C', url: 'https://www.bilibili.com/video/BV1cccccccccc', play: 500 }, kw: '丙' },
+    ]);
+    check(got?.title === 'B' && got?.keyword === '乙', '★★ 合并后取播放量最高的那条 ✓', JSON.stringify(got?.title));
+    check(bs.bestOf([]) === null, '★ 一条都没有 ⇒ null（不会瞎发 ✓）');
+  }
+  check(
+    /if \(force === false\) return ''/.test(s10) && /force !== true/.test(s10),
+    '★★ 评论那条：`force:true` 一定带、`force:false` 一定不带、不传才按概率 ✓',
+  );
+}
+
+console.log(
+  '\n【11】★★★ 同一个群**不重复发同一条** + 已发记录**两个月清一次**（2026-10-16 用户要求）',
+);
+{
+  // 用户原话：「**注意同一个群发的视频不要有重复的**」
+  //        +「**两个月清一次已发视频记录，要不然会无限堆**」
+  // ⚠️ 背景：原来只有那个**共用**、只留 80 条的池子 ⇒ 发得多了老记录被挤掉 ⇒
+  //    同一个群又推一遍 ✗ ⇒ 改成**按群**记（`sentByGid[群]`）+ 兜底一道 `isSent` ✓
+  bs.__reset();
+  clearGroups();
+  setGroup(A, { enable: true, keywords: ['地铁'], cooldownMs: 0, minPerDay: 1, maxPerDay: 5 });
+  setGroup(B, { enable: true, keywords: ['地铁'], cooldownMs: 0, minPerDay: 1, maxPerDay: 5 });
+
+  const same = {
+    title: '某条视频', up: '某个 UP', play: 999,
+    url: 'https://www.bilibili.com/video/BV1dupdupdup', bvid: 'BV1dupdupdup', keyword: '地铁',
+  };
+  // ⚠️ 套件用的 picker **绕过了 `pickReal` 里那道按群过滤** ⇒ 正好用来验"兜底那道也拦得住"
+  bs.__setPicker(async () => ({ ...same }));
+  const bot11 = fakeBot();
+  const r1 = await bs.runOnce(bot11, [A], { force: true, groupId: A, take: false });
+  check(r1.sent === true, '★★ 第一次发出去 ✓', r1.why);
+  const r2 = await bs.runOnce(bot11, [A], { force: true, groupId: A, take: false });
+  check(r2.sent === false && /发过了/.test(r2.why ?? ''), '★★★ **同一个群**第二条不发了 ✓', r2.why);
+  check(bot11.sent.length === 1, '★★ 群里只出现了一条（没重复刷屏 ✓）', JSON.stringify(bot11.sent));
+  const r3 = await bs.runOnce(bot11, [B], { force: true, groupId: B, take: false });
+  check(r3.sent === true, '★★ 换一个群**照样能发**（跨群不算重复 ✓）', r3.why);
+  check(
+    bs.status(A).sentCount >= 1 && bs.status(B).sentCount >= 1,
+    '★★ 两个群各记各的（按群记账 ✓）',
+    `${bs.status(A).sentCount} / ${bs.status(B).sentCount}`,
+  );
+  check(bs.status(A).sentKeepDays === 60, '★★ 界面能看到"保留两个月"这个值 ✓', String(bs.status(A).sentKeepDays));
+  {
+    const onDisk = JSON.parse(readFileSync(join(ROOT, 'logs', '__test-bili-share.json'), 'utf8'));
+    check(
+      Array.isArray(onDisk.sentByGid?.[A]) && onDisk.sentByGid[A].some((x) => x.id === same.bvid),
+      '★★ 落盘了（重启不忘 ⇒ 不会又发一遍 ✓）',
+    );
+  }
+
+  // ---- 两个月清理：纯函数直接验 ----
+  const now11 = Date.now();
+  const day11 = 24 * 60 * 60 * 1000;
+  const kept = bs.pruneSentEntries(
+    [
+      { id: 'BVNEW', at: now11 - 3 * day11 }, // 三天前 ⇒ 留
+      { id: 'BVOLD', at: now11 - 90 * day11 }, // 三个月前 ⇒ 清掉
+      'BVLEGACY', // 老格式（只有 id）⇒ 当刚记的、留着（两个月后自然淘汰 ✓）
+      { id: '', at: now11 }, // 空 id ⇒ 丢掉
+      { id: 'BVEDGE', at: now11 - 59 * day11 }, // 59 天 ⇒ 还在两个月内 ⇒ 留
+    ],
+    now11,
+  );
+  const ids11 = kept.map((x) => x.id);
+  check(ids11.length === 3 && ids11.includes('BVNEW') && ids11.includes('BVEDGE') && ids11.includes('BVLEGACY'), '★★ 两个月内的都留着 ✓', JSON.stringify(ids11));
+  check(!ids11.includes('BVOLD') && !ids11.includes(''), '★★★ 超过两个月的**清掉**（用户要的"要不然会无限堆" ✓）');
+  check(bs.pruneSentEntries([], now11).length === 0 && bs.pruneSentEntries(null, now11).length === 0, '★ 空值 / 坏值不炸 ✓');
+  const many11 = Array.from({ length: 810 }, (_, i) => ({ id: `BV${i}`, at: now11 }));
+  check(bs.pruneSentEntries(many11, now11).length <= 800, '★ 单个群最多留 800 条（文件不会无限长 ✓）', String(bs.pruneSentEntries(many11, now11).length));
+
+  bs.__setPicker(null);
+}
+
+console.log(
+  '\n【12】★★★ 「立刻发送」那格的关键词**会被保存**（2026-10-16 用户：「还是没有被保存」）',
+);
+{
+  // 用户原话：「**独立视频发送那里的关键词框还是没有被保存**」
+  //   原来那格是**纯临时**的：填完点发送、一刷新就空了 ✗
+  //   ⇒ 现在**按群记**（落盘 ⇒ 刷新/重启都还在 ✓），而且**不动**自动发送那份设置 ✓
+  bs.__reset();
+  clearGroups();
+  setGroup(A, { enable: true, keywords: ['地铁'] });
+
+  check(bs.nowPick(A).keywords === '' && bs.nowPick(A).take === null, '★ 一开始是空的（没有假装存过 ✓）');
+  bs.saveNowPick(A, { keywords: '爱祥\nmygo', take: false });
+  const p12 = bs.nowPick(A);
+  check(p12.keywords === '爱祥\nmygo' && p12.take === false, '★★ 存下来了（原样的文本 + 那个选框 ✓）', JSON.stringify(p12));
+  const s12 = bs.status(A);
+  check(s12.nowKeywords === '爱祥\nmygo' && s12.nowTake === false, '★★ 状态接口里带着它（界面打开时填回去 ✓）');
+  {
+    const disk12 = JSON.parse(readFileSync(join(ROOT, 'logs', '__test-bili-share.json'), 'utf8'));
+    check(disk12.nowKw?.[A]?.keywords === '爱祥\nmygo', '★★★ **落盘了**（重启不忘 —— 这就是"没被保存"那个毛病的根 ✓）');
+  }
+  // 只改关键词 ⇒ 那个选框沿用上次（界面每次都会把它一起传上来，这里防的是"只传了词"那条路 ✓）
+  bs.saveNowPick(A, { keywords: '只改词' });
+  check(bs.nowPick(A).take === false, '★ 只改词时，那个选框沿用上次的 ✓');
+  bs.saveNowPick(A, { keywords: '只改词', take: null });
+  check(bs.nowPick(A).take === false, '★ `take` 传 null（没勾）⇒ 不动已存的那个 ✓');
+  check(bs.nowPick(A).keywords === '只改词', '★ 词换成了新的 ✓');
+  check(bs.nowPick(B).keywords === '' && bs.nowPick(B).take === null, '★★ 按群记（另一个群不会串 ✓）');
+  check(bs.saveNowPick('', { keywords: 'x' }) === false, '★ 没给群号 ⇒ 不存（不瞎写 ✓）');
+
+  // ---- 接线：模块 + 接口 + 界面三处都得在 ✓ ----
+  const s12b = readFileSync(join(ROOT, 'src', 'bili-share.js'), 'utf8');
+  check(/export function saveNowPick/.test(s12b) && /export function nowPick/.test(s12b), '★ 模块里导出这两个 ✓');
+  const j12 = readFileSync(join(ROOT, 'src', 'webui.js'), 'utf8');
+  check(/bs\.saveNowPick\(gid, \{ keywords: tmpKw, take: body\.take \}\)/.test(j12), '★★ 点「立刻发送」时**顺手存下来** ✓');
+  check(/'POST \/api\/bili-share\/now'/.test(j12), '★★ 还有一个"只存不发"的接口（填完就走也记得住 ✓）');
+  const w12 = readFileSync(join(ROOT, 'src', 'webui.html'), 'utf8');
+  check(/oninput="saveBiliNowSoon\(\)"/.test(w12) && /function saveBiliNowSoon/.test(w12), '★★ 那格**敲完自己存**（防抖 700ms ✓）');
+  check(/bili-now-kw:' \+ gid/.test(w12), '★ 本地也压一份兜底（接口断了不至于丢字 ✓）');
+  check(
+    /s\.nowKeywords/.test(w12) && /biliNowGid !== gid/.test(w12),
+    '★★ 打开页面 / 换群时**把存的那份填回框里** ✓',
+  );
+  check(/这格会自己记住/.test(w12), '★ 界面上也写明"这格会记住"（他不至于再以为没保存 ✓）');
+  bs.__reset();
+}
+
 console.log(`\n结果: ${failures === 0 ? '全部通过 ✅' : `${failures} 项失败 ❌`}\n`);
 process.exit(failures === 0 ? 0 : 1);
