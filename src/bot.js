@@ -3246,6 +3246,45 @@ export class Bot {
    * ⚠️ 补回来的消息带 `lateMs`，提示词里写明「**N 分钟前发来的（机器人掉线了）**」，
    *    不然她当成"刚刚发的"来答，时间差对不上。
    */
+  /**
+   * ⚠️⚠️ 2026-10-17 加（用户：「**看752群爱音又没回消息**」）——
+   *
+   * 从一段**群历史**里挑出「**必须回她、可我这边压根没见过**」的 message_id。
+   *
+   * 用途：`index.js` 的**收消息自检** —— 心跳只能证明"我发的请求它有回应"，
+   * 而"**能发不能收**"那种半死状态（请求有回应、事件一条不推）它照不出来 ✗。
+   * 判据很准、也不会误伤"半夜没人说话"：
+   *   · 拉到的历史里有 **@她 / 关键词 / 服务器问题** 这类"必须回"的消息，
+   *     而它的 `message_id` **不在 `handled` 里**（正常收到的消息**一定**会被记进去 ✓）
+   *   ⇒ 那就是"协议端推过、我没收到" ⇒ 连接半死 ✓
+   *   · 群里没人说话 ⇒ 历史里没有这类消息 ⇒ **不判死** ✓
+   *
+   * ⚠️ 判据要和 `catchUpMissed()` **保持一致**（同样是那三类"必须回"的），
+   *    不然会出现"自检说要重连、补看却不补"的错位 ✗
+   *
+   * @param {Array} list 群历史（协议端 `get_group_msg_history` 的返回）
+   * @returns {string[]} 漏掉的 message_id（空数组 = 这条路是通的 ✓）
+   */
+  missedRequiredIds(list, { windowMs = 6 * 60 * 1000, now = Date.now() } = {}) {
+    const out = [];
+    for (const m of Array.isArray(list) ? list : []) {
+      const t = Number(m?.time) * 1000; // ⚠️ OneBot 的 time 是**秒**
+      if (!t || now - t > windowMs) continue;
+      const uid = String(m?.user_id ?? '');
+      if (!uid || uid === String(this.selfId)) continue; // 自己发的不算
+      const mid = String(m?.message_id ?? '');
+      if (!mid || handled.has(mid)) continue; // ⚠️ 见过 ⇒ 说明这条路通着 ✓
+      const segs = msg.toSegments(m?.message);
+      const isAt = this.selfId ? msg.isAt(segs, this.selfId) : false;
+      const body = msg.extractText(segs);
+      const kw = (config.trigger?.keywords ?? []).some((k) =>
+        body.toLowerCase().includes(String(k).toLowerCase()),
+      );
+      if (isAt || kw || this.shouldQueryStatus(body)) out.push(mid);
+    }
+    return out;
+  }
+
   async catchUpMissed() {
     if (this.catchUpDone) return 0;
     this.catchUpDone = true;

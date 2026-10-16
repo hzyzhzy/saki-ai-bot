@@ -63,8 +63,33 @@ const isNetErr = (e) =>
     `${e?.message ?? ''} ${e?.cause?.code ?? ''}`,
   );
 
+/** ⚠️ 这个地址是不是**本机**（本机服务绝不许走代理） */
+const isLocalUrl = (u) => {
+  try {
+    const h = new URL(String(u)).hostname.toLowerCase().replace(/^\[|\]$/g, '');
+    return h === '127.0.0.1' || h === 'localhost' || h === '::1' || h === '0.0.0.0';
+  } catch {
+    return false;
+  }
+};
+
 /** 用指定出口发一次请求 */
 function rawFetch(url, opts, mode) {
+  // ⚠️⚠️ 2026-10-17 修（真 bug：**回归里 12 个套件全挂**）——
+  //    **本机地址一律直连**，不管出口选的是代理还是直连 ✗
+  //
+  //    现场：套件跑的是"假模型"，地址 `http://127.0.0.1:39xxx/v1` ——
+  //    而 `applyEgress()` 探到 7890 在听（Clash 常驻）⇒ 把**全局 dispatcher**
+  //    换成了 `ProxyAgent` ⇒ 连**打本机假模型**的请求也丢给代理 ⇒ 打不到 ✗
+  //    ⇒ 机器人回的是兜底句「刚卡了一下，你再说一遍行吗」⇒ 12 套全红 ✗
+  //
+  //    ⚠️ `_run-bot.bat` 里那个 `NO_PROXY=127.0.0.1` 管的是 **Node 自己的
+  //      EnvHttpProxyAgent**，管不着这里手装的 `ProxyAgent` ✗（两套东西）
+  //    ⚠️ 生产也受益：`baseURL` 配成**本机中转站**的人，以前会被代理砸掉 ✗
+  if (isLocalUrl(url)) {
+    directAgent ??= new Agent();
+    return undiciFetch(url, { ...opts, dispatcher: directAgent });
+  }
   if (mode === 'proxy') {
     proxyAgent ??= new ProxyAgent(PROXY_URL);
     return undiciFetch(url, { ...opts, dispatcher: proxyAgent });

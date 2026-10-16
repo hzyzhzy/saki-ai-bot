@@ -21,7 +21,7 @@
  *
  * 用法: node test/catchup.js
  */
-import { writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { writeFileSync, mkdirSync, rmSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -60,6 +60,9 @@ process.env.QQBOT_CONFIG = CFG_REL;
 // 状态文件隔离（别往真实 state/ 里写）
 process.env.QQBOT_AFFINITY_FILE = 'logs/__test-catchup-affinity.json';
 process.env.QQBOT_NAMES_FILE = 'logs/__test-catchup-names.json';
+// ⚠️ 2026-10-17 加：`handled`（"这条我见过了"）也要隔离 ——
+//    收消息自检拿它判"协议端推过、我见过没有"，套件里会写它 ⇒ 不隔离就污染真实 state ✗
+process.env.QQBOT_HANDLED_FILE = 'logs/__test-catchup-handled.json';
 
 let failures = 0;
 const check = (ok, label, extra = '') => {
@@ -193,6 +196,50 @@ console.log('\n【7】协议端不支持这个接口 → 不能崩');
     threw = true;
   }
   check(!threw && n === 0, '拉历史失败 → 安静跳过，不抛错（不影响收消息）');
+}
+
+console.log(
+  '\n【8】★★★ 收消息自检：挑出"协议端推过、我压根没见过"的必须回消息（2026-10-17 用户报的爱音）',
+);
+{
+  // 用户原话：「**看752群爱音又没回消息**」——
+  //   真因：那条连接**能发心跳、收不到群事件**（协议端日志里 @ 它的消息只推给了别的号），
+  //   而心跳只证明"我发的请求它有回应" ⇒ **照不出来** ✗
+  //   ⇒ 加这道自检：拉群历史，里面有"必须回"的消息、而 `handled` 里压根没有
+  //     （正常收到的消息**一定**会被记进去）⇒ 判"漏推" ⇒ 强制重连 + 补看 ✓
+  const b = new Bot();
+  b.selfId = BOT;
+  const sec2 = (msAgo) => Math.floor((NOW - msAgo) / 1000);
+  const hist = [
+    { message_id: 9001, time: sec2(60 * 1000), user_id: <主人>, sender: {}, message: at('这条我压根没见过') },
+    { message_id: 9002, time: sec2(2 * 60 * 1000), user_id: <主人>, sender: {}, message: txt('今天天气不错') },
+    { message_id: 9003, time: sec2(3 * 60 * 1000), user_id: BOT, sender: {}, message: at('我自己发的') },
+    { message_id: 9004, time: sec2(30 * 60 * 1000), user_id: <主人>, sender: {}, message: at('半小时前的') },
+    { message_id: 9005, time: sec2(90 * 1000), user_id: <主人>, sender: {}, message: txt('那个整合包在哪下') },
+    { message_id: 9006, time: sec2(80 * 1000), user_id: <主人>, sender: {}, message: txt('服务器现在在线人数多少') },
+  ];
+  const got = b.missedRequiredIds(hist, { now: NOW });
+  check(got.includes('9001'), '★★★ @ 她的、我没见过的 ⇒ 判成"漏推" ✓', got.join('、') || '（一个都没挑出来）');
+  check(got.includes('9005') && got.includes('9006'), '★★ 关键词 / 服务器问题也算（跟补看同一套口径 ✓）');
+  check(
+    !got.includes('9002') && !got.includes('9003') && !got.includes('9004'),
+    '★★ 闲聊 / 自己发的 / 超窗口的都不算 ✓',
+  );
+  // ⚠️ 见过的（handled 里有）⇒ 说明这条路通着 ⇒ 不能判漏（不然会反复重连 ✗）
+  const handledMod = await import('../src/handled.js');
+  handledMod.note('9001');
+  check(!b.missedRequiredIds(hist, { now: NOW }).includes('9001'), '★★★ 已经见过的 ⇒ 不判漏（路是通的 ✓）');
+  check(b.missedRequiredIds([], { now: NOW }).length === 0, '★★ 空历史 ⇒ 不判漏（半夜没人说话也不误伤 ✓）');
+  check(b.missedRequiredIds(null, { now: NOW }).length === 0, '★ 坏值 ⇒ 不炸 ✓');
+
+  // 接线：index.js 里那两道定时器 + 强制重连 + 让补看能再跑
+  const idx = readFileSync(join(ROOT, 'src', 'index.js'), 'utf8');
+  check(/startRecvCheck\(\)/.test(idx) && /stopRecvCheck\(\)/.test(idx), '★★ 自检定时器连上时挂、断开时清 ✓');
+  check(
+    /bot\.missedRequiredIds\(list/.test(idx) && /ws\.terminate\(\)/.test(idx),
+    '★★★ 判定半死后**强制重连**（用 terminate —— 半开时 close 等不到对面 ✓）',
+  );
+  check(/bot\.catchUpDone = false/.test(idx), '★★ 顺手清掉"只补一次"的标记 ⇒ 重连后补看能把它们捞回来 ✓');
 }
 
 try {

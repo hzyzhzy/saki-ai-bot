@@ -331,6 +331,8 @@ function connectForward() {
     log.info('连接成功');
     bot.attach(ws);
     startHeartbeat();
+    // ⚠️ 心跳之外再加一道**收消息自检**（心跳照不出"能发不能收"）—— 见上面那段注释 ✓
+    startRecvCheck();
     // ⚠️ 重连 = 可能"刚掉线恢复" → 立刻查一次月末工资单要不要补发
     //    （用户要求：「如果因为 QQ 掉线正好没发送，当恢复上线之后马上补发」）
     setTimeout(() => {
@@ -382,12 +384,96 @@ function connectForward() {
     hbBusy = false;
   }
 
+  // ── 收消息自检（⚠️ 2026-10-17 加，见下面那段注释）──────────────
+  //
+  // 为什么光有心跳不够：**心跳只证明"我发的请求它有回应"** ——
+  // 而"能发不能收"那种半死状态（请求有回应、事件一条不推）它**照不出来** ✗
+  const RECV_CHECK_MS = 2 * 60 * 1000; // 每 2 分钟看一次
+  const RECV_WINDOW_MS = 6 * 60 * 1000; // 只看最近 6 分钟的消息
+  const RECV_COOLDOWN_MS = 10 * 60 * 1000; // 救过一次之后 10 分钟内别再救
+  let recvTimer = null;
+  let recvBusy = false;
+  let lastRecvRescueAt = 0;
+
+  function stopRecvCheck() {
+    if (recvTimer) clearInterval(recvTimer);
+    recvTimer = null;
+    recvBusy = false;
+  }
+
+  function startRecvCheck() {
+    stopRecvCheck();
+    recvTimer = setInterval(() => void checkRecvHealth(), RECV_CHECK_MS);
+    recvTimer.unref?.();
+  }
+
+  /**
+   * ⚠️⚠️ 2026-10-17 加（用户：「**看752群爱音又没回消息**」）——
+   * **"能发心跳、收不到群事件"那种半死的自动检测与自愈**。
+   *
+   * ## 现场（有协议端日志）
+   *   爱音那条连接在协议端侧是**只出不进**：
+   *     · 它每 30 秒的 `get_login_info` **一直有回应**（⇒ 心跳那道闸判它是好的 ✗）
+   *     · 可 SnowLuma 日志里**一条群事件都没推给它** —— 用户 @ 它的那条，
+   *       协议端只推给了别的两个号 ✗ ⇒ 它一声不响，靠人工重启才恢复
+   *
+   * ## 判据（准，而且不会误伤"半夜没人说话"）
+   *   用 `get_group_msg_history` 拉最近历史 ⇒ 里面若有**必须回她的**消息
+   *   （@ 她 / 关键词 / 服务器问题），而它的 `message_id` **我这边压根没见过**
+   *   （`handled` 里没有 ⇒ 正常收到的消息**一定会**在里面 ✓）
+   *   ⇒ 那就是"协议端推过、我没收到" ⇒ 判定半死 ✓
+   *   ⚠️ 群里没人说话 ⇒ 历史里没有这类消息 ⇒ **不判死** ✓（不会半夜反复重连）
+   *   ⚠️ 拉历史走的是"请求/响应"（半死状态下它**照样通** ✓）—— 这正是这个判据能成立的原因 ✓
+   *
+   * ## 动作
+   *   `terminate()` 强制断开（半开时 `close()` 的挥手可能永远等不到对面）⇒
+   *   走现成的重连；同时把 `catchUpDone` 清掉，让重连后的**补看**把那几条捞回来 ✓
+   */
+  async function checkRecvHealth() {
+    if (recvBusy || stopping || ws.readyState !== WebSocket.OPEN) return;
+    if (Date.now() - lastRecvRescueAt < RECV_COOLDOWN_MS) return;
+    const groups = (config.trigger?.allowGroups ?? []).map(String).filter(Boolean);
+    if (!groups.length || !bot.selfId) return;
+    recvBusy = true;
+    try {
+      for (const gid of groups) {
+        let raw;
+        try {
+          raw = await bot.call('get_group_msg_history', { group_id: gid, count: 20 });
+        } catch {
+          continue; // 这个群拉不到就换下一个（别因为一个群把自检搞挂）
+        }
+        const list = Array.isArray(raw) ? raw : (raw?.messages ?? raw?.data?.messages ?? []);
+        if (!Array.isArray(list) || !list.length) continue;
+        // ⚠️ 判据统一收在 `bot.missedRequiredIds()` 里（和 `catchUpMissed` 同一套口径 ✓）
+        const missed = bot.missedRequiredIds(list, { windowMs: RECV_WINDOW_MS });
+        if (!missed.length) continue;
+        lastRecvRescueAt = Date.now();
+        log.error(
+          `[收消息自检] 群 ${gid} 有 ${missed.length} 条"必须回"的消息**协议端推过、我这边压根没见过**` +
+            `（心跳却是好的）⇒ 判定这条连接**能发不能收**，强制重连 ✓`,
+        );
+        // ⚠️ 清掉"只补一次"的标记 ⇒ 重连之后 `catchUpMissed()` 会把它们捞回来 ✓
+        bot.catchUpDone = false;
+        try {
+          ws.terminate();
+        } catch {}
+        return;
+      }
+    } catch (e) {
+      log.debug(`[收消息自检] 出错（不影响收消息）：${e.message}`);
+    } finally {
+      recvBusy = false;
+    }
+  }
+
   ws.on('error', (err) => {
     log.warn(`连接失败: ${err.message}`);
   });
 
   ws.on('close', (code) => {
     stopHeartbeat();
+    stopRecvCheck();
     if (stopping) return;
     bot.onClose();
     if (code === 1008 || code === 4001) {
