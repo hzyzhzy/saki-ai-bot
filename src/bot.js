@@ -12,6 +12,54 @@ import * as persona from './persona.js';
  * ⚠️ 现在**没有"全局收紧度"**了：每个群各存各的，没设过的群就是这个值。
  */
 const DEFAULT_STRICTNESS = 50;
+
+/**
+ * ⚠️⚠️ 2026-10-19 加（用户：「**失败之后先自动改成同类的低等级模型吧，比如2.5flash，
+ * 再用主模型**」）——
+ *
+ * 备选模型（Gemini）撞限额是常态：`gemini-3.5-flash` 免费层 RPM 15 / TPM 250K / RPD 500，
+ * 而机对机的提示词一次就 3~4 万 token ⇒ 一次吃掉 15% 的分钟额度，整天 429 ✗
+ * （实测：今天 231 次备选调用 **全部失败**，一次都没成过）
+ *
+ * ⇒ 从名字里**推一个低一档的同族模型**：
+ *   `models/gemini-3.5-flash` → `models/gemini-2.5-flash`
+ *   `gemini-3.5-flash-lite`   → `gemini-2.5-flash-lite`
+ *   `gemini-2.5-flash`        → `gemini-2.0-flash`
+ * ⚠️ 推不出来（名字里没有版本号 / 已经是底档）⇒ 返回 `''`，调用方就跳过这一档 ✓
+ * ⚠️ 也可以直接在 `config.yml` 里写死 `llm.backup.lowModel`，那就以配置为准 ✓
+ */
+/**
+ * ⚠️ 2026-10-19 加：**降档成功过的那个模型名**（记在内存里）。
+ * 备选模型整天撞限额时，主模型名（3.5-flash）大概率还是 429，
+ * 而低一档（3.5-flash-lite）是通的 ⇒ 下次**直接用它**，省掉一次必然失败的往返 ✓
+ * ⚠️ 只记内存（重启就忘）—— 配额是按天恢复的，跨天记着反而会把好的档位永久让掉 ✗
+ */
+let bkGoodModel = '';
+
+export function lowTiersOf(model) {
+  const s = String(model ?? '').trim();
+  if (!s) return [];
+  // ⚠️ 名字里**没有 `X.Y` 版本号** ⇒ 不猜（`deepseek-flash` 这种硬推只会推个不存在的名字 ✗）
+  if (!/\d+\.\d+/.test(s)) return [];
+  const out = [];
+  // ⚠️⚠️ 2026-10-19 实测（拿真实 key 打 Gemini 的 OpenAI 兼容端点）：
+  //    `models/gemini-3.5-flash`        → 200 ✓（用户配的这个）
+  //    `models/gemini-3.5-flash-lite`   → 200 ✓
+  //    `models/gemini-2.5-flash`        → 404 "**no longer available to new users**" ✗
+  //    `models/gemini-2.5-flash-lite`   → 404 同上 ✗
+  //    ⇒ 所以降档**先降同代的 `-lite`**（那个真能用），
+  //      **跨代降到 2.5 是死路**（这个 key 用不了，白试一趟）✗
+  //    （用户说的"比如 2.5flash"就是这个坑：2.5 对新用户已经关了）
+  if (/-flash$/i.test(s)) out.push(s.replace(/-flash$/i, '-flash-lite'));
+  // 再退一档：跨代（3.x → 2.x），实测大概率 404，但别的服务商可能有效
+  const lower = s.replace(/(\d+)\.(\d+)/, (all, a, b) => (Number(a) >= 3 ? `2.${b}` : all));
+  if (lower !== s) {
+    // ⚠️ 这里**别再加一层 lite**：`-flash-lite` 的原名不能再变 `-flash-lite-lite` ✗
+    if (/-flash$/i.test(lower) || /-flash-lite$/i.test(lower)) out.push(lower);
+  }
+  return [...new Set(out)].filter((x) => x && x !== s);
+}
+
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs';
 import { extname, join } from 'node:path';
 import { log } from './log.js';
@@ -34,7 +82,6 @@ import * as ownerUpdate from './owner-update.js';
 import { queryServer, describe } from './status.js';
 import { learn, forget, listEntries } from './learned.js';
 import { detectKnowledge } from './extract.js';
-import { preSearch } from './search-presearch.js';
 import { faceCount, faceMenuText, pickMarkers, pickPhoto, stripMarkers, facePath } from './faces.js';
 // 生图（群里说的「拍个照」）—— 见该文件头部：换服务商只改 config.yml 的 `imagegen` 段
 import * as imagegen from './imagegen.js';
@@ -53,6 +100,8 @@ import * as sessions from './sessions.js';
 import * as balance from './balance.js';
 import * as spend from './spend.js';
 import * as bilibili from './bilibili.js';
+// ⚠️ 2026-10-19：B站问答改走「丢给 agent 查 → 她润色分条说」（见 `src/bili-agent.js`）
+import * as biliAgent from './bili-agent.js';
 import * as monthly from './monthly-report.js';
 import * as followUp from './follow-up.js';
 import * as tic from './tic.js';
@@ -89,6 +138,11 @@ import * as searchMod from './search.js';
 import { judgeSpeak } from './speak-judge.js';
 import * as dialogue from './dialogue.js';
 import * as names from './names.js';
+// ⚠️ 2026-10-17 加：**主人最近的近况**短时记忆（跨群 + 私聊，只留 48 小时）——
+//    见 `src/owner-recent.js` 文件头（用户：「加一个对主人的短时记忆区，同样计入 owner.md」）
+import * as ownerRecent from './owner-recent.js';
+import * as ownerRhythm from './owner-rhythm.js';
+import * as toolStats from './tool-stats.js';
 import * as handled from './handled.js';
 import { looksLikeProblem, solveMaxTokens, SOLVE_GUIDE } from './solve.js';
 import { muteMember, muteLine } from './mute.js';
@@ -108,12 +162,23 @@ import { checkAttribution } from './attribution-guard.js';
 //      · 主动（`volFirst` = 25，老值）：攒够 25 / 36 字才在句末断、**不限条数**
 //        —— 主动接话 / 二级剧情 / 一级事件保持原样，别把剧情切成十几条。
 //      ⚠️ 延时**两条路共用**（见下面 `chunkDelay()`）—— 用户只嫌"条数多"，没嫌"太快"。
-const chunkCfg = () => ({
-  max: config.chunking?.maxChars || 60,
-  chatFirst: Math.max(2, config.chunking?.firstFlushChars || 2),
-  volFirst: Math.max(4, config.chunking?.voluntaryFirstFlushChars || 25),
-  maxChunks: Math.max(1, Number(config.chunking?.maxSentenceChunks) || 3),
-});
+const chunkCfg = () => {
+  const max = config.chunking?.maxChars || 60;
+  const chatFirst = Math.max(2, config.chunking?.firstFlushChars || 2);
+  const volFirst = Math.max(4, config.chunking?.voluntaryFirstFlushChars || 25);
+  const maxChunks = Math.max(1, Number(config.chunking?.maxSentenceChunks) || 3);
+  // ⚠️⚠️ 2026-10-19 加（用户：「**分条逻辑就分工作模式和非工作模式就行了**，
+  //    工作模式直接沿用现有，非工作模式要比现在缩短一些 —— **缩短一半**」）——
+  //    · **工作模式**（这个号 `privateWork.enable` 开着，比如客服号）⇒ 原样 ✓
+  //    · **非工作模式**（主号 / 爱音 / 别的普通号）⇒ 单条上限和分条粒度**各减半** ✓
+  //    ⚠️ 不按号写死：同一份代码 + 各号自己的配置，代码里不点号名 ✗
+  //    ⚠️ 条数（`maxChunks`）**不减** —— 减了长回复会被合成一大段，反而更长 ✗
+  if (config.privateWork?.enable === true) {
+    return { max, chatFirst, volFirst, maxChunks };
+  }
+  const half = (n) => Math.max(2, Math.round(Number(n) / 2));
+  return { max: half(max), chatFirst: half(chatFirst), volFirst: half(volFirst), maxChunks };
+};
 
 /**
  * 分条之间等多久（毫秒）—— **每个分条点都重新摇一次**。
@@ -1051,6 +1116,155 @@ function atifyText(message, groupId = '') {
  */
 const RECONNECT_EVERY_MS = 3 * 60 * 60 * 1000;
 
+/**
+ * ⚠️ 2026-10-19 加：从她的输出里读出「要搜什么」（工具 `搜` 的参数）。
+ *
+ * 只认 `工具[:：]搜` 这个**协议字面**（属于"认暗号"、不是猜人话 ✓）——
+ * 换任何别的说法都由模型自己决定写不写，这里不判语义。
+ *
+ * 参数形态两种都吃：
+ *   · `[工具:搜 {"词":"今天金价"}]`      ⇒ 取 `词` / `query` / `关键词`
+ *   · `[工具:搜 今天金价]`（没写 JSON） ⇒ 取"搜"后面那一段
+ */
+/**
+ * ⚠️⚠️ 2026-10-19 加（用户：「**拍照生图也打包成工具吧，并且工作模式要禁用**」）——
+ *
+ * 从她的输出里读出「要拍什么」：`[工具:拍照 {"拍什么":"夜里在便利店门口自拍"}]`。
+ * 只认 `工具[:：]拍照` 这个**协议字面**（认暗号，不是猜人话 ✓）。
+ */
+export function toolPhotoAsk(text) {
+  const t = String(text ?? "");
+  const i = t.search(/工具\s*[:：]\s*拍照/);
+  if (i < 0) return "";
+  const rest = t.slice(i);
+  const j = /\{[\s\S]{0,300}?\}/.exec(rest);
+  if (j) {
+    try {
+      const a = JSON.parse(j[0]);
+      const q = String(a?.拍什么 ?? a?.场景 ?? a?.说明 ?? a?.what ?? "").trim();
+      if (q) return q.slice(0, 120);
+    } catch {}
+  }
+  const m = /拍照\s*[「『"【]?([^「」『』"【】\[\]】\n]{2,120})/.exec(rest);
+  return m ? m[1].trim().replace(/[」』"]+$/, "").trim() : "";
+}
+
+/**
+ * ⚠️⚠️ 2026-10-19 加（用户：「**把其他能打包成工具的全部列一遍吧，准备全部改造好**」）——
+ *
+ * 通用工具解析：`[工具:查服务器 {"问什么":"怎么进"}]` ⇒ `[{ name, args }]`。
+ * ⚠️ 只认 `工具[:：]名字` 这个**协议字面**（认暗号，不是猜人话 ✓）。
+ * ⚠️ 白名单在 `COMMON_TOOLS`，写别的名字一律不认（防模型乱写）✓
+ */
+export function parseToolCalls(text) {
+  const t = String(text ?? "");
+  const out = [];
+  const re = /\[\s*工具\s*[:：]\s*([\u4e00-\u9fa5A-Za-z_]+)\s*(\{[\s\S]{0,300}?\})?\s*\]/g;
+  let m;
+  while ((m = re.exec(t))) {
+    const name = String(m[1] ?? "").trim();
+    if (!COMMON_TOOLS.has(name)) continue;
+    let args = {};
+    if (m[2]) {
+      try {
+        args = JSON.parse(m[2]) ?? {};
+      } catch {
+        args = {};
+      }
+    }
+    out.push({ name, args });
+  }
+  return out;
+}
+
+/**
+ * 通用工具白名单（写别的名字一律不认 ✓）
+ *
+ * ⚠️ 2026-10-19 第三、四批（用户：「把其他能打包成工具的全部列一遍，准备全部改造好」）：
+ *    加了 `记住 / 忘掉 / 提醒 / 引用` —— 这四个原来全靠**关键词 + 模型二次判定**：
+ *    `judgeMemoryCommand` / `detectKnowledge` / `wantsRemind`+`maybeRemind` / `judgeQuoteTarget`。
+ *    她自己在思考链里写暗号 ⇒ 那几次判定**全省掉**，而且不会出现"换个说法就认不出"✗
+ */
+const COMMON_TOOLS = new Set([
+  '查服务器',
+  '花了多少',
+  // ⚠️ 2026-10-19 加（用户：「**先把问工资这个改成工具吧，不用关键词判断了**」）
+  '工资',
+  '学到什么',
+  '好感度',
+  '戳回去',
+  '闭嘴',
+  '查车次',
+  // ── 第三、四批（写知识库 / 定提醒 / 引用形态）──
+  '记住',
+  '忘掉',
+  '提醒',
+  '引用',
+  // ── 群里那几个"派活"的（⚠️ 只在群里 + 只有主人能用，见 `runReadTool` 里的闸）──
+  '动这一单',
+  '催进度',
+  '停',
+  // ⚠️ 2026-10-19 加：搜图**单独一个工具**（用户：「直接打包成一个新的工具吧，
+  //    搜图场景直接代替之前用的接活工具」）—— 图和评论都是**边搜边发**的，
+  //    不走"产物打包发文件"那条路 ⇒ 见 `src/image-search.js` ✓
+  '搜图',
+]);
+
+/**
+ * ⚠️ 有副作用的通用工具（只执行；**不**为它重新生成回复）✓
+ *
+ * ⚠️ `引用` 在这里 —— 它只往 `event._quoteWant` 上写一个"她想引谁"，
+ *    真正挂不挂引用框是**发送那一刻**（`quoteThisReply` + `pickQuoteTarget`）的事 ✓
+ * ⚠️ `记住 / 忘掉 / 提醒` **不**在这里：它们要回一段"材料"（到底记没记下、几点提醒），
+ *    她得照那个用自己的口气说一句 ⇒ 必须重新生成 ✓
+ */
+const ACT_TOOLS = new Set(['戳回去', '闭嘴', '引用']);
+
+/**
+ * ⚠️ 2026-10-19 加：**这个任务是不是"要图"** —— 「搜图」工具的兜底判据。
+ *
+ * 为什么需要（当天实测）：`[搜图]` 的日志**一次都没出现过** ——
+ *   模型两次都拿「动这一单」去搜图（"找点爱祥图过来"），提示词加强两轮也没用 ✗
+ *   ⇒ 走到「动这一单」时在这里兜一道，直接转搜图管线。
+ *
+ * ⚠️ 这是**兜底**、不是主判据（模型选对工具时根本走不到这儿）——
+ *    按 AGENTS 的规矩，关键词只当兜底可以，当主判据不行 ✓
+ *
+ * 判据：**带"图"类名词** + **带"要图"类动词**，且**不带文档类词**。
+ * @param {string} task
+ * @returns {boolean}
+ */
+function looksLikeImageTask(task) {
+  const s = String(task ?? '');
+  if (!s) return false;
+  // ① 得是图
+  if (!/(图|立绘|壁纸|插画|原画|截图|表情包)/.test(s)) return false;
+  // ② 得是在"要 / 找"它（「做一个图表的 PPT」这种也带"图"，靠 ③ 挡）
+  if (!/(找|搜|弄|来|发|给|扒|挑|下载|收集|翻)/.test(s)) return false;
+  // ③ 文档 / 代码类的活**不算**（那是「动这一单」的地盘）
+  if (/(ppt|pptx|文档|论文|报告|表格|代码|脚本|简历|作业)/i.test(s)) return false;
+  return true;
+}
+
+export function toolSearchQuery(text) {
+  const t = String(text ?? '');
+  const i = t.search(/工具\s*[:：]\s*搜/);
+  if (i < 0) return '';
+  const rest = t.slice(i);
+  const j = /\{[\s\S]{0,300}?\}/.exec(rest);
+  if (j) {
+    try {
+      const a = JSON.parse(j[0]);
+      const q = String(a?.词 ?? a?.query ?? a?.关键词 ?? a?.q ?? '').trim();
+      if (q) return q.slice(0, 120);
+    } catch {
+      /* 参数没写成合法 JSON ⇒ 落到下面按"搜后面那段"取 ✓ */
+    }
+  }
+  const m = /搜\s*[「『"'【]?([^「」『』"'【】\[\]】］\n]{2,120})/.exec(rest);
+  return m ? m[1].trim().replace(/[」』"']+$/, '').trim() : '';
+}
+
 export class Bot {
   constructor() {
     this.ws = null;
@@ -1280,9 +1494,50 @@ export class Bot {
     // ⚠️ 2026-10-14 加（用户：「**只要有新好友加进来就更新名单**」）：
     //    名单里没这个人 ⇒ 当场重查一次（后台跑，不挡这条路）——
     //    这样「刚通过的好友」发的第一条消息不会被漏在门外 ✓
-    void privateWork.ensureFreshFriend(payload.user_id, this).catch(() => {});
+    // ⚠️⚠️ 2026-10-17 修（查"电脑卡"时抓到的真 bug）：
+    //    这一行原来**不判 message_type** ⇒ **每条群消息**都会调 `ensureFreshFriend()`
+    //    ⇒ 群里一活跃就**每 10~15 秒拉一次好友列表**（日志实测刷屏 ✗ 白占协议端 + 吃 CPU）
+    //    ⇒ 现在只在**私聊**时查（那才是"刚通过的好友发来第一条消息"的场景 ✓）
+    if (payload.message_type === 'private') {
+      void privateWork.ensureFreshFriend(payload.user_id, this).catch(() => {});
+    }
+    // ⚠️⚠️ 2026-10-19 加（用户：「**加一条指令，只在私聊启用：/接管**。
+    //    用来开关人工接管开关，bot 要开关接管，并回复目前开关状态」）——
+    //    ⚠️ 必须放在 `privateAllowed()` **之前**：接管一开那道闸就拦下了，
+    //      消息进不来 ⇒ `/接管` 永远关不掉 ✗✗
+    if (payload.message_type === "private") {
+      const _uid = String(payload.user_id ?? "");
+      const _txt = String(this._textOf(payload) ?? "").replace(/\s+/g, "");
+      if ((_txt === "/接管" || _txt === "接管") && privateWork.isSelfSide(_uid)) {
+        const _now = !privateWork.dmTakeoverOn(_uid);
+        privateWork.dmTakeoverSet(_uid, _now);
+        log.warn(`[私聊工作] /接管 ⇒ **${_now ? "开启" : "关闭"}**（${_uid}）✓`);
+        try {
+          await this.sendText(
+            { message_type: "private", user_id: _uid },
+            _now
+              ? "（人工接管：**已开启** —— 这条私聊现在归我自己回，我不插嘴了。再发一次 /接管 就关掉）"
+              : "（人工接管：**已关闭** —— 我回来了，有事跟我说）",
+          );
+        } catch (e) {
+          log.warn(`/接管 状态没发出去：${e.message}`);
+        }
+        return;
+      }
+    }
     if (payload.message_type === 'private' && !this.privateAllowed(payload.user_id)) {
-      log.debug(`私聊用户 ${payload.user_id} 不在白名单/私聊已关闭，已忽略`);
+      // ⚠️⚠️ 2026-10-19 修（用户：「**bot 看不到掉线后或者我接管时发的消息，不能自己承接上**」）——
+      //    真因：这条闸**在 `recent.remember()` 之前**（那道在 1600 行开外）⇒
+      //    被它拦下的私聊消息**一个字都没进上下文** ✗
+      //    现场：她说完「我送你一万块钱」，用户接管后回「真的送我一万块钱吗」，
+      //    切回机器人后她看不见那句 ⇒ 反口说「我什么时候说过要送钱了」✗✗
+      //    ⇒ **拦下也要记进上下文（只是不回）** —— 切回机器人时她还认得上这段 ✓
+      try {
+        recent.remember(payload, { text: String(payload?.raw_message ?? payload?.message ?? '') });
+      } catch (e) {
+        log.debug(`私聊被拦时记上下文失败（忽略）：${e.message}`);
+      }
+      log.debug(`私聊用户 ${payload.user_id} 不在白名单/私聊已关闭，已忽略（**上下文照样记了**）`);
       return;
     }
 
@@ -1373,6 +1628,47 @@ export class Bot {
       return;
     }
 
+    // ⚠️⚠️ 2026-10-19 加（用户截图：「@saki 能不能闭嘴」→ 她回「行行行，我闭嘴」→
+    //    **接着又聊了一句** ✗）—— 用户要求：「**当有对 saki 说让她别说话的消息时，
+    //    开启 5 分钟完全不接收群消息，除非被 @**」。
+    //    ⚠️ 放在这个位置（在 `/剧情` 那些命令之后、进聊天之前）：
+    //      · 判据交给模型（`wantsMute`，不写关键词表）；
+    //      · **只在她被 @ 时才判** ⇒ 量小、不烧钱 ✓；
+    //      · mute 之后**这一条照常回**（她要说一句"行，我闭嘴"），
+    //        靠 `this._justMuted` 让 `decide` 放行这一次 ✓；
+    //      · 静默期内**被 @ 就能把她叫出来**（`decide` 里那条 `!atMeHere`）✓
+    if (payload.message_type === 'group') {
+      try {
+        const segs0 = msg.toSegments(payload.message);
+        const atMe0b = this.selfId ? msg.isAt(segs0, this.selfId) : false;
+        if (atMe0b) {
+          const txt0 = segs0
+            .filter((x) => x.type === 'text')
+            .map((x) => x.data?.text ?? '')
+            .join('')
+            .trim();
+          if (txt0 && (await this.wantsMute(txt0))) {
+            // ⚠️⚠️ 2026-10-19 改（用户：「**调用到闭嘴工具时要先答应对方一句，
+            //    再执行 5 分钟屏蔽群消息**」）——
+            //    先让她**把"行，我闭嘴"那句说出来**（这一条照常生成、照常发），
+            //    **8 秒后**再开始静默 ⇒ 顺序是"答应 → 闭嘴"，不是"先哑掉再想说什么" ✓
+            //    （8 秒够打字延迟 + 分条发送；她那句 8 秒内一定发得完 ✓）
+            log.info(
+              `[静默] 他冲她说"别说话" ⇒ 先让她答应一句，8 秒后再静默 5 分钟（${payload.group_id}）✓`,
+            );
+            const gid0 = String(payload.group_id);
+            setTimeout(() => {
+              try {
+                this.muteGroup(gid0, 5 * 60 * 1000, '他冲她说的"别说话"');
+              } catch {}
+            }, 8000).unref?.();
+          }
+        }
+      } catch (e) {
+        log.debug(`[静默] 判"让我闭嘴"那步出错（不影响回复）：${e.message}`);
+      }
+    }
+
     // ⚠️ `/剧情 <背景>` —— 管理员在群里手动开一条剧情（2026-10-03 用户要求）。
     //    和上面 `/好感度` 同一个位置、同样的理由（命令不进聊天上文、不被"要不要接话"挡住）。
     if (
@@ -1438,6 +1734,17 @@ export class Bot {
     //      （「不然回到 bot 模式，bot 会不记得之前的聊天记录」）✗ 别调过来。
     if (!cmdSenderIsBot && this.takeoverOn()) {
       this.rememberTakeover(payload);
+      // ⚠️⚠️ 2026-10-19 修（用户：「**谷雨 bot 接管之后看不到我发的「我送你一万块钱」**」）——
+      //    这一支是**号级接管**（`config.humanTakeover`）：命中就 `return`，
+      //    而 `recent.remember()` 在 1600 行开外 ⇒ **接管期间收到的消息一条都没进上下文** ✗
+      //    ⇒ 跟私聊白名单那道闸一样：**拦下也要记**（只是不回）✓
+      try {
+        recent.remember(payload, {
+          text: String(payload?.raw_message ?? (Array.isArray(payload?.message) ? '' : payload?.message) ?? ''),
+        });
+      } catch (e) {
+        log.debug(`[接管] 记上下文失败（忽略）：${e.message}`);
+      }
       // ⚠️⚠️ 2026-10-16 加（用户：「补收文件要自动补收，要不然很容易漏」）——
       //    接管期间 `onPrivate` 压根没跑 ⇒ **文件没收下来** ✗
       //    ⇒ 记一笔"这个人有文件欠着"，等会儿自动补收会优先补他 ✓（只记、不说话 ✓）
@@ -2974,14 +3281,23 @@ export class Bot {
         //    紧接着补了一句：「**不要完全没紧度了，略低就行了**」。
         //    ⇒ 所以这里**不是传 0**，而是 `strictness × peerChat.strictnessFactor`
         //      （默认 0.7 ⇒ 这个群 40 → 28：比群友闲聊松一档，但没完全放开）。
-        strictness: isLevel1
-          ? this.isPeerBot(String(event?.group_id ?? ''), String(event?.user_id ?? ''))
-            ? Math.round(
-                this.strictnessOf(event) *
-                  Math.min(1, Math.max(0, Number(config.peerChat?.strictnessFactor ?? 0.7))),
-              )
-            : this.strictnessOf(event)
-          : undefined,
+        // ⚠️⚠️ 2026-10-19 改（用户：「1」）——
+        //    **收紧度现在不管灵敏度几档都传给 judge**。
+        //    原来非 1 档时传的是 `undefined` ⇒ 收紧度 95 的群，judge 压根不知道 ✗
+        //    （现场：699 群收紧度 95，13~16 点每小时还回 50~66 条）
+        //    ⚠️ 只有 **≥70** 才会有额外效果（`speak-judge` 里那段"极挑"）；
+        //      50 附近传过去等于没变（`strictNote` 返回空串）✓
+        //    ⚠️ 同类机器人那条"打折"（`peerChat.strictnessFactor`）照旧 ✓
+        strictness: this.isPeerBot(
+          String(event?.group_id ?? ''),
+          String(event?.user_id ?? ''),
+        )
+          ? Math.round(
+              this.strictnessOf(event) *
+                Math.min(1, Math.max(0, Number(config.peerChat?.strictnessFactor ?? 0.7))),
+            )
+          : this.strictnessOf(event),
+        // ⚠️ 这个只管"**很松**（≤30）那段要不要带" —— 收紧度高那段已经不看它了 ✓
         strictnessOnlyLevel1: isLevel1,
       });
     } catch (e) {
@@ -2995,6 +3311,24 @@ export class Bot {
       log.warn(`[主动接话] 说话判断出错（${e.message}）→ 兜底照常说`);
       this.markVoluntary(join.mode, event);
       return join;
+    }
+
+    // ⚠️⚠️ 2026-10-19 加（用户：「**不是只是@她闭嘴要闭嘴，群友说的话有要她闭嘴的
+    //    意图也要识别到**」）——
+    //    judge 那一趟**顺手**判了"这句话是不是在让她闭嘴"（不额外花一次调用 ✓）⇒
+    //    是 ⇒ 这个群静默 5 分钟。**先让她答应一句，8 秒后才静默**（和 @ 那条路一致）✓
+    //    ⚠️ 放在 `!verdict.speak` 的 return **之前** —— 让她闭嘴的话本来就会被判"不说"，
+    //      放在后面就永远走不到 ✗
+    if (verdict.mute === true) {
+      const gidM = String(event?.group_id ?? '');
+      log.info(
+        `[静默] 他说的话是在让她闭嘴（${verdict.why}）⇒ 8 秒后静默 5 分钟（${gidM}）✓`,
+      );
+      setTimeout(() => {
+        try {
+          this.muteGroup(gidM, 5 * 60 * 1000, '群友话里的"让她闭嘴"');
+        } catch {}
+      }, 8000).unref?.();
     }
 
     if (!verdict.speak) {
@@ -3718,6 +4052,13 @@ export class Bot {
    * @param {string} tag 路径标记（`主动/@` 之类），空则不显示
    */
   logIncoming(event, tag = '') {
+    // ⚠️ 2026-10-19 加（用户：「**只要她能记住这类事情就行了**，除了作息，
+    //    还可以加一下其他固定要记的习惯之类的东西」）——
+    //    只记**主人**（`config.ownerQQ`）的"哪天的哪个小时说过话"⇒ 攒出作息/习惯 ✓
+    //    ⚠️ 只统计、不评判；"要不要提"照旧听人设的（那条「深夜别劝睡」没动）✓
+    try {
+      ownerRhythm.note(event?.user_id);
+    } catch {}
     try {
       const segs0 = msg.toSegments(event.message);
       const t = msg.stripPlaceholders(msg.tidy(msg.extractText(segs0)));
@@ -3991,28 +4332,72 @@ export class Bot {
       params = rest;
     }
     return new Promise((resolve, reject) => {
-      if (!this.ws || this.ws.readyState !== 1) {
-        reject(new Error('尚未连接到 NapCat'));
+      // ⚠️⚠️⚠️ 2026-10-19 改（用户：「**爱音还是没回**」）——
+      //    原来 ws 没连着就**立刻 reject**，而上层把错误**静默 catch 掉了** ⇒
+      //    消息**凭空消失、日志里一个字都没有** ✗✗
+      //    现场：爱音 `01:43:58 已回复 30 字`，可协议端日志里**零条 `send_group_msg`**，
+      //    那几分钟她正好在重连（一堆 `get_group_msg_history` 补看动作）
+      //    ⇒ 生成完 → 要发时 ws 还没连上 → reject → 被吞 ⇒ 这条回复**丢了** ✗
+      //    ⇒ 现在**等重连（最多 12 秒）再发**：她的 ws 每 3 秒重试一次，
+      //      12 秒足够跨过绝大多数重连窗口；真等不到才 reject，并且**记一条日志** ✓
+      const fire = () => {
+        const echo = `e${++this.echoSeq}`;
+        // ⚠️ 默认 30 秒；传大文件时调用方显式放宽（见上面 `opts.timeoutMs` 那段）✓
+        // ⚠️⚠️ 2026-10-16：**`0` = 不限时**（用户：「**进入了上传过程就不要限时了**」）——
+        //    大包传起来可能十几分钟，掐掉它反而永远传不完 ✗；真断线由 `onClose()`
+        //    把挂着的调用 reject 掉（那边会回"连接已断开"）⇒ 上层**自己重传** ✓
+        const rawWait = opts?.timeoutMs;
+        const waitMs = rawWait === 0 ? 0 : Math.max(1000, Number(rawWait) || 30000);
+        const timer =
+          waitMs > 0
+            ? setTimeout(() => {
+                this.pending.delete(echo);
+                reject(new Error(`调用 ${action} 超时`));
+              }, waitMs)
+            : null;
+        // ⚠️ 把 action 一起存下来 —— 回包要按"是不是发送类接口"区别对待 1200，
+        //    见 `onRaw` 里那段（2026-09-15）。
+        this.pending.set(echo, { resolve, reject, timer, action });
+        this.ws.send(JSON.stringify({ action, params, echo }));
+      };
+      if (this.ws && this.ws.readyState === 1) {
+        fire();
         return;
       }
-      const echo = `e${++this.echoSeq}`;
-      // ⚠️ 默认 30 秒；传大文件时调用方显式放宽（见上面 `opts.timeoutMs` 那段）✓
-      // ⚠️⚠️ 2026-10-16：**`0` = 不限时**（用户：「**进入了上传过程就不要限时了**」）——
-      //    大包传起来可能十几分钟，掐掉它反而永远传不完 ✗；真断线由 `onClose()`
-      //    把挂着的调用 reject 掉（那边会回"连接已断开"）⇒ 上层**自己重传** ✓
-      const rawWait = opts?.timeoutMs;
-      const waitMs = rawWait === 0 ? 0 : Math.max(1000, Number(rawWait) || 30000);
-      const timer =
-        waitMs > 0
-          ? setTimeout(() => {
-              this.pending.delete(echo);
-              reject(new Error(`调用 ${action} 超时`));
-            }, waitMs)
-          : null;
-      // ⚠️ 把 action 一起存下来 —— 回包要按"是不是发送类接口"区别对待 1200，
-      //    见 `onRaw` 里那段（2026-09-15）。
-      this.pending.set(echo, { resolve, reject, timer, action });
-      this.ws.send(JSON.stringify({ action, params, echo }));
+      // ws 还没连上 ⇒ **等它**（每 250ms 看一眼，最多 12 秒）
+      //
+      // ⚠️⚠️ 2026-10-19 修：**从来没有 ws**（压根没连过协议端）⇒ **立刻 reject**，
+      //    别白等 12 秒。真踩到：`test/private-work.js` 里 `new Bot()` 直接 `call()`，
+      //    12 秒等待把整个套件挂死（`unsettled top-level await`）⇒ 后面的项全没跑 ✗，
+      //    而 `run-all` 只报"（无结果行）"，看着像代码坏了。
+      //    ⚠️ 只有"**有 ws、但它还没 open**"（刚重连中）才值得等 —— 那才是要救的场景 ✓
+      if (!this.ws) {
+        reject(new Error(`调用 ${action} 失败：还没连上协议端`));
+        return;
+      }
+      let waited = 0;
+      const waitTimer = setInterval(() => {
+        waited += 250;
+        if (this.ws && this.ws.readyState === 1) {
+          clearInterval(waitTimer);
+          if (waited >= 500) {
+            log.info(`[发送] ws 刚重连上（等了 ${waited}ms）⇒ 现在补发 ${action} ✓`);
+          }
+          try {
+            fire();
+          } catch (e) {
+            reject(e);
+          }
+        } else if (waited >= 12000) {
+          clearInterval(waitTimer);
+          log.warn(
+            `[发送] ws 等了 12 秒还没连上 ⇒ **这条 ${action} 丢了**` +
+              `（readyState=${this.ws ? this.ws.readyState : 'null'}）`,
+          );
+          reject(new Error('尚未连接到 NapCat'));
+        }
+      }, 250);
+      waitTimer.unref?.();
     }).then(
       (r) => {
         if (isSend) {
@@ -4341,6 +4726,15 @@ export class Bot {
    *    真实原因（HTTP 状态 / 平台错误码）**只进 `logs/bot.log`**，见 `imagegen.js`。
    */
   runPhoto(event, photo, said = '') {
+    // ⚠️⚠️ 2026-10-19 加（用户：「**拍照生图也打包成工具吧，并且工作模式要禁用**」）——
+    //    工作模式（工作号私聊客户）**一律不发自拍**：谈项目的时候发张自拍不合场景 ✗
+    //    ⚠️ 闸放在**这里**：正的 `[工具:拍照]` 和老的 `[拍照:场景]` 两条路都会被挡住 ✓
+    try {
+      if (privateWork.isWorkChat(event)) {
+        log.info(`[拍照] 工作模式里不发自拍 ⇒ 这次跳过（${event?.user_id ?? ""}）✓`);
+        return;
+      }
+    } catch {}
     // ── 防连拍（**不是限额**：用户明确说"不用限"）──
     // 真人也不会几十秒内连拍好几张；顺便挡住"模型一条回复里写了两个标记"那种病态情况。
     // 想彻底关掉：把 `config.yml` 的 `imagegen.cooldownMs` 设成 0。
@@ -4838,6 +5232,18 @@ export class Bot {
   questLive(groupId) {
     const g = String(groupId ?? '');
     if (!g) return false;
+    // ⚠️⚠️⚠️ 2026-10-19 加（用户：「**谷雨本来不接受剧情命令的居然在接剧情**」）——
+    //    现场（谷雨 10000014 的日志）：
+    //      05:19:58 `[同类] 剧情进行中 → **这条我接**（不再往下走"该不该说"那串闲聊判据）`
+    //      05:20:03 已回复 81 字
+    //    它的 `/剧情`、`/清除剧情` 确实被 `commands === false` 挡住了（05:20:26 有记录），
+    //    但**"剧情进行中就走剧情例外"这条路没挡** ⇒ 它一看到群里在演，就当成"我该接" ✗
+    //    它是**客服号**（`quest.enable=false` + 按群 `commands=false`）⇒ 对剧情**零参与**：
+    //      不接剧情、不让位（让位是"演的人之间"的规矩）、也不吃剧情豁免 ✓
+    //    ⇒ 这里直接把 `questLive` 判成 false（`questLive` 是所有剧情例外的总闸）✓
+    try {
+      if (paramsFor('quest', g)?.commands === false) return false;
+    } catch {}
     // ① 我自己真有剧情在跑
     try {
       if (quest.current(g)) return true;
@@ -5089,6 +5495,51 @@ export class Bot {
    * @param {number} [ms] 安静多久（默认 1 分钟；**传 0 = 解除静默**）
    * @param {string} [why] 写日志用
    */
+  /**
+   * ⚠️⚠️ 2026-10-19 加（用户截图 + 一句「**当有对 saki 说让她别说话的消息时，
+   * 开启 5 分钟完全不接收群消息，除非被 @**」）。
+   *
+   * 现场（699 群）：管理员「@saki 能不能闭嘴」→ 她回「行行行，我闭嘴」→
+   *   **然后还接着聊**（下一句就是「那我自己看了啊」）✗ 说了闭嘴却没闭嘴。
+   *
+   * ## 判据交给模型（不写关键词表）
+   * 「能不能闭嘴」「吵死了」「别刷了」「安静点」都算 —— 换个说法也得认得出 ✓
+   * ⚠️ 反过来不能误判：**「闭嘴」出现在别处**（「这电影结局让人闭嘴惊艳」）、
+   *   开玩笑、或者他在说**别人** ⇒ 都不算 ✓
+   *
+   * ## 只在"冲她来的"消息上判（结构判据，不猜人话）
+   * 调用方只在 **@ 了她 / 直接点了她的名** 时才调它 ⇒ 量小、不烧钱 ✓
+   *
+   * @returns {Promise<boolean>} true = 是在让她别说话
+   */
+  async wantsMute(text) {
+    const t = String(text ?? '').trim();
+    if (!t) return false;
+    try {
+      // ⚠️ 开头的【闭嘴判定】是**固定标记**：假模型/套件靠它认这条请求，别改这个词
+      const ans = await phrase({
+        system: [
+          '【闭嘴判定】你判断：群里这句话，是不是在**让机器人（客服小祥）别说话 / 少说话 / 安静**。',
+          '',
+          '· 明确让她闭嘴、别刷、安静、吵死了（冲她说的）→ 答「是」；',
+          '· 开玩笑、说的不是她（在说别人吵 / 说电影让人闭嘴）、',
+          '  只是句子里顺带带了这几个字 → 答「否」。',
+          '',
+          '只回答一个字：是 或 否。不要解释，不要加标点。',
+        ].join('\n'),
+        user: `这句话：「${t.slice(0, 200)}」`,
+        maxTokens: 60,
+        timeoutMs: 6000,
+      });
+      const raw = String(ans ?? '').trim();
+      // ⚠️ 和 `judgeMemoryCommand` 同一条收严：**整条就是"是"**才算
+      return /^[\s"「]*是(的|呀|啊|对)?[\s"」。.!！,，]*$/.test(raw);
+    } catch (e) {
+      log.warn(`[静默] 判"是不是让我闭嘴"出错（这次不当真）：${e.message}`);
+      return false;
+    }
+  }
+
   muteGroup(groupId, ms = 60000, why = '') {
     const gid = String(groupId ?? '').trim();
     if (!gid) return 0;
@@ -5828,7 +6279,32 @@ export class Bot {
     //    ⚠️ 指令（`/剧情` `/清除剧情`）不经过这里 ⇒ 不受影响，他还能接着操作。
     //    ⚠️ 为什么必须"强制"：剧情状态清掉之后，**上下文里那几句还在**，
     //      而"对话延续"（直接接、不判）跟剧情状态无关 ⇒ 光清剧情她们照接 ✗
-    if (event?.message_type === 'group' && this.isMuted(event.group_id)) {
+    // ⚠️⚠️ 2026-10-19 加（用户截图 + 一句「**当有对 saki 说让她别说话的消息时，
+    //   开启 5 分钟完全不接收群消息，除非被 @**」）——
+    //   现场（699 群）：管理员「@saki 能不能闭嘴」→ 她回「行行行，我闭嘴」→
+    //   **接着又聊了一句** ✗ 说了闭嘴却没闭嘴。
+    //   ⚠️ **判据和 `muteGroup` 都在 `onMessage` 里做**（那边是 async，能 await 模型）；
+    //      这里只读两个标记：① 刚才那一下是不是刚 mute 的（这一条要照常回）
+    //      ② 这条有没有 @ 她（静默期里被 @ 就能把她叫出来）✓
+    let justMutedNow = false;
+    let atMeHere = false;
+    if (event?.message_type === 'group') {
+      try {
+        const jm = this._justMuted;
+        justMutedNow =
+          !!jm &&
+          String(jm.gid) === String(event.group_id) &&
+          Date.now() - Number(jm.at ?? 0) < 5000;
+        atMeHere = this.selfId ? msg.isAt(msg.toSegments(event?.message), this.selfId) : false;
+      } catch {}
+    }
+
+    if (
+      event?.message_type === 'group' &&
+      this.isMuted(event.group_id) &&
+      !justMutedNow && // ⚠️ 刚说完"我闭嘴"的**这一条**照常回（回完才静默）✓
+      !atMeHere // ⚠️ 静默期里**被 @ 就能把她叫出来**（用户：「除非被 @」）✓
+    ) {
       log.info(
         `[静默] 群 ${event.group_id} 还在静默期（清剧情之后那一分钟）→ 这条不回` +
           `${voluntary ? `（voluntary=${voluntary}）` : ''}`,
@@ -7246,6 +7722,67 @@ export class Bot {
   }
 
   async handle(event, meta = {}) {
+    // ⚠️⚠️ 2026-10-17 修（用户截图：**soyo 说「你这话怎么又说一遍」**）——
+    //    **同一条群消息被送进模型两次** ✗
+    //
+    //    现场（主号日志，协议端只推了一次）：
+    //      · 01:27:10  把 Anon 那两条**合并**处理 ✓（`段=text,text`）
+    //      · 01:27:12  **同一条（ID …529）又进来** ✗（从续批那条路）
+    //      · 01:27:15  她又答了一遍 ⇒ 所以她看见了重复内容，说「你这话怎么又说一遍」✗
+    //
+    //    ⇒ 不管是哪个入口进来的（实时 / 合并续批 / 补看 / 重放），
+    //      **同一个 `message_id` 只走一次模型** ✓
+    //    ⚠️ 只对**群聊**做（私聊那条路的 id 语义不同）；
+    //      记录保留 10 分钟就够了（同一条 id 被复用的情况几乎不存在 ✓）
+    //    ⚠️⚠️ **合并续批的事件必须放行**（`_sources` 就是它的标记，见 `flushPendingGroup`）——
+    //      续批是 `{...caller, message: 各条拼起来}`，它的 `message_id` **继承自批次里的某一条**
+    //      ⇒ 那条 id 早就处理过了 ⇒ 不加这个豁免就会**把续批整批拦掉**（"生成期间又收到"直接失效 ✗✗）
+    if (event?.message_type === 'group' && !event?._sources) {
+      const mid0 = String(event?.message_id ?? '').trim();
+      if (mid0) {
+        this._handledMids ??= new Map();
+        const now0 = Date.now();
+        const seenAt = this._handledMids.get(mid0);
+        if (seenAt && now0 - seenAt < 10 * 60 * 1000) {
+          log.info(`[去重] 这条群消息刚处理过（id=${mid0}）⇒ 不再走一遍模型 ✓`);
+          return;
+        }
+        this._handledMids.set(mid0, now0);
+        if (this._handledMids.size > 800) {
+          for (const [k, t] of this._handledMids) {
+            if (now0 - t > 10 * 60 * 1000) this._handledMids.delete(k);
+          }
+        }
+      }
+    }
+    // ⚠️⚠️ 2026-10-17 加（用户：「加一个对主人的**短时记忆区**，同样计入 owner.md，
+    //    **到 48 小时**前的数据就清除，主要用于**跨群和私聊**的记忆，所以**只用总结记忆**即可，
+    //    而且要**记下时间**以便调用和删除」）——
+    //    **他本人**说话（私聊 / 群里都算 ✓ 这就是"跨群"✓）⇒ 攒一条原始话；
+    //    攒够几条由 `owner-recent.js` 让模型**总结**成短句、写进 owner.md 末尾区块 ✓
+    //    ⚠️ 只攒**他本人**的（`config.ownerQQ`）—— 别人的话不进这块 ✗
+    //    ⚠️ 这里只"攒"（落盘，很便宜）；总结是后台定时做的 ✓
+    if (config.ownerQQ && String(event?.user_id ?? '') === String(config.ownerQQ)) {
+      const saidNow = this._textOf(event);
+      try {
+        ownerRecent.noteOwnerTalk(saidNow, {
+          source: event?.message_type === 'group' ? `群${event?.group_id}` : '私聊',
+        });
+      } catch (e) {
+        log.debug(`[近况] 攒一条失败（不影响回复）：${e.message}`);
+      }
+      // ⚠️⚠️ 2026-10-17 加（用户：「**如果和她说哪个是记错了，她能自己删掉那条吗，
+      //    要用模型判断是否删除**」）——
+      //    后台让**模型**判一下他这句是不是在"指出某条近况记错了 / 要删"（⚠️ 不用关键词快判 ✗），
+      //    是就**安静地删掉**那条 ✓
+      //    ⚠️ 不 await（不许挡这条正常回复 ✓）
+      //    ⚠️⚠️ 用户明确要求（2026-10-17）：「**不要专门说一遍，就正常聊天回话即可**」
+      //      ⇒ 删完**什么都不用说** —— 她本来就要回他这句，正常聊天里自然会带过 ✓
+      //      （所以这里只删、不发言 ✗）
+      void ownerRecent
+        .judgeAndFix(saidNow)
+        .catch((e) => log.debug(`[近况] 删除判定出错：${e.message}`));
+    }
     // ⚠️⚠️ 2026-10-16 加（用户截图：「**saki 回应的有点不对，最好 saki 也去看一遍
     //    视频的大概再回**」）——
     //    群里（群友 / 同类）甩 B 站链接时，她原来只知道"有个链接"，不知道视频讲什么
@@ -7287,7 +7824,23 @@ export class Bot {
     //    **已经存好了的事实** —— 否则她答应了、其实没存上（用户最怕的就是这个）。
     //    ⚠️ 但**先同步粗筛**（`wantsRemind`）：不命中的消息连 await 点都不产生
     //       （否则会给每条消息加一个微任务延迟，把对时序敏感的套件带抖，见那个方法的注释）。
-    if (this.wantsRemind(event)) await this.maybeRemind(event);
+    //
+    // ⚠️⚠️⚠️ 2026-10-19 **停用**（用户：「B 的粗筛删了吧，现在 A 应该足够精准了」）——
+    //    现场：Saki 只说「行吧，那我先躺会儿。你弄完喊我一声，别一个人熬到天亮」，
+    //    这条粗筛因为命中「喊我」⇒ 白花一次小模型调用 ⇒ 模型自己补了个 `hour=0`
+    //    ⇒ 00:00 用谷雨号（10000014）发了一条「你让我提醒你起来的，到时候了」✗✗
+    //
+    //    用户判断：**暗号路径（`[工具:提醒 {...}]`）已经够准**，这条"兜底解析"只会自己编时间。
+    //    ⇒ 现在**只走暗号**：她主动写 `[工具:提醒 {"何时":"…","说什么":"…"}]` 才定提醒，
+    //      没写就是没要提醒（跟"她没写 `[工具:交付]` 就不发文件"同一个规矩）✓
+    //
+    //    ⚠️ 代价（记在这儿，别当 bug 查）：`[工具:提醒]` 目前**只支持新建**
+    //      （`args.何时` + `args.说什么` ⇒ `remind.add`），所以「取消 / 改时间」这两个动作
+    //      暂时没有入口了（原来靠这里的 `amend === 'cancel' | 'update'`）。
+    //      要恢复**补一个 `[工具:取消提醒]` 暗号**，🚫 别再开回这条"每句都猜"的路 ✗
+    //    ⚠️ `wantsRemind()` / `maybeRemind()` 两个函数**保留着没删**（几百行、动它风险大），
+    //      但**没有任何调用点**了 —— 哪天要用得先看清楚上面这段再说。
+    // if (this.wantsRemind(event)) await this.maybeRemind(event);
     // ⚠️⚠️ 2026-09-29 加（用户实测：他连着三次说「把下次提醒的被提醒人改成XXX」，
     //    她三次都应「行，改好了」，**实际一次都没改** ✗）。
     //
@@ -7511,7 +8064,17 @@ export class Bot {
           );
         }
       } catch (e) {
-        await this.sendText(event, `没记上：${e.message}`, { reply: true });
+        // ⚠️ 2026-10-19：`e.message` 有两种 —— 一种是**他看得懂的**（「格式不对」那种），
+        //    一种是 `fetch failed` / `HTTP 500` 这种**内部货**（同类问题用户截图抓到过：
+        //    群里出现过「开场生成失败：fetch failed」）⇒ 内部货一律换成人话 ✓
+        const m0 = String(e?.message ?? '');
+        await this.sendText(
+          event,
+          /fetch failed|ECONN|ENOTFOUND|ETIMEDOUT|socket|HTTP\s*\d{3}/i.test(m0)
+            ? '没记上，等会儿再试一次'
+            : `没记上：${m0}`,
+          { reply: true },
+        );
       }
       return;
     }
@@ -7596,6 +8159,32 @@ export class Bot {
     //       所以现在分三种：全站热门 / 按题材（mc→搜「我的世界」）/ 按 UP 主（籽岷）。
     //       后两种走**搜索接口**（`space/arc` 拉投稿那个接口实测会被限流 -799，
     //       搜索接口稳得多，籽岷那条用 `keyword=籽岷&order=pubdate` 拿他最新的）。
+    // ⚠️⚠️ 2026-10-19 加（用户：「把询问 b站内容的问题都接入 b站工具，**直接把问题丢给 agent**」）——
+    //    **群里**问 B站 ⇒ 丢给 agent 真去查（它能自己换关键词、翻页面），
+    //    回来由她**用自己的话、带人设**分条说 ✓
+    //    ⚠️ 私聊不走这条（`startRun` 是群任务）⇒ 那边继续走下面那条接口直查的老路 ✓
+    {
+      const hotQ0 = config.bilibili?.enable !== false ? bilibili.hotQuery(promptText) : null;
+      const gidB = String(event.group_id ?? '');
+      if (
+        hotQ0 &&
+        String(event.message_type ?? '') === 'group' &&
+        gidB &&
+        biliAgent.askBili({
+          bot: this,
+          gid: gidB,
+          by: String(event.user_id ?? ''),
+          byName: String(event.sender?.card || event.sender?.nickname || ''),
+          question: promptText,
+          event,
+        })
+      ) {
+        log.info(`[B站] 问内容 → 丢给 agent 查（${hotQ0.mode}）：${promptText.slice(0, 40)}`);
+        this.touchConversation(event);
+        return;
+      }
+    }
+
     const hotQ = config.bilibili?.enable !== false ? bilibili.hotQuery(promptText) : null;
     if (hotQ) {
       let out = '';
@@ -7632,6 +8221,33 @@ export class Bot {
         try {
           bilibili.setLastHot(promptText, out);
         } catch {}
+        this.touchConversation(event);
+        return;
+      }
+    }
+
+    // ⚠️⚠️ 2026-10-19：**问"我的 B站"也一样丢给 agent**（群里；私聊保留下面的老路）✓
+    {
+      const gidB2 = String(event.group_id ?? '');
+      if (
+        gidB2 &&
+        String(event.message_type ?? '') === 'group' &&
+        !privateWork.noGimmick() &&
+        bilibili.looksLikeVideoQuestion(
+          promptText,
+          String(event.user_id) === String(config.ownerQQ),
+          String(config.bilibili?.ownerUid ?? ''),
+        ) &&
+        biliAgent.askBili({
+          bot: this,
+          gid: gidB2,
+          by: String(event.user_id ?? ''),
+          byName: String(event.sender?.card || event.sender?.nickname || ''),
+          question: promptText,
+          event,
+        })
+      ) {
+        log.info(`[B站] 问投稿/播放 → 丢给 agent 查：${promptText.slice(0, 40)}`);
         this.touchConversation(event);
         return;
       }
@@ -8065,117 +8681,14 @@ export class Bot {
       }
     }
 
-    // 需要联网的话先搜一下（免费 Bing 抓取，失败就安静降级）
-    let webSearch = '';
-    let searchQuery = null;
-
-    // ① 先用**规则**过一遍：明显不需要联网的直接跳过，不浪费一次模型调用。
-    //    ⚠️ 踩过的坑：一开始对每条消息都调模型规划搜索词，
-    //       结果每条消息多花一次调用（慢一倍、贵一倍），
-    //       而且把测试里「抓最后一次 system prompt」的逻辑全打乱了。
-    //    ⚠️ 又踩一次：别用 `^` 锚定 —— 消息前面常带 `@ZYHG `，锚定会漏判。
-    //    ⚠️ 2026-09-12 再踩：原来「记住[:：]」要求**必须有冒号**，
-    //       所以「清空对话」（没冒号，靠前半段命中）行，但
-    //       「记住 是bro的大豆就是大豆」这种**空格分隔**的教学就漏了 quickSkip。
-    //       冒号改成可选。
-    const quickSkip = /(清空对话|你学到了什么|忘记[:：]?|记住[:：]?)/.test(promptText);
-
-    // ── 合并式预搜索（默认走这条）──
-    //
-    // 用户要求：「可以，合并吧，速度慢一点其实也更像人类了」。
-    //
-    // 旧流程分三步，每步只看得到局部：规划（决定搜什么，**看不到搜索结果**）
-    // → 搜索（规则代码，只拿摘要）→ 主聊天。结果规划的判断经常错。
-    // 真实踩过：群友说「给我来碗忘情牛肉面」，规划判 NONE（当成了菜），
-    // 主模型于是回「忘情的没有」—— 其实那是王琪的歌。
-    //
-    // 合并后：**同一个上下文决定 + 执行**，而且需要细节时**把网页正文读进来**，
-    // 主模型拿到的不是几条摘要，是真材料。
-    //
-    // ⚠️ 代价：多 1~2 次模型调用 + 一次抓页，慢 3~8 秒。
-    //    配置里 `search.merged: false` 可以退回旧的三步流程。
-    const useMerged = config.search?.merged !== false && !quickSkip;
-    if (useMerged) {
-      try {
-        const recentCtx = this.recentContextFor(event, promptText);
-      const pre = await preSearch(promptText, recentCtx, {
-          knowledge: hasKnowledge() ? knowledgeText().slice(0, 4000) : '',
-          // ⚠️ 本地知识库里已经有这个词条 → 别去搜（白花时间，还会搜到不相干的东西）
-          // ⚠️ 2026-09-21：动画库改成**人设驱动**（`anime/<库名>.md`），
-          //    这里不能再写死 `'anime.md'` —— 换了人设就判断不出来了。
-          knownLocally: (s) =>
-            [...animeLibNames(), 'group-memory.md'].some((n) =>
-              mentionsAnyTerm(s, n),
-            ),
-          // ⚠️ 2026-10-03 加（方案⑤）：**问的是群里的人** ⇒ 内部话题，不搜。
-          //    答案在群资料/人员名录里；上网只会搜到同名的陌生人（还慢 3~15 秒）。
-          knownPerson: (s) => {
-            try {
-              return names.mentioned(s, event.group_id).length > 0;
-            } catch {
-              return false;
-            }
-          },
-          signal: AbortSignal.timeout(config.search?.mergedTimeoutMs ?? 45000),
-        });
-        if (pre.searched && pre.block) {
-          webSearch = pre.block;
-          searchQuery = pre.query;
-        }
-      } catch (e) {
-        log.warn(`预搜索失败，退回旧流程：${e.message}`);
-      }
-    }
-
-    // ── 旧的三步流程（预搜索没接管时走这里，兜底）──
-    if (!webSearch && !useMerged) {
-      if (quickSkip) {
-        log.debug('规则判定不需要联网，跳过搜索规划');
-      } else if (config.search?.planWithModel !== false) {
-        try {
-          const recentCtx = this.recentContextFor(event, promptText);
-          const plan = await searchMod.planSearch(promptText, recentCtx, {
-            signal: AbortSignal.timeout(config.search?.planTimeoutMs ?? 15000),
-          });
-          searchQuery = plan.query;
-        } catch (e) {
-          log.debug(`搜索规划失败，退回规则：${e.message}`);
-          searchQuery = searchMod.shouldSearch(promptText);
-        }
-      } else {
-        searchQuery = searchMod.shouldSearch(promptText);
-      }
-
-      // ② 认图问题：用视觉特征当搜索词（模型规划不出来这种）
-      if (!searchQuery && vision && searchMod.looksLikeIdentify(promptText)) {
-        const feat = vision
-          .replace(/^#+\s*【[^】]*】.*$/gm, '')
-          .replace(/^###.*$/gm, '')
-          .replace(/[⚠️]/g, '')
-          .replace(/\s+/g, ' ')
-          .trim();
-        if (feat) {
-          searchQuery = feat.slice(0, 90);
-          log.info(`认图问题 → 用视觉特征联网查：「${searchQuery.slice(0, 40)}」`);
-        }
-      }
-
-      if (searchQuery) {
-        try {
-          // 用 searchSmart：结果不相关会自动换更精准的词重试
-          const results = await searchMod.searchSmart(searchQuery, {
-            limit: config.search?.results ?? 5,
-          });
-          webSearch = searchMod.searchBlock(searchQuery, results);
-          log.info(
-            `[${who}] 联网搜索「${searchQuery.slice(0, 40)}」→ ` +
-              (results.length ? `${results.length} 条` : '无结果（降级）'),
-          );
-        } catch (e) {
-          log.warn(`搜索失败：${e.message}`);
-        }
-      }
-    }
+    // ⚠️⚠️ 2026-10-19 删（用户：「**记得把之前的搜索逻辑删干净**」）——
+    //    原来这里有一整套"**每条消息都先过一遍要不要联网**"：
+    //      · `preSearch()`（合并式预搜索：规划 + 真搜 + 抓正文，每条多花 3~15 秒）
+    //      · 旧三步流程（`planSearch` → `shouldSearch` → `searchSmart`）
+    //      · 认图问题拿视觉特征去搜
+    //    ⇒ 现在**搜索是她自己的工具调用**（`[工具:搜 {"词":"…"}]`，见 `toolSearchQuery`）——
+    //      她说要查才查 ✓ 两套并存会**同一句搜两遍**（白等好几秒、白花钱 ✗）
+    //    ⚠️ 别把这段加回来：那就等于"每条都绕开她自己的判断去搜" ✗
 
     // 有人发合并转发 → 展开内容（不然只看到占位符）。
     // ⚠️ 占位符写法不统一，实测 NapCat 发的是「[转发消息]」，
@@ -8322,7 +8835,7 @@ export class Bot {
       voluntary,
       promptText,
       vision,
-      webSearch,
+      '',
       forwardText,
       logText,
       solveMode,
@@ -8439,7 +8952,9 @@ export class Bot {
     //    **这个才是引用回复的正确用途**」。
     //    对：那条是几分钟前的，群里早刷过去好几条了 —— 不引用的话，
     //    群里没人（包括他自己）知道她在回哪一条。
-    const quoteThisReply = lateMs > 0 ? true : this.shouldQuote(event, false);
+    // ⚠️ 2026-10-19 改 `const` → `let`：`[工具:引用 …]` 是在**生成之后**才执行的，
+    //    而她点名要引用就等于"明确要挂引用框" ⇒ 那条路要能把这里改成 true ✓
+    let quoteThisReply = lateMs > 0 ? true : this.shouldQuote(event, false);
     let buffer = '';
     let stopped = false;
 
@@ -8538,7 +9053,9 @@ export class Bot {
       const backupOpts =
         backupReady && useBackup
           ? {
-              model: String(bkCfg.model),
+              // ⚠️ 2026-10-19：上次降档成功过就直接用它（`bkGoodModel`），
+              //    省掉一次"先撞 429 再降"的往返 ✓
+              model: String(bkGoodModel || bkCfg.model),
               baseURL: String(bkCfg.baseURL),
               apiKey: String(bkCfg.apiKey ?? ''),
             }
@@ -8588,6 +9105,11 @@ export class Bot {
             //    ⇒ **低电量时一并关掉思考链**：很低/垂危要的本来就是短句，
             //      思考链在这里纯属白烧 token，还会把正文挤掉 ✓
             if (batteryLife.replyCap() > 0) return true;
+// ⚠️⚠️ 2026-10-19 加（真事故）：**工作模式的私聊一律开思考链** ——
+//    工具暗号是让她"写在**心里**"的（客户看不到那层），没有思考链就**无处可写** ✗
+//    现场：客户号在同类池里 ⇒ 被判成"机对机"⇒ `th.peer: true` ⇒ 思考链被关
+//    ⇒ 她连着三句一个暗号都没写，全靠代码兜底（兜底只能猜，猜漏就出事 ✗）
+if (privateWork.isWorkChat(event)) return false;
             const fromPeer = (() => {
               try {
                 return this.isPeerBot(String(event?.group_id ?? ''), String(event?.user_id ?? ''));
@@ -8651,17 +9173,64 @@ export class Bot {
       } catch (e) {
         const why = String(e?.message ?? e).slice(0, 80);
         if (backupOpts.model) {
-          // ① 主动走的就是**备选** ⇒ 回主模型重跑一次
-          log.warn(`[备选模型] 生成失败（${why}）→ **自动回主模型重跑一次**`);
-          full = '';
-          buffer = '';
-          for await (const delta of streamChat(messages, controller.signal, {
-            maxTokens: solveMode ? solveMaxTokens() : batteryLife.replyCap(),
-            ...solveOpts,
-            report: solveReport,
-          })) {
-            full += delta;
-            buffer += delta;
+          // ① 主动走的就是**备选** ⇒
+          //    ⚠️⚠️ 2026-10-19 改（用户：「**失败之后先自动改成同类的低等级模型吧，
+          //       比如 2.5flash，再用主模型**」）——
+          //    原来是"备选一失败就直接回主模型"⇒ 可备选整天 429（今天 231 次全挂），
+          //    等于这条路从来没通过、每次都白等一轮 ✗
+          //    ⇒ 现在：**先降一档同族模型**（3.5-flash → 2.5-flash，便宜/额度更宽松），
+          //      那一档也失败，才回主模型 ✓
+          //    ⚠️ 降档候选：配置 `llm.backup.lowModel` 优先（配了就只试它一个），
+          //      没配就用 `lowTiersOf()` 推 —— **同代 `-lite` 打头**（实测那个真能用）✓
+          const lowCfg = String(bkCfg.lowModel ?? '').trim();
+          const lowList = lowCfg ? [lowCfg] : lowTiersOf(backupOpts.model);
+          let okLow = false;
+          for (const lowModel of lowList) {
+            if (!lowModel || lowModel === backupOpts.model) continue;
+            log.warn(
+              `[备选模型] 生成失败（${why}）→ **先降一档用 ${lowModel} 再试一次**` +
+                '（同族低档，额度更宽松）',
+            );
+            try {
+              full = '';
+              buffer = '';
+              // ⚠️ 还是备选那套 baseURL/key，只换模型名；`genOpts` 已经不带 thinking ✓
+              for await (const delta of streamChat(messages, controller.signal, {
+                maxTokens: solveMode ? solveMaxTokens() : batteryLife.replyCap(),
+                ...genOpts,
+                ...backupOpts,
+                model: lowModel,
+                report: solveReport,
+              })) {
+                full += delta;
+                buffer += delta;
+              }
+              okLow = true;
+              log.info(`[备选模型] 降到 ${lowModel} 之后**成了** ✓（这一轮没花主模型的钱）`);
+              // ⚠️ 记住这次成功的档位 —— 下次直接用它，省掉一次必然失败的往返 ✓
+              bkGoodModel = lowModel;
+              break;
+            } catch (e2) {
+              log.warn(
+                `[备选模型] 降档的 ${lowModel} 也失败（${String(e2?.message ?? e2).slice(0, 60)}）`,
+              );
+            }
+          }
+          if (!okLow && !lowList.length) {
+            log.info('[备选模型] 推不出可降的档位（名字里没版本号）⇒ 直接回主模型');
+          }
+          if (!okLow) {
+            log.warn(`[备选模型] 生成失败（${why}）→ **自动回主模型重跑一次**`);
+            full = '';
+            buffer = '';
+            for await (const delta of streamChat(messages, controller.signal, {
+              maxTokens: solveMode ? solveMaxTokens() : batteryLife.replyCap(),
+              ...solveOpts,
+              report: solveReport,
+            })) {
+              full += delta;
+              buffer += delta;
+            }
           }
         } else if (bkAny) {
           // ② 主动走的是**主模型**（或没开备选）⇒ **用备选顶上**（用户选 B：全场景）✓
@@ -8752,6 +9321,131 @@ export class Bot {
           full = draftBefore.full;
           buffer = draftBefore.buffer;
           log.warn(`${tag} 退回第一次那半截草稿`);
+        }
+      }
+
+      // ⚠️⚠️ 2026-10-19 加（用户：「**联网搜索也包装为工具，工作模式和正常聊天都用**」）——
+      //
+      //    她在**思考链**里写了 `[工具:搜 {"词":"…"}]` ⇒ 这一条先**别发**：
+      //    真去搜一次 ⇒ 把材料补进上下文 ⇒ **重新生成** ⇒ 只把最后那一条发出去 ✓
+      //    （和 dsh 的"调工具 → 看结果 → 继续说"一个逻辑；客户看到的只有一条回复 ✓）
+      //
+      //    ⚠️ 判据看**两处**：思考链（主路）+ 正文（兜底 —— 模型偶尔抄进正文）✓
+      //    ⚠️ **只搜一次**（`searchRounds`）—— 第二次生成里她可能又写一遍，
+      //      再跟就会没完没了地烧钱 ✗
+      //    ⚠️ 搜不到东西 ⇒ **照原样发**（别让她因为"查不到"沉默 ✗）
+      //    ⚠️ 丢草稿前后都用 `draftBefore`（和上面"截断重试"同一套写法），
+      //      不然两次生成的内容会拼在一起 ✗
+      let searchRounds = 0;
+      while (searchRounds < 1) {
+        const want = toolSearchQuery(`${solveReport.reasoning ?? ''}\n${buffer}`);
+        if (want) {
+          try {
+            toolStats.hit('搜');
+          } catch {}
+        }
+        if (!want) break;
+        searchRounds++;
+        log.info(`[${who}] 她在思考链里说要搜「${want.slice(0, 40)}」⇒ 先查再回 ✓`);
+        let block = '';
+        try {
+          const results = await searchMod.searchSmart(want, {
+            limit: config.search?.results ?? 5,
+          });
+          if (results?.length) block = searchMod.searchBlock(want, results);
+          log.info(
+            `[${who}] 工具搜「${want.slice(0, 40)}」→ ` +
+              (results?.length ? `${results.length} 条` : '无结果（照原样发）'),
+          );
+        } catch (e) {
+          log.warn(`工具搜失败（照原样发）：${e.message}`);
+        }
+        if (!block) break;
+        messages.push({
+          role: 'user',
+          content:
+            '# 【你自己刚查到的】（这一行别人看不到）\n' +
+            block +
+            '\n\n⚠️ 照这个**用你平时的口气**回他：别照抄原文、别说"我搜了一下"、别列条目。',
+        });
+        full = draftBefore.full;
+        buffer = draftBefore.buffer;
+        try {
+          await _genOnce({});
+          log.info(`[${who}] 查完重新生成：${buffer.trim().length} 字 ✓`);
+        } catch (e) {
+          log.warn(`查完重新生成失败（用上一版）：${e.message}`);
+          full = draftBefore.full;
+          buffer = draftBefore.buffer;
+        }
+      }
+
+      // ⚠️⚠️ 2026-10-19 加（用户：「**把其他能打包成工具的全部列一遍吧，准备全部改造好**」）——
+      //    第一批是**只读**的四个：查服务器 / 花了多少 / 学到什么 / 好感度。
+      //    她在思考链里写 `[工具:查服务器]` ⇒ 这里真去查 ⇒ 材料塞回上下文 ⇒ **重新生成一次**，
+      //    这样她说出口的就是**真数据**，不是编的 ✓
+      //    ⚠️ 只跑一轮（`toolRounds`）—— 防她反复写、没完没了烧钱 ✗
+      //    ⚠️ 机器人互聊（不开思考链）不给清单、也不执行 ✓
+      if (!this.thinkDisabledFor(event)) {
+        let toolRounds = 0;
+        while (toolRounds < 1) {
+          const calls = parseToolCalls(`${solveReport.reasoning ?? ''}\n${buffer}`);
+          if (!calls.length) break;
+          toolRounds++;
+          const parts2 = [];
+          for (const c of calls.slice(0, 3)) {
+            log.info(`[${who}] 她在思考链里调了工具「${c.name}」⇒ 真去执行 ✓`);
+            const got = await this.runReadTool(c.name, c.args, event);
+            // ⚠️ 有副作用的（戳回去 / 闭嘴）**不需要材料、也不用重生成** ✓
+            if (got) parts2.push(`### ${c.name}\n${got}`);
+          }
+          if (!parts2.length) break;
+          messages.push({
+            role: 'user',
+            content:
+              '# 【你自己查到的】（这一行别人看不到）\n' +
+              parts2.join('\n\n') +
+              '\n\n⚠️ 照这个**用你平时的口气**回他：别照抄原文、别列条目、别说"我查了一下"。',
+          });
+          full = draftBefore.full;
+          buffer = draftBefore.buffer;
+          try {
+            await _genOnce({});
+            log.info(`[${who}] 查完重新生成：${buffer.trim().length} 字 ✓`);
+          } catch (e) {
+            log.warn(`查完重新生成失败（用上一版）：${e.message}`);
+            full = draftBefore.full;
+            buffer = draftBefore.buffer;
+          }
+        }
+      }
+
+      // ⚠️ 2026-10-19 加（工具化第四批）：她写了 `[工具:引用 {"引用谁":"…"}]` ⇒ **强制挂引用框**。
+      //    `quoteThisReply` 是在**生成之前**算的（那次算的时候她还不知道要引谁），
+      //    而"点名要引用谁"本身就是"明确要引用"⇒ 在这儿补一刀 ✓
+      //    ⚠️ **只在群里**：私聊的 `pickQuoteTarget` 直接退回当前这条（引用他自己刚说的那句很怪）✗
+      if (String(event?.group_id ?? '') && String(event?._quoteWant ?? '').trim()) {
+        if (!quoteThisReply) log.info('[引用] 她点名要引用 ⇒ 这次强制挂引用框 ✓');
+        quoteThisReply = true;
+      }
+
+      // ⚠️⚠️ 2026-10-19 加：**拍照走工具** —— 她在思考链里写 `[工具:拍照 {"拍什么":"…"}]`
+      //    ⇒ 这里真去生成 ✓（不重生成：图和文字是两条，`runPhoto()` 自己补发 ✓）
+      //    🚫 **工作模式禁用**（谈项目时发自拍不合场景 ✗）
+      if (!privateWork.isWorkChat(event) && !this.thinkDisabledFor(event)) {
+        const wantShot = toolPhotoAsk(`${solveReport.reasoning ?? ""}\n${buffer}`);
+        if (wantShot) {
+          try {
+            toolStats.hit('拍照');
+          } catch {}
+        }
+        if (wantShot) {
+          log.info(`[${who}] 她在思考链里说要拍照：「${wantShot.slice(0, 40)}」⇒ 真去生成 ✓`);
+          this.runPhoto(
+            event,
+            { scene: wantShot, withSelf: true, together: false, index: -1, raw: "" },
+            String(buffer ?? ""),
+          );
         }
       }
 
@@ -9364,7 +10058,13 @@ export class Bot {
       //    ⚠️ 不走 `recent`：那条路对**主人**的私聊是故意不记的（执行回执不进上下文 ✗），
       //       而用户测试用的号正好是主人号 ⇒ 那边捞出来永远是空的 ✗
       try {
-        privateWork.noteMyReply(event, stripMarkers(full).trim(), this);
+        // ⚠️⚠️ 2026-10-19 改（用户：「**直接只在思考链输出调用工具的信息吧，
+        //    正文一概不输出，和 dsh 一模一样**」）——
+        //    工具调用现在走**思考链**（`solveReport.reasoning`，客户看不见），
+        //    正文侧只留一条兜底（第四参 = 剥离前的原文，第五参）。
+        //    ⚠️ 原来只传了 `stripMarkers(full)` ⇒ 暗号在传进来之前就被剥掉了，
+        //      正文兜底其实**永远解析不到**（顺手修掉 ✓）
+        privateWork.noteMyReply(event, stripMarkers(full).trim(), this, solveReport.reasoning, full);
       } catch {}
 
       // ── 「说完又想补充」（2026-09-13 用户要求）────────────────────
@@ -9375,6 +10075,12 @@ export class Bot {
         voluntary,
         who,
       });
+
+      // ⚠️⚠️ 2026-10-19 加（用户截图：「诶，你自己也翻了一堆图啊，我看看」——
+      //    话说一半就断了）——**5~10 秒后把下一段接上** ✓
+      //    · 用 `void` 不 await：判定要一次模型调用（最多 6 秒），不能拖慢这条消息 ✓
+      //    · 🚫 工作模式内部会直接 return（客户私聊里不许补这种话，会编出不存在的东西）✓
+      void this.maybeHalfSay(event, { said: stripMarkers(full).trim(), who });
 
       // ── 口癖节流：记下这次的**开场白**（2026-09-14 用户要求）─────────
       // 见 src/tic.js 顶部注释（「问这个干嘛」为什么光改人设不够）。
@@ -11182,6 +11888,615 @@ export class Bot {
     }
   }
 
+  /**
+   * ⚠️⚠️ 2026-10-19 加（用户：「**工具清单模式直接应用到非工作模式的其他地方**，
+   *    群聊内的工作模式也用上，**只有机器人互聊这种不开思考链的，同时不要用上工具清单**」）——
+   *
+   * **这次生成会不会关掉思考链**（true = 关）。提示词构建和真正发请求**必须用同一个判据**，
+   * 否则会出现「提示词里有工具清单、但这次没思考链」⇒ 她根本没地方写暗号 ✗
+   *
+   * 四档（和 `config.llm.thinking` 那三个勾一一对应）：
+   *   · 低电量（要短句）⇒ **关**
+   *   · 工作模式的私聊 ⇒ **开**（要在"心里"写工具暗号，见 `isWorkChat`）
+   *   · 同类机器人 + 剧情 ⇒ 看 `th.questPeer`
+   *   · 同类机器人 ⇒ 看 `th.peer`（**默认关** ⇒ 这条就是"机器人互聊不用工具清单"那条）
+   *   · 剧情里和真人 ⇒ 看 `th.quest`（默认开）
+   */
+  thinkDisabledFor(event) {
+    const th = config.llm?.thinking ?? {};
+    try {
+      if (batteryLife.replyCap() > 0) return true;
+    } catch {}
+    try {
+      if (privateWork.isWorkChat(event)) return false;
+    } catch {}
+    const peer = (() => {
+      try {
+        return this.isPeerBot(String(event?.group_id ?? ''), String(event?.user_id ?? ''));
+      } catch {
+        return false;
+      }
+    })();
+    const quest = (() => {
+      try {
+        return this.questLive(String(event?.group_id ?? ''));
+      } catch {
+        return false;
+      }
+    })();
+    if (peer && quest) return th.questPeer !== false;
+    if (peer) return th.peer !== false;
+    if (quest) return th.quest === true;
+    return false;
+  }
+
+  /**
+   * ⚠️⚠️ 2026-10-19 加（工具化第三批：「记住」）—— **她要记的内容有没有依据**。
+   *
+   * 清单里这条标的是「**建议加『只记他自己说的』这道闸**」，原因是：
+   *   工具化以后**没有 `judgeMemoryCommand` 那次模型复核了**（她自己写暗号就是明确指令），
+   *   万一她**编**一条内容写进知识库 ⇒ 那句假知识会**长期污染所有回答**，
+   *   而且用户根本不知道是哪次记坏的 ✗（比"没记住"严重得多）。
+   *
+   * 判据是**确定性**的：把她要写的内容和「他说过的话」（本条 + 最近几句）放到一起，
+   * 算 **2-gram 覆盖率** —— 覆盖不到 35% 就判"没依据"。
+   *   · 原样照抄 / 稍微改写 / 他自己说大半她补一点点 ⇒ 都能过 ✓
+   *   · 凭空编一整段新事实 ⇒ 过不了（宁可这次不记，等她听到他亲口说再记）✓
+   *
+   * 🚫 这里**不是**在猜人话（不判断"他是不是在教她"）—— 只判断"这段字是不是从他嘴里出来的"，
+   *    属于可复现的字符串判据 ✓
+   */
+  factGrounded(fact, basis) {
+    // 去掉空白 + 标点符号（`.` `,` `、` `「」` 这些不参与判据）
+    const norm = (s) => String(s ?? '').replace(/[\s\p{P}\p{S}]+/gu, '');
+    const f = norm(fact);
+    const b = norm(basis);
+    if (!f || !b) return false;
+    // 很短的内容没法算覆盖率 ⇒ 直接看"他有没有说过这几个字"
+    if (f.length <= 6) return b.includes(f);
+    let hit = 0;
+    let total = 0;
+    for (let i = 0; i + 2 <= f.length; i += 2) {
+      total++;
+      if (b.includes(f.slice(i, i + 2))) hit++;
+    }
+    return total > 0 && hit / total >= 0.35;
+  }
+
+  /**
+   * ⚠️⚠️ 2026-10-19 加（工具化第四批：「提醒」）—— 把她写的「何时」**算成一个时间戳**。
+   *
+   * ⚠️ 为什么不在这一步调模型：原来 `maybeRemind()` 花一次调用就是为了把「明天早上八点」
+   *    拆成 hour/minute/period/day 再让 `remind.resolveWhen()` 换算。既然**是她自己写的暗号**，
+   *    她在思考链里就能写成固定格式 ⇒ 这儿只做**字符串解析**，一次模型调用都不花 ✓
+   *
+   * 只认这几种**固定格式**（认不出就返回 0，由调用方告诉她"问准他几点"，
+   * 🚫 **绝不替人猜**"应该是明天早上" —— 猜错就是半夜把人叫醒 ✗）：
+   *   · `08:00` / `8:00` / `8点` / `8点半` / `8点30`      —— 只给钟点：今天已过 ⇒ 顺到明天
+   *   · `今天 08:00` / `明天 8点` / `后天 8点`
+   *   · `2026-10-20 08:00` / `2026/10/20 8:00`
+   *   · `+30分钟` / `30分钟后` / `+2小时` / `半小时后`
+   *
+   * @returns {number} 毫秒时间戳；0 = 算不出（或已经过去了）
+   */
+  parseToolWhen(when, now = Date.now()) {
+    const s = String(when ?? '').trim();
+    if (!s) return 0;
+    const MIN = 60 * 1000;
+    const DAY = 24 * 60 * MIN;
+
+    // ① 相对时间：+30分钟 / 30分钟后 / +2小时 / 半小时后
+    if (/^\+/.test(s) || /(分钟|分|小时|钟头|h)\s*后/.test(s)) {
+      const half = /半\s*(个)?\s*(小时|钟头)/.exec(s);
+      const num = /(\d{1,3})\s*(分钟|分|小时|钟头|h|min)/i.exec(s);
+      let ms = 0;
+      if (num) {
+        const n = Number(num[1]);
+        const unit = /小时|钟头|h/i.test(num[2]) ? 60 * MIN : MIN;
+        ms = n * unit;
+      } else if (half) {
+        ms = 30 * MIN;
+      }
+      if (!ms) return 0;
+      return now + ms;
+    }
+
+    // ② 绝对：先看有没有 YYYY-M-D
+    const abs = /^\s*(\d{4})\s*[-/年]\s*(\d{1,2})\s*[-/月]\s*(\d{1,2})\s*日?\s*([\d:：点]{1,6})?\s*$/.exec(s);
+    const clockOf = (x) => {
+      const m = /(\d{1,2})\s*[:：点]\s*(半|\d{1,2})?/.exec(String(x ?? ''));
+      if (!m) return null;
+      const h = Number(m[1]);
+      const mi = m[2] === '半' ? 30 : Number(m[2] ?? 0) || 0;
+      if (!Number.isFinite(h) || h > 23 || mi > 59) return null;
+      return { h, mi };
+    };
+    if (abs) {
+      const c = clockOf(abs[4]) ?? { h: 0, mi: 0 };
+      const t = new Date(+abs[1], +abs[2] - 1, +abs[3], c.h, c.mi, 0, 0).getTime();
+      return t > now + 30 * 1000 ? t : 0;
+    }
+
+    // ③ 今天 / 明天 / 后天 + 钟点
+    const dayWord = /^(今天|今晚|明天|明晚|后天)\s*/;
+    const dw = dayWord.exec(s);
+    const rest = dw ? s.slice(dw[0].length) : s;
+    const c = clockOf(rest);
+    if (!c) return 0;
+    let t = new Date(now);
+    t.setHours(c.h, c.mi, 0, 0);
+    let at = t.getTime();
+    if (dw) {
+      const w = dw[1];
+      const plus = w === '明天' || w === '明晚' ? 1 : w === '后天' ? 2 : 0;
+      at += plus * DAY;
+    } else if (at <= now + 30 * 1000) {
+      // 只给了钟点、今天这个点已经过了 ⇒ 顺到明天（和 `remind.resolveWhen` 同一个口径）
+      at += DAY;
+    }
+    return at > now + 30 * 1000 ? at : 0;
+  }
+
+  /**
+   * ⚠️ 2026-10-19 加（工具化第四批：「引用」）—— 她**点名**要引用谁时，按名字挑。
+   *
+   * 原来"该引用哪条"永远要花一次模型调用（`judgeQuoteTarget`），
+   * 可她自己在思考链里就能说清「引用李四那条」⇒ 这一步只做**匹配**，不再问模型 ✓
+   *
+   * @returns {string} 要引用的 message_id；她没点名 ⇒ 空串（交回原来的判定）；
+   *                   点了名但候选里没有 ⇒ 退回当前这条（老行为，不退化）
+   */
+  pickQuoteByWant(cands, want, fallback) {
+    const w = String(want ?? '').trim();
+    if (!w) return '';
+    const list = Array.isArray(cands) ? cands : [];
+    // ⚠️ 从**最新**往回找：同一个人连发几条时，她要回的是最后那句 ✓
+    for (let i = list.length - 1; i >= 0; i--) {
+      const c = list[i];
+      const nm = String(c?.name ?? '').trim();
+      const uid = String(c?.userId ?? '').trim();
+      if (!nm && !uid) continue;
+      if (nm === w || uid === w || (nm && (nm.includes(w) || w.includes(nm)))) {
+        if (c?.messageId) return String(c.messageId);
+      }
+    }
+    return String(fallback ?? '');
+  }
+
+  /**
+   * ⚠️ 2026-10-19 第五批：**群里的派活三件套**（`动这一单` / `催进度` / `停`）。
+   * 单独一个方法（不塞进 `runReadTool`）—— 因为它**只在群里 + 只有主人**能用，
+   * 两道闸都在这里，`runReadTool` 开头只做一次分派 ✓
+   */
+  async runGroupTool(name, args, event) {
+      // ⚠️⚠️ 2026-10-19 第五批：**群里的派活三件套**（`动这一单` / `催进度` / `停`）——
+      //    ⚠️ 两道闸：**只在群里**（私聊走工作模式那条路）+ **只有主人能用**（别人写这个暗号一律拒）。
+      //    ⚠️ 产物发到群文件那条路**不用这儿管** —— `startRun()` 里已经有 `sendArtifacts` ✓
+      if (name === '动这一单' || name === '催进度' || name === '停' || name === '搜图') {
+        const gid5 = String(event?.group_id ?? '');
+        if (!gid5) {
+          // ⚠️⚠️ **私聊要静默返回空串**，不能返回一句"用不上" ——
+          //    这三个名字在**工作模式私聊**里是 `private-work.js` 自己的工具
+          //    （`TOOL_NAMES` 里同名的三个）⇒ 那边已经在处理了；
+          //    这边要是再塞一句"私聊用不上"进上下文，就会把她的工作模式搞乱 ✗
+          return '';
+        }
+        if (this.speakerRole(event) !== 'owner') {
+          log.info(`[工具] 「${name}」被拦：${event?.user_id} 不是主人（role=${this.speakerRole(event)}）`);
+          return '⚠️ 这个只有主人能让我干 —— 别答应他，照实说一句就行';
+        }
+        // ⚠️ 2026-10-19：搜图的启动逻辑抽成一个局部函数 ——
+        //    「搜图」工具和下面「动这一单」的**兜底**都走这一条 ✓
+        const IMAGE_SEARCH_REPLY =
+          '✅ 已经在找了（不用你做别的）。\n' +
+          '⚠️ 只回他**一句**，用你**平时那个口气**（比如「行，等会儿」「我翻翻」）—— ' +
+          '别解释你打算怎么找、别保证给几张、🚫 也别提"挑""顺眼""发图""工具""文件夹"这些词。';
+        const beginImageSearch = (what) => {
+          void import('./image-search.js')
+            .then((m) =>
+              m.startImageSearch({
+                bot: this,
+                gid: gid5,
+                by: String(event?.user_id ?? ''),
+                byName: String(event?.sender?.card || event?.sender?.nickname || ''),
+                task: `搜「${what}」的图，挑出几张好的发到群里`,
+              }),
+            )
+            .catch((e) => log.warn(`[工具] 搜图没起来：${e.message}`));
+          log.info(`[工具] 搜图（主人）：${String(what).slice(0, 40)}`);
+        };
+
+        // ── 搜图（2026-10-19，用户要求做成独立工具）──
+        //    ⚠️ 走自己的管线：**边搜边发、直接发图片、每张配她一句话**、
+        //       只发 agent 挑过的、跨次去重（全部在 `src/image-search.js` 里）
+        if (name === '搜图') {
+          const what = String(
+            args?.搜什么 ?? args?.什么 ?? args?.要什么 ?? args?.内容 ?? args?.说明 ?? '',
+          )
+            .trim()
+            .slice(0, 200);
+          if (!what) return '⚠️ 没说搜什么（要「搜什么」这个参数）';
+          beginImageSearch(what);
+          // ⚠️⚠️ 2026-10-19 改（用户截图：她回「行吧，我去找找爱祥的图，**看着顺眼的才发**」——
+          //    「像个 agent 在汇报工作，没有人设」）：**返回材料里别写机制** ✗
+          //    原来那句写了"挑好的图会一张张直接发、每张你自己会配一句话" ⇒ 她把机制**复述**出来了。
+          //    ⇒ 现在只给**一句事实**（在找了）+ 一句口径（一句话、你自己的口气）✓
+          return IMAGE_SEARCH_REPLY;
+        }
+        if (name === '催进度') {
+          let note = '';
+          try {
+            note = String(agentBridge.runningNote() ?? '');
+          } catch {}
+          if (!note) return '（这会儿手上没有在做的活）';
+          return `${note}\n⚠️ 用你自己的口气说做到哪了，别提 agent / 脚本 / 工作区。`;
+        }
+        if (name === '停') {
+          try {
+            // ⚠️ `bot` 传 `null` —— `cancel()` 自己会往群里发一句「行，那个我停了（」，
+            //    这里再让她说一遍就变两条了 ⇒ 让它**只杀进程不说话**，话由她说 ✓
+            const r = await agentBridge.cancel(gid5, null, { mark: false });
+            if (!r?.ok) return `⚠️ 没停成：${String(r?.what ?? '手上没有在跑的活')}`;
+            return '✅ 停了。⚠️ 用你自己的口气说一句"停了啊"，别解释机制。';
+          } catch (e) {
+            return `⚠️ 没停成：${e.message}`;
+          }
+        }
+        // ── 动这一单 ──
+        const task = String(args?.做什么 ?? args?.活 ?? args?.任务 ?? args?.事 ?? '')
+          .trim()
+          .slice(0, 600);
+        if (!task) return '⚠️ 没说要做啥（要「做什么」这个参数）';
+        // ⚠️⚠️ 2026-10-19 兜底（当天实测：`[搜图]` 的日志**一次都没出现过** ——
+        //    模型两次都拿「动这一单」去搜图「找点爱祥图过来」，提示词加强两轮也没用 ✗）：
+        //    ⇒ **任务是"要图"就直接转搜图管线**，别走产物打包那条老路
+        //      （老路会把图当文件发，还会说"太大 / 一次发不完 / 留在我这儿"）。
+        //    ⚠️ 这是兜底、不是主判据（见 `looksLikeImageTask()` 的说明）✓
+        if (looksLikeImageTask(task)) {
+          log.info(`[工具] 「动这一单」被兜底改成搜图（任务是"要图"）：${task.slice(0, 40)}`);
+          beginImageSearch(task);
+          return IMAGE_SEARCH_REPLY;
+        }
+        // ⚠️ 2026-10-19 加：**同一件事正在跑就别再开一遍** ——
+        //    她可能连着两轮都写这个暗号，而 `startRun()` 碰到"已经有一个在跑"会
+        //    **先停旧的、再开新的** ⇒ 活被反复重启、前面的进度全白跑 ✗
+        //    （`agentBridge.handle()` 那条自动派活的路跟这儿**不会撞**：它接管过就 `return true`，
+        //      `bot.handle()` 压根不会跑 ⇒ 她没机会再写一次 ✓）
+        let runningNow = '';
+        try {
+          runningNow = String(agentBridge.runningNote() ?? '');
+        } catch {}
+        if (runningNow && runningNow.includes(task.slice(0, 8))) {
+          log.info('[工具] 「动这一单」跳过：这件事**已经在做了**，不重复开');
+          return '✅ 这件事**已经在做了**，不用再开一遍。\n⚠️ 用你自己的口气说一句"在弄了"就行。';
+        }
+        // 🚫 **不许 await** —— 这活要跑好几分钟，await 会把她这条回复卡住 ✗
+        agentBridge
+          .startRun({
+            bot: this,
+            gid: gid5,
+            by: String(event?.user_id ?? ''),
+            byName: String(event?.sender?.card || event?.sender?.nickname || ''),
+            task,
+            related: true,
+          })
+          .catch((e) => log.warn(`[工具] 群里派活失败：${e.message}`));
+        log.info(`[工具] 群里派活（主人）：${task.slice(0, 40)}`);
+        return (
+          `✅ 已经开做了：「${task.slice(0, 70)}」\n` +
+          '（做完产物会**自动发到这个群**，不用你操心）\n' +
+          '⚠️ 回他一句"这就动手"就行，🚫 别提 agent / 脚本 / 工作区 / 自动。'
+        );
+      }
+  }
+
+  /**
+   * ⚠️ 2026-10-19 加：**跑一个通用工具**（目前全是**只读**的）——
+   * 返回一段"材料"，由调用方塞回上下文让她照着说 ✓
+   * ⚠️ 读不到就返回一句"查不到"，**别抛**（抛了这条回复就废了）✗
+   */
+  async runReadTool(name, args, event) {
+    // ⚠️⚠️⚠️ 2026-10-19 加（用户：「**改，私聊工作模式下一定不要触发了，
+    //    要不然一下就露馅了**」）——
+    //    工作模式 = 工作号私聊**客户**。那个场合**一个工具都不许触发**：
+    //      · 提示词里的工具清单本来就不注入（`!privateWork.isWorkChat(event)`）⇒ 她通常不知道有；
+    //      · 但**光靠"不给她清单"不够** —— 她可能从上下文里学着写出暗号（或者哪天提示词又改漏），
+    //        一旦真执行，工资 / 花费 / 服务器状态这些**一眼是机器人**的东西就会被她说出来 ✗✗
+    //        ⇒ **执行层也硬挡**，而且**全都挡**（不是只挡财务那两个）✓
+    //    ⚠️ 返回 `''`（不是一句提示）是**故意的**：返回「这个场合我不查」她会照着说出来 ⇒ 露馅 ✗
+    //       调用方那边 `if (got) parts2.push(...)` 为假 ⇒ **不塞材料、不重生成** ⇒ 她照原稿发 ✓
+    if (privateWork.isWorkChat(event)) {
+      log.warn(`[工具] 工作模式私聊 ⇒ 拒绝执行「${name}」（客户对话里一个工具都不许触发）`);
+      return '';
+    }
+    // ⚠️ 2026-10-19：**记一次调用**（界面「工具调用」那页要显示累计/今日）✓
+    try {
+      toolStats.hit(name);
+    } catch {}
+    // ⚠️ 群里那三件（派活 / 看进度 / 停）走 `runGroupTool`（它自带"只在群里 + 只有主人"两道闸）✓
+    if (name === '动这一单' || name === '催进度' || name === '停' || name === '搜图') {
+      return this.runGroupTool(name, args, event);
+    }
+    try {
+      if (name === '查服务器') {
+        const d = await queryServer(config.status?.host, (config.status?.cacheSeconds ?? 300) * 1000);
+        const txt = describe(d, config.status?.name ?? '服务器');
+        return String(txt ?? '').slice(0, 1200);
+      }
+      if (name === '花了多少') {
+        const day = spend.dayStats();
+        const month = spend.monthStats();
+        return [
+          `今天：${JSON.stringify(day).slice(0, 300)}`,
+          `这个月：${JSON.stringify(month).slice(0, 500)}`,
+        ].join('\n');
+      }
+      if (name === '工资') {
+        // ⚠️⚠️ 2026-10-19 加（用户：「**先把问工资这个改成工具吧，不用关键词判断了**」）——
+        //    原来"问工资"靠 `spend.looksLikeSpendQuestion()` 那套**关键词快判**：
+        //    「赚|挣|工资|薪水|收入|进账|利润|净赚|到手|薪资」+「多少|几|查|说|这个月…」
+        //    ⇒ 换个说法就漏（而且"净赚"这种词还会把正常聊天顶掉）✗
+        //    ⇒ 改由她自己决定调这个工具（AGENTS 铁律：理解人话的判据别用关键词）✓
+        //    ⚠️ 返回的是**事实**（数字 + 往月 + 物价参照），语气她自己说 ✓
+        //    ⚠️ 只说「工资」，**不许出现「净赚」**（用户 2026-09-13 定：那是账房先生的词）
+        const mAll = spend.monthlyStats({ limit: 6 });
+        const cur = mAll[0] ?? spend.monthStats();
+        const sm = spend.salaryOf(cur);
+        const lines = [
+          `本月（${cur.month ?? ''}）：工资进账 ${Math.round(sm.earned)} 元｜干了 ${cur.calls ?? 0} 次活`,
+        ];
+        const prev = mAll.slice(1).filter((x) => Number.isFinite(Number(x.earned)));
+        if (prev.length) {
+          lines.push(`往月：${prev.map((x) => `${x.month} 工资 ${Math.round(x.earned)} 元`).join('｜')}`);
+        }
+        // 物价参照（能买几件什么）—— 让"够不够花"有个具体感，不然只有数字很干
+        try {
+          const lc = spend.livingContext(sm.earned);
+          if (lc && !/^（/.test(String(lc))) lines.push(`物价参照：\n${lc}`);
+        } catch {}
+        lines.push('⚠️ 用你自己的话说这些数字，**一个都不许改**；别提「净赚 / 成本 / 乘以多少」');
+        return lines.join('\n');
+      }
+      if (name === '学到什么') {
+        const es = listEntries() ?? [];
+        if (!es.length) return '（这会儿还没学到什么）';
+        return es
+          .slice(-25)
+          .map((e) => `- ${String(e.topic ?? e.title ?? '')}：${String(e.fact ?? e.body ?? '').slice(0, 80)}`)
+          .join('\n');
+      }
+      if (name === '查车次') {
+        // ⚠️⚠️ 2026-10-19 加（用户：「**加一个查看火车车次信息的工具**，
+        //    群友提到 / 正在坐 / 询问 / 赶火车之类的场景时，去查一次对应车次的信息」）——
+        //    ⚠️ 12306 没有"只凭车次查时刻"的公开接口（余票接口要**发站/到站的车站代码**，
+        //      还得先解决反爬 cookie）⇒ 这里走**现有的联网搜索**，把词造得像人问的 ✓
+        const code = String(args?.车次 ?? args?.车 ?? args?.说明 ?? "").trim();
+        if (!code) return "";
+        const q = `${code} 次列车 时刻表 途经站 到站时间 正晚点 今天`;
+        log.info(`[工具] 查车次「${code}」⇒ 搜：${q}`);
+        try {
+          const results = await searchMod.searchSmart(q, { limit: config.search?.results ?? 5 });
+          if (!results?.length) return `（没查到 ${code} 次的信息）`;
+          const block = searchMod.searchBlock(`${code} 次列车`, results);
+          return String(block ?? "").slice(0, 1600);
+        } catch (e) {
+          return `（查 ${code} 次失败了：${e.message}）`;
+        }
+      }
+      if (name === '戳回去') {
+        // ⚠️ 2026-10-19 加（工具化第二批）：她想戳回去就戳 ✓
+        const uid2 = String(event?.user_id ?? '');
+        const gid2 = String(event?.group_id ?? '');
+        if (!uid2) return '';
+        await this.sendPokeBack(uid2, gid2);
+        return ''; // 有副作用，不需要材料
+      }
+      if (name === '闭嘴') {
+        // ⚠️ 2026-10-19 加：她想"这个群先别说话"就静音一段时间 ✓
+        //    ⚠️ 私聊没意义（没有群）⇒ 直接不理；⚠️ 上限 30 分钟，别被一句话关一整天 ✗
+        const gid3 = String(event?.group_id ?? '');
+        if (!gid3) {
+          log.info(`[工具] 「闭嘴」只在群里有效 ⇒ 私聊忽略 ✓`);
+          return '';
+        }
+        const raw = String(args?.多久 ?? args?.多久时间 ?? args?.时间 ?? '');
+        const mMin = /(\d+)\s*分/.exec(raw);
+        const mHour = /(\d+)\s*(个)?小时/.exec(raw);
+        let ms = mHour ? Number(mHour[1]) * 3600000 : mMin ? Number(mMin[1]) * 60000 : 600000;
+        ms = Math.max(60000, Math.min(ms, 30 * 60000));
+        this.muteGroup(gid3, ms, '她自己说想歇会儿');
+        return '';
+      }
+      if (name === '好感度') {
+        const uid = String(event?.user_id ?? '');
+        const gid = String(event?.group_id ?? '');
+        const v = affinity.get(uid, gid);
+        return `他（${event?.sender?.nickname ?? uid}）跟你的好感度：${v}`;
+      }
+
+      // ⚠️⚠️ 2026-10-19 第三批：**记住**（真写知识库）——
+      //    工具化省掉的是 `judgeMemoryCommand` 那次模型复核（她写暗号 = 明确指令），
+      //    但**加了一道更硬的闸**：`factGrounded`（内容必须在他自己说的话里有依据）✓
+      if (name === '记住') {
+        const topic = String(args?.主题 ?? args?.话题 ?? args?.题目 ?? '').trim().slice(0, 40);
+        const fact = String(args?.内容 ?? args?.事实 ?? args?.原文 ?? '').trim().slice(0, 400);
+        if (!topic || !fact) return '⚠️ 这次没记：参数不全（要「主题」和「内容」两个）';
+        if (this.isShareLike(event)) {
+          return '⚠️ 这次没记：他发的是分享/转发卡片 —— 那是别人的话，不是他在告诉你';
+        }
+        let basis = '';
+        try {
+          const cur = String(msg.extractText(msg.toSegments(event?.message)) ?? '');
+          const gid0 = String(event?.group_id ?? '');
+          const near = gid0
+            ? (recent.recentItems(gid0, 6) ?? []).map((m) => String(m.text ?? '')).join('\n')
+            : '';
+          basis = `${cur}\n${near}`;
+        } catch {
+          basis = '';
+        }
+        if (!this.factGrounded(fact, basis)) {
+          log.info(
+            `[工具] 「记住」被拦：要记的内容在他自己说的话里找不到依据（${fact.slice(0, 40)}）`,
+          );
+          return (
+            '⚠️ 这次**没有**记下来：你要写的这条内容，在他的话里找不到依据（像你自己编的）。\n' +
+            '⇒ 要么照他**原话**记，要么先问他一句确认，🚫 别凭空写一条进去。'
+          );
+        }
+        const gid = String(event?.group_id ?? '');
+        let res;
+        try {
+          res = await learn(topic, fact, {
+            by: String(event?.user_id ?? ''),
+            byName: event?.sender?.card || event?.sender?.nickname || String(event?.user_id ?? ''),
+            where: event?.message_type === 'group' ? `群${gid}` : `私聊${event?.user_id ?? ''}`,
+            groupId: gid || `dm:${String(event?.user_id ?? '')}`,
+          });
+        } catch (e) {
+          return `⚠️ 这次没记成：${e.message}`;
+        }
+        if (!res?.ok) return `⚠️ 这次没记成：${res?.error ?? '不知道为啥'}`;
+        try {
+          reloadKnowledge();
+        } catch (e) {
+          log.warn(`记住之后重载知识库失败（下次重启会生效）：${e.message}`);
+        }
+        log.info(`[工具] 记住了【${res.topic ?? topic}】→ ${res.file ?? 'learned.md'}`);
+        return (
+          `✅ 已经写进学习档案：\n· 主题：${res.topic ?? topic}\n· 内容：${fact}\n` +
+          `· 落到：${res.file ?? 'learned.md'}${res.replaced ? '（覆盖了同名主题的旧内容）' : '（新增）'}\n` +
+          '⚠️ 回他一句"记下了"就行，用你自己的口气，别列条目、别说"已写入学习档案"。'
+        );
+      }
+
+      // ⚠️ 2026-10-19 第三批：**忘掉**（撤掉最近记下的那条）——
+      //    ⚠️ 权限照旧（服主/管理员）—— 这条是**真删数据**，工具化不放宽它 ✓
+      if (name === '忘掉') {
+        const gid = String(event?.group_id ?? '');
+        if (!gid) return '⚠️ 这次没撤：撤回记忆只在群里有效';
+        const role = this.speakerRole(event);
+        if (role !== 'owner' && role !== 'staff' && role !== 'admin') {
+          log.info(`[工具] 「忘掉」被拦：${event?.user_id} 没权限（role=${role}）`);
+          return '⚠️ 这次没撤：撤回记忆只有服主和管理员能用（你可以照实说一句，或者笑着拒绝他）';
+        }
+        let r;
+        try {
+          r = observe.undoLast(gid);
+        } catch (e) {
+          return `⚠️ 这次没撤成：${e.message}`;
+        }
+        if (!r?.ok) return `⚠️ 这次没撤成：${r?.reason ?? '不知道为啥'}`;
+        const isTeach = r.kind === 'teach';
+        const title = String(r.title ?? '').trim();
+        log.info(
+          `[工具] 撤回了群 ${gid} 最近一次${isTeach ? '教学' : '观察'}` +
+            `${title ? `（「${title}」）` : ''}（${r.removed ?? ''} 条）`,
+        );
+        return (
+          `✅ 撤掉了：${
+            isTeach
+              ? title
+                ? `他刚教我的【${title}】那条`
+                : '他刚教我的那条'
+              : `刚才那次记的（${r.removed ?? 0} 条）`
+          }\n` +
+          '⚠️ 用你自己的口气说一句"忘了 / 撤了"就行，别提"知识库""数据库""记忆"这些词。'
+        );
+      }
+
+      // ⚠️ 2026-10-19 第四批：**提醒**（真定一条）——
+      //    时间由 `parseToolWhen()` **确定性解析**（不花模型调用），算不出就不定 ✓
+      if (name === '提醒') {
+        const when = String(args?.何时 ?? args?.时间 ?? args?.几点 ?? '').trim();
+        const what = String(args?.说什么 ?? args?.做什么 ?? args?.事 ?? '').trim().slice(0, 200);
+        if (!what) return '⚠️ 这次没记：没说提醒他什么事';
+        const at = this.parseToolWhen(when);
+        if (!at) {
+          return (
+            `⚠️ 这次没记：「${when || '（没写时间）'}」这个时间我没算准。\n` +
+            '⇒ 要么按固定格式重写一次（`明天 08:00` / `08:00` / `+30分钟`），要么问他一句几点。'
+          );
+        }
+        const gid = String(event?.group_id ?? '');
+        let r;
+        try {
+          r = remind.add({
+            at,
+            what,
+            by: String(event?.user_id ?? ''),
+            byName: names.of(event?.user_id, gid),
+            targets: [],
+            groupId: gid,
+            now: Date.now(),
+          });
+        } catch (e) {
+          return `⚠️ 这次没记成：${e.message}`;
+        }
+        if (!r?.ok) return `⚠️ 这次没记成：${r?.reason ?? '不知道为啥'}`;
+        const d = new Date(at);
+        const p2 = (n) => String(n).padStart(2, '0');
+        const atText = `${d.getMonth() + 1}月${d.getDate()}日 ${p2(d.getHours())}:${p2(d.getMinutes())}`;
+        log.info(`[工具] 定下提醒：${atText}「${what}」（${gid ? `群${gid}` : '私聊'}）`);
+        return (
+          `✅ 记下了：${atText} 提醒他「${what}」\n` +
+          '⚠️ 回他时用你自己的口气应一声（把时间带上），别说得像日程系统。'
+        );
+      }
+
+      // ⚠️⚠️ 2026-10-19 加（用户：「补上取消提醒工具」）——
+      //    停掉 `maybeRemind()` 那条兜底之后，"不用提醒了 / 别叫我了"就**没人管了**
+      //    （原来靠它的 `amend === 'cancel'`，那条路已经关了）。
+      //    ⇒ 这里补一个暗号工具：`[工具:取消提醒]` ⇒ 撤掉他自己**最近一条还没发出去**的提醒 ✓
+      //    ⚠️ 只认"他自己 + 这个群/私聊"的最近一条（`remind.latest`），
+      //      已经发过的不动（`remind.latestSent` 那种情况在提示词里让她如实说"已经发过了"）✓
+      if (name === '取消提醒') {
+        const gid0 = String(event?.group_id ?? '');
+        let cur = null;
+        try {
+          cur = remind.latest({ by: String(event?.user_id ?? ''), groupId: gid0 });
+        } catch (e) {
+          return `⚠️ 这次没取消成：${e.message}`;
+        }
+        if (!cur) {
+          return (
+            '⚠️ 这次没取消：他手上**没有还没发出去的提醒**。\n' +
+            '⇒ 回他一句"没找到要取消的提醒"就行，别编"取消好了"✗'
+          );
+        }
+        try {
+          remind.cancel(cur.id);
+        } catch (e) {
+          return `⚠️ 这次没取消成：${e.message}`;
+        }
+        const d0 = new Date(cur.at);
+        const p3 = (n) => String(n).padStart(2, '0');
+        const atText0 = `${d0.getMonth() + 1}月${d0.getDate()}日 ${p3(d0.getHours())}:${p3(d0.getMinutes())}`;
+        log.info(`[工具] 取消提醒：${atText0}「${cur.what}」（${gid0 ? `群${gid0}` : '私聊'}）`);
+        return (
+          `✅ 取消了：${atText0} 提醒他「${cur.what}」那条\n` +
+          '⚠️ 回他一句"不提醒了"就行，把你刚取消的那个时间带上，别说得像日程系统。'
+        );
+      }
+
+      // ⚠️ 2026-10-19 第四批：**引用**（只说"想引谁"，挂不挂引用框在发送那一刻定）✓
+      if (name === '引用') {
+        const who = String(args?.引用谁 ?? args?.谁 ?? args?.人名 ?? '').trim().slice(0, 20);
+        if (!who) return '';
+        try {
+          event._quoteWant = who;
+        } catch {
+          return '';
+        }
+        log.info(`[工具] 她想引用「${who}」那条 ✓`);
+        return '';
+      }
+    } catch (e) {
+      return `（这个我没查到：${e.message}）`;
+    }
+    return '';
+  }
+
   privateAllowed(userId) {
     if (config.trigger.privateChat === false) return false;
     const uid = String(userId ?? '');
@@ -11195,6 +12510,9 @@ export class Bot {
     //    这个人被我接管了 ⇒ **不回他**（跟号级接管一个语义，但只管他一个）✓
     //    ⚠️ 放在最前面：别等白名单判完再说，接管就是最高优先级 ✓
     //    ⚠️ 消息照常落盘（`recent` 在收到时就记了）⇒ 我切回机器人它还认得这段 ✓
+    // ⚠️ 2026-10-19：**接管中照旧一句都不回** ✓
+    //    （`/接管` 这条指令是在**消息入口更前面**处理的，见 `onRaw` 那段 ——
+    //      不然接管一开就再也收不到消息、关不掉了 ✗）
     if (privateWork.friendTakeover(uid)) return false;
     if (privateWork.isAllowedFriend(uid)) return true;
     return (config.trigger.allowPrivateUsers ?? []).includes(uid);
@@ -12913,6 +14231,234 @@ export class Bot {
     }
     if (webSearch) parts.push(webSearch);
 
+    // ⚠️ 2026-10-19 加：**主人的作息 / 固定习惯**（只有跟主人说话时才带）——
+    //    和 `owner.md` 同一个规矩：那是他私人的东西，群友看不到 ✓
+    // ⚠️⚠️ 2026-10-19 加（用户：「**拍照生图也打包成工具吧，并且工作模式要禁用**」）——
+    //    做成工具（思考链里给暗号）比原来的正文标记更干净：正文里看不到 ✓
+    //    🚫 **工作模式（工作号私聊客户）禁用** —— 谈项目的时候发自拍不合场景 ✗
+    // ⚠️ 2026-10-19：判据统一成「**这次开不开思考链**」（`thinkDisabledFor`）——
+    //    用户：「**只有机器人互聊这种不开思考链的，同时不要用上工具清单**」✓
+    if (!this.thinkDisabledFor(event) && !privateWork.isWorkChat(event)) {
+      parts.push(
+        [
+          "",
+          "# 【想拍张照 / 发自拍的时候】",
+          "- 你想让他看到你**现在这个样子**（自拍、随手拍、让他看看你在哪）⇒ 在心里写一行：",
+          "- `[工具:拍照 {\"拍什么\":\"一句话说清画面\"}]`",
+          "- 这一行**他看不到**；代码会真去生成一张图，然后**单独发给他** ✓",
+          "- ⚠️ **别滥用**：一次对话最多一两张；他说「拍个照 / 让我看看」才拍 ✓",
+          "- 🚫 你手上有活要交（工作模式）时不要拍照 ✗",
+          "",
+          // ⚠️⚠️⚠️ 2026-10-19 加（用户：「**该把判据改成暗号和正文绑在一起的工具都改一下，
+          //    提高工具的准确利用**」）——
+          //    原来暗号是"另起一行的指令"，很容易变成：嘴上说"我查一下"，
+          //    却没写暗号 ⇒ 代码什么都不做，她照样编一个答案发出去 ✗
+          //    ⇒ 统一一条铁律管住下面**所有**工具：**说要做什么，就必须同时写那一行**；
+          //      写了那一行，代码就一定会真去做 ✓
+          // ⚠️⚠️⚠️ 2026-10-19 加（用户：「2，1先不做」—— 第 2 项：把工具说明做成
+          //    结构化短句。机制上模型是拿"名字 + 一句描述"做语义匹配的，
+          //    所以**先给一张速查表**（一行一个、只有"什么情况用它 + 参数"），
+          //    下面各节的细节和禁令当补充 —— 这样第一眼能匹配，细节也没丢 ✓
+          //    ⚠️ 不动原有那几节（删了会丢禁令，那正是"她会乱做"的地方）✓
+          '# 【工具速查（先看这张表选，再看下面各节的细节）】',
+          '格式：`名字` ↦ 什么情况下用它（要填的参数）',
+          '- `查服务器` ↦ 服务器开没开、怎么进、卡不卡、现在谁在（无参数）',
+          '- `花了多少` ↦ 今天 / 这个月花了多少钱、多少 token（无参数）',
+          '- `学到什么` ↦ 你学过哪些东西（无参数）',
+          '- `好感度` ↦ 某个人跟你的好感度（无参数）',
+          '- `戳回去` ↦ 他戳你、你也想戳回去（无参数）',
+          '- `闭嘴` ↦ 群里太吵 / 你想歇会儿（多久，**最多 30 分钟**）',
+          '- `查车次` ↦ 某趟火车的时刻表 / 途经站 / 正晚点（车次号，G/D/K/T/Z 那种）',
+          '- `搜` ↦ 答案在**外面**（新闻、教程、别人的事、你手上没有的数据）（词）',
+          '- `拍照` ↦ 他想看你现在什么样 / 你想让他看看（拍什么）',
+          '- `记住` ↦ 他**亲口**告诉你一条该长期记住的事（主题 + 内容，内容照他原话）',
+          '- `忘掉` ↦ 他让你去掉刚记下的那条（无参数，只有服主/管理员能用）',
+          '- `提醒` ↦ 他让你**到点提醒他**（何时 + 说什么）',
+          '- `引用` ↦ 该引用某条消息回（引用谁）',
+          '- `动这一单` / `催进度` / `停` / `搜图` ↦ **只在群里、只有他本人**能让你动本机',
+          '⚠️ 这张表**只用来选工具**；每个工具的规矩、禁令看下面各节 ✓',
+          '',
+          '# 【工具的铁律：说要做，就必须同时写那一行暗号】',
+          '- 你**打算做某件"要真去做"的事**（查服务器 / 查车次 / 上网搜 / 拍照 / 记下来 /',
+          '  定提醒 / 引用某条 / 开始做活…）⇒ **这一轮就必须写出对应的 `[工具:名字 {…}]`** ✓',
+          '- 🚫 **只说不写 = 空头承诺**：你说「我查一下」「我记一下」「这就开始」却没写那一行 ⇒',
+          '  代码一个字都不会执行，你下一句就只能**编**（他会立刻发现你说的东西是假的）✗',
+          '- ✅ 反过来也成立：写了那一行，代码**一定**真去执行，材料会塞回给你，',
+          '  你再用自己的口气说一句就行 —— 所以**别怕写**，也别写了又自己瞎猜结果 ✓',
+          '- ⚠️ 那行暗号**他自己一个字都看不到**（发出去之前会被剥干净），',
+          '  所以它不会露出来、也不影响你句子的通顺 ✓',
+          '',
+          // ⚠️⚠️⚠️ 2026-10-19 加（用户给了"模型是靠工具 description 做语义匹配"那段
+          //    机制说明，要求照这个思路把工具用得准一点）——
+          //    机制上说：每个工具的名字 + 说明**就是给你做语义匹配的**，
+          //    所以"先把这一步要干什么想清楚，再找描述最贴的那个"才是正确用法；
+          //    而不是"看到有工具就挑一个用" ✗
+          '# 【怎么挑工具：先想清这一步要干什么，再找最贴的那一个】',
+          '- 每个工具的说明都写着「什么时候用它」。**先明确你现在这一步的目标**，',
+          '  再找描述最贴合的那个 —— 明显只有一个贴 ⇒ 就用那一个 ✓',
+          '- ⚠️ **两个都像的时候，用这条分**：',
+          '  · 答案在**你自己手里的数据**（在线人数、花了多少、学过什么、某个人的好感度、',
+          '    那趟车的时刻）⇒ 用「查…」那类工具，**别去上网搜**；',
+          '  · 答案在**外网**（新闻、教程、别人的事、他不告诉你就查不到的东西）⇒ 用「搜」✓',
+          '- 🚫 **不需要就别写**：自己会的、闲聊、常识、算得出来的 ⇒ 一个工具都不调 ✗',
+          '  （调了只会多等几秒，还可能把材料带偏）',
+          '- 🚫 **一轮最多 3 个**，而且只在真的缺这一块材料时才写 ✓',
+          '- ⚠️ 拿不准要不要调 ⇒ **先想要不要真去做这件事**：',
+          '  要真做（真查、真截、真记、真开工）⇒ 必须写；只是嘴上提一下 ⇒ 别写 ✓',
+          '',
+          '# 【要问「查得到的东西」时，别瞎猜 —— 查一下】',
+          "- 服务器开没开 / 怎么进 ⇒ `[工具:查服务器]`",
+          "- 你花了多少钱 / 多少 token ⇒ `[工具:花了多少]`",
+          "- **你赚了多少 / 工资 / 这个月挣了多少 / 够不够花 ⇒ `[工具:工资]`**（含往月和物价参照）",
+          "- 你学过什么 ⇒ `[工具:学到什么]`",
+          "- 某个人跟你的好感度 ⇒ `[工具:好感度]`",
+          "- **火车 / 车次的事**（有人说自己正在赶车、问某趟车到没到、为什么晚点、几点到哪站）",
+          "  ⇒ `[工具:查车次 {\"车次\":\"G1234\"}]`（车次照他说的写，`G/D/K/T/Z` 开头那种）",
+          // ⚠️ 2026-10-19 加（用户：「**问哪里到哪里有什么交通工具时，先调用上网工具查询，
+          //    然后再调用查火车工具获取可以坐什么火车**」）——
+          //    ⇒ 教她**分两步**：先搞清"有哪些交通方式/有哪些车次"，再按车次查细节 ✓
+          "- **问「从 A 到 B 怎么去 / 有什么车」这种** ⇒ 分两步走：",
+          "  ① 先 `[工具:搜 {\"词\":\"A 到 B 有什么交通工具 高铁 火车\"}]` 看有哪些方式、哪些车次",
+          "  ② 看清车次之后，再 `[工具:查车次 {\"车次\":\"G1234\"}]` 查它几点到、经过哪几站",
+          "  ⚠️ 两步都要写，**顺序别反**（先查车次得先知道车次号）✓",
+          "  ⚠️ 他要是**已经说了车次**（「G1234 怎么还没到」）⇒ 直接查车次，不用先搜 ✓",
+          // ⚠️⚠️ 2026-10-19 加（用户：「**我刚才说的这种也只是范例**，
+          //    能不能在遇到**类似场景**时，思考链能自己调用上这两个工具」）——
+          //    上面那两句**只是举例，不是清单**：把判断权还给模型，按"话里有没有出行/车次的意思"来定 ✓
+          "  🚫 **别把上面两句当成清单** —— 那只是**例子**。只要你觉得「这话跟出行 / 坐车 / 赶时间有关」",
+          "     （不管是问路、说自己在路上、问几点的车、抱怨晚点、说要去某个城市…），就照同一套路子去查 ✓",
+          "  ⚠️ **拿不准要不要查 ⇒ 先查**（多花十几秒，比瞎说强）✓",
+          "  🚫🚫 **绝不许凭印象编时刻表 / 到站时间 / 正晚点 / 票价** —— 编错了比说「我查不到」糟得多 ✗✗",
+          // ⚠️⚠️ 2026-10-19 加（用户：「**群友说明天得去趟杭州，但 bot 不知道群友在哪个城市**」）——
+          //    群成员的「所在城市」**拿不到**：QQ 资料里那个 `area` 字段 SnowLuma 不给
+          //    （同一个接口连生日都不给，日志里有「这个协议端没给这个字段」）✗
+          //    ⇒ 所以**缺出发地就问一句**，别猜、也别瞎查 ✓
+          "- ⚠️ 他**没说从哪出发**（只说「要去趟杭州」）⇒ **先问一句**「你从哪儿出发呀」，别猜 ✗",
+          "- ⚠️ 群友在哪个城市、坐没坐过车 —— **这些你拿不到**（QQ 资料不给），**别编**，问就是了 ✓",
+          "- ⚠️ **他说过的自己住哪 / 常在哪，要记牢** —— 群里谁说过「我在杭州」「我这边下雨了」，",
+          "  以后问出行就能用它当出发地，**别每次都问一遍** ✓",
+          // ⚠️ 2026-10-19 加（用户截图：群里 Anon 说「这也就是照时刻表推的，实时到哪看不到」——
+          //    用户问「**确实看不到吗**」）——确实看不到：铁路不上报 GPS，没有公开的"实时位置"接口 ✗
+          //    ⇒ 教她**说实的**：能给的只有时刻表 + 到发时刻，别说成"我知道它在哪"✓
+          "- ⚠️ **列车的实时位置你看不到**（没有任何公开接口，铁路不上报 GPS）⇒ 只能说「按时刻表推」；",
+          "- ✅ **说不出实的就说实的**：「这是照时刻表推的，实时的我也看不着」——这句话比编一个位置强得多 ✓",
+          "",
+          "# 【想动手的时候】",
+          "- 他戳你、你也想戳回去 ⇒ `[工具:戳回去]`",
+          "- 群里太吵 / 你想歇会儿 ⇒ `[工具:闭嘴 {\"多久\":\"10分钟\"}]`（**最多 30 分钟**）",
+          "- 写在心里，别人看不到；代码查完会把材料给你，你再**用人的口气**说一句 ✓",
+          "- ⚠️ 你自己知道的、闲聊、算得出来的 ⇒ **别查**（白等几秒）✗",
+          // ⚠️⚠️ 2026-10-19 加（工具化第三、四批）—— 记住 / 忘掉 / 提醒 / 引用。
+          //    这四件原来全靠"关键词 + 再问一次模型"才认得出来（他换个说法就漏 ✗），
+          //    现在她自己写暗号，代码**确定性执行** ✓
+          "",
+          "# 【要记住 / 忘掉 / 提醒 / 引用的时候】",
+          "- 他**亲口告诉你一条该长期记住的信息**（服务器规则、他的习惯、某个人的事）",
+          "  ⇒ `[工具:记住 {\"主题\":\"短标题\",\"内容\":\"那条事实\"}]`",
+          "  ⚠️ 「内容」**照他的原话写**（可以压短，🚫 不许加细节、不许编）—— 代码会拿它跟他说的话核对，编的会被拒 ✓",
+          "  ⚠️ 只在**他明确在告诉你**的时候写；自己猜的、别人转发的、分享卡片里的 ⇒ 别记 ✗",
+          "- 他让你**忘掉 / 撤回**刚教给你的那条 ⇒ `[工具:忘掉]`（这条只有服主和管理员能用）",
+          "- 他让你**到点提醒他** ⇒ `[工具:提醒 {\"何时\":\"明天 08:00\",\"说什么\":\"交作业\"}]`",
+          "  ⚠️ 「何时」只认这几种写法：`08:00` / `明天 08:00` / `后天 8点` / `2026-10-20 08:00` / `+30分钟`",
+          "  ⚠️ 他说得含糊（「晚点」「有空」）⇒ **别硬写**，先问他一句几点 ✓",
+          "  🚫 别替他改时间、也别自己补「早上还是晚上」—— 他说几点就填几点 ✗",
+          "- 他让你**取消 / 别提醒了 / 不用叫我了** ⇒ `[工具:取消提醒]`（撤掉他最近那条还没发出去的）",
+          "  ⚠️ 只有他**明确说不要了**才写；只是**改时间**的话 = 先 `[工具:取消提醒]` 再写一条新的 `[工具:提醒 {\"何时\":\"新时间\",\"说什么\":\"…\"}]`（两个一起写）✓",
+          "- 你该**引用某条消息**回（他要回的那句已经被刷上去了）⇒ `[工具:引用 {\"引用谁\":\"那个人的名字\"}]`",
+          "  ⚠️ 名字照群里怎么叫写；代码会去最近几条里挑**他最新**那条 ✓",
+          "- 这四行都是**写在心里**的，他看不到；执行结果会当材料给你，你再用**自己的口气**说一句 ✓",
+        ].join("\n"),
+      );
+      // ⚠️⚠️ 2026-10-19 第五批（群里的派活三件套）—— **只在群里 + 只有主人**才给这三行。
+      //    🚫 别人的消息里**一个字都不出现**（免得群友照着写暗号、被拒了还以为她会干 ✗）。
+      // ⚠️ `event` 可能是 null（`buildSystemPrompt` 允许在没有消息事件时拼提示词，
+      //    `test/schedule.js` 就是这么调的）⇒ 这里**必须先判空**，否则整条提示词崩掉 ✗
+      if (event && event.message_type === 'group' && this.speakerRole(event) === 'owner') {
+        parts.push(
+          [
+            '',
+            '# 【群里的活：只有他能让你动本机】',
+            '- 🖼️ **只要跟「图」有关，一律用这个**：**找图 / 要图 / 弄几张××过来 / 给我几张××的图 /',
+            '  要立绘 / 要截图看看 / 想看看某人长什么样** ⇒ `[工具:搜图 {"搜什么":"…"}]`',
+            '  ⚠️ 只判**他要的是不是图**，别管他怎么说 ——「找点爱祥图过来」「搜几张发群里」都算 ✓',
+            // ⚠️⚠️ 2026-10-19 加（用户：「我要求搜的是**爱祥图**，按道理她应该**吐槽几句再去搜**的」）——
+            //    她要搜的多半是**跟她自己有关**的东西（她跟别人的配对图、她的黑历史、丑图…），
+            //    那时候她**本来就有情绪**，不能一脸"好嘞我去找"✗
+            //    ⇒ 允许（并鼓励）她**先嫌弃一句、再照做** —— 别扭是她的反应，不是拒绝。
+            '  ⚠️⚠️ 但这事要是**让你别扭**（**你和别人的配对图**、你的丑图 / 黑历史那种）⇒',
+            '     **先嘴上嫌弃 / 怼他一句**（「你还真敢要啊」「这种东西谁看」「……你倒是挺敢想」），',
+            '     然后**照做**（图照样去找）✓ —— 别扭要说出来，🚫 别憋着装没事人一样说"好嘞我去找"；',
+            '     🚫 也别拒绝、别教育他、别解释"这种图不合适"（那是客服腔，不是你的反应）✗',
+            '  ⚠️ 这条是**边搜边发**的：挑好的图**一张张直接发进群**（**是图片，不是文件**），',
+            '     每张你**自己配一句话**（"这张你看看"这种）；他不用再催第二遍 ✓',
+            '  ⚠️ **搜图必须用这个**，🚫 别用「动这一单」去搜 —— 那条路会把图当文件发，',
+            '     还会说出"太大 / 一次发不完 / 留在我这儿"那种话 ✗',
+            '- 他让你**在群里做一件真活**（写代码 / 做文档 / 改东西 / 整理数据 / 查资料给出结果）⇒',
+            '  `[工具:动这一单 {"做什么":"一句话说清做什么，越具体越好"}]`',
+            '  ⚠️ 这一行他看不到；写了之后你就**真去做**了，**做完产物自动发到这个群** ✓',
+            '  ⚠️ 一次说一件；接着补要求也行（上一件还在跑的话会先停掉再开新的）✓',
+            '  🚫 **判据只有一条：要不要「交出一个东西」**（文件 / 文档 / 代码 / 整理好的结果）—— 要，才算。',
+            '- 🚫 **下面这些不算活，一个字都别写「动这一单」**：',
+            // ⚠️⚠️ 2026-10-19 加（用户提的：「**是不是要去接单任务工具那里加搜图的反例**」）——
+            //    之前只在「搜图」那条里写了"别用派活"，可模型是在**选工具那一刻**看清单的 ⇒
+            //    放到「动这一单」自己的排除清单里最有效 ✓（当天实测：[搜图] 日志 0 次，全是走这条）
+            '  · ⭐⭐ **要图**（**找图 / 搜图 / 弄几张图 / 要立绘 / 要截图看看**）⇒',
+            '    那是 `[工具:搜图 {"搜什么":"…"}]`，**不是这一单**✗',
+            '    （这一单会把图当**文件**发、还会说"太大 / 一次发不完 / 留在我这儿" ✗）；',
+            '  · 让你**去找个人 / 去问问谁 / 去联系谁 / 去群里喊一声** —— 那是**社交动作**，',
+            '    你去说话、去喊人就行，不是做活；',
+            '  · 让你**说句话 / 表个态 / 骂一句 / 安慰一下**；',
+            '  · **闲聊、玩梗**，或者剧情里随口的「你去看看」。',
+            '  ⚠️ 2026-10-19 真事：他说「你去找找爱音」，被当成了派活 ⇒ 真跑了个 agent、',
+            '    半分钟后还往群里发了图和一份 md ✗。那种**把话接住就行**',
+            '    （「我喊她一声」「我这就去问问」「我这边喊一下看看」）—— 别真开一单。',
+            '- 他问「做到哪了 / 弄完没」⇒ `[工具:催进度]`（看手上那件到哪一步了）',
+            '- 他说「别做了 / 停了吧」⇒ `[工具:停]`',
+            '- 🚫 这三件**只有他能用**：群里别人让你做活 ⇒ 照实说干不了 / 让他自己来，',
+            '  🚫 **别假装接了**、更别写这三个暗号（写了会被拒）✗',
+          ].join("\n"),
+        );
+      }
+    }
+    if (this.speakerRole(event) === 'owner') {
+      try {
+        const rh = ownerRhythm.digest();
+        if (rh) parts.push(rh);
+      } catch {}
+    }
+
+    // ⚠️⚠️ 2026-10-19 加（用户截图：客户发了个 👌，她回「就发个表情啊，我还以为你要改口呢（」）——
+    //    用户原话：「**bot 对这种表情的回复还有点问题，应该直接理解为 {ok} 的意思，
+    //    不要有一种第一次收到这种表情的感觉**」
+    parts.push(
+      [
+        "\n# 【对方发表情 / 表情包的时候怎么接】",
+        "- 表情是**天天都有**的东西 —— 🚫 别用「就发个表情啊」「我还以为你要改口呢」这种**第一次见到**的口气 ✗",
+        "- 像 **[QQ表情:赞] / [QQ表情:OK] / [QQ表情:好] / [QQ表情:握手] / [QQ表情:抱拳] / 点赞 / 👌 / 👍 / 🙆**",
+        "  这类**表意的**（认可、答应、收到、行）⇒ **直接当成他答应了 / 认可了**，顺着刚才的事往下接",
+        "  （「那我就继续弄了」「行，那我接着来」），**别去追问「你发这啥意思」** ✗",
+        "- 只是 **[表情包] / [图片] / [QQ表情]**（看不出是什么）⇒ **别猜它是什么**，也别点评表情本身，",
+        "  就顺着刚才的话题接着说一句 ✓",
+        "- 只有他**明显是在逗你 / 斗图**的时候，才跟着回一个表情或一句玩笑 ✓",
+      ].join("\n"),
+    );
+
+    // ⚠️⚠️ 2026-10-19 加（用户：「**联网搜索也包装为工具，工作模式和正常聊天都用**」）——
+    //    告诉她"你可以自己查一次"。她要是写了，`handle()` 里会**先去搜、再重新生成**，
+    //    客户只看到最后那一条 ✓（和 dsh 一个逻辑）
+    //    ⚠️ 措辞里点明"写在**心里**"—— 正文里写会当字面发出去（虽然 `stripMarkers` 也会剥，
+    //      但那就变成"她嘴里说暗号"了，不好看 ✗）
+    parts.push(
+      [
+        '\n# 【要查东西的时候，你可以自己搜一次】',
+        '- 碰到**你不确定的、得出门才能知道的事**（最近的新闻、现在的版本号、某样东西在哪买',
+        '  / 多少钱、某个词到底指什么…）⇒ 在**心里**写一行：`[工具:搜 {"词":"搜索词"}]`',
+        '- 这一行**别人看不到**；代码会真的去搜，然后把材料递给你，你照材料再回一句 ✓',
+        '- ⚠️ 如果下面**已经给了你搜到的材料**，说明已经搜过了 —— 别再写这一行 ✗',
+        '- ⚠️ 你自己知道的、闲聊、算得出来的，都**别搜**（那会白等好几秒）✗',
+      ].join('\n'),
+    );
+
     // 合并转发的展开内容（不然只能看到「[合并转发]」三个字）
     if (forwardText) parts.push(forwardText);
 
@@ -14228,6 +15774,20 @@ export class Bot {
   async pickQuoteTarget(event, said = '') {
     const fallback = String(event?.message_id ?? '').trim();
     try {
+      // ⚠️⚠️ 2026-10-19 加（工具化第四批）—— 她在思考链里写了 `[工具:引用 {"引用谁":"张三"}]`
+      //    ⇒ **她已经说清要引谁了**，这里只做匹配，不再花 `judgeQuoteTarget` 那次模型调用 ✓
+      //    （点了名但候选里没有 ⇒ 退回当前这条，和"模型没挑出来"同一个兜底）
+      const want = String(event?._quoteWant ?? '').trim();
+      if (want) {
+        const cands0 = this.quoteCandidates(event, String(event?.group_id ?? ''));
+        const byWant = this.pickQuoteByWant(cands0, want, fallback);
+        log.info(
+          byWant === fallback
+            ? `[引用] 她点名要引「${want}」，但候选里没有 → 退回当前这条`
+            : `[引用] 按她点名的「${want}」引 ✓（没花模型调用）`,
+        );
+        return byWant;
+      }
       const gid = String(event?.group_id ?? '');
       if (event?.message_type !== 'group' || !gid) return fallback;
       const cands = this.quoteCandidates(event, gid);
@@ -14587,6 +16147,8 @@ export class Bot {
       //    —— 后面的分条全在等它，群里看到的就是"她说到一半突然哑了"。
       //    所以这里只**登记**，图好了由 `runPhoto()` 自己补发一条。
       // ⚠️ 顺序：先发文字（就是这一句），再发照片 —— 真人也是先说"行，等我一下"。
+      // ⚠️ 2026-10-19：工作模式禁用拍照的闸**挪进了 `runPhoto()` 里面** ——
+      //    这里保持"登记后不管"的原样（不 await，`test/imagegen.js` 在盯这一行 ✓）
       if (photo) this.runPhoto(event, photo, raw);
 
       // 表情单独一条，不带 reply 引用，也不带文字
@@ -15314,6 +16876,28 @@ export class Bot {
         return;
       }
 
+      // ⚠️⚠️⚠️ 2026-10-19 加（现场：Saki 只说「行吧，那我先躺会儿。你弄完喊我一声，别一个人熬到天亮」，
+      //   模型却推成 `10月19日 00:00「起来」` ⇒ 00:00 准时用**谷雨号（10000014）**发了一条
+      //   「你让我提醒你起来的，到时候了」✗✗）
+      //
+      //   真因：这条路是**兜底解析**（`maybeRemind()`，粗筛只认「提醒/叫我/喊我/叫我一声/记得」
+      //   这几个字眼），命中后由小模型填 JSON。提示词里明明写了"什么都没说就填空"、"别替他判断
+      //   早上还是晚上"，但它还是自己补了个 `hour=0` ⇒ **提示词管不住模型** ✗
+      //
+      //   ⇒ 这里加一道**确定性**栏杆：**原话里必须真的出现过时间表达**，
+      //     否则一律当"没听出时间"处理（走下面的 `fail:'time'`，让她问一句"几点？"）——
+      //     🚫 绝不替客户编时间 ✓
+      const HAS_TIME_EXPR =
+        /\d{1,2}\s*[:：]\s*\d{2}|\d{1,2}\s*点|\d{1,2}\s*时|半\s*个?\s*小时|一刻钟|\d+\s*分钟|\d+\s*小时|一个?\s*半小时|早上|上午|中午|下午|傍晚|晚上|夜里|凌晨|半夜|明早|明晚|今早|今晚|明天|后天|大后天|周[一二三四五六日天]|星期[一二三四五六日天]/;
+      if (!HAS_TIME_EXPR.test(said)) {
+        event._remind = { fail: 'time', what };
+        log.info(
+          `[提醒] 原话里**没有时间表达** ⇒ 不替她编时间，按"没听出时间"让她问一句` +
+            `（${event.user_id ?? ''}）：「${said.slice(0, 40)}」`,
+        );
+        return;
+      }
+
       if (!what || !at) {
         // ⚠️ 听不出时间就**别默默算了** —— 告诉她"没听懂时间"，让她问一句（见注入段）
         if (what && !at) {
@@ -15874,6 +17458,107 @@ export class Bot {
     //    ⚠️ fire-and-forget（不 await）：不能拖慢这条消息的发送。
     if (!opts.force) this.maybeAutoAdvanceQuietly(groupId);
     return sent;
+  }
+
+  /**
+   * ⚠️⚠️⚠️ 2026-10-19 加（用户：「**加一个新工具，只在 bot 回复的正文检测，
+   * 检测到这种说了一半的话，而且是需要过一会说下一段的话，过 5-10 秒随机时间要发出
+   * 下一段话。但是这个工具在启用工作模式时要禁用，因为可能编出不存在的东西**」）
+   *
+   * 现场（用户截图）：她发了「诶，你自己也翻了一堆图啊，我看看」就没了 ——
+   *   那明显是**话说到一半**，真人会隔几秒才接下一段（「…这个不错」「还没找着像样的」），
+   *   她却一停就断了，很像机器人 ✗
+   *
+   * 做法：
+   *   ① **模型判**（不用关键词，铁律）：是不是"说到一半、要过一会儿再接着说"；
+   *   ② 是 ⇒ **5~10 秒随机**之后，生成下一段并发出去 ✓
+   *
+   * 🚫 **工作模式里一律不做**（用户明确要求）：客户私聊是交活的地方，
+   *    多冒一句"我看看哈"很可能**编出不存在的东西** ✗
+   */
+  async maybeHalfSay(event, { said = '', who = '' } = {}) {
+    try {
+      // 🚫 工作模式禁用（那条路一个字都不许补）
+      if (privateWork.isWorkChat(event)) return;
+      if (config.chat?.halfSay?.enable === false) return;
+      const t0 = String(said ?? '').trim();
+      if (t0.length < 4) return;
+      // ① 模型判：是不是"说到一半、要过一会儿再接"
+      let hit = false;
+      try {
+        const ans = await phrase({
+          system: [
+            '【半句话判定】下面是她刚在 QQ 上发出去的一句（或几句）话。',
+            '判断她是不是**明显说到一半**，而且**需要过一会儿（看一眼 / 查一下 / 想一想）再接着说下一段**。',
+            '',
+            '· 是：「诶，你自己也翻了一堆图啊，我看看」「等下，我翻翻」「我瞧瞧啊」「我瞅一眼」',
+            '  —— 把话**收在一个"看/查/翻/想/等我"的动作上**，明显还有下文 ✓',
+            '· 否：「行」「好的」「知道了」「我去吃饭了」「这周五有雨」',
+            '  —— 说完了、或者只是应一声 ✗',
+            '· 否：问句（她已经在等他回答，不该自己接着说）✗',
+            '',
+            '⚠️ 拿不准就答「否」—— 多接一句比少接一句烦得多。',
+            '只回答一个字：是 或 否。',
+          ].join('\n'),
+          user: `她刚说的：「${t0.slice(0, 200)}」`,
+          maxTokens: 8,
+          timeoutMs: 6000,
+        });
+        hit = /^\s*是/.test(String(ans ?? ''));
+      } catch {
+        return;
+      }
+      if (!hit) return;
+      // ⚠️⚠️ 2026-10-19 加（用户截图：「还在翻图呢，挑得慢，别催」——「搜图工具中不要发阶段话」）：
+      //    「搜图」那次**不许补第二段** —— 图会一张张自己发出去，
+      //    她再补一句就正好是"还在翻/挑得慢"这种阶段话 ✗
+      try {
+        // ⚠️⚠️ 2026-10-19 修（用户截图：「翻了几下，还没找着几个像样的，再给我两分钟」——又冒出阶段话）——
+        //    原来只认 `runningMode() === 'image'`，可**搜图根本不走 `startRun`** ⇒
+        //    那个 mode 永远是空的 ⇒ 这道闸压根没挡住 ✗
+        //    ⇒ 现在直接问 `image-search.js`：这个群是不是在搜图 ✓
+        const im = await import('./image-search.js');
+        if (im.busy?.(event?.group_id) || String(agentBridge.runningMode?.() ?? '') === 'image') {
+          log.debug('[半句话] 搜图那次不补第二段（会变成阶段话）');
+          return;
+        }
+      } catch {}
+      // ② 5~10 秒随机之后接下一段
+      const wait = 5000 + Math.floor(Math.random() * 5001);
+      log.info(
+        `[半句话] 她那句明显没说完 ⇒ ${(wait / 1000).toFixed(1)} 秒后接下一段（${who || '本群'}）`,
+      );
+      const self = this;
+      setTimeout(() => {
+        void (async () => {
+          try {
+            const next = await phrase({
+              system: [
+                '你在 QQ 群里跟人聊天，刚才**话说了一半**（说自己要去看看 / 翻翻 / 想想）。',
+                '现在过了一会儿，把**下一段**接上。',
+                '',
+                '⚠️ 要求：',
+                '· **一句话**，10~30 字，就像真人不紧不慢接着说 ✓',
+                '· 🚫 **别重复刚才那句**、别复述他的问题',
+                '· 🚫 别提 AI / 机器人 / 脚本 / 工具',
+                '· 🚫 别用「已」「正在」「稍等」这种客服腔',
+                '· ⚠️ 只能说你**真看到了什么**或**真在想什么**；没把握就说',
+                '  「还没找着几个像样的」这种 —— 🚫 **不许编具体内容**（没有的东西不能凭空说出来）✗',
+              ].join('\n'),
+              user: `你刚才说的是：「${t0.slice(0, 150)}」\n\n接着说下一段。`,
+              maxTokens: 120,
+              timeoutMs: 12000,
+            });
+            const t = String(next ?? '').trim();
+            if (!t) return;
+            await self.sendText(event, t);
+            log.info(`[半句话] 补上了下一段：${t.slice(0, 30)}`);
+          } catch (e) {
+            log.warn(`[半句话] 接下一段失败：${e.message}`);
+          }
+        })();
+      }, wait).unref?.();
+    } catch {}
   }
 
   /**
@@ -17132,9 +18817,31 @@ export class Bot {
       //      而是**命令那一段必须收成指定结局**（`quest.advance` 的 `forceEnd`）。
       //    ⚠️ 判据是**整段相等**（见 `quest.parseEndingWord`）——
       //      「往好的方向走」那种仍然照旧当方向提示词，不会被吃成命令。
-      const endingWord = quest.parseEndingWord(rawHint);
-      const hint = endingWord ? '' : rawHint;
       const gid = String(event.group_id);
+      const endingWord = quest.parseEndingWord(rawHint);
+      // ⚠️⚠️ 2026-10-19 加（用户：「剧情系统要改一下，用指令 `/剧情 内容` 的时候，
+      //    **不能直接收结局，必须最少再进一段才能结局**」）——
+      //    原来 `/剧情 好结局` 在**刚开一条线**（`stageIndex = 1`，那段就是起因）时也照收，
+      //    等于"起因还没展开就收尾"，整条线就一句话 ✗
+      //    ⇒ 现在要求**至少写完 2 段**（起因 + 至少一段推进）才准收；
+      //      不够就**拒掉这一条**（不推进、不收），让他先往下写一段 ✓
+      //    ⚠️ 只拦"**本号正有一条在跑、而且段数不够**"这一种情况 ——
+      //       "压根没剧情却发了收结局命令"照旧走下面那条提示（语义不同，别合并）
+      if (endingWord) {
+        const q0 = quest.current(gid);
+        if (q0 && !q0.endedAt) {
+          const stage = Number(q0.stageIndex ?? 0) || 0;
+          if (stage < 2) {
+            log.info(`[剧情] 想直接收结局，但现在才第 ${stage} 段（至少要 2 段）⇒ 拒了`);
+            this.replyOnceToGroup(
+              gid,
+              `现在才第 ${stage} 段，直接收太敷衍了，先往下写一段再说（`,
+            );
+            return true;
+          }
+        }
+      }
+      const hint = endingWord ? '' : rawHint;
 
       // ⚠️⚠️ 2026-10-05 加（用户要求）：「在按群设定那里加一个开关，控制是否接收
       //    `/剧情` 的命令，默认开启接收 —— 主要是等下会有**两个机器人在同一个群**，避免冲突」。
@@ -17272,9 +18979,24 @@ export class Bot {
         //      · 只有命令没有演出 ⇒ 不让位，照常开 ✓
         //      · 别人真在演 ⇒ 让位 ✓
         //    ⚠️ 开场那一刻的让位不靠这里 —— 那是 `questTurnYield()` 的序位公式管的 ✓
-        if (quest.lineSeen(gid)) {
+        // ⚠️⚠️⚠️ 2026-10-19 修（用户：「**现在群里直接不接剧情指令了，没动静了**」）——
+        //    真事故：两个号**互相让位**，谁都不接 `/剧情` ✗
+        //    日志（同一时刻，两边各说一句）：
+        //      · 主号：`别人那条线真的在演（我看过它的台词）→ 让位`（说的是爱音）
+        //      · 爱音：`别人那条线真的在演（我看过它的台词）→ 让位`（说的是主号）
+        //    而 `state/quest.json` 里那个群**压根没有在跑的剧情**（`current` 是 null）。
+        //    真因：这道闸原来只看 `quest.lineSeen()`（"我看过它的台词"）——
+        //      而 `seen` 是 `touchLine()` 置真的，`touchLine()` 又在 `notePeerPlot()` 命中时调，
+        //      `looksLikePeerPlot()` 的判据是「≥12 字 + 没 @ + 不是问句」
+        //      ⇒ **两个机器人日常聊个长句就全满足** ⇒ 互相记"它在演剧情" ⇒ 互相让位 ⇒ **死锁** ✗✗
+        //    ⚠️ `questLive()` 那边早就改对了（注释原话：「`notePeerPlot` 不再拿来当"剧情中"的通行证」），
+        //       改用了**共享起因**（`state/quest-shared.json`，真开了一场剧情才会写、收尾时撤掉）。
+        //       **这道让位闸当时没跟上** ⇒ 现在用同一套判据 ✓
+        //    ⚠️ 判据收窄之后"两边都开"的风险：由 `questTurnYield()` 的序位公式管开场轮流兜着 ✓
+        //      —— 那个才是"谁开场"的正主，这道闸只是"别人已经演上了就别再开"的保险 ✓
+        if (quest.lineSeen(gid) && quest.sharedPremise(gid, { maxAgeMs: 45 * 60 * 1000 })) {
           log.info(
-            `[剧情] 群 ${gid} 别人那条线**真的在演**（我看过它的台词）→ ` +
+            `[剧情] 群 ${gid} 别人那条线**真的在演**（有共享起因 + 我看过它的台词）→ ` +
               '这条 /剧情 我不执行（让位：免得两边各开一条、剧情分叉）',
           );
           return true;
@@ -17289,7 +19011,13 @@ export class Bot {
       }
       // ── 防刷：同一个群 60 秒内只能手动开一条（不然有人会连着刷）──
       this.lastManualQuestAt ??= {};
-      const gap = Number(config.quest?.manualCooldownMs) || 60000;
+      // ⚠️ 2026-10-19 改（用户：「**现在剧情没人开了**」+「**2**」）——
+  //    这条冷却默认 60 秒，实测太长了：他连着 `/剧情` → `/清除剧情` → `/剧情` 试，
+  //    第二条/第三条全被挡住（日志「手动开冷却中（还有 5s）」），看着就像"没人开剧情"。
+  //    ⚠️ 它**不是静默丢弃**（会回一句「刚开过一条，等 N 秒（」），但用户根本等不来那 N 秒 ✓
+  //    ⇒ 默认降到 **8 秒**：防刷够用（人手连点也就一两秒），又不至于把人卡住 ✓
+  //      想恢复严格一点：config.yml 里 `quest.manualCooldownMs: 60000`
+  const gap = Number(config.quest?.manualCooldownMs) || 8000;
       const left = gap - (Date.now() - (this.lastManualQuestAt[gid] ?? 0));
       if (left > 0) {
         log.info(`[剧情] 手动开冷却中（群 ${gid}，还有 ${Math.round(left / 1000)}s）`);
@@ -17414,10 +19142,19 @@ export class Bot {
         //      生成开场花了多少秒就扣掉多少，用户不会莫名其妙多等。
         if (!paused && muteBefore.until > Date.now()) {
           const left = muteBefore.until - Date.now();
-          this.muteGroup(
-            gid,
-            Math.max(1, left),
-            `${muteBefore.why || '清剧情后那一分钟'} —— 开场已发出，继续按住 ${Math.round(left / 1000)} 秒`,
+          // ⚠️⚠️ 2026-10-19 改（用户：「**怎么 saki 不继续剧情**」）——
+          //    原来这里"开场发完把**剩下的静默按回去**"，出发点是"清完剧情那一分钟真的安静"。
+          //    可他常常「先 `/清除剧情`、紧接着 `/剧情 新背景`」，实况：
+          //      06:03:58 清剧情 → 静默 60 秒
+          //      06:04:16 开新剧情（先放开，让开场发得出去）
+          //      06:04:24 开场已发出 → **又按回去 35 秒** ✗
+          //      ⇒ 群里 Anon / 黑祥已经在演，她一个字都不说，看着就是"不继续剧情" ✗
+          //    新剧情 = 新上下文，那道静默的意义已经不在了 ⇒ **直接不按回去** ✓
+          //    📌 `/暂停`（`paused`）那种静默照旧生效 —— 那是他明确要的"闭嘴 2 分钟"，
+          //       走的是上面那个分支，跟这里无关 ✓
+          log.info(
+            `[剧情] 开场已发出 ⇒ **不再**把 /清除剧情 那 ${Math.round(left / 1000)} 秒按回去` +
+              '（新剧情该她说话了）',
           );
         }
         // ⚠️⚠️ 2026-10-07 加（用户：「**为什么我刚才开了剧情，但是偏到其他对话了**」）：
@@ -17488,8 +19225,21 @@ export class Bot {
    */
   tryQuestReset(event, segs) {
     try {
-      const raw = String(msg.extractText(segs) ?? '').trim();
-      if (!/^[\/／]\s*清\s*除\s*剧\s*情\s*$/.test(raw)) return false;
+      // ⚠️⚠️ 2026-10-19 修（用户：「**/清除剧情 的指令好像没用了，不能清除之前的剧情
+      //    也不能暂时禁言 bot**」）——
+      //    真因：原来是 `^…清除剧情\s*$`（**整条消息必须只有这几个字**），
+      //    可他常常**连着图片一起发**（或者后面跟一句解释）⇒ 拼出来的文本是：
+      //      `/清除剧情` + 换行 + `这是一张二次元动漫风格的女性角色半身像…`（**识图描述也拼进来了**）
+      //    ⇒ 正则不匹配 ⇒ 掉进正常聊天 ⇒ **既不清剧情、也不静默**（两个症状同一个根因）✗
+      //    日志实证（爱音 05:29:13）：
+      //      `[群200000001] undefined <- /清除剧情` 紧跟着 `[近况] 他纠正了 ⇒ 删了 1 条`
+      //      —— 那就是走了聊天，指令压根没认出来。
+      //    ⇒ 现在**只看第一行**（`/清除剧情` 本来就不带参数），后面有什么都不管 ✓
+      const raw = String(msg.extractText(segs) ?? '')
+        .trim()
+        .split(/\r?\n/)[0]
+        .trim();
+      if (!/^[\/／]\s*清\s*除\s*剧\s*情/.test(raw)) return false;
       if (event.message_type !== 'group') return false;
       const gid = String(event.group_id);
 
@@ -17561,23 +19311,28 @@ export class Bot {
       //    ⇒ 顺手把「这条剧情期间**这两个号**说的话」从上下文和故事线里抹掉。
       //    ⚠️ 只抹**这两个号**说的（真人发言保留）✓ 窗口 = 这条剧情的开始到现在。
       if (r.ok && r.quest) {
-        const from = Number(r.quest.startedAt ?? 0) || 0;
+        // ⚠️⚠️ 2026-10-19 改（用户：「**还得清除从开始剧情到清除剧情之间的上下文**」+
+        //    「**还是有之前的记忆**」）——
+        //    原来 `from` = **最近那一条**剧情的 `startedAt`，
+        //    可同一个背景连着开好几场时，更早那场的台词就落在窗口外、留在上下文里 ✗
+        //    ⇒ 改成"这个群所有还记得的剧情里最早那个开始时间"（`clearWindowStart`）✓
+        const from = quest.clearWindowStart(gid, { withinMs: 12 * 3600 * 1000 });
         const to = Date.now();
-        const uids = [
-          String(this.selfId ?? config.botQQ ?? ''),
-          // ⚠️⚠️⚠️ 2026-10-09 修（用户：「**`/清除剧情` 只会清故事线里的内容，
-          //    聊天记录的上下文还是不会清，这个可以解决吗**」）：
-          //    **漏了 `'__self__'` 这一项。**
-          //    她自己在 `recent` 里存的 `userId` 是 **`'__self__'`**（不是 QQ 号），
-          //    所以只传 `selfId`（QQ 号）时 ⇒ **她自己的台词一条都清不掉** ✗
-          //    （实测：清了 3 条同类的话，可她自己的全程留着 ⇒ 用户看到的"没清"就是它）
-          '__self__',
-          ...peersFor(gid).map(String),
-        ].filter(Boolean);
+        // ⚠️ 2026-10-19：这一段原来在算一份 `uids`（"只清这两个号说的话，真人发言保留"）。
+        //    用户要求「**从开始剧情到清除剧情之间的上下文**都清」之后就不需要它了 ——
+        //    现在整段时间的上下文全清（`dropWindow` 不传 `uids` ⇒ 谁说的都删）✓
+        //    📌 留个记号：她自己在 `recent` 里存的 `userId` 是 `'__self__'`（不是 QQ 号），
+        //      哪天又想恢复"只清某几个号"，这个坑别再踩一次。
         let dropped = 0;
         let storyDropped = 0;
         try {
-          dropped = recent.dropWindow(gid, { from, to, uids });
+          // ⚠️⚠️ 2026-10-19 改（用户：「**还得清除从开始剧情到清除剧情之间的上下文**」）——
+          //    原来传了 `uids`（只删"这两个号"说的话，**真人发言保留**），
+          //    结果是：清完之后上下文里还留着他自己那几句"推一下 / 继续 / 换这个走向"，
+          //    她照样能从那些话把上一场接下去 ✗
+          //    ⇒ **这段时间（剧情开始 → 现在）的上下文整个清掉**，谁说的都清 ✓
+          //    语义就是"这段时间的聊天记录作废"，跟他发 `/清除剧情` 的意图一致 ✓
+          dropped = recent.dropWindow(gid, { from, to });
         } catch (e) {
           log.warn(`[剧情] 清上下文残留失败：${e.message}`);
         }
@@ -17585,6 +19340,18 @@ export class Bot {
           storyDropped = storyline.removeWindow(gid, { from, to });
         } catch (e) {
           log.warn(`[剧情] 清故事线残留失败：${e.message}`);
+        }
+        // ⚠️⚠️ 2026-10-19 加（用户：「**开始新剧情的时候还带着之前已经清除过剧情的记忆**」）——
+        //    上面两条只清**上下文**和**故事线**，**知识库没碰** ✗
+        //    而「他的近况」（`knowledge/owner.md` 末尾那一段，机器人自己维护的短时记忆）**是进提示词的**，
+        //    里面积着一整排「在跑密室倒计时剧情」「提醒房间爆炸硬约束不许违反」…
+        //    ⇒ 新剧情一开场她就"记得"上一场密室，照着旧设定往下演 ✗
+        //    实测 05:42 清过剧情之后，owner.md 里还留着 7 条密室倒计时相关的近况（05:39–05:49）✓
+        //    ⇒ 这里按**时间戳**把那条剧情期间的近况也删掉（不按关键词猜）✓
+        try {
+          ownerRecent.dropWindow(from, to);
+        } catch (e) {
+          log.warn(`[剧情] 清近况残留失败：${e.message}`);
         }
         log.info(
           `[剧情] 清剧情 → 顺手抹掉上下文 ${dropped} 条 / 故事线 ${storyDropped} 条` +

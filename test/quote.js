@@ -312,8 +312,18 @@ console.log('\n【12】★★★ 分条时**只有第一条带引用**（用户�
     '★ 那个会重算的写法已经不在了',
   );
   check(
-    /const quoteThisReply = lateMs > 0 \? true : this\.shouldQuote\(event, false\)/.test(src),
+    // ⚠️ 2026-10-19 改（`const` → `let`）：加了 `[工具:引用 {"引用谁":"…"}]` 之后，
+    //    `quoteThisReply` 在**生成之后**还可能被补成 `true` —— 那是"她自己点名要引用谁"，
+    //    不是重新判定 ⇒ 所以变量得是 `let` ✓
+    //    ⚠️ 这条断言真正要守的东西没变：**"要不要引用"只在 `handle()` 里定一次**
+    //       （`shouldQuote` 只调这一次，`sendChunk` 不自己重算）✓
+    /let quoteThisReply = lateMs > 0 \? true : this\.shouldQuote\(event, false\)/.test(src),
     '★ 判定仍然**只做一次**（在 `handle()` 里），迟到回复照旧强制引用',
+  );
+  check(
+    // 和上面那条一对：补成 true 的那一下必须是**工具的明说**，不许是第二个 `shouldQuote` 调用
+    !/quoteThisReply = this\.shouldQuote\(/.test(src),
+    '★ 补 `true` 的只有「她点名引用」那一条路（不是又调了一次判定）',
   );
 }
 

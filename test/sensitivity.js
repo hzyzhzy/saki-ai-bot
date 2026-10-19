@@ -184,7 +184,16 @@ async function setup(level, basePort, groupId = GROUP) {
 
   const proc = spawn(process.execPath, [join(ROOT, 'src', 'index.js')], {
     cwd: ROOT,
-    env: { ...process.env, QQBOT_CONFIG: CFGNAME },
+    // ⚠️⚠️ 2026-10-19 加（多账号改造后这个套件必红，要跑满 270 秒才失败）：
+    //    url 现在是从 `accounts/<QQ>.yml` 读的（真的 `ws://127.0.0.1:3001`），
+    //    只替换 `config.yml` 已经**不管用**了 ⇒ 机器人连的是**真协议端**、
+    //    测试推给假 ws 的消息它**一条都收不到**（机器人日志里连 `[收到]` 都没有）✗
+    //    ⇒ 再用环境变量压一道（`config.js` L1121 支持 `QQBOT_ONEBOT_URL`）✓
+    env: {
+      ...process.env,
+      QQBOT_CONFIG: CFGNAME,
+      QQBOT_ONEBOT_URL: `ws://127.0.0.1:${WS_PORT}`,
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const log = [];

@@ -170,8 +170,11 @@ console.log('\n【7】接线：默认值 / 界面控件 / 真的接在那条路�
     /id="llm-slowDrop"/.test(html) && /id="llm-slowDropCount"/.test(html),
     '★ 界面上有这两个控件（「模型 → 大模型」卡片里，单位是**条**）',
   );
+  // ⚠️ 2026-10-19：保存那处后来重构成 `bool('slowDrop')` 辅助函数（内部拼 `'llm-' + id`），
+  //    字面量 `!!$('llm-slowDrop').checked` 不再出现 ⇒ 判据改成**两种写法都认**，
+  //    照样守住"必须显式写"（省略 = undefined ⇒ 用户关不掉这个闸）。
   check(
-    /slowQueueDrop: !!\$\('llm-slowDrop'\)\.checked/.test(html),
+    /slowQueueDrop: (?:bool\('slowDrop'\)|!!\$\('llm-slowDrop'\)\.checked)/.test(html),
     '★★ 保存时**显式写 false** —— 省略就等于"没改"，用户就关不掉这个闸了',
   );
   check(
@@ -180,7 +183,7 @@ console.log('\n【7】接线：默认值 / 界面控件 / 真的接在那条路�
   );
   // ⚠️ 2026-10-09 改：判据从"秒"换成"**条**" ⇒ 界面填**条**、存**条**
   check(
-    /slowQueueDropCount: Math\.max\(1,[\s\S]{0,80}?llm-slowDropCount/.test(html),
+    /slowQueueDropCount:[\s\S]{0,200}?Math\.max\(1,/.test(html) && /num\('slowDropCount'\)/.test(html),
     '★ 界面填**条**、存**条**（不再是"填秒存毫秒"）',
   );
   check(/\?\? 3\)/.test(html), '★ 界面上读回来的兜底默认也是 **3 条**');

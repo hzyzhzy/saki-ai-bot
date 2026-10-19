@@ -26,7 +26,7 @@
  *   我们只负责"把它拉起来"。要不要扫码是它的事，**这里不下任何结论**。
  */
 import net from 'node:net';
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import { config } from './config.js';
 import { log } from './log.js';
 import * as provider from './provider.js';
@@ -121,6 +121,44 @@ export function status() {
 }
 
 /**
+ * ⚠️⚠️⚠️ 2026-10-19 加（用户：「**不是有防协议端重复的机制吗**」+ 今晚真事故）——
+ * **拉起之前先数一遍实例**，已经有活着的就**不拉**。
+ *
+ * 为什么必须加：这个文件原来的设计假设是
+ *   「只启动、不杀；万一旧进程还活着，新起的会**因端口占用自己退出**（无害）」
+ * —— **实测这个假设不成立** ✗
+ *   2026-10-19 晚上连着出现**两个 SnowLuma 同时在跑**（PID 31692 + 22628，相隔 8 秒），
+ *   它们抢 3000/3001/3002/3003、抢同一个身份库 ⇒ **把会话全区踢掉** ⇒
+ *   某个号从此「能发不能收」，表现就是用户说的「**群里一直看不到它回消息**」✗✗
+ * ⇒ 拉起前先看：**已经有 ≥1 个在跑就别再起**（真要重启请走 `tools/restart-snowluma.mjs`）✓
+ * ⚠️ 只数、不杀（安全线保留）✓ 关键词用变量拼，命令行里不留字面量 ✓
+ */
+function countProviderInstances() {
+  try {
+    // ⚠️⚠️ **按端口反查 PID**，不去匹配进程的命令行文本 ——
+    //    套件里有条硬断言：源码里不许出现那种匹配（会打中 DSH 自己的 runner）✗
+    //    SnowLuma 一个实例会同时听 3000~3003（AGENTS 里记的），
+    //    所以把这四个端口上"在听"的 PID 去重数一遍 = 实例个数 ✓
+    const ps = [
+      "$ErrorActionPreference='SilentlyContinue'",
+      '$pids = @(3000,3001,3002,3003 | ForEach-Object {',
+      '  (Get-NetTCPConnection -LocalPort $_ -State Listen -ErrorAction SilentlyContinue).OwningProcess',
+      '}) | Where-Object { $_ -and $_ -gt 0 } | Sort-Object -Unique',
+      '@($pids).Count',
+    ].join('\n');
+    const out = execFileSync(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand',
+        Buffer.from(ps, 'utf16le').toString('base64')],
+      { encoding: 'utf8', timeout: 25000 },
+    );
+    return Number(String(out ?? '').trim()) || 0;
+  } catch {
+    return -1; // 数不清就别拦（宁可少拦一次，也别把正常修复堵死）
+  }
+}
+
+/**
  * 用正牌的 launcher 把协议端拉起来（**独立进程**：我们这条命令马上要结束，
  * 被拉起的协议端必须活过它 —— 所以 `detached` + `cmd /c start` + `unref()`）。
  */
@@ -128,6 +166,15 @@ function launch() {
   const l = provider.launcherPath();
   if (!l) {
     log.warn('[协议端自愈] 没有配 launcher（config.yml 的 provider.dir / provider.launcher）→ 没法自动拉起');
+    return false;
+  }
+  // ⚠️⚠️ 拉起前先数实例：**已经有一个在跑就别再起**（起了就是两个，会把会话踢光）✗
+  const n = countProviderInstances();
+  if (n >= 1) {
+    log.warn(
+      `[协议端自愈] 已经有 ${n} 个协议端进程在跑 ⇒ **不再拉起**` +
+        `（端口不通可能是它自己卡住了；要真重启请跑 node tools/restart-snowluma.mjs）`,
+    );
     return false;
   }
   try {

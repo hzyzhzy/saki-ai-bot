@@ -60,6 +60,11 @@ bot.selfId = String(config.botQQ ?? '');
 // ⚠️ 钉住"对主人例外"开关：那是**演示开关**，和这个套件要测的包级开关是两件事。
 //    不钉的话，用户界面上一动它，这里的断言就跟着变（哨兵不能取决于用户的开关）。
 config.persona = { ...(config.persona || {}), ownerException: true };
+// ⚠️⚠️ 2026-10-19 加（用户 config.yml 里 `humanTakeover.enable: true` 时这个套件必红）——
+//    `pokeBack()` 第一道就是 `if (this.takeoverOn()) return;`（人在用号时不回拍，那个闸是对的），
+//    而这个套件测的是**"拍不拍回去"**，不该受用户那个开关影响 ⇒ 这里钉成 false ✓
+//    （不钉的话：poke 那条永远走不到 `send_poke`，红出来的像是代码坏了，其实是配置 ✗）
+config.humanTakeover = { ...(config.humanTakeover || {}), enable: false };
 // 戳一戳：只测"拍不拍回去"，别让它顺带去跑模型 / 发文字。
 // ⚠️ 这里**故意切回老的 `packet` 模式** —— 默认已经是 `'text'`（攒够次数→文字反击），
 //    那样"拍不拍"就看不出来了。切回 packet 才能验证 `warm` 那道闸真的在拦。

@@ -419,6 +419,38 @@ function cleanSearchTitle(s) {
  *    **`HTTP 412`**（风控，`order=pubdate` 必踩）。随便一个随机值就够用。
  */
 let biliCookie = null;
+let buvidPending = null;
+
+/**
+ * 去 B 站要一个**真的** `buvid3 / buvid4`（整个进程只要一次，拿到就缓存住）。
+ *
+ * ⚠️⚠️ 2026-10-19 修（真事故：`node tools/bili.mjs hot` 一直报「热门榜返回空」）——
+ *    `cookieHeader()` 原来拿的是**随手拼的假 buvid3**（`randomUUID` 那种）。
+ *    搜索接口容忍假的，但**热门榜（`x/web-interface/popular`）和排行榜会直接 `-352` 风控** ✗
+ *    实测：带上从 `x/frontend/finger/spi` 拿的**真 buvid** ⇒ `code:0` 正常返回 ✓
+ */
+async function ensureBuvid() {
+  if (biliCookie) return biliCookie;
+  if (buvidPending) return buvidPending;
+  buvidPending = (async () => {
+    try {
+      const r = await fetch('https://api.bilibili.com/x/frontend/finger/spi', {
+        headers: { 'User-Agent': UA, Referer: 'https://www.bilibili.com/' },
+        signal: AbortSignal.timeout(8000),
+      });
+      const j = await r.json();
+      const b3 = String(j?.data?.b_3 ?? '').trim();
+      const b4 = String(j?.data?.b_4 ?? '').trim();
+      if (b3) biliCookie = b4 ? `buvid3=${b3}; buvid4=${b4}` : `buvid3=${b3}`;
+    } catch {
+      /* 拿不到就算了 —— `cookieHeader()` 会退回那个假的（搜索接口照样能用） */
+    }
+    buvidPending = null;
+    return biliCookie;
+  })();
+  return buvidPending;
+}
+
 function cookieHeader() {
   if (!biliCookie) {
     biliCookie = `buvid3=${randomUUID().replace(/-/g, '').toUpperCase()}infoc`;
@@ -445,6 +477,7 @@ const SEARCH_ORDERS = ['totalrank', 'click', 'pubdate', 'dm', 'stow', 'scores'];
 async function biliSearch({ keyword, order = 'click', tids = 0, pubtime = 0, pageSize = 30 }) {
   const kw = String(keyword ?? '').trim();
   if (!kw) throw new Error('没给关键词');
+  await ensureBuvid(); // 真 buvid（见 ensureBuvid 上面的注释）
   const url =
     'https://api.bilibili.com/x/web-interface/search/type?search_type=video' +
     `&page_size=${Math.max(1, Math.min(50, pageSize))}` +
@@ -531,6 +564,7 @@ export async function videoInfo(bvid) {
   if (!qs) return null;
   const hit = _bvCache.get(bv);
   if (hit && Date.now() - hit.at < 6 * 3600 * 1000) return hit.info;
+  await ensureBuvid();
   try {
     const r = await fetch(`https://api.bilibili.com/x/web-interface/view?${qs}`, {
       headers: {
@@ -636,6 +670,7 @@ export async function upVideos(name, { limit = 8 } = {}) {
     recent = recent.concat(got);
     if (recentEnough(recent) || recentEnough(hot)) break;
     biliCookie = null;
+  buvidPending = null;
   }
   const all = [...recent, ...hot];
   if (!all.length) throw new Error(`搜「${wanted}」没结果`);
@@ -677,6 +712,8 @@ let hotCache = null;export async function hotVideos({ limit = 8, force = false }
     headers: {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
       Referer: 'https://www.bilibili.com/',
+      // ⚠️ 2026-10-19 补：**原来这儿没带 cookie** ⇒ 热门榜必然 `-352` ✗（见 `ensureBuvid`）
+      Cookie: cookieHeader(),
     },
     signal: AbortSignal.timeout(15000),
   });

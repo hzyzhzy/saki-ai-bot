@@ -322,6 +322,12 @@ export function remember(event, parsed = {}) {
 
   const key = contextKey(event);
   const list = store.get(key) ?? [];
+  // ⚠️⚠️ 2026-10-19 加（实测：同一条消息被记了**两遍**）——
+  //    现场：接管期间那句「我真的送你一万块钱」在 `recent.json` 里出现两条，
+  //    她自己的回复也两条 ⇒ **窗口被重复项占满** ⇒ 更早的真对话被挤出上下文 ✗✗
+  //    ⇒ 同一个 `message_id` 只记一次（echo 和正常推送会各来一遍）✓
+  const _mid = String(event?.message_id ?? '').trim();
+  if (_mid && list.some((m) => String(m.messageId ?? "") === _mid)) return;
 
   let text = String(parsed.text ?? '').slice(0, MAX_MSG_CHARS);
   if (!text && parsed.isAtMe) text = '（@了机器人）';

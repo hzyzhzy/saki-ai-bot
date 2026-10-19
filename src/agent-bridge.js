@@ -112,11 +112,11 @@ function addHist(rec) {
 }
 function updHist(id, patch) {
   const t = hist.tasks.find((x) => x.id === id);
-  if (t) {
-    Object.assign(t, patch);
-    saveHist();
-    notifyTaskChange();
-  }
+  if (!t) return false;
+  Object.assign(t, patch);
+  saveHist();
+  notifyTaskChange();
+  return true;
 }
 /** 正在跑的**群任务**的 gid（没有就空串）—— 给"收拾僵尸记录"的判据用 ✓ */
 export function runningGid() {
@@ -642,7 +642,10 @@ export async function voiceize(kind, facts, { task = '', gid = '', timeoutMs = 1
     clarify: '你觉得他那句话**没说清**，**反问他一句**（只问最关键的那个缺项，别一口气问三个）。',
   }[kind];
   const system = [
-    '你就是 QQ 群里的「客服小祥」—— 一个真实的人，正在**自己**动手干这件事。',
+    // ⚠️⚠️ 2026-10-19 修：这里原来**写死**「你就是 QQ 群里的「客服小祥」」——
+    //    可这套代码是**所有号共用**的（爱音 / 谷雨都走它）⇒ 一开口就把别的号说成客服小祥 ✗
+    //    ⇒ 只说"你就是你自己"，真正的身份交给下面那句 `identityRule(selfIdentity())` ✓
+    '你就是你自己 —— 一个真实的人，正在**自己**动手干这件事（不是客服、不是助手、不是程序）。',
     identityRule(await selfIdentity()),
     '',
     '⚠️⚠️ 下面这段是**你自己**做过的事、现在要说的话：',
@@ -1081,6 +1084,13 @@ export function redact(text) {
   '     并在回答里**说清是从哪儿来的**（带来源链接）；',
   '   · ⚠️ **下之前先确认就是那个人**（看标题、来源、角色名对不对得上）——',
   '     上次就是没核对，把祥子画成了别人 ✗ ⇒ 宁可换一张，也别张冠李戴；',
+  // ⚠️ 2026-10-19 加（用户：「**不是拿到一张就发，要 agent 觉得这张图不错再发**」）
+  '   · ⭐⭐⭐ **挑过才发**：下完之后，把**你自己觉得值得给她看的**挑 3~5 张，',
+  '     写进任务文件夹的 `挑好的.md`（**一行一张**，格式：`文件名 | 好在哪（一短句）`）。',
+  '     ⚠️⚠️ **只有写进这个文件的图才会被发出去** —— 模糊的、水印糊脸的、认不准是谁的、',
+  '     明显不是官方图的，**一律别写**（写进去就是当着全群的脸发出去 ✗）；',
+  '     ⚠️ 她那句话会**照你写的"好在哪"来说** ⇒ 写具体一点（"这张是官方立绘，眼神对"），',
+  '     别写"好看"这种空的 ✓',
   '   · 实在搜不到（或者搜到的都不像）⇒ **才自己画**，而且要照 `我的样子/` 里的参考图和外貌设定画 ✓',
   '',
   '任务（来自群里的原话）：',
@@ -1172,7 +1182,11 @@ export function taskDirFor(task) {
       .replace(/[\\/:*?"<>|~\s]+/g, '')
       .replace(/[「」【】（）()[\]]/g, '')
       .slice(0, 14) || '任务';
-  const dir = join(ws, `${stamp} ${slug}`);
+  // ⚠️ 2026-10-19 改（用户截图：「**把在群里开的任务都收到一个文件夹里**，现在 agentwork 文件夹里有点乱了」）——
+  //    原来任务文件夹直接铺在 `agentwork/` 根下，跟 `私聊/`、`tools/`、`sandbox/` 这些挤在一起，
+  //    一晚上二十几个，看着就是一团乱 ✗
+  //    ⇒ 群任务统一放进 `agentwork/群任务/`（`私聊/` 那些不动，它们各有各的归属）✓
+  const dir = join(ws, '群任务', `${stamp} ${slug}`);
   try {
     mkdirSync(dir, { recursive: true });
     try {
@@ -1400,8 +1414,42 @@ async function selfCardIn(bot, gid) {
  *
  * ⚠️ 这是一次**对外发送**（不可逆），所以：条数、体积都卡死，失败也说清楚。
  */
-export async function sendArtifacts(bot, gid, dir) {
+/**
+ * 当前那个任务用的是哪个文件夹（没有任务在跑 ⇒ `''`）。
+ * ⚠️ 2026-10-19 加：「搜图」工具要**边跑边扫**，得先知道去哪儿看图
+ *    （见 `src/image-search.js`）✓
+ */
+export function runningDir() {
+  return String(state.running?.dir ?? '');
+}
+
+/**
+ * 当前那个任务是哪种模式（`'image'` = 搜图；没有任务在跑 ⇒ `''`）。
+ * ⚠️ 2026-10-19 加：bot.js 的「半句话补完」要靠它判断——搜图那次**不许补第二段**
+ *    （补出来的就是「还在翻呢，挑得慢，别催」这种阶段话 ✗）
+ */
+export function runningMode() {
+  return String(state.running?.mode ?? '');
+}
+
+/**
+ * 现在有没有 agent 活在跑（在跑就返回它那件活的开头；没在跑 ⇒ `''`）。
+ *
+ * ⚠️ 2026-10-19 加（`src/bili-agent.js` 要用）：`startRun()` 一进去就会**把正在跑的活杀掉**
+ *    （见 L2501「已经有一个在跑 ⇒ 先把它停掉」）⇒ 群里随口问一句 B 站，
+ *    **会把别人正在干的长活一起砍掉** ✗ ⇒ 先问一句这个，忙就走别的路（不打断）✓
+ */
+export function busyTask() {
+  return state.running ? String(state.running.task ?? '') : '';
+}
+
+export async function sendArtifacts(bot, gid, dir, { skipImages = false } = {}) {
   const none = { sent: [], skipped: [] };
+  // ⚠️⚠️ 2026-10-19 改（用户截图：搜图时**跟着发了 `safebooru-result.json` / `候选.json`**）——
+  //    原来只跳过**图片**，`.json` / `.py` 这类中间文件照发 ✗
+  //    搜图那一次的对外东西**全部由 `image-search.js` 负责**（图 + 每张一句话）⇒
+  //    这里**一个产物都不发**（中间文件更不该丢进群里）✓
+  if (skipImages) return none;
   if (!dir || typeof bot?.call !== 'function') return none;
   const maxFiles = Math.max(0, nz(cfg().maxFiles, 3));
   if (!maxFiles) return none;
@@ -1413,6 +1461,9 @@ export async function sendArtifacts(bot, gid, dir) {
   const sent = [];
   const skipped = [];
   for (const it of list) {
+    // ⚠️ 2026-10-19：「搜图」那次，图已经在运行期**一张张以图片形式**发出去了
+    //    （见 `src/image-search.js`）⇒ 这里别再当文件发一遍 ✗
+    if (skipImages && /\.(png|jpe?g|webp|gif|bmp)$/i.test(it.name)) continue;
     if (sent.length >= maxFiles) {
       skipped.push({ name: it.name, why: '这次只发前几个' });
       continue;
@@ -2240,7 +2291,8 @@ export function addPrivateHist(rec = {}) {
 
 /** 私聊那单的收尾（跑完 / 交付完都调它） */
 export function patchPrivateHist(id, patch = {}) {
-  updHist(String(id), { endedAt: Date.now(), status: 'done', ...patch });
+  // ⚠️ 2026-10-19：**返回"找到没找到"** —— 调用方要据此决定"改不成是不是新建一条" ✓
+  return updHist(String(id), { endedAt: Date.now(), status: 'done', ...patch });
 }
 
 /**
@@ -2428,10 +2480,33 @@ async function taskSay(bot, gid, text, { record = true, ...rest } = {}) {
 /**
  * 真正开跑（确认消息已经在调用方发过了）。
  *
+ * ⚠️⚠️ 2026-10-19 改成 `export`（工具化）：群里主人写 `[工具:动这一单 {"做什么":"…"}]`
+ *    要能直接把活派下去。⚠️ 调用方**不许 await**（这活要跑好几分钟，await 就把她这条回复卡住了）✗
+ *    ⇒ 一律 `startRun({...}).catch(...)` ✓
+ *
  * @param {{bot:object, gid:string, by:string, byName:string, task:string}} p
  */
-async function startRun({ bot, gid, by, byName, task, related = false, reuseDir = '' }) {
+export async function startRun({
+  bot,
+  gid,
+  by,
+  byName,
+  task,
+  related = false,
+  reuseDir = '',
+  // ⚠️ 2026-10-19 加：`'image'` = 「搜图」那一次（见 `src/image-search.js`）——
+  //    图由那边**边跑边一张张以图片形式发群**，这里就**别再当文件发一遍**
+  //    （用户要求：「不要以文件发出来，直接以图片形式发出来」）✓
+  mode = '',
+}) {
   const self = related === true;
+  const skipImages = String(mode ?? '') === 'image';
+  // ⚠️ 2026-10-19 加（用户：「把询问 b站内容的问题都接入 b站工具，直接把问题丢给 agent，
+  //    但让 agent 的回复**尽量快速简短**…拿到的信息交给 bot **润色一遍**…分条逻辑也正常应用」）：
+  //    `'quick'` = **快速查询型**任务 —— 一句播报都不要（开场/进度/要说的话/结果全跳过），
+  //    结果由调用方（`src/bili-agent.js`）自己过 `voiceize` 再**分条**发 ✓
+  const quickMode = String(mode ?? '') === 'quick';
+  const noTalk = skipImages || quickMode;
   // ⚠️⚠️ 2026-10-14 修（真实事故：连着重放两条消息 ——「爱音派活」和「主人同意」——
   //    两条**几乎同时**进来 ⇒ 两边检查 `state.running` 时对方都还没写进去 ⇒
   //    **两个 agent 同时在跑** ✗（日志：15:30:04 今天第 2 次、15:30:05 今天第 3 次，
@@ -2449,6 +2524,7 @@ async function startRun({ bot, gid, by, byName, task, related = false, reuseDir 
     byName: String(byName ?? ''),
     task: clip(task, 200),
     related: self,
+    mode: String(mode ?? ''),
     startedAt: Date.now(),
   };
   state.count = todayCount() + 1;
@@ -2479,6 +2555,26 @@ async function startRun({ bot, gid, by, byName, task, related = false, reuseDir 
     });
   if (dir) state.running.dir = dir;
   save();
+  // ⚠️⚠️ 2026-10-19 加（用户：「**群聊的所有工作文件也加个清理机制吧，满 200mb 就删掉日期最早的文件夹。
+  //    私聊文件夹一定不要清**」）——
+  //    **每开一个新任务顺手理一次**（不另起定时器，省得又多个常驻循环）。
+  //    ⚠️ `keepDir` 传**这次的新文件夹** ⇒ 正在跑的那个永远不动 ✓
+  //    ⚠️ `私聊/` 在 `群任务/` 外面，`sweepGroupTasks()` 只遍历 `群任务/` ⇒ 天然碰不到，
+  //       里面还有一条"路径含私聊就跳过"的硬断言（双重保险）✓
+  // ⚠️⚠️ **这里必须是同步的**（`sweepGroupTasks()` 本身就是同步函数）——
+  //    我第一版写的是 `await import('./work-clean.js')`，那等于在 `startRun` 里**插了一个异步让步点**：
+  //    `startRun()` 是 fire-and-forget 调的，"开跑"就被推迟到 `handle()` 返回之后了 ⇒
+  //    `test/agent-bridge.js` 的【6】当场红（`★ 先跑起来 实际 0 次`，日志里"任务文件夹"和"开跑"分在了断言两边）✗
+  //    ⇒ 改用**顶部静态 import** + 直接调用，一个异步点都不加 ✓
+  try {
+    sweepGroupTasks({
+      root: join(workspace(), '群任务'),
+      maxMB: Math.max(50, Number(config.agent?.taskCacheMB) || 200),
+      keepDir: dir,
+    });
+  } catch (e) {
+    log.debug(`[清理] 群任务清理失败（不影响开工）：${e.message}`);
+  }
   log.info(
     `[任务] 开跑（${byName || by} 在群 ${gid}）：${clip(task, 60)}｜工作区=${workspace()}｜今天第 ${state.count} 次`,
   );
@@ -2603,6 +2699,11 @@ async function startRun({ bot, gid, by, byName, task, related = false, reuseDir 
         if (lines.length <= talkSent) return;
         const fresh = lines.slice(talkSent, talkSent + 5); // 一次最多补 5 条，别刷屏
         talkSent = lines.length;
+        // ⚠️⚠️ 2026-10-19 加（用户截图：「还在翻，找到几张像样的了，**再多找点就发出来**」）——
+        //    「搜图」那次**不许转述 agent 这种"攒着"的话** ✗：图是**一张张边搜边发**的
+        //    （见 `src/image-search.js`），她要是说"再多找点才发"，就等于又回到"攒完一起发"。
+        //    ⇒ `mode: 'image'` 时**整段跳过** agent 自己写的话，只留 `onProgress` 那句中性的"还在弄" ✓
+        if (noTalk) return;
         for (const l of fresh) {
           // ⚠️⚠️⚠️ 2026-10-14 修（用户截图：「**任务中说的话也好像没有被人设润色**，还需要修改」✗）：
           //    原来这里是把她（agent）写的那行**原话直接发群** ✗ ⇒ 群里看到的就是 agent 腔：
@@ -2692,6 +2793,11 @@ async function startRun({ bot, gid, by, byName, task, related = false, reuseDir 
       }
     },
     onProgress: (info) => {
+      // ⚠️⚠️ 2026-10-19 加（用户截图：搜图时她回「我去找找…看着顺眼的才发」，
+      //    「太像一个 agent 了，感觉没有注入她自己的人设」）：
+      //    「搜图」那次**连进度播报也关掉** —— 图是边搜边一张张发的，
+      //    她只要在 `[工具:搜图]` 那一下回一句就够；再多说一句就变成"汇报工作"✗
+      if (noTalk) return;
       void info; // ⚠️ 工具类型**不再**往下传（传了就会被她"转述成"过程细节）
       // 只在**第一次动手**时报一句；报过就不再打扰
       if (state.running?.progressSent) return;
@@ -2713,7 +2819,9 @@ async function startRun({ bot, gid, by, byName, task, related = false, reuseDir 
   currentKill = kill;
   save();
   const runningRef = state.running;
-  const timeoutMs = Math.max(30000, nz(cfg().timeoutMs, 180000));
+  const timeoutMs0 = Math.max(30000, nz(cfg().timeoutMs, 180000));
+  // ⚠️ 2026-10-19：快速查询型（B站那种）**别让一句问答拖三分钟** —— 90 秒封顶，超了照实说没查到 ✓
+  const timeoutMs = quickMode ? Math.min(timeoutMs0, 90000) : timeoutMs0;
   // ⚠️⚠️ 2026-10-13 修（实测：超时被杀的那次任务**在群里一声不响** ✗）：
   //    上一轮我把"我停了"从收尾里删掉（避免和 cancel 重复 ✓），可**超时**那条路
   //    **没有任何调用方替它说话** ⇒ 他干等了三分钟、群里一个字都没有 ✗✗
@@ -2830,7 +2938,7 @@ async function startRun({ bot, gid, by, byName, task, related = false, reuseDir 
           ? '时间到了，东西做出来一部分（下面发你），剩下的要接着弄的话再喊我'
           : '这次没弄完 —— 时间不够了。要么拆小一点再说一遍，要么我把时间放宽',
       ).catch(() => {});
-      if (arts.length) await sendArtifacts(bot, gid, dir).catch(() => {});
+      if (arts.length) await sendArtifacts(bot, gid, dir, { skipImages: noTalk }).catch(() => {});
     }
     log.info(`[任务] 这轮被停掉了（原因=${killWhy || '调用方'}）`);
     finishHist({ status: 'killed', cost, sessionId: String(res.sessionId ?? '') });
@@ -2850,7 +2958,7 @@ async function startRun({ bot, gid, by, byName, task, related = false, reuseDir 
     } catch {}
     const line = await voiceImpl('clarify', ask, { task, gid });
     await taskSay(bot, gid, `${CONFIRM_PREFIX}${line || ask}`);
-    await sendArtifacts(bot, gid, dir).catch(() => {});
+    await sendArtifacts(bot, gid, dir, { skipImages: noTalk }).catch(() => {});
     log.info(`[任务] 它缺信息 → 让她自己问一句：${clip(ask, 60)}`);
     finishHist({ status: 'asking', cost, text: line || '', ask, sessionId: String(res.sessionId ?? '') });
     return { ok: true, cost, text: line, ask };
@@ -2874,7 +2982,7 @@ async function startRun({ bot, gid, by, byName, task, related = false, reuseDir 
     //    ⇒ 群里只说人话；退出码照旧写日志（上一行那个 warn 里有）✓
     await taskSay(bot, gid, '这次没弄成，我再想想别的办法（');
     // ⚠️ 话没说出来，但**东西可能已经做出来了** —— 那就把文件发过去（有才发）
-    await sendArtifacts(bot, gid, dir).catch(() => {});
+    await sendArtifacts(bot, gid, dir, { skipImages: noTalk }).catch(() => {});
     finishHist({ status: 'failed', cost, sessionId: String(res.sessionId ?? '') });
     await runQueued();
     return { ok: false, cost };
@@ -2894,11 +3002,16 @@ async function startRun({ bot, gid, by, byName, task, related = false, reuseDir 
   const facts = next ? `${clip(body, max)}\n（另外还有下一段没做：${next}）` : clip(body, max);
   // ⚠️⚠️ 2026-10-13：**别把 agent 的报告原样贴进群**（用户截图说的）——
   //    先交给她自己的模型、用**第一人称**重写成一句人话（事实不动），失败才退回原文。
-  const said = await voiceImpl('result', facts, { task, gid });
-  await taskSay(bot, gid, said);
+  // ⚠️ 2026-10-19 改（用户：「这种阶段话在搜图工具中**不要发**，只发**开始搜图的话 + 图片 + 评论**」）——
+  //    「搜图」那次**结束也不吭声**：图已经一张张发完了、每张都配了话，
+  //    再补一句"找完了 / 发你了"就是阶段话 ✗
+  const said = noTalk ? '' : await voiceImpl('result', facts, { task, gid });
+  if (said) await taskSay(bot, gid, said);
   // ⚠️⚠️ 2026-10-13：**产出的文件也发进群** —— 光说一句"做好了"没用，
   //    他要的是那份 pptx / 表格本身（用户要求）。上限与失败处理见 `sendArtifacts`。
-  await sendArtifacts(bot, gid, dir).catch((e) => log.warn(`[任务] 发产物时出错：${e.message}`));
+  await sendArtifacts(bot, gid, dir, { skipImages: noTalk }).catch((e) =>
+    log.warn(`[任务] 发产物时出错：${e.message}`),
+  );
   // ⚠️ 结果那句已经由 `taskSay` 记进她的上下文了（2026-10-13 起统一走那个出口）——
   //    这里原来还有一条「（我刚在本机上干完一个活：…）」的重复记账，已经删掉 ✓
   finishHist({ cost, text: said, next, sessionId: String(res.sessionId ?? '') });
@@ -2917,7 +3030,8 @@ async function startRun({ bot, gid, by, byName, task, related = false, reuseDir 
     }
   }
   await runQueued();
-  return { ok: true, cost, text: said };
+  // ⚠️ 2026-10-19：快速查询型要把 **agent 的原始输出**交回去（调用方自己过 `voiceize` 再分条发）✓
+  return { ok: true, cost, text: quickMode ? clip(body, max) : said };
 }
 
 /**
@@ -2947,16 +3061,41 @@ export async function resumePending(bot) {
   state.resume = null;
   save();
   log.info(`[任务] 自动接着上次被打断的活：${clip(r.task, 60)}`);
-  try {
-    const line =
-      (await voiceImpl('start', `这个活刚才被重启打断了，你现在接着做完（${clip(r.task, 60)}），用自己的话说一声。`, {
-        task: String(r.task),
-        gid,
-        timeoutMs: 8000,
-      }).catch(() => '')) || '刚断了一下，我接着弄';
-    await taskSay(bot, gid, line);
-  } catch (e) {
-    log.debug(`[任务] 恢复时那句没说出去：${e.message}`);
+  // ⚠️⚠️ 2026-10-19 加（实测：爱音重启后 resume 接的那个搜图活**又开始说阶段话**）——
+  //    ① `mode` 必须**原样带回去**：不带 ⇒ `skipImages=false` ⇒
+  //       阶段话全回来（"还在挑/马上就好"）、产物还会当**文件**再发一遍 ✗
+  //    ② 「搜图」那次 resume 也**别补那句**"刚断了一下，我接着弄"（同样是阶段话）✓
+  const resumeMode = String(r.mode ?? '');
+  const isImageRun = resumeMode === 'image';
+  if (!isImageRun) {
+    try {
+      const line =
+        (await voiceImpl('start', `这个活刚才被重启打断了，你现在接着做完（${clip(r.task, 60)}），用自己的话说一声。`, {
+          task: String(r.task),
+          gid,
+          timeoutMs: 8000,
+        }).catch(() => '')) || '刚断了一下，我接着弄';
+      await taskSay(bot, gid, line);
+    } catch (e) {
+      log.debug(`[任务] 恢复时那句没说出去：${e.message}`);
+    }
+  }
+  // ⚠️⚠️ 2026-10-19 加：搜图那次要**走搜图管线**（`image-search.js`）——
+  //    直接 `startRun` 只会"不播报 + 不当文件发"，结果**一张图都不发**（静默）✗✗
+  if (isImageRun) {
+    void import('./image-search.js')
+      .then((m) =>
+        m.startImageSearch({
+          bot,
+          gid,
+          by: String(r.by ?? ''),
+          byName: String(r.byName ?? ''),
+          task: String(r.task),
+          reuseDir: String(r.dir ?? ''),
+        }),
+      )
+      .catch((e) => log.warn(`[任务] 恢复搜图失败：${e.message}`));
+    return true;
   }
   startRun({
     bot,
@@ -2966,6 +3105,7 @@ export async function resumePending(bot) {
     task: String(r.task),
     related: r.related === true,
     reuseDir: String(r.dir ?? ''),
+    mode: resumeMode,
   }).catch((e) => log.warn(`[任务] 恢复失败：${e.message}`));
   return true;
 }
@@ -3013,6 +3153,54 @@ function killCurrent() {
   currentKill = null;
 }
 
+/**
+ * 「要图的活」⇒ 交给搜图管线（**不派给 agent**）。
+ *
+ * ⚠️⚠️ 2026-10-19 抽出来（用户两张截图）：
+ *   ｜@她「找点古早的初音未来的图」⇒ 她只回了句「行，等我一下，找点老图去」，**一张图都没有**
+ *   ｜@她「找3张安岛的图来」⇒ 派给了 agent ⇒ 三句阶段话 + 产物当**文件**发（图不是图）
+ *   真因：`looksLikeTask()` 认的是"做/写/查"这类活，**"找…的图"过不了那道快判**
+ *   ⇒ 连模型都不问就 `return false` ⇒ 整条派活路（连同底下的搜图兜底）**压根走不到** ✗
+ *   而且「补一句」那条路（`state.clarify`）当时**没接搜图**，所以他补的「找3张安岛的图来」
+ *   被拼成「…（补充：找3张安岛的图来）」直接派给了 agent ✗
+ *   ⇒ 现在**三条路（直接派活 / 补一句 / 继续做）都先过这里** ✓
+ *
+ * @returns {Promise<boolean>} true = 这条已经按搜图接下了（调用方直接 return）
+ */
+async function startImageAsk({ bot, gid, uid, byName, clean }) {
+  let im;
+  try {
+    im = await import('./image-search.js');
+  } catch (e) {
+    log.warn(`[任务] 搜图模块加载失败（照常派活）：${e.message}`);
+    return false;
+  }
+  if (!im.looksLikeImageTask(clean)) return false;
+  const line = String(
+    (await voiceImpl(
+      'start',
+      // ⚠️⚠️ 2026-10-19 修（用户：「她答应搜图回的话也要灵活一点，**现在太干了**」）——
+      //    原来这里给了例句「像『行，等会儿』那种」⇒ 她照抄成「好，等着。」✗
+      //    ⇒ 现在**一个例句都不给**，只说"你现在去弄了"+"长短语气你自己定" ✓
+      `他让你找图，你**现在就去弄了**。用你自己的方式说一句，让他知道你在办。\n` +
+        '⚠️ 长短、语气**你自己定** —— 按你平时的性子来（痛快 / 不情愿 / 嫌弃 / 打趣都行），' +
+        '这句可以带点情绪，🚫 别只回一两个字。\n' +
+        '🚫 别用"这就去 / 等会儿 / 稍等 / 好，等着 / 马上"这类固定说法（说腻了）；\n' +
+        '🚫 别解释怎么找、别保证给几张、别提"图 / 挑 / 文件 / 工具 / 文件夹"这些词。',
+      { task: clip(clean, 120), gid, timeoutMs: 6000 },
+    ).catch(() => '')) ?? '',
+  ).trim();
+  await taskSay(bot, gid, line || `${CONFIRM_PREFIX}行，我翻翻`);
+  im.startImageSearch({
+    bot,
+    gid,
+    by: String(uid ?? ''),
+    byName: String(byName ?? ''),
+    task: `搜「${clip(clean, 60)}」的图，挑出几张好的发到群里`,
+  });
+  log.info(`[任务] 要图 ⇒ 走搜图管线（不派给 agent）：${clip(clean, 40)}`);
+  return true;
+}
 /**
  * 主入口 —— `bot.js` 在**进聊天上下文之前**调它（和 `/剧情` / 撤回同一个位置）。
  *
@@ -3284,6 +3472,15 @@ async function handleTask(event, segs, bot, opts = {}) {
     if (Date.now() - c.askedAt <= ttl && !/^(算了|不用了|cancel|取消)$/.test(clean)) {
       state.clarify = null;
       save();
+      // ⚠️⚠️ 2026-10-19 修（用户截图：她反问完，他补「找3张安岛的图来」⇒ 被拼成
+      //    「…（补充：找3张安岛的图来）」直接派给 agent ⇒ 三句阶段话 + 产物当**文件**发）✗
+      //    补的这一句如果是"要图"，就走搜图 ✓
+      if (await startImageAsk({ bot, gid, uid: c.by, byName: c.byName, clean })) return true;
+      // ⚠️ 2026-10-19：他补的这句如果是"问 B 站"，也走快速查询（同上，不发文件）✓
+      {
+        const ba = await import('./bili-agent.js');
+        if (await ba.startBiliAsk({ bot, gid, by: c.by, byName: c.byName, question: clean, event })) return true;
+      }
       const merged = `${c.task}（补充：${clip(clean, 120)}）`;
       await taskSay(bot, gid, `${CONFIRM_PREFIX}${await startLine(merged, gid)}`);
       startRun({ bot, gid, by: c.by, byName: c.byName, task: merged, related: c.related === true }).catch((e) =>
@@ -3425,7 +3622,33 @@ async function handleTask(event, segs, bot, opts = {}) {
   //       ⚠️ 而"@ 的是别人"已经在上面那道闸挡掉了 ⇒ 这里只认**确实叫了她**（at 段或文本形态都行）✓
   // ⚠️⚠️ 2026-10-14 修：`&& !inContinueTask` —— 「继续」那条路（`state.continues`）
   //    在这行**后面**，而它不像派活、会被这行提前挡掉 ⇒ 必须放它过去（见上面那段说明）
-  if (!looksLikeTask(clean, { atMe: forHer }) && !inContinueTask) return false; // 快判没过 ⇒ 连模型都不问
+  // ⚠️⚠️ 2026-10-19 修（用户截图：@她「找点古早的初音未来的图」⇒ 她只回了句
+  //    「行，等我一下，找点老图去」，**一张图都没发**）——
+  //    真因：`looksLikeTask()` 认的是"做/写/查"这类活，**"找…的图"过不了这道快判**
+  //    ⇒ 连模型都不问就 return false ⇒ 底下那条「要图 ⇒ 搜图」的兜底**压根走不到** ✗
+  //    ⇒ ① 要图的活**单独放行**；② 而且在**问模型之前就接走**
+  //      （省一次调用，也免得它把"找图"判成普通聊天）✓
+  const imgAsk = await (async () => {
+    try {
+      const im = await import('./image-search.js');
+      return im.looksLikeImageTask(clean);
+    } catch {
+      return false;
+    }
+  })();
+  if (imgAsk && (isOwner || extraAllowed(uid))) {
+    if (await startImageAsk({ bot, gid, uid, byName, clean })) return true;
+    // ⚠️⚠️ 2026-10-19 加（用户截图：「找找 dev 通道的新视频」⇒ 普通派活 ⇒ **写了个 .md 发进群**，
+    //    拿回来的还是关键词搜的视频、不是那个频道自己的投稿）——
+    //    B 站那条判据（`hotQuery`）只认"热门/榜/某 UP 主有什么视频"，
+    //    这种说法一个都不沾 ⇒ 走不到 `askBili` ⇒ 落回普通派活 ⇒ 建文件 + 发文件 ✗
+    //    ⇒ 这里用**模型**判一句（不用关键词），是就交给快速查询那条（**它不发文件**）✓
+    {
+      const ba = await import('./bili-agent.js');
+      if (await ba.startBiliAsk({ bot, gid, by: uid, byName, question: clean, event })) return true;
+    }
+  }
+  if (!looksLikeTask(clean, { atMe: forHer }) && !inContinueTask && !imgAsk) return false; // 快判没过 ⇒ 连模型都不问
   const it = normIntent(await judgeImpl(clean, opts));
 
   // ⚠️⚠️ 2026-10-13（用户要求："saki 还能反问我给的描述不够清晰之类的"）：
@@ -3472,6 +3695,24 @@ async function handleTask(event, segs, bot, opts = {}) {
 
   // 主人（或额外放行的人）→ 直接开；别人 → 先问主人
   if (isOwner || extraAllowed(uid)) {
+    // ⚠️⚠️⚠️ 2026-10-19 兜底（当天实测：`[搜图]` 的日志**一次都没出现过**）——
+    //    **要图这种活不派给 agent**，转搜图管线（边搜边发图片 + 每张配她一句话）。
+    //    ⚠️ 为什么必须加在**这里**：这条自动接管的路**根本不经过 bot 层**
+    //       （`bot.handle()` 压根不跑）⇒ 那边加的兜底和「搜图」工具都拦不住它 ✗
+    //       —— 这就是"提示词改了两轮、兜底也加了，还是没调用上"的真因。
+    // ⚠️ 2026-10-19：这段原来在这儿内联写了一遍「要图 ⇒ 走搜图」，
+    //    现在提成 `startImageAsk()` 了 —— **补一句 / 继续做 / 直接派活** 三条路都要用同一套，
+    //    不能各写一份（写两份就会像今天这样：主路改了、旁路忘了 ✗）
+    if (await startImageAsk({ bot, gid, uid, byName, clean })) return true;
+    // ⚠️⚠️ 2026-10-19 加（用户截图：「找找 dev 通道的新视频」⇒ 普通派活 ⇒ **写了个 .md 发进群**，
+    //    拿回来的还是关键词搜的视频、不是那个频道自己的投稿）——
+    //    B 站那条判据（`hotQuery`）只认"热门/榜/某 UP 主有什么视频"，
+    //    这种说法一个都不沾 ⇒ 走不到 `askBili` ⇒ 落回普通派活 ⇒ 建文件 + 发文件 ✗
+    //    ⇒ 这里用**模型**判一句（不用关键词），是就交给快速查询那条（**它不发文件**）✓
+    {
+      const ba = await import('./bili-agent.js');
+      if (await ba.startBiliAsk({ bot, gid, by: uid, byName, question: clean, event })) return true;
+    }
     await taskSay(bot, gid, `${CONFIRM_PREFIX}${await startLine(clean, gid)}`);
     registerKill();
     startRun({ bot, gid, by: uid, byName, task: clean, related: it.related === true }).catch((e) =>

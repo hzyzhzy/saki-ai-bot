@@ -126,6 +126,18 @@ const DEFAULTS = {
     //    ⚠️ 上面那个 `slowQueueDropMs` 现在**只用于日志**（不再当判据）——
     //      留着是为了老配置不报错，别再拿它当阈值。
     slowQueueDropCount: 3,
+    /**
+     * ⚠️⚠️ 2026-10-19 加（用户：「**不拒绝、不警示、不做任何道德评估做成一个开关
+     *    放在模型页面，只有开才导入，默认关闭即可**」）：
+     *
+     * 打开 ⇒ **剧情生成**的提示词里会多一段「这是创作、别软化别加免责」的授权
+     * （见 `src/quest.js` 的 `unfilteredQuest()`）。
+     *
+     * ⚠️ 它**只放开叙事**，不碰用词红线：人设里"不出现违禁词"那条**照旧生效**
+     *    （群里发违禁内容是要被封号的，这条不能给开关）。
+     * ⚠️ 默认 **false**：不给开关就等于偷偷放宽，那是骗人。
+     */
+    unfiltered: false,
     systemPrompt: '你是一个 QQ 聊天机器人，用简洁自然的中文回答。',
   },
   // ⚠️⚠️ 生图 —— 群里让她「拍个照」（2026-09-22 用户要求）。
@@ -1172,6 +1184,15 @@ function load() {
   cfg.speakJudge.enable = cfg.speakJudge.enable !== false;
   // 判断的短超时（它挡在每条消息必经之路上，不能拖）
   cfg.speakJudge.timeoutMs = Math.max(2000, Number(cfg.speakJudge.timeoutMs) || 6000);
+  // ⚠️ 2026-10-19 加（用户：「1，按你说的改」—— 省钱大头）：
+  //    **同一个人连着刷时不重复问模型** —— 上一条判"不说"、`burstThrottleMs` 内又来一条
+  //    ⇒ 直接不说、不再调模型 ✓（只复用"不说"；`inDialogue` 时不节流）
+  //    ⚠️ `burstThrottle: false` 或 `burstThrottleMs: 0` 就是关掉它（回到每条都判）✓
+  cfg.speakJudge.burstThrottle = cfg.speakJudge.burstThrottle !== false;
+  cfg.speakJudge.burstThrottleMs = Math.max(
+    0,
+    Number(cfg.speakJudge.burstThrottleMs ?? 10000) || 0,
+  );
 
   // 群禁言（用户要求 2026-09-13）：刷屏时真的禁言 1 分钟
   // ⚠️ 禁言是**公开的社交动作**，所以只给明确的刷屏用，且台词必须轻

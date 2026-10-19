@@ -319,7 +319,12 @@ console.log('\n【12】★★ 接单状态机：注入块按阶段说话（话�
   check(pw.noteFor({ message_type: 'group', group_id: '50001', user_id: FRIEND }) === '', '★ 群里不注入（只管私聊）');
   check(pw.noteFor({ message_type: 'private', user_id: STRANGER }) === '', '★ 不是好友不注入');
   pw.patchState(FRIEND, { stage: 'done' });
-  check(pw.noteFor(ev) === '', '★ 交付完了（done）就不再注入');
+  // ⚠️ 2026-10-18 改：`done` 之后**仍会带一句"你能调工具"**（客户随时可能返工 ⇒
+//    她得知道可以写 `[工具:动这一单 …]` ✓）⇒ 断言只要求"不再注入【你手上这个活】那一段" ✓
+check(
+  !/【你手上这个活】/.test(pw.noteFor(ev) || ''),
+  '★ 交付完了（done）就不再注入「手上这个活」那段',
+);
 
   // ⚠️⚠️ 用户：「不是跳过，而是要**正常接话**但是**不调用功能**」+「**不能返回错误信息**」
   pw.patchState(FRIEND, { stage: 'intake' });
@@ -410,13 +415,21 @@ console.log('\n【14】★ 产物 > 3 个才打包，而且包名要像人写的
 console.log('\n【15】★ 界面上两个开关都在 QQ 号页（私聊工作模式 + 人工接管）');
 {
   const w = readFileSync(join(ROOT, 'src', 'webui.html'), 'utf8');
-  check(/id="acc-workmode"/.test(w), '★ 有「私聊工作模式」那个 checkbox');
-  check(/async function accSaveWorkMode/.test(w), '★ 有它的保存函数');
-  check(/privateWork: \{ enable: on \}/.test(w), '★ 保存发的是 `privateWork.enable`（后端会按号存）');
-  check(/me && me\.workMode/.test(w), '★ 进页面时刷成**当前这个号**的真实值');
+  // ⚠️⚠️ 2026-10-19 改断言：那两个**勾选框删了**，换成「开启 / 关闭」这种明确按钮 ——
+  //    用户为这一处报了三回（打不开 / 关不了 / 点不动），每次后端都写成功了，
+  //    病根是"勾选框 + 保存"这个形态根本看不出生效没 ⇒ 换掉 ✓
+  //    ⚠️ 要守的没变：界面真有这个开关、点了真发 `privateWork.enable`、
+  //       而且那句状态读的是**服务端报回来的真实值**（不是界面自己的猜测）。
+  check(/onclick="accSetWorkMode\(true\)"/.test(w), '★ 有「开启工作模式」按钮');
+  check(/onclick="accSetWorkMode\(false\)"/.test(w), '★ 有「关闭工作模式」按钮');
+  check(/async function accSetWorkMode/.test(w), '★ 有它的保存函数');
+  check(/privateWork: \{ enable: want \}/.test(w), '★ 保存发的是 `privateWork.enable`（后端会按号存）');
+  check(/api\('\/api\/switches'\)/.test(w), '★ 读回走轻接口（不探活，避免拿旧值当答案）');
   check(
-    /id="acc-takeover"/.test(w) && /async function accSaveTakeover/.test(w),
-    '★ 「人工接管」那两个也都在（用户说看到不按钮 = 缺的就是这两个）',
+    /onclick="accSetTakeover\(true\)"/.test(w) &&
+      /onclick="accSetTakeover\(false\)"/.test(w) &&
+      /async function accSetTakeover/.test(w),
+    '★ 「人工接管」那组按钮也都在（用户说看不到按钮 = 缺的就是这两个）',
   );
   const j = readFileSync(join(ROOT, 'src', 'webui.js'), 'utf8');
   check(/workMode: a\.privateWork\?\.enable === true/.test(j), '★ `/api/accounts` 报出每个号的工作模式状态');
@@ -1798,7 +1811,16 @@ console.log(
     };
     const r4a = await pw.backfillFiles(uid, botSay, 50, { say: true });
     await new Promise((r) => setTimeout(r, 600));
-    check(said.length >= 1, '★★★ 补完之后**她主动说了一句**（用户要的"补发回复"）', said.join('｜'));
+    // ⚠️⚠️ 2026-10-19 改（用户截图：他明明在问「报告的文件我不小心丢了，可以再给我一份吗」，
+    //   点一下补消息 ⇒ 她回「收到了，我看看你这套东西。六份是同一个模板，正文还空着」——
+    //   牛头不对马嘴，而且**这次一个文件都没补下来**，"收到了"根本是假的 ✗）
+    //   ⇒ 现在**没补到新文件时不许说"收到了 / 我看看你这套东西"**；
+    //     文件真补下来（`savedN > 0`）那条路照旧会说 ✓
+    check(
+      !said.some((t) => /收到了|看看你这套东西|你这套东西/.test(String(t))),
+      '★★★ 没补到新文件时**绝不许说"收到了/我看看你这套东西"**（他会一脸问号 ✗）',
+      said.join('｜') || '（一个字都没说 ✓）',
+    );
     check(!!r4a.ok, '★ 接口照样返回 ok');
     // 只补文件、不要那句（`say:false`）⇒ 一个字都不发 ✓
     const said2 = [];
@@ -2183,8 +2205,11 @@ console.log(
     sentFiles.filter((f) => !f.exists).map((f) => f.name).join('、') || '全部在',
   );
   check(
-    existsSync(join(pw.outDir(uid), '小项目.zip')),
-    '★ zip 落在产物根下（他解压就看到整个项目）',
+    existsSync(join(pw.outDir(uid), '.zip-out', '小项目.zip')),
+    // ⚠️ 2026-10-19：包**不再落在产物根下**了 —— 实现改成统一放 `产物/.zip-out/`
+    //    （否则下一轮 `listOut()` 又把它当"本轮产物"，越包越厚 ✗）
+    //    断言跟着改：要验的是"这个包**真打出来了**"，不是它落在哪一层 ✓
+    '★ zip 真打出来了（放 `产物/.zip-out/`，不污染产物根）',
   );
 
   // ⚠️⚠️ 2026-10-16 加（用户：「交付过去的文件必须要直接跑，**如果缺什么运行前需要下载的
@@ -2274,8 +2299,11 @@ console.log(
       '★ 只提一次、别刷屏；兜底最多磨 **30 分钟**（可配 `bigRetryMaxMs`；2026-10-16 从 3 小时收小 ✓）',
     );
     check(
-      (s35.match(/Math\.min\(600000, Math\.max\(30000, Number\(f\.size/g) ?? []).length === 2,
-      '★★ 两处传文件的地方都按**文件大小**放宽超时（上限 10 分钟）',
+      // ⚠️ 2026-10-19：从"2 处"改成 **≥2** —— 工具「补发」又加了一处传大文件
+      //    （`resendLost` 里也走 `upload_private_file`）⇒ 写死 2 就会红 ✗
+      //    这条要盯的是"**每一处都**按大小放宽超时"，不是"恰好两处"✓
+      (s35.match(/Math\.min\(600000, Math\.max\(30000, Number\(f\.size/g) ?? []).length >= 2,
+      '★★ 每处传文件都按**文件大小**放宽超时（上限 10 分钟）',
       String((s35.match(/Math\.min\(600000/g) ?? []).length),
     );
     check(
@@ -2835,6 +2863,443 @@ console.log(
 
   config.ownerQQ = keepOwnerH;
   config.privateWork = keepWH;
+}
+
+console.log(
+  '\n【43】★★★ 交付包名交给模型起（2026-10-17 用户：「别用固定模式了，直接走模型」+「主要是要简短」）',
+);
+{
+  // 现场：交付包叫「虽然你是机器人.zip」—— 因为旧实现从需求里**截字**，正好截到客户一句吐槽 ✗
+  //   ⇒ 用户拍板：**不用固定模式，走模型**，而且**要简短** ✓
+  const uid = '10000031';
+  pw.__setFriends({ [uid]: '客户' });
+  pw.switchWork?.(true);
+  pw.stateOf(uid).need = '在吗\n帮我做个零件缺陷检测系统\n虽然你是机器人';
+  pw.patchState(uid, { need: '在吗\n帮我做个零件缺陷检测系统\n虽然你是机器人' });
+
+  // ① 模型给什么就用什么（简短、像人写的 ✓）
+  pw.__setPhrase(async () => '零件缺陷检测');
+  check((await pw.__zipName(uid)) === '零件缺陷检测', '★★★ 模型起的名字直接用 ✓');
+
+  // ② 模型话多/带修饰 ⇒ 清洗后仍太长 ⇒ **丢掉**（不乱截 ✗），由调用方兜底
+  pw.__setPhrase(async () => '「零件缺陷检测系统（含源码与说明）」');
+  const long = await pw.__zipName(uid);
+  check(long === '', '★★ 太长/带修饰的 ⇒ 丢掉（宁可用兜底，也不乱截）✗', long || '（已丢掉 ✓）');
+
+  // ③ 模型挂了 ⇒ 不炸、返回空
+  pw.__setPhrase(async () => {
+    throw new Error('模型超时');
+  });
+  check((await pw.__zipName(uid)) === '', '★★ 模型失败 ⇒ 返回空（调用方兜底 ✓）');
+
+  // ④ 没有需求 ⇒ 压根不调模型
+  pw.__setPhrase(async () => '不该被调用');
+  pw.patchState('10000032', { need: '' });
+  check((await pw.__zipName('10000032')) === '', '★ 没需求 ⇒ 空（不浪费一次调用 ✓）');
+
+  // ⑤ 兜底那一下：packIfMany 里 `|| '给你弄好的'` 在不在
+  {
+    const src = readFileSync(join(ROOT, 'src', 'private-work.js'), 'utf8');
+    check(/packIfMany/.test(src) && /\|\| '给你弄好的'/.test(src), '★★ 打包时有兜底名 ✓');
+    check(
+      !/stemFromNeed/.test(src),
+      '★★★ 旧的"从需求里截字"那套已经删干净（不再用固定模式 ✓）',
+    );
+  }
+  pw.__setPhrase(null);
+}
+
+// ════════════════════════════════════════════════════════════════════
+// 【工具 补发】交付完了、他说"我那个文件丢了，再给一份"
+//
+// 用户原话（2026-10-19）：
+//   「当所有文件都交付完的时候，如果对面不小心丢了文件再向我们要的时候，
+//    我们要能识别对面要什么文件并发过去。**先直接向主对话询问，让主对话
+//    给出点名清单然后立刻发过去**。如果探查到我们这里已经删掉了，
+//    如实回答就行了」
+// ════════════════════════════════════════════════════════════════════
+{
+  // ① 工具登记上了（名字写错 = 她写了也不执行 ✗）
+  check(pw.__toolNames().includes('补发'), '★★ 「补发」在工具清单里（模型才选得到）');
+
+  const uid = '10000034';
+  const out = pw.outDir(uid);
+  mkdirSync(out, { recursive: true });
+  mkdirSync(join(out, '.zip-out'), { recursive: true }); // 隐藏目录不该被点名
+  writeFileSync(join(out, '课程设计报告.docx'), 'docx-body', 'utf8');
+  writeFileSync(join(out, '源码.zip'), 'zip-body', 'utf8');
+
+  const sent = [];
+  const fakeBot = {
+    call: async (a, p) => {
+      sent.push({ a, p });
+      return { status: 'ok', retcode: 0, data: { file_id: 'f1' } };
+    },
+    noteSentFile: () => {},
+  };
+  pw.patchState(uid, { stage: 'done', pendingSend: [] });
+
+  // ② 点名命中 ⇒ 只发点名的那个、并且**立刻**发（不是等到某个时刻）
+  {
+    let askPrompt = '';
+    pw.__setPhrase(async ({ system, user }) => {
+      if (system.includes('原样抄')) {
+        askPrompt = `${system}\n${user}`;
+        return '课程设计报告.docx';
+      }
+      return '那份我这边已经清掉了';
+    });
+    const r = await pw.__resendLost(pw.stateOf(uid), fakeBot, uid, '他丢的那个课程设计报告');
+    const ups = sent.filter((x) => x.a === 'upload_private_file');
+    check(ups.length === 1, '★★★ 点名命中 ⇒ **只发一个**（不把产物一起糊过去 ✗）', `发了 ${ups.length} 个`);
+    check(
+      ups[0] && /课程设计报告\.docx$/.test(String(ups[0].p.file)),
+      '★★★ 发的正是他点名要的那个 ✓',
+      String(ups[0]?.p?.name),
+    );
+    check(!ups.some((x) => /源码\.zip/.test(String(x.p.file))), '★★ 没点名的**不跟着发** ✗');
+    check(
+      askPrompt.includes('课程设计报告.docx') && askPrompt.includes('他丢的那个课程设计报告'),
+      '★★★ 点名那一步：把**产物清单**和他**原话**都摊给了模型 ✓',
+    );
+    check(r.sent === 1 && !r.gone, '★ 返回"发成功了"，不是"没了" ✓');
+    check(sent.every((x) => x.a !== 'send_private_msg'), '★★ 发成功了就不该再补一句"我这边没了" ✗');
+  }
+
+  // ③ 补发**不动状态机**（文件早就发过了，只是重发）
+  check(pw.stateOf(uid).stage === 'done', '★★★ 补发之后 stage 还是 done（不搅回去 ✗）');
+  check(!pw.stateOf(uid).pendingSend?.length, '★★ 也没往 pendingSend 里塞东西 ✓');
+
+  // ④ 他要的那份**已经不在了** ⇒ 不发文件、**如实说一句**
+  {
+    const s2 = [];
+    const bot2 = {
+      call: async (a, p) => {
+        s2.push({ a, p });
+        return { status: 'ok', retcode: 0 };
+      },
+      noteSentFile: () => {},
+    };
+    pw.__setPhrase(async ({ system }) => {
+      if (system.includes('原样抄')) return '无'; // 模型：清单里没有
+      return '那份我这边已经清掉了，找不到了';
+    });
+    const r = await pw.__resendLost(pw.stateOf(uid), bot2, uid, '上次那个压测报告');
+    check(r.sent === 0 && r.gone === true, '★★★ 产物里没有 ⇒ 返回"没了"（不是假装发了 ✗）');
+    check(
+      !s2.some((x) => x.a === 'upload_private_file'),
+      '★★★ 没有的东西**绝不去发**（哪怕模型点错了名 ✗）',
+    );
+    const say = s2.find((x) => x.a === 'send_private_msg')?.p?.message ?? '';
+    check(!!say, '★★★ 但**要如实回他一句**（不能默默地什么都没发生 ✗）', say);
+    check(!/agent|机器|AI|工具|系统|提示词/i.test(String(say)), '★★ 那句里**不带内部词** ✗', say);
+  }
+
+  // ⑤ 产物被清空（他丢了文件、而我们连工作区都清了）⇒ 一样如实说
+  {
+    const s3 = [];
+    const bot3 = {
+      call: async (a, p) => {
+        s3.push({ a, p });
+        return { status: 'ok', retcode: 0 };
+      },
+      noteSentFile: () => {},
+    };
+    rmSync(out, { recursive: true, force: true });
+    let askedModel = false;
+    pw.__setPhrase(async ({ system }) => {
+      if (system.includes('原样抄')) {
+        askedModel = true;
+        return '随便什么';
+      }
+      return '我这边已经清掉了';
+    });
+    const r = await pw.__resendLost(pw.stateOf(uid), bot3, uid, '那个文件');
+    check(r.gone === true && r.sent === 0, '★★★ 产物全空了 ⇒ 直接如实说 ✓');
+    check(!askedModel, '★★ 产物一个都没有时**不白问一次模型** ✓');
+    check(
+      s3.some((x) => x.a === 'send_private_msg') && !s3.some((x) => x.a === 'upload_private_file'),
+      '★★ 只回话、不发文件 ✓',
+    );
+  }
+
+  // ⑥ 模型那句要是带了内部词 ⇒ 换成固定说法（别把"工具/系统"露给客户 ✗）
+  {
+    const s4 = [];
+    const bot4 = {
+      call: async (a, p) => {
+        s4.push({ a, p });
+        return { status: 'ok', retcode: 0 };
+      },
+      noteSentFile: () => {},
+    };
+    pw.__setPhrase(async ({ system }) => {
+      if (system.includes('原样抄')) return '无';
+      return '我查了系统，agent 说那个文件被清掉了';
+    });
+    await pw.__resendLost(pw.stateOf(uid), bot4, uid, '那个文件');
+    const say = String(s4.find((x) => x.a === 'send_private_msg')?.p?.message ?? '');
+    check(!/agent|系统|工具/i.test(say), '★★★ 模型自己说出内部词 ⇒ 换成固定说法 ✓', say);
+    check(say.length > 0, '★ 换过之后**仍然有话**（不是干脆不说 ✗）', say);
+  }
+
+  // ⑦ ⚠️⚠️ 她说"我再发一遍"却**没写暗号** ⇒ 代码必须**兜底真发**
+  //
+  // 现场（用户截图）：他「报告的文件我不小心丢了，可以再给我一份吗」
+  //   → 她「啊，丢了呀，行，我再发一遍。稍等一下，我找一下那份彩色版的」
+  //   → **什么都没发**，日志是「她答应了"发给他"但没写暗号 ⇒ **不自动发**」✗
+  // 用户要的：这种时候**别让他干等**，该发就发；那份真没了就如实说 ✓
+  {
+    const uid7 = '10000035';
+    const out7 = pw.outDir(uid7);
+    mkdirSync(out7, { recursive: true });
+    writeFileSync(join(out7, '课程设计报告_彩色版.docx'), 'body', 'utf8');
+    const s7 = [];
+    const bot7 = {
+      call: async (a, p) => {
+        s7.push({ a, p });
+        return { status: 'ok', retcode: 0, data: { file_id: 'f7' } };
+      },
+      noteSentFile: () => {},
+    };
+    const keepW7 = config.privateWork;
+    config.privateWork = { ...(keepW7 ?? {}), enable: true };
+    pw.__setFriends({ [uid7]: '客户' });
+    pw.patchState(uid7, {
+      stage: 'done',
+      outBase: '',
+      lastDeliver: { at: Date.now(), sent: ['课程设计报告_彩色版.docx'] },
+    });
+    pw.__setPhrase(async ({ system }) => {
+      if (system.includes('她答应了什么')) return '发';
+      if (system.includes('原样抄')) return '课程设计报告_彩色版.docx';
+      return '';
+    });
+    pw.noteMyReply(
+      { message_type: 'private', user_id: uid7 },
+      '行，我再发一遍。稍等一下，我找一下那份彩色版的',
+      bot7,
+    );
+    await new Promise((r) => setTimeout(r, 900));
+    const ups7 = s7.filter((x) => x.a === 'upload_private_file');
+    check(
+      ups7.length >= 1,
+      '★★★ 嘴上答应"我再发一遍"、没写暗号 ⇒ **代码兜底真发**（别让他干等 ✗）',
+      `发了 ${ups7.length} 个`,
+    );
+    check(
+      ups7.some((x) => /课程设计报告_彩色版\.docx$/.test(String(x.p.file))),
+      '★★★ 兜底发的就是那份彩色版 ✓',
+      String(ups7[0]?.p?.name),
+    );
+
+    // ⑧ 反过来：这一单**还没交付过** ⇒ 不许乱发（那种要走 `[工具:交付]`）
+    const uid8 = '10000036';
+    mkdirSync(pw.outDir(uid8), { recursive: true });
+    writeFileSync(join(pw.outDir(uid8), '草稿.docx'), 'x', 'utf8');
+    const s8 = [];
+    const bot8 = {
+      call: async (a, p) => {
+        s8.push({ a, p });
+        return { status: 'ok', retcode: 0 };
+      },
+      noteSentFile: () => {},
+    };
+    pw.__setFriends({ [uid8]: '客户' });
+    pw.patchState(uid8, { stage: 'waiting', outBase: '', lastDeliver: null, lastResend: null });
+    pw.__setPhrase(async ({ system }) => {
+      if (system.includes('她答应了什么')) return '发';
+      return '';
+    });
+    pw.noteMyReply(
+      { message_type: 'private', user_id: uid8 },
+      '行，我弄完发你',
+      bot8,
+    );
+    await new Promise((r) => setTimeout(r, 700));
+    check(
+      !s8.some((x) => x.a === 'upload_private_file'),
+      '★★ 还没交付过就答应"发" ⇒ **不乱发**（这种得走 `[工具:交付]` 挑范围/时间）',
+    );
+    config.privateWork = keepW7;
+  }
+
+  // ⑨ ⚠️⚠️ QQ **今天发文件的配额用完了**（-98090）⇒ 补发也要改走闪传
+  //
+  // 现场（用户截图）：她「文件还在，就是刚才传不上去，我这就再试一次发给你」
+  //   —— 然后就一直"再试一次"，因为她每次都在撞 -98090 ✗
+  // 交付那条路早就有"整批改走闪传"，补发这条路没接上 ✓
+  {
+    const uid9 = '10000037';
+    const out9 = pw.outDir(uid9);
+    mkdirSync(out9, { recursive: true });
+    writeFileSync(join(out9, '智能系统开发_课程设计报告.docx'), 'body', 'utf8');
+    const calls9 = [];
+    const bot9 = {
+      call: async (a, p) => {
+        calls9.push({ a, p });
+        if (a === 'upload_private_file') {
+          throw new Error(
+            'API 调用失败: retcode=100 private file upload failed: code=-98090 msg=超过今天发送文件容量上限',
+          );
+        }
+        if (a === 'create_flash_task') return { fileset_id: 'fs-1', task_id: 't-1' };
+        return { status: 'ok', retcode: 0 };
+      },
+      noteSentFile: () => {},
+    };
+    pw.patchState(uid9, { stage: 'done', outBase: '', pendingSend: [] });
+    pw.__setPhrase(async ({ system }) => {
+      if (system.includes('原样抄')) return '智能系统开发_课程设计报告.docx';
+      return '';
+    });
+    const r9 = await pw.__resendLost(pw.stateOf(uid9), bot9, uid9, 'docx 的');
+    check(
+      calls9.some((x) => x.a === 'create_flash_task'),
+      '★★★ 配额用完（-98090）⇒ 补发**改走闪传**（别一直重试同一个失败 ✗）',
+    );
+    check(calls9.some((x) => x.a === 'send_flash_msg'), '★★★ 闪传的卡片也真发出去了 ✓');
+    check(r9.sent >= 1, '★★★ 走闪传也算"发出去了"（不能再说"传不上去" ✗）', `sent=${r9.sent}`);
+    check(
+      !calls9.some((x) => x.a === 'send_private_msg' && /传不上去/.test(String(x.p?.message))),
+      '★★ 发成功了就不该再补一句"传不上去" ✗',
+    );
+    // ⚠️ 撞配额之前**只试一次上传**（原来 0ms + 3000ms 试两遍，纯浪费）
+    check(
+      calls9.filter((x) => x.a === 'upload_private_file').length === 1,
+      '★★ 配额用完的错**不重试**（-98090 再试还是 98090 ✓）',
+      `${calls9.filter((x) => x.a === 'upload_private_file').length} 次`,
+    );
+  }
+
+  // ⑩ 「相同的 docx 和 pdf ⇒ 没明确说明就只发 docx」（用户：「**补发也是**」）
+  //
+  // 现场：他丢了文件，主对话点名「…报告.docx、…报告.pdf」⇒ 两个都发（多传、对面还得挑）
+  {
+    const uid10 = '10000038';
+    const out10 = pw.outDir(uid10);
+    mkdirSync(out10, { recursive: true });
+    writeFileSync(join(out10, '课程设计报告.docx'), 'docx', 'utf8');
+    writeFileSync(join(out10, '课程设计报告.pdf'), 'pdf', 'utf8');
+
+    const run10 = async (asked) => {
+      const got = [];
+      const bot = {
+        call: async (a, p) => {
+          if (a === 'upload_private_file') got.push(String(p.name));
+          return { status: 'ok', retcode: 0, data: { file_id: 'x' } };
+        },
+        noteSentFile: () => {},
+      };
+      pw.patchState(uid10, { stage: 'done', outBase: '' });
+      pw.__setPhrase(async ({ system }) =>
+        system.includes('原样抄') ? '课程设计报告.docx\n课程设计报告.pdf' : '',
+      );
+      await pw.__resendLost(pw.stateOf(uid10), bot, uid10, asked);
+      return got;
+    };
+
+    // ① 没明确说 ⇒ 只发 docx
+    const a10 = await run10('报告再给我一份');
+    check(
+      a10.includes('课程设计报告.docx') && !a10.includes('课程设计报告.pdf'),
+      '★★★ 补发：同名的 docx 和 pdf ⇒ **只发 docx**（没明确说明时）',
+      a10.join('、') || '（一个都没发）',
+    );
+    // ② 明确要 pdf ⇒ 只发 pdf
+    const b10 = await run10('给我一份 pdf 的，我要打印出来');
+    check(
+      b10.includes('课程设计报告.pdf') && !b10.includes('课程设计报告.docx'),
+      '★★★ 他**明确说要 pdf / 打印版** ⇒ 反过来只发 pdf ✓',
+      b10.join('、') || '（一个都没发）',
+    );
+  }
+
+  // ⑪ ⚠️⚠️ 点名**说没有**时不许判"已经清掉了" —— 要退回这一单的正式清单
+  //
+  // 现场（用户截图）：他「报告的文件我不小心丢了」→ 她「行，东西还在我这，这就发你」
+  //   → 兜底拿**她的话**去点名 ⇒ 主对话答"没有" ⇒
+  //   她又说「那份文件我这边已经清掉了，现在没法再发给你了」✗
+  //   可产物里明明还有 30 个（文件在！）—— 误判比不发还糟 ✓
+  {
+    const uid11 = '10000039';
+    const out11 = pw.outDir(uid11);
+    mkdirSync(out11, { recursive: true });
+    writeFileSync(join(out11, '课程设计报告_彩色版.docx'), 'docx', 'utf8');
+    writeFileSync(join(out11, '别的无关文件.txt'), 'x', 'utf8');
+    // agent 的正式清单
+    writeFileSync(
+      join(pw.dirFor(uid11), '要发这些.md'),
+      '课程设计报告_彩色版.docx\n',
+      'utf8',
+    );
+    const got11 = [];
+    const bot11 = {
+      call: async (a, p) => {
+        if (a === 'upload_private_file') got11.push(String(p.name));
+        if (a === 'send_private_msg') got11.push(`说:${String(p.message)}`);
+        return { status: 'ok', retcode: 0, data: { file_id: 'f' } };
+      },
+      noteSentFile: () => {},
+    };
+    pw.patchState(uid11, { stage: 'done', outBase: '', lastDeliver: null });
+    // 主对话点名时**说没有**（因为她那句话里没文件名）
+    pw.__setPhrase(async ({ system }) => (system.includes('原样抄') ? '无' : ''));
+    const r11 = await pw.__resendLost(
+      pw.stateOf(uid11),
+      bot11,
+      uid11,
+      '行，东西还在我这，这就发你',
+    );
+    check(
+      got11.includes('课程设计报告_彩色版.docx'),
+      '★★★ 点名说"没有" ⇒ **退回「要发这些.md」清单**把东西发出去（文件明明还在 ✗）',
+      got11.join('、') || '（什么都没发）',
+    );
+    check(r11.sent >= 1 && !r11.gone, '★★★ 不能说"已经清掉了"（产物里还有东西 ✓）');
+    check(
+      !got11.some((x) => x.startsWith('说:') && /清掉|找不到了/.test(x)),
+      '★★★ 也不能回他"那份我这边已经清掉了"（那是误判的话 ✗）',
+      got11.filter((x) => x.startsWith('说:')).join(' / ') || '（没乱说 ✓）',
+    );
+    check(
+      !got11.includes('别的无关文件.txt'),
+      '★★ 退回清单时也只发清单里点名的那个，别把无关文件一起糊过去 ✓',
+    );
+  }
+
+  pw.__setPhrase(null);
+}
+
+// ⚠️⚠️ 2026-10-19 加（用户：「**改，私聊工作模式下一定不要触发了，要不然一下就露馅了**」）——
+//    工作模式 = 工作号私聊**客户**。提示词里工具清单本来不注入，但**执行层原来没兜**：
+//    她要是凭上下文写出 `[工具:工资]` 这类暗号，代码照样会执行 ⇒ 工资/花费/服务器状态
+//    这些"一眼是机器人"的东西就被说出来了 ✗
+console.log('\n【N】★ 工作模式私聊 ⇒ 一个工具都不许执行');
+{
+  const { Bot } = await import('../src/bot.js');
+  const b = new Bot();
+  // ⚠️ isWorkChat() 要求「工作模式开着」（privateWork.enable === true）——enabled() 默认是 false，
+  //    前面那几段会把它改回去 ⇒ 这里显式打开，不然这条闸根本不会生效（我第一次就写成这样，白红一轮）
+  const beforeAllowFriends = config.trigger?.allowFriendsPrivate;
+  config.trigger = { ...(config.trigger ?? {}), allowFriendsPrivate: true }; // 前面那段关过，这里恢复
+  const beforeEnable = config.privateWork?.enable;
+  // ⚠️ isAllowedFriend() 还要「好友缓存里有这个人」；前面那几段把缓存换过/清过 ⇒ 这里用
+  //    riendOnly: false 那条捷径（它本来就存在：W().friendOnly === false 就放行）
+  const beforeFriendOnly = config.privateWork?.friendOnly;
+  config.privateWork = { ...(config.privateWork ?? {}), enable: true, friendOnly: false };
+  const workEv = { message_type: 'private', user_id: FRIEND };
+  const groupEv = { message_type: 'group', group_id: '999000778', user_id: '30003' };
+  check(pw.isWorkChat(workEv), '前置：这条是工作模式私聊');
+  for (const name of ['工资', '花了多少', '查服务器', '学到什么', '好感度']) {
+    const got = await b.runReadTool(name, {}, workEv);
+    check(got === '', `★ 「${name}」在工作模式私聊里**没有执行**（返回空 ⇒ 不塞材料、不重生成）`, JSON.stringify(String(got)).slice(0, 90));
+  }
+  // 群聊里照旧能查（别把正常的也挡了）
+  const gotGroup = await b.runReadTool('花了多少', {}, groupEv);
+  check(typeof gotGroup === 'string' && gotGroup.length > 0, '★ 群聊里「花了多少」照旧能查（没连正常场景一起挡）');
+  config.privateWork = { ...(config.privateWork ?? {}), enable: beforeEnable === true, friendOnly: beforeFriendOnly };
+  config.trigger = { ...(config.trigger ?? {}), allowFriendsPrivate: beforeAllowFriends };
 }
 
 console.log(`\n结果: ${failures === 0 ? '全部通过 ✅' : `${failures} 项失败 ❌`}\n`);

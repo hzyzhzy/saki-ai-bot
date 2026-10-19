@@ -838,7 +838,42 @@ const routes = {
    *   ② 别的号的进程用它**探活**（见 `GET /api/accounts`）——
    *      `http://127.0.0.1:<那个号的端口>/api/whoami` 通 = 那个号在跑。
    */
-  'GET /api/whoami': async (_req, res) => {
+    // ⚠️ 2026-10-19 加（用户：「在**功能卡片**加一个**工具调用入口**…
+  //    展示**所有目前已启用的工具**，并显示**累计调用次数**和**今日调用次数**」）
+  'GET /api/tools': async (req, res) => {
+    try {
+      const ts = await import('./tool-stats.js');
+      // ⚠️⚠️⚠️ 2026-10-19 修（用户截图：「**工作模式是开着的**，能不能多检查几遍」）——
+      //    现场：他在 **3099**（主号界面）上**切号切到谷雨**，工具页显示「工作模式现在：关」，
+      //    可谷雨那个号明明是开着的 ✗
+      //    真因：这条路由只读**当前进程**的 `config`（= 主号，关着），
+      //    完全没理前端切号时带的 `x-saki-account` 头 ⇒ 显示的是**另一个号**的状态 ✗
+      //    ⇒ 带了那个头就按**那个号自己的** `accounts/<QQ>.yml` 读 ✓
+      const hdr = String(req?.headers?.['x-saki-account'] ?? '').trim();
+      let wantQq = hdr && /^\d{5,12}$/.test(hdr) ? hdr : '';
+      let workEnabled = config.privateWork?.enable === true;
+      if (wantQq) {
+        try {
+          const a = accounts.read(wantQq) ?? {};
+          // ⚠️ 读得到就用它的；读不到（这号还没自己的配置文件）⇒ 沿用它跟主号一样的判断
+          if (a.privateWork && typeof a.privateWork.enable === 'boolean') {
+            workEnabled = a.privateWork.enable === true;
+          }
+        } catch {}
+      }
+      send(res, 200,
+        ts.snapshot({
+          // ⚠️ 工作模式关着的号：不显示那 12 个工作模式工具（它们在这个号上根本用不到）✓
+          workEnabled,
+        }),
+      );
+    } catch (e) {
+      // ⚠️ 这个响应对象**不是 express**（没有 `res.status`）⇒ 只能 `res.json` ✓
+      send(res, 500, { ok: false, error: String(e?.message ?? e) });
+    }
+  },
+
+'GET /api/whoami': async (_req, res) => {
     send(res, 200, {
       ok: true,
       qq: displayId(),
@@ -863,6 +898,29 @@ const routes = {
    *    所以这一页能一眼看出"哪个号在线、哪个号没起来"。
    * ⚠️ 探测用 1.5 秒超时并**并发**发出去 —— 号多了也不该让这一页卡住。
    */
+  // ⚠️⚠️ 2026-10-19 加（用户第三次报同一处：「**这两个开关还是有问题，现在根本点不动**」
+  //    + 截图：「点了关，但服务端现在是开 —— 没生效」）——
+  //    查下来后端**每一次都写成功了**（`POST /api/config` → `accounts/<QQ>.yml`，
+  //    带不带 `x-saki-account` 都验过，两个方向都对）。
+  //    ⇒ 病根在前端**读回那一步**：它原来走 `GET /api/accounts`，
+  //      而那个接口要**遍历所有号、逐个探活**（每个 1.5 秒超时）、还要顺带重建整张表 ——
+  //      中间任何一处抛异常，`ACC_LIST` 就**停在旧值** ⇒ 界面拿旧值当答案 ⇒ 报"没生效" ✗
+  //    ⇒ 给这两个开关一个**只读内存、不探活、不碰 DOM** 的轻接口：秒回、只看这个号自己 ✓
+  'GET /api/switches': async (_req, res) => {
+    const pw = config.privateWork;
+    const tk = config.humanTakeover;
+    return send(res, 200, {
+      ok: true,
+      qq: displayId(),
+      workMode: pw?.enable === true,
+      takeover: tk?.enable === true,
+      // ⚠️ 顺带把"配置文件里到底是什么"也报出来 —— 万一内存和磁盘不一致，这里一眼能看出来
+      raw: {
+        privateWork: pw?.enable === undefined ? null : pw.enable,
+        humanTakeover: tk?.enable === undefined ? null : tk.enable,
+      },
+    });
+  },
   'GET /api/accounts': async (_req, res) => {
     const ids = accounts.ids();
     // ⚠️ 主号可能**还没有账号文件**（老用户没做拆分）—— 也要列出来，
@@ -2758,6 +2816,30 @@ const routes = {
    *   · 补下来之后顺手起一次**只读预读**（和正常收到文件一个待遇）✓
    *   ⚠️ QQ 的文件有有效期 —— 要补趁早（过期只能让他重发）
    */
+  // ⚠️⚠️ 2026-10-19 加（用户：「**在工作模式的分好友设置那里加一个补回消息
+  //    加补看文件的按钮**」）—— 「分好友」那张表**每一行**都有这个按钮，
+  //    点它就把**那个人的**消息和文件一起补回来 ✓
+  //    ⚠️ 和下面 `backfill` 的区别：这条**先补消息、再补文件**（下面那条只补文件）✓
+  'POST /api/private-work/backfill-both': async (req, res) => {
+    if (!bot?.selfId) return send(res, 200, { ok: false, error: 'QQ 没在线' });
+    let b = {};
+    try {
+      b = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+    } catch {}
+    const qq = String(b.qq ?? '').trim();
+    if (!/^\d{5,12}$/.test(qq)) return send(res, 200, { ok: false, error: '要填 QQ 号' });
+    try {
+      const pw = await import('./private-work.js');
+      const r = await pw.backfillBoth(qq, bot, {
+        count: Math.max(20, Number(b.count) || 60),
+        // ⚠️ `say:false` = 只补、不打扰他（补文件那条会回他一句「补发一下」）
+        say: b.say !== false,
+      });
+      return send(res, 200, r);
+    } catch (e) {
+      return send(res, 200, { ok: false, error: e.message });
+    }
+  },
   'POST /api/private-work/backfill': async (req, res) => {
     if (!bot?.selfId) return send(res, 200, { ok: false, error: 'QQ 没在线' });
     let b = {};
@@ -3852,9 +3934,46 @@ export function startWebUI(botInstance = null) {
     }
   });
 
+  // ⚠️ 2026-10-19：端口被占时自动重试的次数（要声明在 `server.on('error')` **之前**）✓
+  let retries = 0;
+
   server.on('error', (e) => {
     if (e.code === 'EADDRINUSE') {
-      log.error(`管理界面端口 ${config.webui.port} 被占用，换一个端口或关掉占用的程序`);
+      // ⚠️⚠️⚠️ 2026-10-19 修（用户截图「**读不到号列表（服务端出错了）**」）——
+      //    真实现场：`[21:53:17] ERR 管理界面端口 3099 被占用` ⇒ 之后**再也没起过界面**，
+      //    可机器人本体照常在跑（群里还会说话）⇒ 用户只看到界面挂了，还以为代码坏了 ✗
+      //    真因：重启时上一个进程**还没完全释放端口**（TIME_WAIT / 退出慢），
+      //      这一次启动就永久放弃了 —— 不会再试 ✗
+      //    ⇒ 现在**自动重试**：隔几秒再 bind 一次，最多 6 次（覆盖"旧进程慢退出"的窗口）✓
+      //      ⚠️ 不换端口：换了端口用户按老地址就打不开，比报错还迷惑 ✗
+      retries += 1;
+      if (retries <= 6) {
+        const waitMs = Math.min(1500 * retries, 6000); // 1.5s → 3s → 4.5s → 6s…
+        log.warn(
+          `管理界面端口 ${config.webui.port} 还被占着（第 ${retries}/6 次）` +
+            `⇒ ${Math.round(waitMs / 1000)} 秒后重试（多半是上一个进程还没退干净）`,
+        );
+        try {
+          server.close();
+        } catch {}
+        setTimeout(() => {
+          try {
+            server.listen({ port: config.webui.port, host, ipv6Only: false }, () => {
+              log.info(
+                ` 管理界面: http://${host === '::' ? '127.0.0.1' : host}:${config.webui.port}` +
+                  `（端口重试第 ${retries} 次成功 ✓）`,
+              );
+            });
+          } catch (e2) {
+            log.error(`管理界面重试启动失败: ${e2.message}`);
+          }
+        }, waitMs).unref?.();
+        return;
+      }
+      log.error(
+        `管理界面端口 ${config.webui.port} 被占用（重试 6 次都不成）⇒ ` +
+          `手动关掉占用的程序，或者改 config.yml 里的 webui.port`,
+      );
     } else if (e.code === 'EADDRNOTAVAIL' && config.webui.host === '::') {
       // 有些环境没有 IPv6，退回只监听 IPv4
       log.warn('没有可用的 IPv6，退回只监听 127.0.0.1');
@@ -3863,7 +3982,7 @@ export function startWebUI(botInstance = null) {
     } else {
       log.error(`管理界面启动失败: ${e.message}`);
     }
-  });
+  });;
 
   // host 用 "::" 时 Node 默认同时接受 IPv4 和 IPv6（双栈），
   // 这样浏览器无论是走 127.0.0.1 还是 localhost→::1 都能打开。

@@ -308,6 +308,11 @@ export async function* streamChat(messages, outerSignal, opts = {}) {
   const usingMainBase =
     useBase.replace(/\/+$/, '') === String(llm.baseURL ?? '').replace(/\/+$/, '');
 
+  // ⚠️ 2026-10-19：思考链**每次调用重新攒** —— 同一个 `report` 对象会被"重跑/切备选"
+  //    复用（见 `bot.js` 的 `_genOnce`），不清空就会把两次的思考拼在一起 ⇒
+  //    上一次写过的工具暗号会被**执行两遍** ✗
+  if (opts.report) opts.report.reasoning = '';
+
   try {
     const res = await llmFetch(`${useBase.replace(/\/+$/, '')}/chat/completions`, {
       method: 'POST',
@@ -427,6 +432,18 @@ export async function* streamChat(messages, outerSignal, opts = {}) {
           // ⚠️ 但要记一下「有没有思考过」—— 用来判断正文为空是不是被思考吃光了。
           if (typeof delta.reasoning_content === 'string' && delta.reasoning_content) {
             sawReasoning = true;
+            // ⚠️⚠️ 2026-10-19 加（用户：「**直接只在思考链输出调用工具的信息吧，正文一概不输出，
+            //    和 dsh 一模一样**」）：
+            //    工具调用要从**思考链**里读 ⇒ 这里必须把它**攒下来**交给调用方 ✓
+            //    （原来只记了个布尔 `sawReasoning`，思考链的内容**直接扔掉**了）
+            //    ⚠️ 落点：`opts.report.reasoning` —— 和 `truncated` 同一个"按次隔离"的对象，
+            //      不用模块级全局变量（并发两条请求会互相串 ✗）
+            //    ⚠️ 上限 20000 字：思考链一般两三千 token，够用；真超了留**尾部**
+            //      （暗号多半写在"决定动手"那一段，靠近末尾 ✓）—— 也防止把内存吃爆。
+            if (opts.report) {
+              const r = String(opts.report.reasoning ?? '') + delta.reasoning_content;
+              opts.report.reasoning = r.length > 20000 ? r.slice(-20000) : r;
+            }
           }
           const text = delta.content;
           if (typeof text === 'string' && text) {

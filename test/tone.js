@@ -159,8 +159,16 @@ console.log('\n【5】★ 对方在**问你**的时候，回一句反问不算�
   );
 
   // 他问完接着开始分享，这时候才该开始算
-  sheSays('半年零花钱就换这个？', heSays('我买了个表', ev));
-  check(recent.challengeStreak(ev) === 1, '转入分享后 → 开始计 1', `实际 ${recent.challengeStreak(ev)}`);
+  // ⚠️⚠️ 2026-10-19 修（**断言过时，代码是对的**）：
+  //    原来写的是 `sheSays('半年零花钱就换这个？', heSays('我买了个表', ev))` ——
+  //    两次 `heSays` 共用**同一个 `ev`（同一个 `message_id`）**，而 `recent.remember()`
+  //    现在会**按 message_id 去重**（今天为"同一条消息记了两遍"那个 bug 加的）⇒
+  //    第二句「我买了个表」**根本没进上下文** ⇒ `lastHuman()` 还是那句**问句** ⇒
+  //    走"他在问我，反问不算抬杠"那一支清 0 ⇒ 永远算不到 1 ✗
+  //    ⇒ 换一个**全新的 ev**（新 message_id、同一个群），语义不变 ✓
+  const ev2 = heSays('我买了个表');
+  sheSays('半年零花钱就换这个？', ev2);
+  check(recent.challengeStreak(ev2) === 1, '转入分享后 → 开始计 1', `实际 ${recent.challengeStreak(ev2)}`);
 }
 
 console.log('\n【6】★ 阈值 ≥2 才注入提示，而且真的注进系统提示词里');

@@ -211,9 +211,19 @@ console.log('\n【10】★ 搜出来的东西要**筛**（B站会拆词、会混
     const uv = await bili.upVideos('籽岷');
     check(uv.list.length === 1 && uv.list[0].up === '籽岷', 'UP 主搜索**只留作者本人**（别人的不混进来）');
     check(uv.fresh === true, '有近 90 天内的稿 → fresh=true');
+    // ⚠️ 2026-10-19 改（这条原来写的是"**所有**请求都带 buvid3"，把取 buvid 的那次也算进去了）：
+    //    现在 `src/bilibili.js` 会先去 `x/frontend/finger/spi` 要一个**真的** buvid
+    //    （热门榜 / 排行榜不吃假 buvid，会 -352）—— 那一次请求本来就**没有** Cookie ✗
+    //    ⇒ 只查**搜索请求**那几条 ✓
+    const searchIdx = urls.map((u, i) => (/search\/type/.test(u) ? i : -1)).filter((i) => i >= 0);
     check(
-      headers.length > 0 && headers.every((h) => /buvid3=/.test(String(h?.Cookie ?? ''))),
+      searchIdx.length > 0 && searchIdx.every((i) => /buvid3=/.test(String(headers[i]?.Cookie ?? ''))),
       '每个搜索请求都带 **buvid3**（不带时 B站会回 HTTP 412，实测踩过）',
+    );
+    // 取 buvid 那一步**只该发生一次**（拿到就缓存住；不然每条搜索都多一次往返 ✗）
+    check(
+      urls.filter((u) => /finger\/spi/.test(u)).length <= 1,
+      `取 buvid 只请求一次（实际 ${urls.filter((u) => /finger\/spi/.test(u)).length} 次）`,
     );
     check(urls.length >= 2, `UP 主那条会拉不止一遍（时间筛时灵时不灵要重试，实际 ${urls.length} 次请求）`);
     check(urls.some((u) => /pubtime=30/.test(u)), '用 `pubtime` 做时间筛');

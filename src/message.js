@@ -127,9 +127,15 @@ export function extractText(segments, { atPlaceholder = '', atNameOf = null } = 
         // 这个区别对回答方式影响很大 —— 表情包是「在玩笑」，截图是「有问题要问」。
         parts.push(isStickerSeg(seg) ? '[表情包]' : '[图片]');
         break;
-      case 'face':
-        parts.push('[QQ表情]');
+      case 'face': {
+        // ⚠️⚠️ 2026-10-19 修（用户截图：客户发了个 👌，她回「就发个表情啊，我还以为你要改口呢」）——
+        //    原来这里**只写 `[QQ表情]`**，她根本不知道是哪个 ⇒ 只能当"看不懂的新东西" ✗
+        //    ⇒ 协议端给了名字/描述就带上：`[QQ表情:赞]`、`[QQ表情:OK]` ✓
+        const d = seg.data ?? {};
+        const nm = String(d.name ?? d.faceName ?? d.summary ?? d.face_text ?? "").trim();
+        parts.push(nm ? `[QQ表情:${nm.slice(0, 12)}]` : '[QQ表情]');
         break;
+      }
       case 'record':
         parts.push('[语音]');
         break;

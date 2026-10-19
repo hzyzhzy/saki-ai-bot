@@ -615,6 +615,8 @@
       <button data-tab="quest">二级剧情</button>
       <button data-tab="affinity">好感度 / 好友</button>
       <button data-tab="workmode">工作模式</button>
+      <!-- ⚠️ 2026-10-19 加：工具调用次数（长条卡片 + 累计/今日） -->
+      <button data-tab="tools">工具调用</button>
     </div>
     <div class="navsec">
       <div class="navgrp">运行</div>
@@ -657,13 +659,16 @@
         ⚠️ 两个开关都是<b>这个号自己的</b>设置（<span class="mono">accounts/&lt;QQ&gt;.yml</span>），保存后立刻生效。
       </p>
       <div class="btns">
-        <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer">
-          <input type="checkbox" id="acc-workmode"> <span>私聊工作模式</span>
-        </label>
-        <button class="act" onclick="accSaveWorkMode()">保存</button>
+        <!-- ⚠️⚠️ 2026-10-19 改成**两个按钮**（用户：「**这两个开关还是有问题，现在根本点不动**」）——
+             这已经是第三次报同一处了（先"打不开"、再"关不了"、再"点不动"）⇒
+             结论：**「复选框 + 保存」这个形态本身就是坑**（点了勾会不会生效、什么时候刷回去，
+             光看那个小方框根本判断不出来）。⇒ 换成「开启 / 关闭」两个**明确的动作** ✓ -->
+        <button class="act" onclick="accSetWorkMode(true)">开启工作模式</button>
+        <button class="ghost" onclick="accSetWorkMode(false)">关闭工作模式</button>
         <span class="msg" id="msg-acc-workmode"></span>
         <span class="hint" id="state-acc-workmode" style="margin-left:6px"></span>
       </div>
+      <p class="hint">⚠️ 点一下就生效（不用再点别处）；右边那句会告诉你**服务端现在的真实状态**。</p>
       <hr style="border:none;border-top:1px solid rgba(127,127,127,.25);margin:14px 0">
       <p class="hint">
         <b>人工接管</b>：你要<b>自己上手用这个号</b>的时候打开它 —— 机器人从此<b>一条消息都不发</b>
@@ -671,10 +676,9 @@
         但<b>聊天记录照常存着</b>，关掉之后它接得上刚才那些话。
       </p>
       <div class="btns">
-        <label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer">
-          <input type="checkbox" id="acc-takeover"> <span>人工接管这个号</span>
-        </label>
-        <button class="act" onclick="accSaveTakeover()">保存</button>
+        <!-- ⚠️ 同上，两个按钮 -->
+        <button class="act" onclick="accSetTakeover(true)">开启接管</button>
+        <button class="ghost" onclick="accSetTakeover(false)">交还（关闭接管）</button>
         <span class="msg" id="msg-acc-takeover"></span>
         <span class="hint" id="state-acc-takeover" style="margin-left:6px"></span>
       </div>
@@ -737,6 +741,90 @@
       </p>
     </div>
   </section>
+  <!-- ⚠️ 2026-10-19 加（用户要求）：工具调用入口 —— 长条卡片 + 累计/今日次数 -->
+  <section id="tab-tools" class="hidden">
+    <div class="card">
+      <h2>工具调用</h2>
+      <div id="tools-sum" style="font-weight:800;font-size:16px;margin:10px 0 4px">—</div>
+      <p class="hint">
+        这里是<b>目前启用的所有工具</b>（她自己在<b>思考链</b>里写暗号 ⇒ 代码确定性地执行）。
+        后面两个数字：<b>累计</b>调用次数 / <b>今日</b>调用次数。
+        <br>⚠️ 工作模式关着的号，那 12 个「工作模式专用」工具不会显示。
+      </p>
+            <div id="tools-list" style="display:flex;flex-direction:column;gap:8px;margin-top:12px"></div>
+    </div>
+  </section>
+  <script>
+    // 长条卡片：一行一个工具，右边两个数字
+    async function renderTools() {
+      const box = document.getElementById("tools-list");
+      const sum = document.getElementById("tools-sum");
+      if (!box) return;
+      box.innerHTML = "<div class=hint>加载中…</div>";
+      try {
+        // ⚠️⚠️⚠️ 2026-10-19 修（用户：「**工作模式是开着的**，能不能多检查几遍」）——
+        //    **真凶就在这一行**：这里原来用的是**裸 `fetch`**，而页面切号是靠
+        //    `x-saki-account` 这个头把请求转给"那个号的进程"的（见 `api()`）⇒
+        //    裸 fetch 不带头 ⇒ **永远问的是主号** ⇒ 在 3099 上切到谷雨，
+        //    工具页读到的还是主号的状态（工作模式关 / 13 个工具）✗✗
+        //    实测：3099 带谷雨头 = workEnabled True / 25 个；不带头 = False / 13 个。
+        let curAcc = "";
+        try {
+          curAcc = localStorage.getItem("saki-account") || "";
+        } catch {}
+        const r = await fetch("/api/tools", {
+          cache: "no-store",
+          headers: curAcc ? { "x-saki-account": curAcc } : {},
+        });
+        const j = await r.json();
+        const list = j.list || [];
+        const nWork = list.filter((x) => x.scope === "work").length;
+        const nAny = list.filter((x) => x.scope !== "work").length;
+        if (sum) {
+          // ⚠️ 2026-10-19 改：**把"工作模式开没开"直接写出来** ——
+          //    之前只报总数，13 和 25 分不清是"开关没开"还是"页面没刷"✗
+          sum.textContent =
+            `共 ${list.length} 个工具（工作模式 ${nWork} 个 / 全场景 ${nAny} 个）` +
+            ` ｜ 工作模式现在：${j.workEnabled ? "开" : "关"}` +
+            ` ｜ 累计 ${j.totalAll || 0} 次 ｜ 今日 ${j.todayAll || 0} 次（${j.day || ""}）`;
+        }
+        if (!list.length) { box.innerHTML = "<div class=hint>还没有工具</div>"; return; }
+        // ⚠️⚠️ 2026-10-19 修（用户截图：「**改的什么，完全没有了**」）——
+        //    上一版我在这里写了 `return`，把「工作模式关着」这件事变成了
+        //    **整个列表都不显示** ⇒ 那 13 个全场景工具也一起没了 ✗✗
+        //    ⇒ 现在只**加一行提示**，列表照常列出来 ✓
+        const tip =
+          !j.workEnabled && nWork === 0
+            ? "<div class=hint style=\"margin-bottom:8px;border:1px solid rgba(255,170,60,.5);" +
+              "border-radius:10px;padding:8px 12px\">⚠️ 这个号的<b>工作模式是关着的</b> ⇒ " +
+              "那 12 个「工作模式专用」工具不显示。要看它们：去「工作模式」页点「开启工作模式」，" +
+              "再回这页按 F5。<br>下面是**现在可用**的那 " +
+              nAny +
+              " 个全场景工具 ✓</div>"
+            : "";
+        box.innerHTML =
+          tip +
+          list
+          .map((x) => {
+            const scope = x.scope === "work" ? "工作模式" : "全场景";
+            return (
+              `<div style="display:flex;align-items:center;gap:12px;border:1px solid var(--line,#e3e8ef);` +
+              `border-radius:10px;padding:10px 14px;background:#fff">` +
+              `<div style="min-width:96px;font-weight:600">${x.name}</div>` +
+              `<div style="flex:1;color:#64748b;font-size:13px">${x.desc || ""}</div>` +
+              `<div style="min-width:64px;color:#94a3b8;font-size:12px">${scope}</div>` +
+              `<div style="min-width:92px;text-align:right;font-variant-numeric:tabular-nums">` +
+              `<b>${x.total}</b><span style="color:#94a3b8"> / ${x.today}</span></div>` +
+              `</div>`
+            );
+          })
+          .join("");
+      } catch (e) {
+        box.innerHTML = `<div class=hint>读不到：${e.message}</div>`;
+      }
+    }
+  </script>
+
   <section id="tab-accounts" class="hidden">
     <div class="card">
       <h2>正在控制哪个 QQ</h2>
@@ -882,6 +970,21 @@
         <div><label>单次最大 token</label><input type="number" id="llm-maxTokens"></div>
         <div><label>超时（毫秒）</label><input type="number" id="llm-timeout"></div>
       </div>
+      <div class="btns">
+        <button class="act" onclick="saveModel()">保存</button>
+        <button class="ghost" onclick="testLLM()">测试连通性</button>
+        <span class="msg" id="msg-llm"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>对话处理（慢消息 · 思考链 · 备选模型 · 剧情放开写）</h2>
+      <p class="hint">
+        这几项是<b>行为开关</b>，和上面的模型配置（地址 / 密钥 / 温度）<b>分开放</b> ——
+        在这里点保存<b>不会动 api 地址、密钥、温度那些</b>（那几项在上面的「大模型」卡片里）。
+      </p>
+      <div style="margin-top:14px;font-weight:600">生成太慢 / 三类对话 / 备选模型</div>
+
       <!-- ⚠️⚠️ 2026-10-07 加（用户要求，专门对付「中转站盗版慢速模型」）：
            一轮生成拖太久的时候，**把后面排队等着的消息直接丢掉** ——
            不丢的话队列永远追不上，回的还都是几分钟前那些已经过时的话。
@@ -942,10 +1045,19 @@
       </div>
       <div><label>备选 API Key</label><input type="password" id="llm-bkKey" placeholder="（Gemini 的 key）"></div>
       <div class="hint" id="bk-hint" style="margin:4px 0"></div>
+
+      <div style="margin-top:16px;font-weight:600">剧情放开写（只影响剧情生成）</div>
+      <div class="hint" style="margin:4px 0 2px">
+        ⚠️ <b>只放开写法，不放开用词</b>：人设里"不出现违禁词"那条照旧生效
+        （群里发违禁内容会被封号，这个开关管不到它）。
+      </div>
+      <label style="display:flex;align-items:center;gap:8px;margin:10px 0">
+        <input type="checkbox" id="llm-unfiltered" style="width:auto;margin:0">
+        剧情里「不拒绝、不警示、不做道德评估」
+      </label>
       <div class="btns">
         <button class="act" onclick="saveModel()">保存</button>
-        <button class="ghost" onclick="testLLM()">测试连通性</button>
-        <span class="msg" id="msg-llm"></span>
+        <span class="msg" id="msg-llm2"></span>
       </div>
     </div>
 
@@ -2626,6 +2738,13 @@ async function initAccounts() {
 // ⚠️ 2026-10-14：工作模式那一页的读取（两个开关的状态走 /api/accounts，和 QQ 号页同一份）
 async function renderWorkMode() {
   await renderAccounts();
+  // ⚠️⚠️ 2026-10-19 加（用户第三次报那两个开关）：那两个「当前：…」原来只靠
+  //    `renderAccounts()` 顺带刷 —— 那一整套里任何一步抛异常就停在旧值 ⇒ 界面撒谎 ✗
+  //    ⇒ 进这个页面时**再单独问一次**那个轻接口（只读内存、不探活），拿到啥就显示啥 ✓
+  try {
+    const sw0 = await api('/api/switches').catch(() => null);
+    if (sw0 && sw0.ok) accShowSwitchState(sw0);
+  } catch {}
   const r = await api("/api/config").catch(() => null);
   const cfg = (r && (r.config || r)) || {};
   const w = cfg.privateWork || {};
@@ -2691,14 +2810,42 @@ function pwFriendTable(d) {
       + (f.costYuan
         ? "<div class=\"hint\">这个私聊一共花了 " + esc(pwYuan(f.costYuan)) + "（" + (f.costCalls || 0) + " 次调用）</div>"
         : "")
-      + (f.stage === "waiting" && f.etaAt ? "<div class=\"hint pw-eta\" data-eta=\"" + f.etaAt + "\">…</div>" : "")
-      + (f.stage === "sendfail" ? "<div class=\"hint\">上次一个都没发出去（等他催，或你点下面那个）</div>" : "")
+      // ⚠️⚠️⚠️ 2026-10-19 改（用户：「**要查看交付工具的状态，这个优先级高**」）——
+      //    那几行原来全都挂在 `stage === 'waiting'` 上 ⇒ 而 stage 是**状态机**推的，
+      //    跟"产物做没做出来"完全独立 ⇒ 活早干完了、产物有 16 个，
+      //    stage 还停在 `intake`（界面上写"在聊需求"）⇒ **交付状态一行都不显示** ✗
+      //    ⇒ 现在**只看实际的东西**（产物 / 发送记录 / 失败标记），不看 stage：
+      + (function () {
+          const n = arts.length;
+          const sent = Number(f.sentCount || 0);
+          if (f.stage === "sendfail") {
+            return "<div class=\"hint\" style=\"color:#e5484d\">⚠️ <b>交付失败</b>：上次一个都没发出去（等他催，或点下面那个）</div>";
+          }
+          if (sent > 0) {
+            return (
+              "<div class=\"hint\">✅ <b>已交付 " + sent + " 个</b>" +
+              (f.sentAt ? "（" + new Date(f.sentAt).toLocaleString("zh-CN", { hour12: false }) + "）" : "") +
+              "</div>"
+            );
+          }
+          if (n > 0) {
+            return "<div class=\"hint\">📦 <b>待交付</b>：" + n + " 个产物已经做好了、<b>还没发给他</b></div>";
+          }
+          return "";
+        })()
+      // ⚠️ 去掉 `stage === "waiting"` 这个前提 —— 只要有"说好的时间"就显示倒计时 ✓
+      + (f.etaAt ? "<div class=\"hint pw-eta\" data-eta=\"" + f.etaAt + "\">…</div>" : "")
       + (f.sentAt
         ? "<div class=\"hint\">已发 " + (f.sentCount || 0) + " 个（" + new Date(f.sentAt).toLocaleString("zh-CN", { hour12: false }) + "）</div>"
         : "")
       + (canSend
         ? "<div style=\"margin-top:6px\"><button class=\"act\" onclick=\"pwDeliverNow('" + q + "')\">立刻发送产物</button> <span class=\"hint\" id=\"pwf-msg-" + q + "\"></span></div>"
         : "")
+      // ⚠️⚠️ 2026-10-19 加（用户：「**在工作模式的分好友设置那里加一个补回消息
+      //    加补看文件的按钮**」）—— 每行一个，点它补**这个人**的：
+      //    ① 消息（他这阵子说的话，补进她的上下文）② 文件（历史里有、工作区里没有的）
+      //    ⚠️ 接管 / 掉线那阵子两样都会漏，所以做成**一个按钮做两件**（用户就这么说的）✓
+      + "<div style=\"margin-top:6px\"><button class=\"ghost\" onclick=\"pwBackfillThis('" + q + "')\">补消息 + 补文件</button> <span class=\"hint\" id=\"pwbf-msg-" + q + "\"></span></div>"
       + "</div></td>"
       + "<td style=\"padding:6px 8px\"><input type=\"checkbox\" id=\"pwf-allow-" + q + "\"" + (c.allow === false ? "" : " checked") + "></td>"
       // ⚠️ 2026-10-15（用户：「分好友设置也加一个人工接管开关」）—— 勾上 = 这个人的私聊我自己回
@@ -2882,17 +3029,68 @@ async function saveWorkCfg() {
   });
   flash(el, r.ok, r.ok ? "已保存（立刻生效）" : ("保存失败：" + r.error));
 }
-async function accSaveWorkMode() {
+/**
+ * ⚠️⚠️ 2026-10-19 改成**明确动作**（用户：「**这两个开关还是有问题，现在根本点不动**」）。
+ *
+ * 这一处他已经报了三回：先「打不开」、再「关不了」、再「点不动」，
+ * 后来又截图「点了关，但服务端现在是开 —— 没生效」。
+ *
+ * ⚠️ 后端**每一次都写成功了**（`accounts/<QQ>.yml` 里确实是新值，带不带页面那个
+ *    `x-saki-account` 头我都实测过，两个方向都对）。
+ *    病根是**读回那一步**：原来走 `GET /api/accounts` —— 那个接口要遍历所有号逐个探活、
+ *    还要重建整张表，中间任何一处抛异常，`ACC_LIST` 就停在旧值 ⇒ 拿旧值当答案 ✗
+ * ⇒ 现在：
+ *   ① 用 `GET /api/switches`（只读内存、不探活、不碰 DOM，秒回）；
+ *   ② 回话**直接把服务端读到的那两个值说出来** —— 万一还对不上，一眼就知道卡在哪 ✓
+ */
+async function accSetWorkMode(on) {
+  const want = on === true;
   const el = $('msg-acc-workmode');
-  const on = !!$('acc-workmode')?.checked;
+  flash(el, true, want ? '正在开启…' : '正在关闭…');
   const r = await api('/api/config', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ privateWork: { enable: on } }),
-  });
-  flash(el, r.ok, r.ok
-    ? (on ? '已开启：这个号的好友私聊按接单走' : '已关闭')
-    : ('保存失败：' + r.error));
-  if (r.ok) await renderAccounts();
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ privateWork: { enable: want } }),
+  }).catch((e) => ({ ok: false, error: e.message }));
+  if (!r || !r.ok) {
+    flash(el, false, '没成功：' + (r?.error || '不知道为啥（看看服务端日志）'));
+    return;
+  }
+  // ⚠️ 读回只问那个轻接口（不探活、不重建表）
+  const sw = await api('/api/switches').catch(() => null);
+  if (!sw || !sw.ok) {
+    flash(el, true, '存进去了，但读不回状态 —— 刷新一下页面看那句"当前：…"');
+    await renderAccounts().catch(() => {});
+    return;
+  }
+  const real = sw.workMode === true;
+  accShowSwitchState(sw);
+  flash(
+    el,
+    real === want,
+    real === want
+      ? (real ? '已开启（现在按接单走）' : '已关闭（现在不接单）')
+      : `⚠️ 点了${want ? '开' : '关'}，但服务端读到的是「${real ? '开' : '关'}」 —— 没生效（刷新页面再试一次）`,
+  );
+}
+
+/** 把「当前：开/关」那两句刷成轻接口读到的最新值（不依赖那个重的号列表） */
+function accShowSwitchState(sw) {
+  const s = sw || {};
+  const w = $('state-acc-workmode');
+  const t = $('state-acc-takeover');
+  if (w) {
+    w.textContent =
+      s.workMode === undefined ? '当前：读不到状态' : s.workMode ? '当前：已开启' : '当前：已关闭';
+  }
+  if (t) {
+    t.textContent =
+      s.takeover === undefined
+        ? '当前：读不到状态'
+        : s.takeover
+          ? '⚠️ 当前：已接管 —— 这个号一条消息都不发'
+          : '当前：未接管';
+  }
 }
 
 /**
@@ -2901,17 +3099,35 @@ async function accSaveWorkMode() {
  * 后端是 `POST /api/config` → `splitPatch()`：`humanTakeover` 不在共用段里 ⇒
  * 它会自动写进 `accounts/<QQ>.yml`（只有这个号变）✓
  */
-async function accSaveTakeover() {
+async function accSetTakeover(on) {
+  const want = on === true;
   const el = $('msg-acc-takeover');
-  const on = !!$('acc-takeover')?.checked;
+  flash(el, true, want ? '正在接管…' : '正在交还…');
   const r = await api('/api/config', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ humanTakeover: { enable: on } }),
-  });
-  flash(el, r.ok, r.ok
-    ? (on ? '已接管：这个号现在一条都不发了（消息照常记着）' : '已交还：机器人恢复说话')
-    : ('保存失败：' + r.error));
-  if (r.ok) await renderAccounts();
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ humanTakeover: { enable: want } }),
+  }).catch((e) => ({ ok: false, error: e.message }));
+  if (!r || !r.ok) {
+    flash(el, false, '没成功：' + (r?.error || '不知道为啥（看看服务端日志）'));
+    return;
+  }
+  // ⚠️ 和上面一样：读回只问轻接口（不探活、不重建表）✓
+  const sw = await api('/api/switches').catch(() => null);
+  if (!sw || !sw.ok) {
+    flash(el, true, '存进去了，但读不回状态 —— 刷新一下页面看那句"当前：…"');
+    await renderAccounts().catch(() => {});
+    return;
+  }
+  const real = sw.takeover === true;
+  accShowSwitchState(sw);
+  flash(
+    el,
+    real === want,
+    real === want
+      ? (real ? '已接管：这个号现在一条都不发了（消息照常记着）' : '已交还：机器人恢复说话')
+      : `⚠️ 点了${want ? '接管' : '交还'}，但服务端读到的是「${real ? '接管中' : '未接管'}」 —— 没生效（刷新页面再试一次）`,
+  );
 }
 
 /**
@@ -2925,10 +3141,10 @@ async function accSaveTakeover() {
 function accPaintSwitches() {
   try {
     const me = (ACC_LIST || []).find((a) => a.self);
-    const wm = $('acc-workmode');
-    const tk = $('acc-takeover');
-    if (wm) wm.checked = !!(me && me.workMode);
-    if (tk) tk.checked = !!(me && me.takeover);
+    // ⚠️ 2026-10-19：那两个**勾选框已经删了**（换成「开启 / 关闭」两个按钮，见 HTML 里那段注释）——
+    //    这里只负责刷**右侧那句当前状态** ✓
+    //    ⚠️ 别再加回 `$('acc-workmode').checked = …`：元素不存在了，那样会抛异常，
+    //       而下面"当前：已开启/已关闭"那句就永远不更新（界面继续骗人）✗
     const sw = $('state-acc-workmode');
     const st = $('state-acc-takeover');
     if (!me) {
@@ -2983,6 +3199,44 @@ async function pwBackfill() {
           (skipped.length ? `；${skipped.length} 个没下来（${skipped[0]}）` : ''),
   );
   await renderWorkMode();
+}
+
+/**
+ * ⚠️⚠️ 2026-10-19 加（用户：「**在工作模式的分好友设置那里加一个补回消息
+ * 加补看文件的按钮**」）—— 「分好友」每一行那个按钮：补**这个人**的
+ * ① 掉线 / 接管那阵子他发的**消息**（进她的上下文）② 那段时间的**文件**。
+ *
+ * ⚠️ 顺序由后端定（**先消息、后文件**）—— 补文件那条要回他一句「补发一下」，
+ *    得先有上下文才不会说岔 ✓
+ * ⚠️ 结果**先显示 4 秒再刷新表格** —— 不然表一重建，那句提示就没了，看着像没反应 ✗
+ */
+async function pwBackfillThis(qq) {
+  const q = String(qq || '').trim();
+  if (!q) return;
+  const el = $('pwbf-msg-' + q);
+  flash(el, true, '正在补消息和文件…（大的包要等一会儿）');
+  const r = await api('/api/private-work/backfill-both', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ qq: q }),
+  }).catch((e) => ({ ok: false, error: e.message }));
+  if (!r || !r.ok) {
+    flash(el, false, '没成：' + (r?.error || '不知道为啥'));
+    return;
+  }
+  const m = r.msgs || {};
+  const f = r.files || {};
+  const saved = Array.isArray(f.saved) ? f.saved : [];
+  const skipped = Array.isArray(f.skipped) ? f.skipped : [];
+  const bits = [];
+  bits.push(
+    (m.ok === false ? '消息没补成（' + (m.error || '不知道为啥') + '）' : '消息补了 ' + (m.added || 0) + ' 条')
+      + '（扫了 ' + (m.scanned || 0) + ' 条历史）',
+  );
+  bits.push(saved.length ? '文件补了 ' + saved.length + ' 个：' + saved.join('、') : '文件没有新的');
+  if (skipped.length) bits.push(skipped.length + ' 个没下来（' + skipped[0] + '）');
+  flash(el, true, bits.join('；'));
+  setTimeout(() => void renderWorkMode().catch(() => {}), 4000);
 }
 
 async function renderAccounts() {
@@ -3367,7 +3621,7 @@ document.querySelectorAll('nav button').forEach(b => {
     //     2026-10-15 加「B站分享」时**又漏了一次** —— `bili` 没加进这个数组 ⇒
     //     点过去是一片空白（连卡片都不显示，因为它的 section 一直挂着 `hidden`）✗
     //     ⇒ 现在有一条套件断言**自动对账**（`test/webui.js`：每个 `data-tab` 都得在这个数组里）✓）
-    ['model','groups','faces','knowledge','persona','qzone','life','bili','quest','groupcfg','affinity','workmode','qqlogin','status','about','accounts'].forEach(t => {
+    ['model','groups','faces','knowledge','persona','qzone','life','bili','quest','groupcfg','affinity','workmode','tools','qqlogin','status','about','accounts'].forEach(t => {
       const el = $('tab-' + t);
       if (el) el.classList.toggle('hidden', t !== b.dataset.tab);
     });
@@ -3388,6 +3642,7 @@ document.querySelectorAll('nav button').forEach(b => {
     if (b.dataset.tab === 'accounts') renderAccounts();
     // ⚠️ 2026-10-14：工作模式自己一页（两个开关也搬到它顶上了）
     if (b.dataset.tab === 'workmode') renderWorkMode();
+    if (b.dataset.tab === 'tools') renderTools();
   };
 });
 
@@ -3450,6 +3705,9 @@ async function reloadAll() {
   // ⚠️ 2026-10-09：判据从"秒"改成"**条**"（用户：「改成超过 3 条消息的个数，
   //    时间还是没有精确对应到」）
   $('llm-slowDropCount').value = Math.round(c.llm.slowQueueDropCount ?? 3);
+  // ⚠️ 2026-10-19：剧情里「不拒绝 / 不警示 / 不做道德评估」的开关（**默认关** ——
+  //    只有明确写成 true 才算开，老配置里没这个键就是关 ✓）
+  $('llm-unfiltered').checked = c.llm.unfiltered === true;
   // ⚠️ 2026-10-09：三类对话关思考链的开关。默认按用户定的：机器人之间 = 关，剧情里和真人 = 开 ✓
   $('llm-thinkPeer').checked = (c.llm.thinking?.peer ?? true) !== false;
   $('llm-thinkQuestPeer').checked = (c.llm.thinking?.questPeer ?? true) !== false;
@@ -5028,45 +5286,74 @@ async function loadOwnerName() {
   } catch {}
 }
 
-async function saveModel() {  const el = $('msg-llm');
+async function saveModel() {  // ⚠️ 2026-10-19：保存按钮现在**两张卡片上都有**（大模型 / 剧情放开写）⇒ 提示两处都写
+  const showMsg = (ok, text) => {
+    for (const id of ['msg-llm', 'msg-llm2']) {
+      const e = $(id);
+      if (e) flash(e, ok, text);
+    }
+  };
+  // ⚠️⚠️ 2026-10-19（用户：「我一保存配置的 api 就没了」）：
+  //    这几个框一旦**没渲染出值**（页面半路出错 / 浏览器里还是旧页面 / 先点开别的页再回来），
+  //    读到的就是空串 ⇒ 会把**密钥和地址清空**写进配置 ✗（实测就这样丢过一次 key）
+  //    ⇒ **空 = 没改**：空串（或元素不存在）一律传 `undefined`；后端 `put()` 见到 undefined
+  //      是"**不写**这个键"⇒ 配置里原来那份保留 ✓
+  //    ⚠️ 数字：温度 **0 是合法值**（照常提交），只有"框是空的"才 undefined。
+  const txt = (id) => {
+    const e = $('llm-' + id);
+    const v = e && e.value != null ? String(e.value).trim() : '';
+    return v || undefined;
+  };
+  const num = (id) => {
+    const v = txt(id);
+    return v === undefined ? undefined : Number(v);
+  };
+  const bool = (id) => {
+    const e = $('llm-' + id);
+    return e ? !!e.checked : undefined;
+  };
+  const cnt = num('slowDropCount');
   const r = await api('/api/config', {
     method: 'POST', headers: {'Content-Type':'application/json'},
     body: JSON.stringify({ llm: {
-      baseURL: $('llm-baseURL').value.trim(),
-      model: $('llm-model').value.trim(),
-      apiKey: $('llm-apiKey').value.trim(),
-      temperature: Number($('llm-temperature').value),
-      maxTokens: Number($('llm-maxTokens').value),
-      timeout: Number($('llm-timeout').value),
+      baseURL: txt('baseURL'),
+      model: txt('model'),
+      apiKey: txt('apiKey'),
+      temperature: num('temperature'),
+      maxTokens: num('maxTokens'),
+      timeout: num('timeout'),
       // ⚠️ 2026-10-07：慢模型丢弃积压（复选框 + 秒 → 毫秒）。
       //    ⚠️ 这里必须**显式写 false**（不能省略）—— 省略等于"没改"，
       //       用户就关不掉这个闸了。
-      slowQueueDrop: !!$('llm-slowDrop').checked,
+      slowQueueDrop: bool('slowDrop'),
+      // ⚠️ 2026-10-19：剧情里「不拒绝 / 不警示 / 不做道德评估」的开关。
+      //    ⚠️ 同样**显式写**（省略 = "没改"，用户就关不掉了）
+      unfiltered: bool('unfiltered'),
    // ⚠️ 2026-10-09 加：**哪几类对话关掉思考链**（勾上 = 这类不带给思考链）。
    //    ⚠️ 必须**三个都显式写**（省略 = "没改"，用户就关不掉了）——
    //       和上面 `slowQueueDrop` 那条同一个道理 ✓
    //    ⚠️ 存在 `llm`（共用段）⇒ 所有账号一起生效。
    thinking: {
-     peer: !!$('llm-thinkPeer').checked,
-     questPeer: !!$('llm-thinkQuestPeer').checked,
-     quest: !!$('llm-thinkQuest').checked,
+     peer: bool('thinkPeer'),
+     questPeer: bool('thinkQuestPeer'),
+     quest: bool('thinkQuest'),
    },
    // ⚠️ 2026-10-09 加：**备选模型**（Gemini）—— 三个场景**各一个勾**，
    //    和上面那三个"关思考链"的勾一一对应（同一行、左边那个是思考链）✓
    backup: {
      for: {
-       peer: !!$('llm-bkPeer').checked,
-       questPeer: !!$('llm-bkQuestPeer').checked,
-       quest: !!$('llm-bkQuest').checked,
+       peer: bool('bkPeer'),
+       questPeer: bool('bkQuestPeer'),
+       quest: bool('bkQuest'),
      },
-     baseURL: $('llm-bkBase').value.trim(),
-     model: $('llm-bkModel').value.trim(),
-     apiKey: $('llm-bkKey').value.trim(),
+     baseURL: txt('bkBase'),
+     model: txt('bkModel'),
+     apiKey: txt('bkKey'),
    },
       // ⚠️ 2026-10-09 改（用户：「把这个判据改成**超过 3 条消息的个数**，
       //    时间还是没有精确对应到」）：判据从"秒"换成"**条数**"。
       //    ⚠️ `slowQueueDropMs` 不再写（老配置里留着也无妨 —— 代码只拿它打日志）
-      slowQueueDropCount: Math.max(1, Math.floor(Number($('llm-slowDropCount').value))) || 3,
+      slowQueueDropCount: cnt === undefined ? undefined : (Math.max(1, Math.floor(cnt)) || 3),
     }})
   });
   flash(el, r.ok, r.ok ? '已保存并生效' : ('保存失败：' + r.error));

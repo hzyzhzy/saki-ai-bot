@@ -154,11 +154,15 @@ console.log('\n【6】★★ 入口顺序：**先落盘、再 return**，而且�
   check(
     // ⚠️ 窗口放宽到 600：2026-10-16 在"落盘"和 `return` 中间加了「记一笔他发的文件」
     //    （自动补收要用）⇒ 原来那段只有 220 字符的窗口就够不着 `return` 了（假红 ✗）
-    /this\.rememberTakeover\(payload\);[\s\S]{0,600}?return;/.test(s),
+    // ⚠️⚠️ 2026-10-19 再放宽到 1800：接管期间**也要进上下文**（`recent.remember`，
+    //    用户报「接管之后看不到我发的那句」）—— 那一段带注释又插在中间，
+    //    现在"落盘 → return"实测约 1100 字符 ⇒ 600 又会假红 ✗
+    //    ⚠️ 真要判的只是**先后**，不是距离 ⇒ 窗口给足，别让它因为注释变长就红 ✓
+    /this\.rememberTakeover\(payload\);[\s\S]{0,1800}?return;/.test(s),
     '★★ **先落盘再 return**（顺序调过来就等于没记）',
   );
   check(
-    /this\.rememberTakeover\(payload\);[\s\S]{0,600}?noteMissedFile[\s\S]{0,200}?return;/.test(s),
+    /this\.rememberTakeover\(payload\);[\s\S]{0,1800}?noteMissedFile[\s\S]{0,600}?return;/.test(s),
     '★★ 接管期间"他发的文件"也记下来了（也要在 return **之前** —— 不然等于没记 ✓）',
   );
 }
@@ -184,13 +188,20 @@ console.log('\n【8】★ 界面上真的有这个开关（QQ 号页）');
     '★ `/api/accounts` 把每个号的接管状态报出来（界面读它）',
   );
   const w = src('webui.html');
-  check(/id="acc-takeover"/.test(w), '★ QQ 号页有那个 checkbox');
-  check(/async function accSaveTakeover/.test(w), '★ 有保存函数');
-  check(/humanTakeover: \{ enable: on \}/.test(w), '★ 保存时发的是 `humanTakeover.enable`（后端会按号存）');
+  // ⚠️⚠️ 2026-10-19 改断言：勾选框**换成了「开启接管 / 交还」两个按钮** ——
+  //    用户为那一处报了三次（打不开 / 关不了 / 点不动），三次都不是后端的问题，
+  //    全是"勾选框 + 保存"这个形态判断不了"到底生效没"⇒ 换成明确动作 ✓
+  //    ⚠️ 要守的东西没变：**界面上真有这个开关**、点了真发 `humanTakeover.enable`、
+  //       而且那句状态读的是**服务端报回来的真实值**（不许拿界面自己的状态当答案）。
+  check(/onclick="accSetTakeover\(true\)"/.test(w), '★ QQ 号页有「开启接管」按钮');
+  check(/onclick="accSetTakeover\(false\)"/.test(w), '★ 还有「交还（关闭接管）」按钮');
+  check(/async function accSetTakeover/.test(w), '★ 有对应的保存函数');
+  check(/humanTakeover: \{ enable: want \}/.test(w), '★ 保存时发的是 `humanTakeover.enable`（后端会按号存）');
   check(
-    /me && me\.takeover/.test(w),
-    '★ 进页面时把开关刷成**当前这个号**的真实值',
+    /me\.takeover/.test(w) && /state-acc-takeover/.test(w),
+    '★ 那句状态刷的是**当前这个号**的真实值（不是界面自己的猜测）',
   );
+  check(!/id="acc-takeover"/.test(w), '★ 老的那个勾选框已经删干净了（留着会误导）');
 }
 
 console.log('\n【9】★ 两道闸的注释都在（别哪天被"优化"掉一道）');

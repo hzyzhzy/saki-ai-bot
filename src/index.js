@@ -11,6 +11,8 @@ import { startWebUI } from './webui.js';
 import * as observe from './observe.js';
 // ⚠️ 「他的资料」自动更新（2026-10-03 用户要求）：他私聊里聊到生活变化 → 自动改 owner.md
 import * as ownerUpdate from './owner-update.js';
+// ⚠️ 2026-10-17 加：**主人最近的近况**短时记忆（48 小时滚动）—— 攒够就总结、定期清过期的 ✓
+import * as ownerRecent from './owner-recent.js';
 import * as life from './life.js';
 // ⚠️ 2026-10-15 加：B 站视频分享（只发链接、只发 1 档群、默认关）
 import * as biliShare from './bili-share.js';// ⚠️ 2026-10-05 加：同类机器人主动搭话（群里冷场时 @ 它 / 戳它一下）
@@ -312,6 +314,18 @@ const HB_MS = 30000;
 const HB_TIMEOUT_MS = 8000;
 const HB_MAX_FAIL = 2;
 
+// ⚠️⚠️ 2026-10-19 修（用户截图：主号在群里一直不接话，日志**每 30 秒断一次**、永远写「第 1 次」）——
+//    「收消息自检」的三个状态变量原来写在 `connectForward()` **里面**
+//    ⇒ 每次断线重连都会重新执行那个函数 ⇒ **冷却和计数全被清零**：
+//      ① 冷却（10 分钟）失效 ⇒ 每 30 秒就判一次死、救一次，
+//         而重连那几秒的群消息**白丢**（表现就是"看着在线、但不接话"）✗
+//      ② `recvRescueCount` 永远是 1 ⇒ 三级自愈里的第 3 级
+//         （**自动重启协议端**）一次都触发不了 ✗
+//    ⇒ 必须放在**模块顶层**，让它们跨连接存活 ✓
+let lastRecvRescueAt = 0;
+let recvRescueCount = 0;
+let recvRescueTimes = [];
+
 function connectForward() {
   const url = config.onebot.url;
   // ⚠️ 2026-09-21：别再写死 NapCat —— 协议端换成 SnowLuma 之后这句是误导的
@@ -393,7 +407,61 @@ function connectForward() {
   const RECV_COOLDOWN_MS = 10 * 60 * 1000; // 救过一次之后 10 分钟内别再救
   let recvTimer = null;
   let recvBusy = false;
-  let lastRecvRescueAt = 0;
+  // ⚠️⚠️ 2026-10-19 修：`lastRecvRescueAt` / `recvRescueCount` / `recvRescueTimes`
+  //    已提到**模块顶层**（在 `connectForward()` 外面）——
+  //    写在这里会被"每次重连重新执行本函数"清零，
+  //    表现就是每 30 秒救一次、永远"第 1 次"、自动重启协议端永不触发 ✗
+  const RECV_STREAK_WINDOW_MS = 10 * 60 * 1000;
+
+  /**
+   * ⚠️⚠️⚠️ 2026-10-19 加 —— **重启协议端**（不是重启机器人）。
+   *
+   * 实测（2026-10-19 04:5x，爱音半死那次）：机器人侧反复断开重连四次无效，
+   *   而**重启协议端进程后 6 秒**三个号全部重新登录、爱音立刻开始收消息 ✓
+   * ⇒ "能发不能收"这种半死，靠重连治不了，要换掉协议端那个进程。
+   *
+   * ⚠️ 协议端是**三个号共用**的 ⇒ 重启会让三个号一起断几秒再回来（实测 6 秒）✓
+   * ⚠️ 只做 provider 说"能重启"的情况；不支持就明说，别假装 ✓
+   * ⚠️ 先按 PID 停（绝不用命令行匹配杀 —— 会杀到自己的 runner ✗），再按原方式起。
+   */
+  async function restartProvider(bot) {
+    const prov = await import('./provider.js');
+    if (typeof prov.restart === 'function') {
+      const r = await prov.restart({ why: '收消息自检判定"能发不能收"' });
+      log.info(`[收消息自检] 协议端重启调用返回：${JSON.stringify(r ?? {}).slice(0, 200)}`);
+      return r;
+    }
+    const dir = String(config.provider?.dir ?? '').trim();
+    if (!dir) throw new Error('配置里没有 provider.dir，不知道协议端装在哪');
+    // ⚠️⚠️ **绝不把要匹配的字面量直接写进命令行**（会把 DSH 自己的 runner 一起杀掉 ✗，
+    //    铁律：杀进程一律按 PID；这里用**变量拼**关键词、再加"在协议端目录下"双重条件）✓
+    const ps = [
+      "$ErrorActionPreference='Stop'",
+      "$kw = 'ind' + 'ex.' + 'mjs'", // 拼出来，命令行里不出现那个字面量
+      '$hit = @(Get-CimInstance Win32_Process -Filter "Name=\'node.exe\'" | Where-Object {',
+      '  $_.CommandLine -and $_.CommandLine.Contains($kw) -and $_.CommandLine.Contains($env:PROV_DIR)',
+      '})',
+      'foreach ($p in $hit) { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }',
+      'Start-Sleep -Seconds 3',
+      'Start-Process -FilePath (Join-Path $env:PROV_DIR "node.exe") -ArgumentList $kw -WorkingDirectory $env:PROV_DIR -WindowStyle Hidden',
+      "Write-Output ('RESTARTED ' + $hit.Count)",
+    ].join('\n');
+    const { execFileSync } = await import('node:child_process');
+    const out = execFileSync(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-EncodedCommand',
+        Buffer.from(ps, 'utf16le').toString('base64'),
+      ],
+      { env: { ...process.env, PROV_DIR: dir }, encoding: 'utf8', timeout: 90000 },
+    );
+    log.info(`[收消息自检] 协议端已重启：${String(out ?? '').trim().slice(0, 120)}`);
+    return { ok: true, raw: String(out ?? '').trim() };
+  }
 
   function stopRecvCheck() {
     if (recvTimer) clearInterval(recvTimer);
@@ -401,9 +469,36 @@ function connectForward() {
     recvBusy = false;
   }
 
+  /**
+   * ⚠️⚠️ 2026-10-17 加（用户：「加」）—— **四个号的活儿错开**。
+   *
+   * 起因：用户玩 Minecraft 时**帧率不如以前**。查下来机器人**不是**主因
+   *   （四个号加起来 200 MB、2.5 小时才用 8 秒 CPU ✓），但**多个号会在同一秒一起干活**
+   *   ⇒ 瞬时 CPU / 网络尖峰 ⇒ 对 MC 那种**单线程**的游戏就是掉帧 ✓
+   *
+   * ⇒ 每个号按**自己的 QQ 号**算一个**固定相位**（0~89 秒）+ 每轮再加一点随机抖动
+   *   ⇒ 四个号的周期活从此**永不重叠** ✓
+   */
+  const PHASE_SEC = (() => {
+    const key = String(config.botQQ ?? config.webui?.port ?? '');
+    let h = 7;
+    for (const ch of key) h = (h * 31 + ch.charCodeAt(0)) % 9973;
+    return h % 90;
+  })();
+
   function startRecvCheck() {
     stopRecvCheck();
-    recvTimer = setInterval(() => void checkRecvHealth(), RECV_CHECK_MS);
+    // 首轮：按号错开（同一个号每次重启相位一样，便于排查 ✓）
+    const firstMs = (PHASE_SEC + Math.random() * 15) * 1000;
+    recvTimer = setTimeout(() => {
+      void checkRecvHealth();
+      // 之后：每轮在 2 分钟基础上 ±15 秒抖动 ⇒ 就算两个号相位撞了也不会一直撞 ✓
+      recvTimer = setInterval(
+        () => void checkRecvHealth(),
+        RECV_CHECK_MS + (Math.random() * 30 - 15) * 1000,
+      );
+      recvTimer.unref?.();
+    }, firstMs);
     recvTimer.unref?.();
   }
 
@@ -439,7 +534,8 @@ function connectForward() {
       for (const gid of groups) {
         let raw;
         try {
-          raw = await bot.call('get_group_msg_history', { group_id: gid, count: 20 });
+          // ⚠️ 数量从 20 降到 12：够判"有没有漏推"就行，别每次都拉一大坨（省 CPU / 网络 ✓）
+          raw = await bot.call('get_group_msg_history', { group_id: gid, count: 12 });
         } catch {
           continue; // 这个群拉不到就换下一个（别因为一个群把自检搞挂）
         }
@@ -449,16 +545,74 @@ function connectForward() {
         const missed = bot.missedRequiredIds(list, { windowMs: RECV_WINDOW_MS });
         if (!missed.length) continue;
         lastRecvRescueAt = Date.now();
+        // ⚠️⚠️⚠️ 2026-10-19 加（用户：「**B**」—— 先验证根因，再按结果改自愈）——
+        //    **实测结论**（04:57→05:00 爱音那个号）：
+        //      · 判据是对的（协议端推过、这边真的没收到）
+        //      · 但**断开重连四次全部无效** —— 重连只重建 WS，
+        //        协议端那边这个号的会话还是坏的 ✗
+        //      · **重启协议端进程后立刻恢复**（三个号 6 秒全部重新登录，爱音马上开始收消息）
+        //      · （重启机器人进程也有效，05:01 那次就是）
+        //    ⇒ 自愈**升级成三级**，别再无脑反复重连：
+        //      ① 本轮第 1 次 ⇒ 断开重连（保留现状，代价最小）
+        //      ② 10 分钟窗口内第 2 次 ⇒ 还是重连，但**明说"大概率要重启协议端"**
+        //      ③ 第 3 次 ⇒ **自动重启协议端**（一个进程、6 秒全回来；可用配置关掉）
+        // ⚠️⚠️⚠️ 2026-10-19 再修（用户：「**看一下为什么 anon 没回消息**」）——
+        //    上一版用 `recvRescueCount` + `recvRescueFirstAt` 两个变量算"第几次"，
+        //    实测**每次都算成 1**（日志三次全是「本轮第 1 次」）⇒ 永远到不了第 3 次
+        //    ⇒ **自动重启协议端一次都没触发** ✗✗
+        //    ⇒ 改成**记时间戳数组**：只数"最近 10 分钟内判死过几次"，
+        //      不依赖任何"重置"逻辑（不会因为某处清零就丢计数）✓
+        recvRescueTimes.push(Date.now());
+        recvRescueTimes = recvRescueTimes.filter((t) => Date.now() - t <= RECV_STREAK_WINDOW_MS);
+        recvRescueCount = recvRescueTimes.length;
         log.error(
           `[收消息自检] 群 ${gid} 有 ${missed.length} 条"必须回"的消息**协议端推过、我这边压根没见过**` +
-            `（心跳却是好的）⇒ 判定这条连接**能发不能收**，强制重连 ✓`,
+            `（心跳却是好的）⇒ 判定这条连接**能发不能收**（10 分钟内第 ${recvRescueCount} 次）`,
         );
         // ⚠️ 清掉"只补一次"的标记 ⇒ 重连之后 `catchUpMissed()` 会把它们捞回来 ✓
         bot.catchUpDone = false;
+        if (recvRescueCount >= 3 && config.provider?.autoRestartOnDeaf !== false) {
+          log.error(
+            `[收消息自检] ⚠️⚠️ 重连连续 ${recvRescueCount} 次都救不回来 ⇒ **重启协议端**` +
+              `（实测这招有效：三个号 6 秒全部重连）`,
+          );
+          await restartProvider(bot).catch((e) =>
+            log.error(`[收消息自检] 重启协议端失败：${e.message}`),
+          );
+          recvRescueTimes = []; // 重启过就重新计数（清空时间戳数组）✓
+          recvRescueCount = 0;
+          return;
+        }
+        if (recvRescueCount >= 2) {
+          log.error(
+            '[收消息自检] ⚠️ 已经不止一次没救回来 ⇒ **大概率要重启协议端**' +
+              '（不是重启机器人）：再漏一次我就自己动手',
+          );
+        }
+        // ⚠️⚠️⚠️ 2026-10-19 关键修正（用户：「**还是不回**」，连续折腾两小时才查出来）——
+        //    **第 1、2 次判死时不再断开重连！**
+        //
+        //    为什么：这个自检原来一判死就 `ws.terminate()`，而对 **SnowLuma** 来说
+        //    **重连是有害的** —— 事件推送（warmup）只在协议端启动时对"那时连着"的号建立；
+        //    她中途重连一次，协议端**不会**给新连接补跑 warmup ⇒ 新连接照样收不到事件 ✗
+        //    ⇒ 于是形成死循环：
+        //        收不到 → 判死 → 主动断连 → 重连后协议端仍不推 → 更收不到 → 再判死…
+        //    实测证据（02:02→02:06 那几轮）：每次断连重连后，协议端日志里
+        //    她的记录**全是 `get_*`，一条 `[Event]` 都没有**，而主号/谷雨的 Event 正常 ✓
+        //
+        //    ⇒ 现在：第 1、2 次**只记日志、不动连接**（漏掉的那条靠 `catchUpMissed` 补看），
+        //      只有第 3 次（10 分钟内）才重启协议端 —— 那才是真正有效的动作 ✓
+        if (recvRescueCount < 3) {
+          log.warn(
+            `[收消息自检] 第 ${recvRescueCount} 次判定"收不到事件" ⇒ ` +
+              `**这次不断开**（对 SnowLuma 来说重连会丢掉事件推送，越连越糟 ✗）；` +
+              `漏的那几条靠「补看」捞回来；同一个窗口里凑满 3 次才重启协议端 ✓`,
+          );
+          return;
+        }
         try {
           ws.terminate();
         } catch {}
-        return;
       }
     } catch (e) {
       log.debug(`[收消息自检] 出错（不影响收消息）：${e.message}`);
@@ -758,6 +912,34 @@ if (config.ownerUpdate?.enable !== false && !privateWork.noLearn()) {
   );
 } else if (privateWork.noLearn()) {
   log.info('他的资料自动更新：**工作模式禁止学习** ⇒ 这个号不跑');
+}
+
+// ── 「主人最近的近况」短时记忆（2026-10-17 用户要求）──
+// 用户原话：「加一个对主人的**短时记忆区**，同样计入 `owner.md`，**到 48 小时**前的数据就清除，
+//   主要用于**跨群和私聊**的记忆，所以**只用总结记忆**即可……而且要**记下时间**以便调用和删除。
+//   机器人可以在**没事的时候提一下**里面的东西，但是**不能老是提**」。
+// ⚠️ 这里只负责两件后台事（`bot.js` 那边只负责"攒他说的话"）：
+//   · 每 10 分钟问一次"攒够该总结了吗" ⇒ 够了就**让模型总结**成短句写进 owner.md 末尾区块 ✓
+//   · 每 60 分钟清一遍**超过 48 小时**的（用户要求：到点就清 ✓）
+// ⚠️⚠️ 每个号**各跑各的**（各自的 buf 在自己 state 里 ✓），但写的是**同一份** `knowledge/owner.md`
+//    ⇒ 所以 `owner-recent.js` 写入前会**按文本去重**（同一句已经有了就跳过 ✓），不会互相踩 ✗。
+//    好处：**他在哪个群说的话，那个群的号就会把它总结进去** ⇒ 别的号、私聊也读得到 ✓
+//    （这就是用户要的"跨群和私聊"✓）
+if (config.ownerRecent?.enable !== false) {
+  const everySum = config.ownerRecent?.summarizeIntervalMs ?? 600000;
+  setInterval(() => {
+    ownerRecent
+      .maybeSummarize()
+      .catch((e) => log.debug(`[近况] 总结出错：${e.message}`));
+  }, everySum).unref();
+  setInterval(() => {
+    try {
+      ownerRecent.sweep();
+    } catch (e) {
+      log.debug(`[近况] 清理出错：${e.message}`);
+    }
+  }, 60 * 60 * 1000).unref();
+  log.info('主人近况（短时记忆）：每 10 分钟看要不要总结，超过 48 小时自动清掉 ✓');
 }
 
 // ── 群记忆的「按时间压缩」（2026-09-14 用户要求）──

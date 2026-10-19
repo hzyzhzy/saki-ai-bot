@@ -2927,11 +2927,21 @@ console.log(
     '★ 判"是不是机器人之间"用 `isPeerBot()`，不是靠昵称猜',
   );
   const h = readFileSync(join(ROOT, 'src', 'webui.html'), 'utf8');
-  for (const id of ['llm-thinkPeer', 'llm-thinkQuestPeer', 'llm-thinkQuest']) {
-    check(h.split(id).length - 1 >= 3, `★★ 模型页里「${id}」表单 + 回填 + 保存三处配套`);
+  // ⚠️ 2026-10-19：保存那处重构成 `bool('thinkPeer')` 辅助函数（内部拼 `'llm-' + id`），
+  //    字面量只剩**表单 + 回填**两处 ⇒ 判据改成「≥2 处 + 保存处有对应的 bool()」，
+  //    "表单 / 回填 / 保存三件配套"照样守住。
+  const thinkSaveKey = {
+    'llm-thinkPeer': 'thinkPeer',
+    'llm-thinkQuestPeer': 'thinkQuestPeer',
+    'llm-thinkQuest': 'thinkQuest',
+  };
+  for (const id of Object.keys(thinkSaveKey)) {
+    const n = h.split(id).length - 1;
+    const saved = new RegExp(`bool\\('${thinkSaveKey[id]}'\\)`).test(h);
+    check(n >= 2 && saved, `★★ 模型页里「${id}」表单 + 回填 + 保存三处配套（出现 ${n} 处，保存${saved ? '有' : '缺'}）`);
   }
   check(
-    /thinking: \{[\s\S]{0,200}?peer: !!/.test(h),
+    /thinking: \{[\s\S]{0,200}?peer: (?:bool\('thinkPeer'\)|!!)/.test(h),
     '★★ 保存时三个开关**都显式写**（省略 = 用户关不掉，和 slowQueueDrop 那条同理）',
   );
 }

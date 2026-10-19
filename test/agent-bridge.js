@@ -231,11 +231,16 @@ console.log('\n【1】★★ 主人说一句活 → 两个空格开头的确认 
     !!dir && existsSync(join(dir, 'AGENTS.md')) && existsSync(join(dir, '任务.md')),
     '★★ 文件夹里放好了 `AGENTS.md`（铁律的副本）+ `任务.md`（这次是谁、原话是什么）',
   );
-  // ⚠️ 用"父目录就是工作区"判（工作区在套件里是**相对路径** —— 别拿绝对路径去 startsWith）
+  // ⚠️ 2026-10-19 改（用户：「**把在群里开的任务都收到一个文件夹里**，现在 agentwork 文件夹里有点乱了」）——
+  //    原来这条断言要求"任务文件夹就在工作区**根下**"，现在改成**统一放进 `群任务/`** 了。
+  //    ⚠️ 但"别塞进深层子目录"那个初衷**还在**：只许**一层**（`<工作区>/群任务/<任务文件夹>`），
+  //    再往下就不许了 —— 不然清理逻辑（按顶层文件夹扫）和用户自己翻文件都会变难 ✗
+  // ⚠️ 用"父目录就是工作区/群任务"判（工作区在套件里是**相对路径** —— 别拿绝对路径去 startsWith）
+  const wsBase = String(config.agent.workspace).replace(/[\\/]+$/, '').replace(/\//g, '\\').toLowerCase();
   const parent = dir ? dirname(String(dir)).replace(/[\\/]+$/, '').toLowerCase() : '';
   check(
-    !!parent && parent === String(config.agent.workspace).replace(/[\\/]+$/, '').replace(/\//g, '\\').toLowerCase(),
-    '★ 任务文件夹就在工作区**根下**（没有塞进深层子目录）',
+    !!parent && parent === `${wsBase}\\群任务`,
+    '★ 任务文件夹就在 `<工作区>/群任务/` 里（只许**一层**，不往更深的子目录里塞）',
     dir || '',
   );
 }
