@@ -491,5 +491,71 @@ console.log(
   bs.__reset();
 }
 
+console.log('\n【13】★★ 跨进程：判定前重读共享状态（两个号不会同时转发视频）');
+console.log('        （用户 2026-10-20：「有时候两个 bot 会同时转发视频」）');
+{
+  bs.__reset();
+  clearGroups();
+  setGroup(A, {
+    enable: true, keywords: ['地铁'], minPerDay: 9, maxPerDay: 9,
+    cooldownMs: 3600000, startHour: 0, endHour: 24,
+  });
+  let n = 0;
+  bs.__setPicker(async () => {
+    const b = `BV1zz411z7m${n++}`;
+    return { title: 't' + n, up: 'u', play: 1, url: `https://www.bilibili.com/video/${b}`, bvid: b, keyword: '地铁' };
+  });
+
+  // ① 这个号发一条（共享文件里 lastAt = 刚刚）
+  const bot = fakeBot();
+  await bs.runOnce(bot, [A]);
+  check(bot.sent.length === 1 && bs.status(A).lastAt > 0, '★ 先发一条（lastAt 落盘）', `lastAt=${bs.status(A).lastAt}`);
+
+  // ② 模拟"**另一个进程**"：它内存里 lastAt 还是 0（启动时读的旧状态），
+  //    但共享文件里 lastAt 是刚刚 ⇒ **重读之后必须看得见** ⇒ 不许跟着发
+  //    （旧行为：内存里 lastAt=0 ⇒ 判"该发" ⇒ 第二个号同时转发 ✗）
+  bs.__stForTest().by[A].lastAt = 0; // ⚠️ 只改内存，**不落盘** —— 共享文件里还是"刚发过"
+  const r2 = await bs.runOnce(fakeBot(), [A]);
+  check(
+    r2.sent === false && /冷却/.test(r2.why),
+    '★★ 共享文件里"刚发过"⇒ 重读后**不发**（同时转发就出在这）',
+    r2.why,
+  );
+
+  // ③ 对照：把共享文件里的 lastAt 改成 2 小时前 ⇒ 冷却过了 ⇒ 照发
+  //    （证明拦它的确实是"别的号刚发过"，不是什么别的条件碰巧挡了）
+  const f = join(ROOT, 'logs', '__test-bili-share.json');
+  const j = JSON.parse(readFileSync(f, 'utf8'));
+  j.by[A].lastAt = Date.now() - 2 * 3600 * 1000;
+  writeFileSync(f, JSON.stringify(j, null, 2), 'utf8');
+  const r3 = await bs.runOnce(fakeBot(), [A]);
+  check(r3.sent === true, '★★ 对照：冷却过了 ⇒ 照发（拦的确实是"刚发过"）');
+
+  // ④ 立刻发送**不受重读影响**（手动点的就该发 —— 这条路在 reload 之前就 return 了）
+  bs.__reset();
+  setGroup(A, { enable: true, keywords: ['地铁'] });
+  bs.__setPicker(async () => ({
+    title: 'force', up: 'u', play: 1,
+    url: 'https://www.bilibili.com/video/BV1force99mD', bvid: 'BV1force99mD', keyword: '地铁',
+  }));
+  const r4 = await bs.runOnce(fakeBot(), [A], { force: true, groupId: A });
+  check(r4.sent === true, '★ 「立刻发送」照旧不走重读那条路（手动点的不该被拦）');
+}
+
+console.log('\n【14】号间错峰：不同号相位不同、同一个号稳定');
+{
+  const e = 10 * 60 * 1000;
+  const a1 = bs.staggerMs('10000001', e);
+  const a2 = bs.staggerMs('10000002', e);
+  const a3 = bs.staggerMs('10000003', e);
+  check(a1 === bs.staggerMs('10000001', e), '★ 同一个号两次算出来一样（重启后相位不变）');
+  check(a1 !== a2 && a1 !== a3 && a2 !== a3, '★★ 三个号三个相位（不再同一秒判定）', `${a1} / ${a2} / ${a3}`);
+  check(
+    [a1, a2, a3].every((x) => x >= 0 && x <= e / 2),
+    '★ 偏移都在间隔的一半以内（不会顶到下一次）',
+  );
+  check(bs.staggerMs('', e) === 0, '★ 空号 ⇒ 0（不炸）');
+}
+
 console.log(`\n结果: ${failures === 0 ? '全部通过 ✅' : `${failures} 项失败 ❌`}\n`);
 process.exit(failures === 0 ? 0 : 1);

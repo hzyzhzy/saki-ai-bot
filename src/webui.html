@@ -612,6 +612,10 @@
       <button data-tab="life">日常事件</button>
       <!-- ⚠️ 2026-10-15 加：B 站视频分享（只发链接、只发 1 档群、默认关） -->
       <button data-tab="bili">B站分享</button>
+      <!-- ⚠️ 2026-10-22 加（用户：「在功能卡片里新增一个 B站投稿设置页，所有设置都放在里面」
+           + 「不要新建一个页面，和其他的功能页面一样在同一个页面」）
+           —— **自动生成并投稿**，和上面那个「分享别人的视频」是两件事，别混 -->
+      <button data-tab="biliPub">B站投稿</button>
       <button data-tab="quest">二级剧情</button>
       <button data-tab="affinity">好感度 / 好友</button>
       <button data-tab="workmode">工作模式</button>
@@ -1044,6 +1048,14 @@
         <button class="ghost" onclick="bkLoadModels()" id="btn-bk-models" style="white-space:nowrap;padding:8px 12px">从 API 拉取</button>
       </div>
       <div><label>备选 API Key</label><input type="password" id="llm-bkKey" placeholder="（Gemini 的 key）"></div>
+      <!-- ⚠️ 2026-10-20 加（用户：「**把备用模型也加个模型温度的调整框吧**」）：
+           备选模型（Gemini 那类）和主模型的脾气不一样 —— 它本来就话多、爱发散，
+           拿主模型那个温度（0.5~0.8）去跑经常跑飞 ⇒ 单独给一个 ✓
+           ⚠️ **留空 = 跟着主模型那个温度走**（老配置里没这个键的，行为一个字都不变）✓ -->
+      <div>
+        <label>备选 temperature（留空 = 跟主模型一样）</label>
+        <input type="number" step="0.1" min="0" max="2" id="llm-bkTemperature" placeholder="留空 = 跟主模型一样">
+      </div>
       <div class="hint" id="bk-hint" style="margin:4px 0"></div>
 
       <div style="margin-top:16px;font-weight:600">剧情放开写（只影响剧情生成）</div>
@@ -1687,7 +1699,77 @@
   <!-- ⚠️ 2026-10-15 加：B 站视频分享（用户要求）——
        只发**链接**（QQ 卡片被挡了：json/share 段都回「发送者版本过低」✗）、
        只在 **1 档群**发、**默认关闭**、**没填关键词不会发** ✓ -->
-  <section id="tab-bili" class="hidden">
+  <section id="tab-biliPub" class="hidden">
+  <div class="card">
+    <h3>B站投稿（自动生成并发布）</h3>
+    <div style="background:rgba(74,158,255,.09);border-left:3px solid #4a9eff;padding:9px 13px;border-radius:0 6px 6px 0;font-size:12.5px;line-height:1.7;margin:10px 0">
+      <b>硬性要求（不可关）</b>：每条视频都必须有 <b>Live2D 形象（祥子半身）</b> + <b>她自己写的台词</b> + <b>她的真人语音配音</b>（带口型同步）。
+      台词、标题、简介、标签、封面文案全部由她自己出，不是模板。
+    </div>
+    <div id="bp-status" class="d" style="display:block;margin-bottom:12px">读取中…</div>
+  </div>
+
+  <div class="card">
+    <h3>每天什么时候做</h3>
+    <div style="display:flex;gap:12px;flex-wrap:wrap;margin:10px 0">
+      <div style="flex:1;min-width:150px"><div class="d" style="display:block">总开关</div>
+        <select id="bp-enable" style="width:100%"><option value="0">关闭</option><option value="1">开启（每天自动生成并发布）</option></select></div>
+      <div style="flex:1;min-width:120px"><div class="d" style="display:block">时间段 · 开始</div><input id="bp-ws" type="time" value="20:00" style="width:100%"></div>
+      <div style="flex:1;min-width:120px"><div class="d" style="display:block">时间段 · 结束</div><input id="bp-we" type="time" value="23:00" style="width:100%"></div>
+    </div>
+    <div class="d" style="display:block">每天在这段时间里<b>随机</b>挑一个时刻做一次，一天只做一条。</div>
+    <div style="display:flex;gap:12px;flex-wrap:wrap;margin:12px 0 0">
+      <div style="flex:1;min-width:150px"><div class="d" style="display:block">群聊素材取哪个群</div><input id="bp-group" placeholder="群号" style="width:100%"></div>
+      <div style="flex:1;min-width:110px"><div class="d" style="display:block">最长多少秒（上限）</div><input id="bp-durmax" type="number" min="25" max="120" value="60" style="width:100%"></div>
+    </div>
+    <div class="d" style="display:block;margin-top:6px">
+      ⚠️ <b>时长不是这里定死的</b> —— 具体多长由 agent 按内容自己决定，这里只是<b>上限</b>（再短也不会低于 20 秒）。
+      <b>分区也是它自己选</b>，下面那两个只是它挑不到时的兜底。
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>内容来源</h3>
+    <div style="display:flex;gap:12px;flex-wrap:wrap;margin:10px 0">
+      <div style="flex:1;min-width:200px"><div class="d" style="display:block">默认标签（逗号分隔）</div><input id="bp-tags" value="AI,日常,vlog" style="width:100%"></div>
+      <div style="flex:1;min-width:170px"><div class="d" style="display:block">连续几天用群聊后必须自制</div><input id="bp-streak" type="number" min="1" max="10" value="2" style="width:100%"></div>
+    </div>
+    <div style="display:flex;gap:12px;flex-wrap:wrap;margin:10px 0">
+      <div style="flex:1;min-width:120px"><div class="d" style="display:block">兜底分区（一级）</div><input id="bp-zone" value="生活" style="width:100%"></div>
+      <div style="flex:1;min-width:120px"><div class="d" style="display:block">兜底分区（二级）</div><input id="bp-zone2" value="日常" style="width:100%"></div>
+    </div>
+    <div class="d" style="display:block;margin-top:4px">
+      <b>只有「分享群内趣事」这一种是定死的题材</b>（走之前写好的那套流程）；
+      其它时候 agent 会<b>自己上网搜当下在火的东西</b>，再从里面挑一个跟她身份对得上的角度。
+      连续用满上面的天数后，下一天强制自制。
+    </div>
+    <div style="margin-top:12px"><div class="d" style="display:block">创作范围（一行一个方向/关键词 —— 跟 B 站分享那些标签一样，只是划范围，不是题材清单）</div>
+      <textarea id="bp-scope" rows="5" style="width:100%;font:inherit;padding:8px 10px;border-radius:7px" placeholder="AI&#10;二次元&#10;游戏服务器 / MC&#10;日常吐槽&#10;打工 / 兼职"></textarea></div>
+    <div style="margin-top:12px"><div class="d" style="display:block">成功 / 失败是否私聊通知主人</div>
+      <select id="bp-notify" style="width:auto"><option value="1">通知</option><option value="0">不通知</option></select></div>
+    <div style="margin-top:14px"><button class="btn primary" id="bp-save">保存设置</button></div>
+  </div>
+
+  <div class="card">
+    <h3>立刻做一条</h3>
+    <div class="d" style="display:block;margin:8px 0">留空 = 让她自己决定今天做什么</div>
+    <textarea id="bp-topic" rows="3" style="width:100%;font:inherit;padding:8px 10px;border-radius:7px" placeholder="例如：聊聊群里那个坚持用 1.12 的老哥"></textarea>
+    <div style="margin-top:10px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+      <button class="btn primary" id="bp-run">立刻做一条并发布</button>
+      <label style="display:inline-flex;gap:6px;align-items:center;font-size:12.5px">
+        <input type="checkbox" id="bp-draft" style="width:auto"> 只填不发布（停在投稿按钮前）
+      </label>
+    </div>
+    <div class="d" style="display:block;margin-top:8px">做一条大约 5~12 分钟（选题 + 配音 + 录 Live2D + 合成 + 自检 + 上传），关掉页面也会继续跑。</div>
+  </div>
+
+  <div class="card">
+    <h3>最近记录</h3>
+    <div id="bp-history" class="d" style="display:block;margin-top:8px"></div>
+  </div>
+</section>
+
+<section id="tab-bili" class="hidden">
     <div class="card">
       <h3>B 站视频分享</h3>
       <!-- ⚠️ 2026-10-15 加（用户：「b站分享也要分群调节」）——**按群**一套参数 ✓ -->
@@ -1793,7 +1875,7 @@ mygo
         <a class="act" href="https://afdian.com/a/hzyzhzy" target="_blank" rel="noopener"
            style="display:inline-flex;align-items:center;text-decoration:none">
           <img class="siteicon" src="/assets/site-afdian.png" alt="">爱发电 · 赞助</a>
-        <a class="act" href="https://space.bilibili.com/30000001?spm_id_from=203.0.113.10" target="_blank" rel="noopener"
+        <a class="act" href="https://space.bilibili.com/394060600?spm_id_from=333.788.0.0" target="_blank" rel="noopener"
            style="display:inline-flex;align-items:center;text-decoration:none">
           <img class="siteicon" src="/assets/site-bilibili.png" alt="">B 站主页</a>
       </div>
@@ -2817,6 +2899,10 @@ function pwFriendTable(d) {
       //    ⇒ 现在**只看实际的东西**（产物 / 发送记录 / 失败标记），不看 stage：
       + (function () {
           const n = arts.length;
+          // ⚠️⚠️ 2026-10-20 改（用户：「这里的交付文件还是不对」）——
+          //     `arts` 是 `产物/` 里**全部**文件（实测 17 个，其中 16 个是三天前的旧活）
+          //     ⇒ 显示"这一轮"的数量（后端算好的 `thisRoundCount`）✓
+          const mine = Number(f.thisRoundCount) || 0;
           const sent = Number(f.sentCount || 0);
           if (f.stage === "sendfail") {
             return "<div class=\"hint\" style=\"color:#e5484d\">⚠️ <b>交付失败</b>：上次一个都没发出去（等他催，或点下面那个）</div>";
@@ -2828,8 +2914,14 @@ function pwFriendTable(d) {
               "</div>"
             );
           }
-          if (n > 0) {
-            return "<div class=\"hint\">📦 <b>待交付</b>：" + n + " 个产物已经做好了、<b>还没发给他</b></div>";
+          if (mine > 0) {
+            return (
+              "<div class=\"hint\">📦 <b>待交付</b>：" + mine + " 个产物已经做好了、<b>还没发给他</b>" +
+              (n > mine
+                ? "<span style=\"opacity:.6\">（产物目录里另有 " + (n - mine) + " 个是以前的，不发）</span>"
+                : "") +
+              "</div>"
+            );
           }
           return "";
         })()
@@ -3621,7 +3713,7 @@ document.querySelectorAll('nav button').forEach(b => {
     //     2026-10-15 加「B站分享」时**又漏了一次** —— `bili` 没加进这个数组 ⇒
     //     点过去是一片空白（连卡片都不显示，因为它的 section 一直挂着 `hidden`）✗
     //     ⇒ 现在有一条套件断言**自动对账**（`test/webui.js`：每个 `data-tab` 都得在这个数组里）✓）
-    ['model','groups','faces','knowledge','persona','qzone','life','bili','quest','groupcfg','affinity','workmode','tools','qqlogin','status','about','accounts'].forEach(t => {
+    ['model','groups','faces','knowledge','persona','qzone','life','bili','biliPub','quest','groupcfg','affinity','workmode','tools','qqlogin','status','about','accounts'].forEach(t => {
       const el = $('tab-' + t);
       if (el) el.classList.toggle('hidden', t !== b.dataset.tab);
     });
@@ -3633,6 +3725,8 @@ document.querySelectorAll('nav button').forEach(b => {
     if (b.dataset.tab === 'life') renderLife();
     // ⚠️ 2026-10-15 加：B 站分享那一页
     if (b.dataset.tab === 'bili') renderBili();
+    // ⚠️ 2026-10-22 加：B 站自动投稿那一页
+    if (b.dataset.tab === 'biliPub') renderBiliPub();
     if (b.dataset.tab === 'quest') { renderQuest(); renderStoryline(); startQuestPoll(); }
     else stopQuestPoll();
     // ⚠️ 2026-09-16：按群设定自己一页了（原来挤在二级剧情页里）
@@ -3720,6 +3814,12 @@ async function reloadAll() {
   // ⚠️ 2026-10-09：备选模型名现在是**下拉**（和主模型一样，可以点"从 API 拉取"）✓
   fillModelSelect([c.llm.backup?.model].filter(Boolean), c.llm.backup?.model || '', 'llm-bkModel');
   $('llm-bkKey').value = c.llm.backup?.apiKey || '';
+  // ⚠️ 2026-10-20：备选模型自己的温度（**留空 = 跟主模型一样** ⇒ 存成空串，
+  //    不是 0 —— 0 是"完全确定性"，跟"没配"是两回事 ✗）
+  $('llm-bkTemperature').value =
+    c.llm.backup?.temperature === undefined || c.llm.backup?.temperature === null
+      ? ''
+      : c.llm.backup.temperature;
 
   // 生图
   const ig = c.imagegen || {};
@@ -5349,6 +5449,10 @@ async function saveModel() {  // ⚠️ 2026-10-19：保存按钮现在**两张�
      baseURL: txt('bkBase'),
      model: txt('bkModel'),
      apiKey: txt('bkKey'),
+     // ⚠️ 2026-10-20 加：备选模型自己的温度。
+     //    ⚠️ **空 = 没改**（`num()` 对空框返回 undefined ⇒ 后端不写这个键）
+     //      ⇒ 老配置里没这个键时，备选模型照旧用主模型那个温度，行为一个字都不变 ✓
+     temperature: num('bkTemperature'),
    },
       // ⚠️ 2026-10-09 改（用户：「把这个判据改成**超过 3 条消息的个数**，
       //    时间还是没有精确对应到」）：判据从"秒"换成"**条数**"。
@@ -6113,6 +6217,129 @@ async function qzoneManualPost() {
 //    只发链接、只发 1 档群、默认关、没关键词不发 ✓（见 src/bili-share.js）
 // ⚠️ 2026-10-16：「立刻发送」那格**这一轮渲染的是哪个群**（换群时才知道要不要换内容 ✓）
 let biliNowGid = '__none__';
+
+/* ── B站自动投稿（2026-10-22）──────────────────────────────
+ * 用户：「在功能卡片里新增一个 B站投稿设置页，所有设置都放在里面」
+ *       + 「不要新建一个页面，和其他的功能页面一样在同一个页面」
+ * 设置存 `config.yml` 的 `biliPublish` 段（走 `POST /api/bili-publish` → `saveConfig`）
+ * ⚠️ 事件用 `onclick=` 赋值、不用 addEventListener —— 这个函数每次切页都会重跑，
+ *    addEventListener 会越绑越多（点一次保存发三次请求）✗
+ */
+async function renderBiliPub() {
+  const st = $('bp-status');
+  let j;
+  try {
+    j = await (await fetch('/api/bili-publish')).json();
+  } catch (e) {
+    if (st) st.textContent = '读取失败：' + e.message;
+    return;
+  }
+  if (!j.ok) { if (st) st.textContent = '读取失败'; return; }
+  const c = j.cfg, s = j.state;
+  // ① 填表
+  $('bp-enable').value = c.enable ? '1' : '0';
+  $('bp-ws').value = c.windowStart;
+  $('bp-we').value = c.windowEnd;
+  $('bp-group').value = c.group || '';
+  $('bp-durmax').value = c.durationMax;
+  $('bp-zone').value = c.zone || '生活';
+  $('bp-zone2').value = c.zone2 || '日常';
+  $('bp-tags').value = (c.tags || []).join(',');
+  $('bp-streak').value = c.groupMaxStreak;
+  $('bp-scope').value = (c.scope || []).join('\n');
+  $('bp-notify').value = c.notifyOwner ? '1' : '0';
+  // ② 状态条
+  if (st) {
+    st.innerHTML =
+      '<b style="color:' + (c.enable ? '#3fb950' : '#8b98a5') + '">' +
+      (c.enable ? '● 已开启' : '○ 已关闭') + '</b>' +
+      ' · ' + (s.todayDone ? '今天已经做过了' : '今天还没做，计划 ' + s.nextAt) +
+      ' · 连续群聊 ' + s.streakGroup + '/' + s.groupMaxStreak + ' 天' +
+      (s.running ? ' · <b style="color:#4a9eff">正在做…</b>' : '');
+  }
+  // ③ 最近记录
+  const hs = s.history || [];
+  const hb = $('bp-history');
+  if (hb) {
+    if (!hs.length) hb.innerHTML = '<span class="d">还没有记录</span>';
+    else {
+      hb.innerHTML = hs.map(function (x) {
+        const when = String(x.at || '').slice(5, 16).replace('T', ' ');
+        const src = x.source === 'group' ? '群聊' : x.source === 'custom' ? '自定义' : '自制';
+        const ok = x.ok
+          ? '<b style="color:#3fb950">成功</b>'
+          : '<b style="color:#f85149">失败</b>';
+        return '<div style="padding:4px 0;border-bottom:1px solid rgba(127,127,127,.15)">' +
+          when + ' · ' + src + ' · ' + (x.title || x.topic || x.why || '') + ' · ' + ok + '</div>';
+      }).join('');
+    }
+  }
+  bpBindSave(); // ⚠️ 必须在这里绑（脚本块在 DOM 之前执行，外面绑会拿到 null）
+}
+
+// ⚠️ 必须**在 renderBiliPub 里调用**：这个脚本块在 DOM 之前执行，
+//    直接在外面 `$('bp-save').onclick = …` 拿到的是 null（面板还没解析）✗
+//    用 `onclick =` 覆盖式绑定 ⇒ 重复调用也只有一个监听 ✓
+function bpBindSave() {
+$('bp-save') && ($('bp-save').onclick = async function () {
+  this.disabled = true;
+  const body = {
+    cfg: {
+      enable: $('bp-enable').value === '1',
+      windowStart: $('bp-ws').value,
+      windowEnd: $('bp-we').value,
+      group: $('bp-group').value,
+      durationMax: Number($('bp-durmax').value),
+      zone: $('bp-zone').value,
+      zone2: $('bp-zone2').value,
+      tags: $('bp-tags').value,
+      groupMaxStreak: Number($('bp-streak').value),
+      scope: $('bp-scope').value,
+      notifyOwner: $('bp-notify').value === '1',
+    },
+  };
+  try {
+    const r = await (await fetch('/api/bili-publish', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    })).json();
+    var st2=$('bp-status');
+    if (r.ok) {
+      // ⚠️ 先 render 再写提示 —— renderBiliPub 会重设整个 innerHTML，
+      //    反过来写会把「已保存 ✓」当场冲掉（2026-10-22 实测：存成功了却看着像没存）✗
+      await renderBiliPub();
+      var st4=$('bp-status');
+      if(st4) st4.innerHTML='<b style="color:#3fb950">已保存 ✓</b> · ' + st4.innerHTML;
+    } else if (st2) {
+      st2.innerHTML='<b style="color:#f85149">保存失败：' + (r.error||'') + '</b>';
+    }
+  } catch (e) { var s2=$('bp-status'); if(s2) s2.textContent='保存失败：'+e.message; }
+  this.disabled = false;
+});
+
+$('bp-run') && ($('bp-run').onclick = async function () {
+  this.disabled = true;
+  try {
+    const r = await (await fetch('/api/bili-publish/run', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ topic: $('bp-topic').value, publish: !$('bp-draft').checked }),
+    })).json();
+    var st3=$('bp-status');if(st3)st3.innerHTML=r.ok?'<b style="color:#4a9eff">已开始，3~5 分钟后再来看记录</b>':'<b style="color:#f85149">没能开始：' + (r.error||'') + '</b>';
+    if (r.ok) setTimeout(renderBiliPub, 3000);
+  } catch (e) { var s3=$('bp-status'); if(s3) s3.textContent='没能开始：'+e.message; }
+  this.disabled = false;
+});
+} // ← bpBindSave 的收尾（漏了这个 } 会让整个 script 块语法错误、页面所有 JS 全挂 ✗）
+
+// ⚠️ 兜底：页面加载后**先渲染一次**（不等用户点 tab）
+//    2026-10-22 实测：按钮 onclick 绑上了、面板也能切出来，但 render 函数就是不跑
+//    （手动调 `renderBiliPub()` 完全正常 ⇒ 只能是那条点击链里某处断了）
+//    ⇒ 与其继续猜绑定链，不如**加载时就把表单和状态填好**，点 tab 只是刷新一次 ✓
+//    这样功能不受影响；重复调用幂等（都是覆盖赋值）✓
+document.addEventListener('click', (e) => {
+  const btn = e.target && e.target.closest ? e.target.closest('[data-tab="biliPub"]') : null;
+  if (btn) setTimeout(() => { renderBiliPub().catch(() => {}); }, 60);
+}, true);
+setTimeout(() => { renderBiliPub().catch(() => {}); }, 1200);
 
 async function renderBili() {
   const box = $('bili-status');  try {

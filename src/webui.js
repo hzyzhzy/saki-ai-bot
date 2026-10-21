@@ -316,6 +316,14 @@ function readBody(req, limit = MAX_UPLOAD) {
   });
 }
 
+/** 读 JSON 请求体（2026-10-22 加：B站投稿设置页用它） */
+async function readJson(req) {
+  const buf = await readBody(req, 2 * 1024 * 1024);
+  const s = buf.toString('utf8').trim();
+  if (!s) return {};
+  return JSON.parse(s);
+}
+
 // ── 配置：读写 ────────────────────────────────────────
 
 /** 只保留界面关心的字段，避免把运行时状态写回文件 */
@@ -565,6 +573,12 @@ function saveConfig(patch) {
   //    `config.yml` 里连 `persona:` 段都没有，`personaId()` 一路回落到默认的 saki。
   //    界面上就是"点『切到这个』没反应"（用户报的「这个好像切不动」）。
   put('persona', patch.persona);
+  // ⚠️ 2026-10-22 加：**B站全自动投稿**的设置段。
+  //    踩到的：`biliPublish` 是共用段（`SHARED_SECTIONS` 里有），所以 `splitPatch` 会放行，
+  //    但 `put()` 列表和白名单里都**没有**它 ⇒ 界面点保存返回 `ok:true`、状态条还写「已保存 ✓」，
+  //    可 `config.yml` 里**一个字都没写进去**（只有一行 warn 落在日志里）✗
+  //    ⇒ 三处都要有：`put(...)` / `HANDLED` / `order`。
+  put('biliPublish', patch.biliPublish);
   // ⚠️ 2026-09-22 加：**谁在改人设**要留下痕迹。
   //    查"config.yml 被莫名改成别的人设"时，就是靠这行定位到是哪个套件干的。
   //    带上文件名一眼能看出改的是**真实配置**还是套件的临时配置。
@@ -592,7 +606,7 @@ function saveConfig(patch) {
   const HANDLED = new Set([
     'llm', 'onebot', 'trigger', 'context', 'qzone', 'status', 'faces', 'chat', 'attitude',
     'teach', 'chunking', 'webui', 'life', 'quest', 'affinity', 'friend', 'persona',
-    'imagegen', 'groupParams', 'ownerQQ', 'botQQ', 'logLevel',
+    'imagegen', 'groupParams', 'ownerQQ', 'botQQ', 'logLevel', 'biliPublish',
   ]);
   for (const k of Object.keys(patch ?? {})) {
     if (!HANDLED.has(k)) log.warn(`saveConfig 收到没处理的字段「${k}」—— 白名单里没有它，这次它**不会被写进 config.yml**`);
@@ -615,6 +629,7 @@ function saveConfig(patch) {
     'attitude',
     'life',
     'quest',
+    'biliPublish',
     'ownerQQ',
     'botQQ',
     'adminQQ',
@@ -2279,6 +2294,74 @@ const routes = {
     };
     req.on('close', bye);
     req.on('error', bye);
+  },
+
+  /* ── B站全自动投稿（2026-10-22 加）─────────────────────────
+   * 用户：「在功能卡片里新增一个 B站投稿设置页，所有设置都放在里面」
+   *      +「不要新建一个页面，和其他的功能页面一样在同一个页面」
+   * ⇒ 设置面板在 `webui.html` 的 `tab-biliPub`；这里只有接口。
+   *   ⚠️ 2026-10-22：原来那个独立页 `/bili-publish` 已经删掉（用户不要第二个页面）✗
+   */
+  'GET /api/bili-publish': async (_req, res) => {
+    const bp = await import('./bili-publish.js');
+    const c = bp.settings();
+    send(res, 200, { ok: true, cfg: c, state: bp.status() });
+  },
+
+  'POST /api/bili-publish': async (req, res) => {
+    try {
+      const body = await readJson(req);
+      const c = body?.cfg || {};
+      const clean = {};
+      if (typeof c.enable === 'boolean') clean.enable = c.enable;
+      if (c.windowStart) clean.windowStart = String(c.windowStart).slice(0, 5);
+      if (c.windowEnd) clean.windowEnd = String(c.windowEnd).slice(0, 5);
+      if (c.group !== undefined) clean.group = String(c.group).replace(/\D/g, '');
+      // ⚠️ 2026-10-22 用户改口：**题材不是清单，是"范围"**（跟 b 站分享的关键词一个用法）
+      //    「输入和 b 站分享的那些标签一样划定范围就可以了」⇒ 一行/逗号一个方向
+      if (c.scope !== undefined) {
+        clean.scope = (Array.isArray(c.scope) ? c.scope : String(c.scope).split(/[,，、\n]/))
+          .map((t) => String(t).trim()).filter(Boolean).slice(0, 20);
+      }
+      // ⚠️ 时长**由 agent 自己定**，这里只是上限（别写成"视频时长"）
+      if (c.durationMax !== undefined) {
+        clean.durationMax = Math.max(25, Math.min(120, Number(c.durationMax) || 60));
+      }
+      // ⚠️ 分区也**由 agent 自己选**，这两个只是兜底（它挑不到时用）
+      if (c.zone !== undefined) clean.zone = String(c.zone).trim().slice(0, 20) || '生活';
+      if (c.zone2 !== undefined) clean.zone2 = String(c.zone2).trim().slice(0, 20);
+      if (c.tags !== undefined) {
+        clean.tags = (Array.isArray(c.tags) ? c.tags : String(c.tags).split(/[,，、\n]/))
+          .map((t) => String(t).replace(/^#/, '').trim()).filter(Boolean).slice(0, 10);
+      }
+      if (c.groupMaxStreak !== undefined) clean.groupMaxStreak = Math.max(1, Math.min(10, Number(c.groupMaxStreak) || 2));
+      if (typeof c.notifyOwner === 'boolean') clean.notifyOwner = c.notifyOwner;
+      // ⚠️ 老字段（durationSec / tid / topics）如果还在 config.yml 里，**顺手清掉** ——
+      //    留着会让下一个读配置的人以为它们还有用（它们已经废了）✗
+      for (const dead of ['durationSec', 'tid', 'topics']) {
+        if (dead in (config.biliPublish || {})) clean[dead] = null;
+      }
+      saveConfig({ biliPublish: clean });
+      const bp = await import('./bili-publish.js');
+      // ⚠️ 存完立刻读回来核对（这功能一旦"以为开了其实没开"，是第二天才发现）
+      send(res, 200, { ok: true, cfg: bp.settings(), state: bp.status() });
+    } catch (e) {
+      send(res, 200, { ok: false, error: e.message });
+    }
+  },
+
+  /** 立刻做一条（自定义题材可选）—— 就是用户要的「手动转发视频那样自己输入题材」 */
+  'POST /api/bili-publish/run': async (req, res) => {
+    try {
+      const body = await readJson(req);
+      const bp = await import('./bili-publish.js');
+      if (bp.isBusy()) return send(res, 200, { ok: false, error: '上一条还在做，等它跑完' });
+      // ⚠️ 不等它跑完（要 3~5 分钟，会超时）⇒ 立刻回"已开始"，进度看状态
+      void bp.runOnce({ topic: String(body?.topic || '').slice(0, 200), publish: body?.publish !== false });
+      send(res, 200, { ok: true, started: true });
+    } catch (e) {
+      send(res, 200, { ok: false, error: e.message });
+    }
   },
 
   'GET /agent-tasks': async (_req, res) => {

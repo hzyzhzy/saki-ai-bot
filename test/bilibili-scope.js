@@ -40,7 +40,7 @@ writeFileSync(
     '  model: test-model',
     'bilibili:',
     '  enable: true',
-    '  ownerUid: "30000001"',
+    '  ownerUid: "394060600"',
     '',
   ].join('\n'),
   'utf8',
@@ -54,7 +54,7 @@ const check = (ok, label, extra = '') => {
 };
 
 const bili = await import('../src/bilibili.js');
-const UID = '30000001';
+const UID = '394060600';
 /** 服主问的（isOwner=true） */
 const ask = (t) => bili.looksLikeVideoQuestion(t, true, UID);
 
@@ -94,7 +94,7 @@ console.log('\n【2】★ 明确问"我的视频"才算（这才是这个功能�
 
 console.log('\n【3】直接报 UID 也算（那是明确指向他的号）');
 {
-  check(ask(`30000001 播放量多少`) === true, '报 UID 的 → 抓走');
+  check(ask(`394060600 播放量多少`) === true, '报 UID 的 → 抓走');
   check(ask(`${UID} 最近怎么样`) === true, 'UID + 最近 → 抓走');
   check(ask('394060601 播放量') === false, '别的 UID → 不抓（那是别人的号）');
 }
@@ -248,16 +248,15 @@ console.log('\n【12】★「Luminiflux有什么视频」要**真去查**（2026
   const src = readFileSync(join(ROOT, 'src', 'bilibili.js'), 'utf8');
   const botSrc = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
   const guard = readFileSync(join(ROOT, 'src', 'attribution-guard.js'), 'utf8');
-  check(/noAuthor/.test(src) && /e\.noAuthor/.test(botSrc), 'B站没这个人 → 标 `noAuthor`，交给正常搜索（**不硬答**）');
-  check(
-    /fallThrough/.test(botSrc) && /放行走正常搜索/.test(botSrc),
-    '★ 没这个人时**放行**（继续走网页搜索那条真去查的路）',
-  );
+  // ⚠️ 2026-10-20 删（B 站查询从"代码关键词自动触发"改成"她自己调 [工具:查B站]"）——
+  //    noAuthor / fallThrough / setLastHot / 接上文 都是 hotQuery 自动触发的逻辑，
+  //    现在没自动触发了（AGENTS 铁律：工具只能由她自己调，代码不许猜）
+  //      现在没自动触发了（AGENTS 铁律：工具只能由她自己调，代码不许猜）
   check(!/没搜到「\$\{wanted\}」本人的投稿，下面/.test(src), '不再拿"别人做的视频"冒充他本人的投稿');
   check(/绝对不许改成"空头承诺"/.test(guard), '★ 归属核对里明令**不许改成"我去搜搜"**这种空头承诺');
   check(/noteLookupPromise/.test(botSrc) && /takeLookup/.test(botSrc), '★ 万一是承诺也记下"欠着一件事"');
   check(/真的去查/.test(botSrc), '  ↳ 他催一句「快去搜」→ **换成原来那个问题**真去查');
-  check(/setLastHot/.test(src) && /setLastHot\(promptText/.test(botSrc), '记住上一轮 → 接着问「那…」时能**接上文**');
+  // ⚠️ 2026-10-20 删：setLastHot / 接上文 也是 hotQuery 自动触发的逻辑，现在没自动触发了
 }
 
 console.log('\n【13】★ @ 前缀不许混进解析（2026-09-15 日志实测）');

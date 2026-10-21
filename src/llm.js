@@ -323,7 +323,12 @@ export async function* streamChat(messages, outerSignal, opts = {}) {
       body: JSON.stringify({
         model: useModel,
         messages,
-        temperature: llm.temperature,
+        // ⚠️ 2026-10-20 加（用户：「**把备用模型也加个模型温度的调整框吧**」）：
+        //    备选模型（Gemini 那类）可以有自己的温度 —— `opts.temperature` 有值就用它，
+        //    没有就照旧用主模型那个（**老配置一个字都不变**）✓
+        temperature: Number.isFinite(Number(opts.temperature))
+          ? Number(opts.temperature)
+          : llm.temperature,
         max_tokens: maxTokens,
         // ⚠️ 关掉思考链（2026-09-18）：flash 的**思考链计入 completion_tokens**，
         //    压缩故事线时它烧掉 7479/8000，正文只写了 819 字就被截断 → 整次作废。

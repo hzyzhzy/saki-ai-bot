@@ -15,7 +15,9 @@ import * as ownerUpdate from './owner-update.js';
 import * as ownerRecent from './owner-recent.js';
 import * as life from './life.js';
 // ⚠️ 2026-10-15 加：B 站视频分享（只发链接、只发 1 档群、默认关）
-import * as biliShare from './bili-share.js';// ⚠️ 2026-10-05 加：同类机器人主动搭话（群里冷场时 @ 它 / 戳它一下）
+import * as biliShare from './bili-share.js';
+import * as biliPublish from './bili-publish.js';
+// ⚠️ 2026-10-05 加：同类机器人主动搭话（群里冷场时 @ 它 / 戳它一下）
 import * as peerChat from './peer-chat.js';
 import * as storyline from './storyline.js';
 import * as quest from './quest.js';
@@ -435,16 +437,39 @@ function connectForward() {
     if (!dir) throw new Error('配置里没有 provider.dir，不知道协议端装在哪');
     // ⚠️⚠️ **绝不把要匹配的字面量直接写进命令行**（会把 DSH 自己的 runner 一起杀掉 ✗，
     //    铁律：杀进程一律按 PID；这里用**变量拼**关键词、再加"在协议端目录下"双重条件）✓
+    //
+    // ⚠️⚠️⚠️ 2026-10-20 修（**真事故**：用户「爱音又不回消息，能不能把问题一次解决好」）——
+    //    老判据要求 `CommandLine` **同时**含 `index.mjs` 和 `C:\SnowLuma`；
+    //    但实测存在**裸命令行**的实例（`node.exe  index.mjs`，不含任何路径）⇒
+    //    **杀不掉** ⇒ 起来的时候旧的还在 ⇒ **两个 SnowLuma 并存** ⇒
+    //    两个抢同一批身份会话 ⇒ 某个号"能发不能收"、反复出现 ✗✗
+    //
+    //    ⇒ 现在**只认 `ExecutablePath`**（SnowLuma 自带的 `C:\SnowLuma\node.exe`）：
+    //      · 裸命令行的实例**也跑在它上面** ⇒ 照样认得出（70972 那种）✓
+    //      · 而 **DSH 自己的 runner 永远不会命中** —— 我实测加过"命令行含关键词"那条，
+    //        结果它把 `powershell ... 'C:\SnowLuma\node.exe' -ArgumentList 'index.mjs'` 这种
+    //        **我自己的命令行**也数进去了（里面同时含 index.mjs 和 C:\SnowLuma）⇒
+    //        自愈一触发就把正在跑我的那条命令杀掉 ✗（AGENTS 铁律里记过同一个坑）
+    //    ⚠️ 并且**起之前再数一次**：还有残留就**不起了**（宁可报错，绝不留下第二个）✓
     const ps = [
       "$ErrorActionPreference='Stop'",
       "$kw = 'ind' + 'ex.' + 'mjs'", // 拼出来，命令行里不出现那个字面量
-      '$hit = @(Get-CimInstance Win32_Process -Filter "Name=\'node.exe\'" | Where-Object {',
-      '  $_.CommandLine -and $_.CommandLine.Contains($kw) -and $_.CommandLine.Contains($env:PROV_DIR)',
-      '})',
-      'foreach ($p in $hit) { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }',
+      "$dir = $env:PROV_DIR",
+      'function IsProv($p) {',
+      '  if ($p.ExecutablePath) { if ($p.ExecutablePath -like "$dir*") { return $true } }',
+      '  return $false',
+      '}',
+      '$all = @(Get-CimInstance Win32_Process -Filter "Name=\'node.exe\'" | Where-Object { IsProv $_ })',
+      'foreach ($p in $all) { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }',
       'Start-Sleep -Seconds 3',
-      'Start-Process -FilePath (Join-Path $env:PROV_DIR "node.exe") -ArgumentList $kw -WorkingDirectory $env:PROV_DIR -WindowStyle Hidden',
-      "Write-Output ('RESTARTED ' + $hit.Count)",
+      '# ⚠️ 起之前再数一次 —— 还有残留就**不起**（绝不留下第二个实例 ✗）',
+      '$left = @(Get-CimInstance Win32_Process -Filter "Name=\'node.exe\'" | Where-Object { IsProv $_ })',
+      'if ($left.Count -gt 0) {',
+      "  Write-Output ('STILLRUNNING ' + $left.Count + ' pid=' + (($left | ForEach-Object { $_.ProcessId }) -join ','))",
+      '  exit 0',
+      '}',
+      'Start-Process -FilePath (Join-Path $dir "node.exe") -ArgumentList $kw -WorkingDirectory $dir -WindowStyle Hidden',
+      "Write-Output ('RESTARTED ' + $all.Count)",
     ].join('\n');
     const { execFileSync } = await import('node:child_process');
     const out = execFileSync(
@@ -571,9 +596,16 @@ function connectForward() {
         );
         // ⚠️ 清掉"只补一次"的标记 ⇒ 重连之后 `catchUpMissed()` 会把它们捞回来 ✓
         bot.catchUpDone = false;
-        if (recvRescueCount >= 3 && config.provider?.autoRestartOnDeaf !== false) {
+        // ⚠️⚠️⚠️ 2026-10-20 改（用户：「**爱音又不回消息，能不能把问题一次解决好**」）——
+        //    **第 2 次就重启协议端**（原来是第 3 次）。
+        //    第 1、2 次不断开这条判断是对的（SnowLuma 的 warmup 只在协议端启动时给
+        //    "那时连着"的号建立 ⇒ 中途重连吃不到）；但"等到第 3 次"意味着用户要等十几分钟
+        //    —— 实测他早就发现"又不回消息"了 ✗
+        //    而重启协议端实测 6 秒三个号全部回来 ✓ ⇒ 10 分钟窗口内第 2 次就动手。
+        //    ⚠️ 第 1 次仍然只记日志：偶发一条没推过来不值得重启整个协议端（防误判）✓
+        if (recvRescueCount >= 2 && config.provider?.autoRestartOnDeaf !== false) {
           log.error(
-            `[收消息自检] ⚠️⚠️ 重连连续 ${recvRescueCount} 次都救不回来 ⇒ **重启协议端**` +
+            `[收消息自检] ⚠️⚠️ 第 ${recvRescueCount} 次判定"能发不能收" ⇒ **重启协议端**` +
               `（实测这招有效：三个号 6 秒全部重连）`,
           );
           await restartProvider(bot).catch((e) =>
@@ -582,12 +614,6 @@ function connectForward() {
           recvRescueTimes = []; // 重启过就重新计数（清空时间戳数组）✓
           recvRescueCount = 0;
           return;
-        }
-        if (recvRescueCount >= 2) {
-          log.error(
-            '[收消息自检] ⚠️ 已经不止一次没救回来 ⇒ **大概率要重启协议端**' +
-              '（不是重启机器人）：再漏一次我就自己动手',
-          );
         }
         // ⚠️⚠️⚠️ 2026-10-19 关键修正（用户：「**还是不回**」，连续折腾两小时才查出来）——
         //    **第 1、2 次判死时不再断开重连！**
@@ -602,11 +628,11 @@ function connectForward() {
         //
         //    ⇒ 现在：第 1、2 次**只记日志、不动连接**（漏掉的那条靠 `catchUpMissed` 补看），
         //      只有第 3 次（10 分钟内）才重启协议端 —— 那才是真正有效的动作 ✓
-        if (recvRescueCount < 3) {
+        if (recvRescueCount < 2) {
           log.warn(
             `[收消息自检] 第 ${recvRescueCount} 次判定"收不到事件" ⇒ ` +
               `**这次不断开**（对 SnowLuma 来说重连会丢掉事件推送，越连越糟 ✗）；` +
-              `漏的那几条靠「补看」捞回来；同一个窗口里凑满 3 次才重启协议端 ✓`,
+              `漏的那几条靠「补看」捞回来；**再漏一次就自动重启协议端** ✓`,
           );
           return;
         }
@@ -1168,7 +1194,11 @@ if (biliShare.anyEnabled(biliGroups)) {
       .catch((e) => log.warn(`[B站分享] 出错：${e.message}`));
   };
   setInterval(tickBili, every).unref();
-  setTimeout(tickBili, 120 * 1000).unref();
+  // ⚠️⚠️ 2026-10-20（用户：「有时候两个 bot 会同时转发视频」）：**号间错峰** ——
+  //    三个号的进程如果同一时刻醒来判定，就算共享了状态文件，
+  //    同一秒内的两次判定也互相看不见（竞态窗口）⇒ 按号给一个稳定的相位偏移，
+  //    三个号"先后醒"而不是"同时醒" ✓（偏移由号尾决定，重启后不变 ✓）
+  setTimeout(tickBili, 120 * 1000 + biliShare.staggerMs(bot.selfId, every)).unref();
   const detail = biliGroups
     .filter((g) => biliShare.enabled(g))
     .map((g) => {
@@ -1180,6 +1210,23 @@ if (biliShare.anyEnabled(biliGroups)) {
     `B站分享：每 ${Math.round(every / 60000)} 分钟看一次（**只发 1 档群**）；` +
       `开着的有：${detail || '（一个都没有）'}`,
   );
+}
+
+// ── B站全自动投稿（2026-10-22 加）──────────────────────────
+// 用户：「设置一个时间段，每天随机在这段时间制作发送…全部 agent 完成」（A 档 = 直接发布）
+// ⚠️ 只在**主号**上跑：三个号的进程都读同一份配置 ⇒ 不加这道闸会三个号各做一条、发三条 ✗
+//    （和 biliShare 不一样：那个是"分享别人的视频"，多号同时跑顶多重复一次；
+//      这个是"自己生成并投稿"，重复投稿更糟）
+if (config.biliPublish?.enable && isMainAccount()) {
+  const everyPub = 30 * 1000; // 每 30 秒看他到点没（一天只做一次，判据在模块里）
+  setInterval(() => {
+    try { biliPublish.tick(); } catch (e) { log.warn(`[B站投稿] tick 出错：${e.message}`); }
+  }, everyPub).unref();
+  const st = biliPublish.status();
+  log.info(`B站投稿：已开启（每天在 ${st.window} 里随机挑一个时刻，自动生成并发布）；` +
+    `今天是 ${st.todayDone ? '已经做过了' : st.nextAt}；连续群聊 ${st.streakGroup}/${st.groupMaxStreak} 天`);
+} else if (config.biliPublish?.enable) {
+  log.info('B站投稿：本进程不是主号 ⇒ 不跑（只在主号上执行，防重复投稿）');
 }
 
 // ── 待发箱：通道恢复之后自动补发 ─────────────────────────────

@@ -183,18 +183,24 @@ console.log('\n【8】"相比上月"的三种情况都要说清楚（不然模�
   check(spend.comparePrev('2026-01').prev === '2025-12', '跨年：1 月的上月 = 上年 12 月');
 }
 
-console.log('\n【9】默认范围 = 这个月，说赚了就不提花费');
+console.log('\n【9】默认范围 = 这个月；问工资已改走工具（关键词路不再认）');
 {
+  // ⚠️⚠️ 2026-10-19 改（用户：「**先把问工资这个改成工具吧，不用关键词判断了**」）——
+  //    「赚 / 工资 / 收入」这一整类**已经从关键词路挪走**（换个说法就漏，
+  //    而且「净赚」那种词还会把正常聊天顶掉换成一段账单 ✗）⇒ 现在由她自己写 `[工具:工资]`。
+  //    ⇒ 这里只验「花了多少」那半边；`earn` 那三条改成「**不再**被当成查账」✓
   const cases = [
-    ['你赚了多少', 'month', 'earn'],
     ['花了多少钱', 'month', 'spend'],
-    ['今天赚了多少', 'day', 'earn'],
     ['今天花了多少', 'day', 'spend'],
-    ['这个月赚了多少', 'month', 'earn'],
   ];
   for (const [q, scope, type] of cases) {
     const got = spend.looksLikeSpendQuestion(q);
     check(got?.scope === scope && got?.type === type, `「${q}」→ ${scope}/${type}`, got ? `实际 ${got.scope}/${got.type}` : '没识别');
+  }
+  // 问工资那三条走工具 ⇒ 关键词路必须**一个字都不认**（不认才不会顶掉聊天）
+  for (const q of ['你赚了多少', '今天赚了多少', '这个月赚了多少']) {
+    const got = spend.looksLikeSpendQuestion(q);
+    check(got === null, `「${q}」不再走关键词路（工资已交给工具）`, got ? `实际 ${got.scope}/${got.type}` : '');
   }
   const earnFacts = spend.spendFacts('month', 'earn');
   check(!/花掉|花了/.test(earnFacts), '问工资的事实里**不含**花费');

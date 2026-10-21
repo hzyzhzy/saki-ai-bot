@@ -1195,6 +1195,11 @@ const COMMON_TOOLS = new Set([
   '戳回去',
   '闭嘴',
   '查车次',
+  // ⚠️⚠️ 2026-10-19 注：`搜` **不在这里** —— 它走的是**独立的搜索回合**
+  //    （`toolSearchQuery()` 从思考链/正文取词 → `searchSmart` → 材料塞回 → 重新生成，
+  //     见 `bot.js` 里"联网搜索也包装为工具"那一段）。
+  //    ⚠️ 别再把它加进 `COMMON_TOOLS` —— 那会走 `runReadTool` 的工具回合，
+  //      和搜索回合**各搜一次**，白烧钱 ✗
   // ── 第三、四批（写知识库 / 定提醒 / 引用形态）──
   '记住',
   '忘掉',
@@ -1204,6 +1209,12 @@ const COMMON_TOOLS = new Set([
   '动这一单',
   '催进度',
   '停',
+  // ⚠️⚠️⚠️ 2026-10-20 加（用户：「**就用提示词里加工具+删触发**」）——
+  //    「群里问 B 站」原来靠 `hotQuery()` 那套关键词正则自动触发 ⇒
+  //    「继续把刚才的视频做完」撞上「的视频」被丢去搜 B 站 ✗（用户：不要用关键词判断）
+  //    ⇒ **改成她自己决定调的工具**：她在思考链里写 `[工具:查B站 {"问题":"…"}]` 才查 ✓
+  //    （见 `runReadTool` 的 handler + 提示词里的说明；自动触发已删 ✓）
+  '查B站',
   // ⚠️ 2026-10-19 加：搜图**单独一个工具**（用户：「直接打包成一个新的工具吧，
   //    搜图场景直接代替之前用的接活工具」）—— 图和评论都是**边搜边发**的，
   //    不走"产物打包发文件"那条路 ⇒ 见 `src/image-search.js` ✓
@@ -1218,7 +1229,7 @@ const COMMON_TOOLS = new Set([
  * ⚠️ `记住 / 忘掉 / 提醒` **不**在这里：它们要回一段"材料"（到底记没记下、几点提醒），
  *    她得照那个用自己的口气说一句 ⇒ 必须重新生成 ✓
  */
-const ACT_TOOLS = new Set(['戳回去', '闭嘴', '引用']);
+const ACT_TOOLS = new Set(['戳回去', '闭嘴', '引用', '查B站']);
 
 /**
  * ⚠️ 2026-10-19 加：**这个任务是不是"要图"** —— 「搜图」工具的兜底判据。
@@ -1237,8 +1248,10 @@ const ACT_TOOLS = new Set(['戳回去', '闭嘴', '引用']);
 function looksLikeImageTask(task) {
   const s = String(task ?? '');
   if (!s) return false;
-  // ① 得是图
-  if (!/(图|立绘|壁纸|插画|原画|截图|表情包)/.test(s)) return false;
+  // ① 得是图 —— ⚠️ 2026-10-19 统一成"字根族"（和 `image-search.js` 的正本一致）：
+  //    图 / 照 / 相 / 片 / 绘 五个字根 + 壁纸头像素材表情立绘海报封面画面。
+  //    🚫 别再往这里加词了 —— 换个说法就漏的问题，靠 `judgeImageAsk()` 的模型兜底解决 ✓
+  if (!/[图照相片绘]|壁纸|头像|素材|表情|立绘|海报|封面|画面/.test(s)) return false;
   // ② 得是在"要 / 找"它（「做一个图表的 PPT」这种也带"图"，靠 ③ 挡）
   if (!/(找|搜|弄|来|发|给|扒|挑|下载|收集|翻)/.test(s)) return false;
   // ③ 文档 / 代码类的活**不算**（那是「动这一单」的地盘）
@@ -1628,46 +1641,15 @@ export class Bot {
       return;
     }
 
-    // ⚠️⚠️ 2026-10-19 加（用户截图：「@saki 能不能闭嘴」→ 她回「行行行，我闭嘴」→
-    //    **接着又聊了一句** ✗）—— 用户要求：「**当有对 saki 说让她别说话的消息时，
-    //    开启 5 分钟完全不接收群消息，除非被 @**」。
-    //    ⚠️ 放在这个位置（在 `/剧情` 那些命令之后、进聊天之前）：
-    //      · 判据交给模型（`wantsMute`，不写关键词表）；
-    //      · **只在她被 @ 时才判** ⇒ 量小、不烧钱 ✓；
-    //      · mute 之后**这一条照常回**（她要说一句"行，我闭嘴"），
-    //        靠 `this._justMuted` 让 `decide` 放行这一次 ✓；
-    //      · 静默期内**被 @ 就能把她叫出来**（`decide` 里那条 `!atMeHere`）✓
-    if (payload.message_type === 'group') {
-      try {
-        const segs0 = msg.toSegments(payload.message);
-        const atMe0b = this.selfId ? msg.isAt(segs0, this.selfId) : false;
-        if (atMe0b) {
-          const txt0 = segs0
-            .filter((x) => x.type === 'text')
-            .map((x) => x.data?.text ?? '')
-            .join('')
-            .trim();
-          if (txt0 && (await this.wantsMute(txt0))) {
-            // ⚠️⚠️ 2026-10-19 改（用户：「**调用到闭嘴工具时要先答应对方一句，
-            //    再执行 5 分钟屏蔽群消息**」）——
-            //    先让她**把"行，我闭嘴"那句说出来**（这一条照常生成、照常发），
-            //    **8 秒后**再开始静默 ⇒ 顺序是"答应 → 闭嘴"，不是"先哑掉再想说什么" ✓
-            //    （8 秒够打字延迟 + 分条发送；她那句 8 秒内一定发得完 ✓）
-            log.info(
-              `[静默] 他冲她说"别说话" ⇒ 先让她答应一句，8 秒后再静默 5 分钟（${payload.group_id}）✓`,
-            );
-            const gid0 = String(payload.group_id);
-            setTimeout(() => {
-              try {
-                this.muteGroup(gid0, 5 * 60 * 1000, '他冲她说的"别说话"');
-              } catch {}
-            }, 8000).unref?.();
-          }
-        }
-      } catch (e) {
-        log.debug(`[静默] 判"让我闭嘴"那步出错（不影响回复）：${e.message}`);
-      }
-    }
+    // ⚠️⚠️⚠️ 2026-10-19 改（用户：「**闭嘴判定不应该是一个在思考链时可能调用的工具吗，
+    //    不是每次都要判定吧**」）——
+    //    原来这里对**每一条 @ 她的消息**都跑一次「【闭嘴判定】」模型调用
+    //    （连 `/清空对话` 这种命令也白判一次，e2e 抓到的就是它）⇒ 纯烧钱 ✗
+    //    ⇒ 现在**只留工具**：她自己在思考链里判断"他这是让我闭嘴"才写 `[工具:闭嘴]`
+    //      （见 `runReadTool()` 里那个分支 + 提示词里那条说明）。
+    //    ⚠️ "她凭什么判得准"：她读得懂上下文、知道那句话是不是冲她说的 ——
+    //      比一句孤立文本扔给模型判要准得多 ✓
+    //    ⚠️ 「先答应一句、8 秒后再静默」的顺序**照旧**（工具里实现）✓
 
     // ⚠️ `/剧情 <背景>` —— 管理员在群里手动开一条剧情（2026-10-03 用户要求）。
     //    和上面 `/好感度` 同一个位置、同样的理由（命令不进聊天上文、不被"要不要接话"挡住）。
@@ -5474,75 +5456,37 @@ export class Bot {
     }
   }
 
-  /**
-   * 让这个群**安静一会儿**（2026-10-07 用户要求）。
-   *
-   * 用户原话：「**发了清除剧情应该强制 bot 停发消息一分钟**，要不然她们会
-   *   接着上文继续聊」。
-   *
-   * ⚠️ 为什么 `/清除剧情` 清不掉"接着聊"：剧情状态是清了，但**上下文里
-   *    还留着刚聊的那几句**，而"对话延续"那条路（`snap.phase === 'active'`
-   *    → 直接接、不判）**跟剧情状态无关** ⇒ 清完照接不误 ✗
-   *    ⇒ 所以要在**群这一级**强制安静一小会儿，让那波上下文自然过期。
-   *
-   * ⚠️ 拦的是**所有**聊天回复（@ 她、关键词、同类、主动搭话、追补）——
-   *    用户要的就是"一个字都别发"。**指令本身照常执行**（`/剧情` `/清除剧情`
-   *    走的是指令处理那条路，不经过 `decide()`）。
-   * ⚠️ **内存态、不落盘**：1 分钟的窗口，重启本身就要 20 秒以上、本来就会错过；
-   *    落盘反而可能让"清完剧情又重启了一下"变成第二天她还不说话。
-   *
-   * @param {string} groupId
-   * @param {number} [ms] 安静多久（默认 1 分钟；**传 0 = 解除静默**）
-   * @param {string} [why] 写日志用
-   */
-  /**
-   * ⚠️⚠️ 2026-10-19 加（用户截图 + 一句「**当有对 saki 说让她别说话的消息时，
-   * 开启 5 分钟完全不接收群消息，除非被 @**」）。
-   *
-   * 现场（699 群）：管理员「@saki 能不能闭嘴」→ 她回「行行行，我闭嘴」→
-   *   **然后还接着聊**（下一句就是「那我自己看了啊」）✗ 说了闭嘴却没闭嘴。
-   *
-   * ## 判据交给模型（不写关键词表）
-   * 「能不能闭嘴」「吵死了」「别刷了」「安静点」都算 —— 换个说法也得认得出 ✓
-   * ⚠️ 反过来不能误判：**「闭嘴」出现在别处**（「这电影结局让人闭嘴惊艳」）、
-   *   开玩笑、或者他在说**别人** ⇒ 都不算 ✓
-   *
-   * ## 只在"冲她来的"消息上判（结构判据，不猜人话）
-   * 调用方只在 **@ 了她 / 直接点了她的名** 时才调它 ⇒ 量小、不烧钱 ✓
-   *
-   * @returns {Promise<boolean>} true = 是在让她别说话
-   */
-  async wantsMute(text) {
-    const t = String(text ?? '').trim();
-    if (!t) return false;
-    try {
-      // ⚠️ 开头的【闭嘴判定】是**固定标记**：假模型/套件靠它认这条请求，别改这个词
-      const ans = await phrase({
-        system: [
-          '【闭嘴判定】你判断：群里这句话，是不是在**让机器人（客服小祥）别说话 / 少说话 / 安静**。',
-          '',
-          '· 明确让她闭嘴、别刷、安静、吵死了（冲她说的）→ 答「是」；',
-          '· 开玩笑、说的不是她（在说别人吵 / 说电影让人闭嘴）、',
-          '  只是句子里顺带带了这几个字 → 答「否」。',
-          '',
-          '只回答一个字：是 或 否。不要解释，不要加标点。',
-        ].join('\n'),
-        user: `这句话：「${t.slice(0, 200)}」`,
-        maxTokens: 60,
-        timeoutMs: 6000,
-      });
-      const raw = String(ans ?? '').trim();
-      // ⚠️ 和 `judgeMemoryCommand` 同一条收严：**整条就是"是"**才算
-      return /^[\s"「]*是(的|呀|啊|对)?[\s"」。.!！,，]*$/.test(raw);
-    } catch (e) {
-      log.warn(`[静默] 判"是不是让我闭嘴"出错（这次不当真）：${e.message}`);
-      return false;
-    }
-  }
+  // ⚠️ 静默这条路的来由（2026-10-07；老注释压缩过，细节见下面 `muteGroup()` 的 JSDoc）：
+  //    用户原话「**发了清除剧情应该强制 bot 停发消息一分钟**，要不然她们会接着上文继续聊」——
+  //    光清剧情状态不够：上下文里刚聊的那几句还在，而"对话延续"那条路（`snap.phase === 'active'`
+  //    → 直接接、不判）**跟剧情状态无关** ⇒ 清完照接不误 ✗
+  //    ⇒ 所以在**群这一级**强制安静一小会儿，让那波上下文自然过期 ✓
+  //    ⚠️ 拦的是**所有**聊天回复（@ 她、关键词、同类、主动搭话、追补）；指令本身照常执行 ✓
+  // ⚠️⚠️ 2026-10-19 删（用户：「**闭嘴判定不应该是一个在思考链时可能调用的工具吗，
+  //    不是每次都要判定吧**」）——
+  //    这里原来有个 `wantsMute()`：对**每一条 @ 她的消息**都跑一次「【闭嘴判定】」模型调用，
+  //    连 `/清空对话` 这种命令也白判一次 ⇒ 纯烧钱 ✗
+  //    ⇒ 现在改成工具 `[工具:闭嘴]`：她自己读上下文判"他这是让我闭嘴"，
+  //      比她拿到一句话孤零零去判要准（见 `runReadTool()` 里那个分支 + 提示词里那条说明）✓
+  //    ⚠️ 「先答应一句、8 秒后再静默」的顺序**照旧**（在工具里做）✓
 
-  muteGroup(groupId, ms = 60000, why = '') {
+
+  /**
+   * 群级静默。
+   *
+   * @param {string|number} groupId
+   * @param {number} ms 安静多久（传 0 = 解除）
+   * @param {string} [why] 谁下的、为什么（日志 + 事后排查用）
+   * @param {{strict?: boolean}} [opts]
+   *   `strict: true` = **连 @ 她都不回**（强制停发）。
+   *   ⚠️ 2026-10-19 加：这类静默现在分两种，别混 ✗
+   *     · 「他说让她闭嘴 / 她自己说想歇会儿」⇒ **被 @ 就能叫出来**（用户：「除非被 @」）✓
+   *     · `/清除剧情`、`/暂停` ⇒ 用户原话是「**强制** bot 停发消息」，@ 也不回 ✓
+   */
+  muteGroup(groupId, ms = 60000, why = '', opts = {}) {
     const gid = String(groupId ?? '').trim();
     if (!gid) return 0;
+    const strict = !!opts?.strict;
     this._muteUntil ??= new Map();
     // ⚠️ 2026-10-07 加：**记下"这次静默是谁下的"** ——
     //    因为 `/剧情` 里那句"开新剧情 → 解除静默"会把静默无条件抹掉，
@@ -5554,14 +5498,19 @@ export class Bot {
       const was = String(this._muteWhy.get(gid) ?? '');
       this._muteUntil.delete(gid);
       this._muteWhy.delete(gid);
+      this._muteStrict?.delete(gid);
       log.info(`[静默] 群 ${gid} 解除静默` + (why ? `（${why}）` : '') + (was ? ` ← 原来是「${was}」` : ''));
       return 0;
     }
     const until = Date.now() + span;
     this._muteUntil.set(gid, until);
     this._muteWhy.set(gid, String(why ?? ''));
+    this._muteStrict ??= new Map();
+    this._muteStrict.set(gid, strict);
     log.info(
-      `[静默] 群 ${gid}：${Math.round(span / 1000)} 秒内一个字都不发` + (why ? `（${why}）` : ''),
+      `[静默] 群 ${gid}：${Math.round(span / 1000)} 秒内一个字都不发` +
+        (strict ? '（强制：连 @ 也不回）' : '（被 @ 能叫出来）') +
+        (why ? `（${why}）` : ''),
     );
     return until;
   }
@@ -5572,6 +5521,16 @@ export class Bot {
     if (!gid) return false;
     const until = Number(this._muteUntil?.get(gid) ?? 0);
     return until > Date.now();
+  }
+
+  /**
+   * 这个群现在是不是**强制**静默（连 @ 都不回，见 `muteGroup` 的 `opts.strict`）。
+   * ⚠️ 只在静默期内有意义 —— 静默已经过了就一律 false（别让一条陈旧标记把她永久哑掉）。
+   */
+  isMutedStrict(groupId) {
+    if (!this.isMuted(groupId)) return false;
+    const gid = String(groupId ?? '').trim();
+    return !!this._muteStrict?.get(gid);
   }
 
   /**
@@ -6299,11 +6258,15 @@ export class Bot {
       } catch {}
     }
 
+    //    ⚠️ 但 `strict` 那种（`/清除剧情`、`/暂停`）**连 @ 都不回** ——
+    //      用户原话是「发了清除剧情应该**强制** bot 停发消息一分钟」，
+    //      @ 一下就把她叫出来就不叫强制了 ✗（2026-10-19 两种静默分开）
+    const strictMute = event?.message_type === 'group' && this.isMutedStrict(event.group_id);
     if (
       event?.message_type === 'group' &&
       this.isMuted(event.group_id) &&
-      !justMutedNow && // ⚠️ 刚说完"我闭嘴"的**这一条**照常回（回完才静默）✓
-      !atMeHere // ⚠️ 静默期里**被 @ 就能把她叫出来**（用户：「除非被 @」）✓
+      (strictMute || !justMutedNow) && // ⚠️ 刚说完"我闭嘴"的**这一条**照常回（回完才静默）✓
+      (strictMute || !atMeHere) // ⚠️ 非强制静默里**被 @ 就能把她叫出来**（用户：「除非被 @」）✓
     ) {
       log.info(
         `[静默] 群 ${event.group_id} 还在静默期（清剧情之后那一分钟）→ 这条不回` +
@@ -8159,132 +8122,21 @@ export class Bot {
     //       所以现在分三种：全站热门 / 按题材（mc→搜「我的世界」）/ 按 UP 主（籽岷）。
     //       后两种走**搜索接口**（`space/arc` 拉投稿那个接口实测会被限流 -799，
     //       搜索接口稳得多，籽岷那条用 `keyword=籽岷&order=pubdate` 拿他最新的）。
-    // ⚠️⚠️ 2026-10-19 加（用户：「把询问 b站内容的问题都接入 b站工具，**直接把问题丢给 agent**」）——
-    //    **群里**问 B站 ⇒ 丢给 agent 真去查（它能自己换关键词、翻页面），
-    //    回来由她**用自己的话、带人设**分条说 ✓
-    //    ⚠️ 私聊不走这条（`startRun` 是群任务）⇒ 那边继续走下面那条接口直查的老路 ✓
-    {
-      const hotQ0 = config.bilibili?.enable !== false ? bilibili.hotQuery(promptText) : null;
-      const gidB = String(event.group_id ?? '');
-      if (
-        hotQ0 &&
-        String(event.message_type ?? '') === 'group' &&
-        gidB &&
-        biliAgent.askBili({
-          bot: this,
-          gid: gidB,
-          by: String(event.user_id ?? ''),
-          byName: String(event.sender?.card || event.sender?.nickname || ''),
-          question: promptText,
-          event,
-        })
-      ) {
-        log.info(`[B站] 问内容 → 丢给 agent 查（${hotQ0.mode}）：${promptText.slice(0, 40)}`);
-        this.touchConversation(event);
-        return;
-      }
-    }
+    // ⚠️⚠️⚠️ 2026-10-20 删（用户：「**难道b站工具又是用关键词判断吗？说了多少遍不要用了**」+
+    //    「**就用提示词里加工具+删触发**」）——
+    //    原来这里靠 `hotQuery()` 那套关键词正则**自动**把群里的问句丢给 B 站 agent ⇒
+    //    今晚真事故：「继续把刚才的视频做完」撞上「的视频」⇒ 被丢去搜 B 站 ⇒
+    //    90 秒超时、被打断的任务没接上 ✗
+    //    ⇒ **删了**：要不要查 B 站只由她自己思考链里的 `[工具:查B站 {问题}]` 决定 ✓
+    //    （见 `COMMON_TOOLS` + `runReadTool` 的 handler + 提示词里的说明 ✓）
 
-    const hotQ = config.bilibili?.enable !== false ? bilibili.hotQuery(promptText) : null;
-    if (hotQ) {
-      let out = '';
-      let fallThrough = false;
-      try {
-        const facts = await bilibili.hotFacts({ query: hotQ, limit: 8 });
-        out = await bilibili.hotReply({ facts, asked: promptText, mode: hotQ.mode });
-      } catch (e) {
-        // ⚠️⚠️ B站**没这个人** → **放行走正常搜索**（那才叫"真的去做这件事"）。
-        //    2026-09-15 用户截图：「Luminiflux有什么视频」→ 她答
-        //    「Luminiflux是谁啊，**我去搜搜**」＝**空头承诺**，然后就没下文了。
-        //    用户原话：「这种能不能**真的去做这件事情**然后给回复」。
-        if (hotQ.mode === 'up' && e.noAuthor) {
-          log.info(`[B站] 没搜到「${hotQ.name}」本人 → 放行走正常搜索（别答"我去搜搜"）`);
-          fallThrough = true;
-        } else {
-          log.warn(`[B站] 报热门失败（${hotQ.mode}${hotQ.keyword ?? hotQ.name ?? ''}）：${e.message}`);
-        }
-      }
-      if (!fallThrough) {
-        // ⚠️ 拉不到就**照实说拉不到** —— 别编，更别打发人（"你自己去看排行榜"那种）
-        if (!out) {
-          out =
-            hotQ.mode === 'all'
-              ? 'B站那边热榜我没拉到，等会儿再问我一次。'
-              : `B站那边${hotQ.keyword ?? hotQ.name ?? ''}的我没搜到，等会儿再问我一次。`;
-        }
-        log.info(`[B站] 报热门（${hotQ.mode}）：${out.replace(/\s+/g, ' ').slice(0, 60)}`);
-        await this.sendText(event, out, { reply: true }).catch(() => {});
-        try {
-          recent.rememberBot(event, out.replace(/\s+/g, ' ').trim());
-        } catch {}
-        // ⚠️ 记下这一轮（下一次她接着问「那…」时能接上文）
-        try {
-          bilibili.setLastHot(promptText, out);
-        } catch {}
-        this.touchConversation(event);
-        return;
-      }
-    }
-
-    // ⚠️⚠️ 2026-10-19：**问"我的 B站"也一样丢给 agent**（群里；私聊保留下面的老路）✓
-    {
-      const gidB2 = String(event.group_id ?? '');
-      if (
-        gidB2 &&
-        String(event.message_type ?? '') === 'group' &&
-        !privateWork.noGimmick() &&
-        bilibili.looksLikeVideoQuestion(
-          promptText,
-          String(event.user_id) === String(config.ownerQQ),
-          String(config.bilibili?.ownerUid ?? ''),
-        ) &&
-        biliAgent.askBili({
-          bot: this,
-          gid: gidB2,
-          by: String(event.user_id ?? ''),
-          byName: String(event.sender?.card || event.sender?.nickname || ''),
-          question: promptText,
-          event,
-        })
-      ) {
-        log.info(`[B站] 问投稿/播放 → 丢给 agent 查：${promptText.slice(0, 40)}`);
-        this.touchConversation(event);
-        return;
-      }
-    }
-
-    // ⚠️ 「我最近视频播放量怎么样」→ 查 B站（2026-09-13 用户要求）。
-    //
-    //    用户原话：「既然能用 b站了，可以让机器人记下我的 b站 uid 是 30000001，
-    //    这样以后还可以询问**我的视频播放量最近怎么样**之类的信息」。
-    //
-    //    ⚠️ **只对服主本人** —— 那是他自己的号（群友问"你的视频"不该去查他的 B站）。
-    //    ⚠️ 走 `bilibili.ownerVideoFacts()`：数字**代码算好**（它算一列数字必错），
-    //       而且内部**带缓存**（B站的 space 接口会限流，实测连拉几次就 -412/-799）。
-    // ⚠️ 2026-10-15 加 `!privateWork.noGimmick()`：工作号不做播报（同报账那条）✗
-    if (
-      !privateWork.noGimmick() &&
-      bilibili.looksLikeVideoQuestion(
-        promptText,
-        String(event.user_id) === String(config.ownerQQ),
-        // ⚠️ 把他的 B站 UID 也传进去 —— 「30000001 播放量多少」这种也该认
-        String(config.bilibili?.ownerUid ?? ''),
-      )
-    ) {
-      try {
-        const facts = await bilibili.ownerVideoFacts();
-        const line = await bilibili.videoReply({ facts, asked: promptText });
-        await this.sendText(event, line, { reply: true }).catch(() => {});
-        log.info(`[B站] 报视频数据：${String(line).replace(/\s+/g, ' ').slice(0, 70)}`);
-      } catch (e) {
-        log.warn(`[B站] 查投稿失败：${e.message}`);
-        await this.sendText(event, 'B站那边没查着，等下再问一次', { reply: true }).catch(() => {});
-      }
-      // ⚠️ 和上面报账那条同一个坑（2026-09-15）：**提前 return 的特殊回复也要记一笔对话**，
-      //    否则用户接着追问一句（「那这个月呢」）不算"对话延续"，没有 @ 就不接。
-      this.touchConversation(event);
-      return;
-    }
+    // ⚠️⚠️⚠️ 2026-10-20 删（用户：「**难道b站工具又是用关键词判断吗？说了多少遍不要用了**」）——
+    //    这里原来有三条**关键词自动触发**的 B 站查询路：
+    //      ① `hotQuery()` 自动丢 agent（8124 那段，今晚撞了「的视频」⇒ 误触 ✗）
+    //      ② `hotQuery()` 接口直查（8145 那段）
+    //      ③ `looksLikeVideoQuestion` 问"我的视频播放量"丢 agent / 直查（8174 / 8210 两段）
+    //    ⇒ **全删了**。要不要查 B 站只由她思考链里的 `[工具:查B站 {"问题":"…"}]` 决定 ✓
+    //    （"我的视频播放量"这种服主专属查询也在工具 handler 里分流到 ownerVideoFacts ✓）
 
     // 「清空对话」指令
     //
@@ -9058,6 +8910,13 @@ export class Bot {
               model: String(bkGoodModel || bkCfg.model),
               baseURL: String(bkCfg.baseURL),
               apiKey: String(bkCfg.apiKey ?? ''),
+              // ⚠️ 2026-10-20 加（用户：「**把备用模型也加个模型温度的调整框吧**」）：
+              //    备选模型可以有自己的温度（`llm.backup.temperature`）。
+              //    ⚠️ **没配就不带这个键** ⇒ `llm.js` 那边照旧用主模型那个温度，
+              //      老配置行为一个字都不变 ✓
+              ...(Number.isFinite(Number(bkCfg.temperature))
+                ? { temperature: Number(bkCfg.temperature) }
+                : {}),
             }
           : {};
       // ⚠️⚠️⚠️ 2026-10-10 加（用户拍板选 B：**主模型失败 ⇒ 备选顶上，全场景**）：
@@ -11104,8 +10963,8 @@ if (privateWork.isWorkChat(event)) return false;
       //    也出现「你和服主的关系」，测试 attitude.js 就是盯这个隔离的）。
       //    这里保留动态部分：这次说话的人是谁 + 他的职权边界。
       // ⚠️ 2026-09-26：**别名也写进这一行**（用户同一天报的「认不出管理员」）——
-      //    只写群名片/昵称的话，他用游戏 ID 问「<主人> 是谁」时她**对不上号**
-      //    （末尾就一句"<主人> 本人"，而"<主人>"在提示词的别处）。
+      //    只写群名片/昵称的话，他用游戏 ID 问「hzyzhzy 是谁」时她**对不上号**
+      //    （末尾就一句"<主人> 本人"，而"hzyzhzy"在提示词的别处）。
       const akaOwner = aliasesOf(config.ownerQQ, [name, '<主人>']);
       return [
         `## 当前对话者：**<主人> 本人**（QQ ${config.ownerQQ}，昵称「${name}」${akaOwner.length ? `，也叫 ${akaOwner.join(' / ')}` : ''}）`,
@@ -12205,8 +12064,18 @@ if (privateWork.isWorkChat(event)) return false;
     //        ⇒ **执行层也硬挡**，而且**全都挡**（不是只挡财务那两个）✓
     //    ⚠️ 返回 `''`（不是一句提示）是**故意的**：返回「这个场合我不查」她会照着说出来 ⇒ 露馅 ✗
     //       调用方那边 `if (got) parts2.push(...)` 为假 ⇒ **不塞材料、不重生成** ⇒ 她照原稿发 ✓
-    if (privateWork.isWorkChat(event)) {
-      log.warn(`[工具] 工作模式私聊 ⇒ 拒绝执行「${name}」（客户对话里一个工具都不许触发）`);
+    //    ⚠️⚠️⚠️ 2026-10-20 修（用户：「**开工了吗**」）——
+    //    那道闸**连 `动这一单` 都挡了** ⇒ 她答应了「素材挑完就开工」，结果一个字没做 ✗✗
+    //    真实现场（13:07 谷雨私聊）：
+    //      `她在思考链里调了工具「动这一单」⇒ 真去执行 ✓`
+    //      `[工具] 工作模式私聊 ⇒ 拒绝执行「动这一单」`     ← 就是这里挡的
+    //      `工具「动这一单」没起成：自己人（主人 / 同类池）不当客户`
+    //    ⇒ 挡的**本意**是"别把内部信息（工资 / 花费 / 服务器状态 / 学到的知识）说给客户听"，
+    //      而 `动这一单 / 催进度 / 停 / 交付` 是**接活流程本身**、不吐任何内部信息 ✓
+    //      把这几件放行，其余照旧全挡 ✓
+    const WORK_FLOW = new Set(['动这一单', '催进度', '停', '交付', '补发', '补收', '够开工']);
+    if (privateWork.isWorkChat(event) && !WORK_FLOW.has(name)) {
+      log.warn(`[工具] 工作模式私聊 ⇒ 拒绝执行「${name}」（客户对话里不许吐内部信息）`);
       return '';
     }
     // ⚠️ 2026-10-19：**记一次调用**（界面「工具调用」那页要显示累计/今日）✓
@@ -12265,6 +12134,9 @@ if (privateWork.isWorkChat(event)) return false;
           .map((e) => `- ${String(e.topic ?? e.title ?? '')}：${String(e.fact ?? e.body ?? '').slice(0, 80)}`)
           .join('\n');
       }
+      // ⚠️⚠️ 2026-10-19 注：**`搜` 不在这里实现** ——
+      //    它走 `toolSearchQuery()` + `searchSmart` 那个**独立搜索回合**
+      //    （材料塞回上下文再重新生成）。这里再实现一次会**各搜一遍**、白烧钱 ✗
       if (name === '查车次') {
         // ⚠️⚠️ 2026-10-19 加（用户：「**加一个查看火车车次信息的工具**，
         //    群友提到 / 正在坐 / 询问 / 赶火车之类的场景时，去查一次对应车次的信息」）——
@@ -12291,9 +12163,58 @@ if (privateWork.isWorkChat(event)) return false;
         await this.sendPokeBack(uid2, gid2);
         return ''; // 有副作用，不需要材料
       }
+      // ⚠️⚠️⚠️ 2026-10-20 加（用户：「**就用提示词里加工具+删触发**」）——
+      //    「群里问 B 站」原来靠 `hotQuery()` 关键词自动触发 ⇒
+      //    「继续把刚才的视频做完」撞上「的视频」被丢去搜 B 站 ✗（用户：不要用关键词判断）
+      //    ⇒ **改成她自己决定调的工具**：`[工具:查B站 {"问题":"…"}]` 才查 ✓
+      //    走 `biliAgent.askBili()`（它自己 agent 查 + 润色 + 分条发群，不重生成这条回复）✓
+      if (name === '查B站') {
+        const gid2 = String(event?.group_id ?? '');
+        const q = String(args?.问题 ?? args?.查 ?? args?.q ?? args?.查什么 ?? '').trim();
+        if (!gid2 || !q) {
+          log.info(`[工具] 「查B站」缺参数（群=${gid2 || '无'}，问题=${q || '空'}）⇒ 忽略 ✓`);
+          return '';
+        }
+        log.info(`[工具] 她自己在思考链里调了「查B站」⇒ 真去查 ✓`);
+        // ⚠️ 分流：问"我的"视频/播放量（服主专属）⇒ 走 ownerVideoFacts 直查发群；
+        //    别的问句 ⇒ 走 biliAgent.askBili（agent 查 + 润色 + 分条发群）
+        const isOwner = String(event?.user_id) === String(config.ownerQQ);
+        const isMyVideo = isOwner && /我(的)?(视频|投稿|播放|播放量)/.test(q);
+        if (isMyVideo) {
+          try {
+            const facts = await bilibili.ownerVideoFacts();
+            const line = await bilibili.videoReply({ facts, asked: q });
+            await this.sendText(event, line, { reply: true }).catch(() => {});
+            log.info(`[工具] 查B站·服主视频数据：${String(line).replace(/\s+/g, ' ').slice(0, 70)}`);
+          } catch (e) {
+            log.warn(`[工具] 查B站·服主视频失败：${e.message}`);
+            await this.sendText(event, 'B站那边没查着，等下再问一次', { reply: true }).catch(() => {});
+          }
+          this.touchConversation(event);
+        } else {
+          // ⚠️ 异步起，别卡住这条回复 ✓
+          void biliAgent
+            .askBili({
+              bot: this,
+              gid: gid2,
+              by: String(event?.user_id ?? ''),
+              byName: String(event?.sender?.card || event?.sender?.nickname || ''),
+              question: q,
+              event,
+            })
+            .catch((e) => log.warn(`[工具] 查B站出错：${e.message}`));
+        }
+        return ''; // 有副作用，不需要材料
+      }
       if (name === '闭嘴') {
-        // ⚠️ 2026-10-19 加：她想"这个群先别说话"就静音一段时间 ✓
-        //    ⚠️ 私聊没意义（没有群）⇒ 直接不理；⚠️ 上限 30 分钟，别被一句话关一整天 ✗
+        // ⚠️⚠️ 2026-10-19 改（用户：「**闭嘴判定不应该是一个在思考链时可能调用的工具吗，
+        //    不是每次都要判定吧**」）——
+        //    原来 `onMessage` 里对**每一条 @ 她的消息**都跑一次「【闭嘴判定】」模型调用，
+        //    连 `/清空对话` 这种命令也白判一次 ⇒ 现在**这是唯一入口** ✓
+        //    语义两种：他让闭嘴（默认 5 分钟）/ 自己想歇会儿（可写「多久」）——
+        //    两种都是**非强制静默**：静默期里**被 @ 照样能叫出来**（用户：「除非被 @」）✓
+        //    ⚠️ **8 秒后才生效**：她得先把"行，我不说了"那句发出去 ——
+        //      顺序必须是"答应 → 闭嘴"，不是"先哑掉再想说什么"（用户明确要求）✓
         const gid3 = String(event?.group_id ?? '');
         if (!gid3) {
           log.info(`[工具] 「闭嘴」只在群里有效 ⇒ 私聊忽略 ✓`);
@@ -12302,9 +12223,15 @@ if (privateWork.isWorkChat(event)) return false;
         const raw = String(args?.多久 ?? args?.多久时间 ?? args?.时间 ?? '');
         const mMin = /(\d+)\s*分/.exec(raw);
         const mHour = /(\d+)\s*(个)?小时/.exec(raw);
-        let ms = mHour ? Number(mHour[1]) * 3600000 : mMin ? Number(mMin[1]) * 60000 : 600000;
+        let ms = mHour ? Number(mHour[1]) * 3600000 : mMin ? Number(mMin[1]) * 60000 : 5 * 60000;
         ms = Math.max(60000, Math.min(ms, 30 * 60000));
-        this.muteGroup(gid3, ms, '她自己说想歇会儿');
+        this._justMuted = { gid: gid3, at: Date.now() };
+        setTimeout(() => {
+          try {
+            this.muteGroup(gid3, ms, '她自己判断该闭嘴了（工具）');
+          } catch {}
+        }, 8000).unref?.();
+        log.info(`[静默] 她调了「闭嘴」⇒ 8 秒后静默 ${Math.round(ms / 60000)} 分钟（${gid3}）✓`);
         return '';
       }
       if (name === '好感度') {
@@ -14275,7 +14202,7 @@ if (privateWork.isWorkChat(event)) return false;
           '- `忘掉` ↦ 他让你去掉刚记下的那条（无参数，只有服主/管理员能用）',
           '- `提醒` ↦ 他让你**到点提醒他**（何时 + 说什么）',
           '- `引用` ↦ 该引用某条消息回（引用谁）',
-          '- `动这一单` / `催进度` / `停` / `搜图` ↦ **只在群里、只有他本人**能让你动本机',
+          '- `动这一单` / `催进度` / `停` / `搜图` / `查B站` ↦ **只在群里、只有他本人**能让你动本机',
           '⚠️ 这张表**只用来选工具**；每个工具的规矩、禁令看下面各节 ✓',
           '',
           '# 【工具的铁律：说要做，就必须同时写那一行暗号】',
@@ -14312,6 +14239,14 @@ if (privateWork.isWorkChat(event)) return false;
           "- **你赚了多少 / 工资 / 这个月挣了多少 / 够不够花 ⇒ `[工具:工资]`**（含往月和物价参照）",
           "- 你学过什么 ⇒ `[工具:学到什么]`",
           "- 某个人跟你的好感度 ⇒ `[工具:好感度]`",
+          // ⚠️ 2026-10-19 加（用户：「**闭嘴判定不应该是一个在思考链时可能调用的工具吗，
+          //    不是每次都要判定吧**」）—— 原来系统对每条 @ 她的消息都判一次"是不是让她闭嘴"，
+          //    纯烧钱 ✗ ⇒ 现在**你自己判**：读得懂上下文、知道那句是不是冲你说的，比孤立一句扔给模型准 ✓
+          "- **他让你闭嘴 / 别说了 / 安静 / 少刷几句**（确实是冲你说的）⇒ `[工具:闭嘴]`",
+          "  ⚠️ 先把答应的话说出来（「行，我不说了」）—— **工具 8 秒后才生效**，来得及 ✓",
+          "  ⚠️ 玩笑、或者说的不是你（他在说别人吵 / 说电影里让人闭嘴）⇒ **别调** ✗",
+          "- **你自己想歇一会儿**（这波插不上话 / 想消停一下）⇒ `[工具:闭嘴 {\"多久\":\"20分钟\"}]`",
+          "  （默认 5 分钟、最长 30 分钟；静默期里**有人 @ 你照样能把你叫出来**）✓",
           "- **火车 / 车次的事**（有人说自己正在赶车、问某趟车到没到、为什么晚点、几点到哪站）",
           "  ⇒ `[工具:查车次 {\"车次\":\"G1234\"}]`（车次照他说的写，`G/D/K/T/Z` 开头那种）",
           // ⚠️ 2026-10-19 加（用户：「**问哪里到哪里有什么交通工具时，先调用上网工具查询，
@@ -14393,6 +14328,14 @@ if (privateWork.isWorkChat(event)) return false;
             '     每张你**自己配一句话**（"这张你看看"这种）；他不用再催第二遍 ✓',
             '  ⚠️ **搜图必须用这个**，🚫 别用「动这一单」去搜 —— 那条路会把图当文件发，',
             '     还会说出"太大 / 一次发不完 / 留在我这儿"那种话 ✗',
+            // ⚠️⚠️⚠️ 2026-10-20 加（用户：「**难道b站工具又是用关键词判断吗？**」+
+            //    「**就用提示词里加工具+删触发**」）——
+            //    原来群里问 B 站靠代码关键词自动触发（hotQuery 正则），现在改成你自己决定调
+            '- 🎬 **群里问 B 站的东西**（某个 UP 主有什么视频 / 最近什么火的 / 你的视频播放量）⇒',
+            '  `[工具:查B站 {"问题":"他的原话"}]`',
+            '  ⚠️ 判据只看**他是不是在问 B 站的视频/UP 主** —— 在问才调；',
+            '     让你做别的事（继续做视频 / 写个东西 / 闲聊）⇒ **不调** ✗',
+            '  （查完会自己发群，你不用再补话）',
             '- 他让你**在群里做一件真活**（写代码 / 做文档 / 改东西 / 整理数据 / 查资料给出结果）⇒',
             '  `[工具:动这一单 {"做什么":"一句话说清做什么，越具体越好"}]`',
             '  ⚠️ 这一行他看不到；写了之后你就**真去做**了，**做完产物自动发到这个群** ✓',
@@ -14666,6 +14609,19 @@ if (privateWork.isWorkChat(event)) return false;
           [
             '',
             '# 【正在跟你说话的是另一个同类：把事往前推，别原地顶嘴】',
+            '',
+            // ⚠️⚠️ 2026-10-20 加（用户截图：「**为什么爱音和祥子老是说「她怎么怎么样」，
+            //    而不是直接对对方说「你怎么怎么样」**」）：
+            //    现场 —— 群里两个同类互相接话，说成了
+            //      「官方图啊……那**她**可得挑仔细点」「挑仔细点？**她**自己平时什么样自己心里没数吗」✗
+            //    读起来像**跟第三方谈论对方**，不像在跟对面说话（群里看着像自言自语）。
+            //    ⇒ 人称必须钉死：**对面这个同类就是「你」**。
+            //    ⚠️ 用「你」而不是写名字 —— 人设里有「别喊名字」那条，两条一起才不打架 ✓
+            '⚠️⚠️ **对面这个同类就是在跟你说话 —— 叫它「你」**：',
+            '  · ✅ 「**你**挑仔细点」「**你**自己平时什么样心里没数吗」「**你**要是嫌烦就自己去找」；',
+            '  · 🚫 **别用「她 / 他 / 对方 / 那个谁」代指它** —— 那是"跟第三个人谈论它"的口气，',
+            '    群里读着像你在自言自语，根本不像在跟它说话 ✗；',
+            '  · 🚫 也别把它的名字写出来（名字由 @ 负责，见下面那条）。',
             '',
             '你们两个是在**一起演一件事**（剧情里就是让这一段往下走），不是比谁嘴硬。',
             '⚠️ 最容易犯的错，是**一句接一句地互相评价对方刚才那句话**，比如：',
@@ -15261,6 +15217,12 @@ if (privateWork.isWorkChat(event)) return false;
           }),
         });
         if (brief) parts.push('\n' + brief);
+        // ⚠️⚠️ 2026-10-20 加（用户：「**换个写法吧，直接作为剧情生成和剧情对话的铁律**」）——
+        //    `brief` 只在**这个群正在演剧情**时才有内容 ⇒ 铁律跟着它走，
+        //    日常聊天一个字都不会多 ✓
+        //    ⚠️ "生成剧情段"那条路有自己的那份（`quest.unfilteredQuest()`）——
+        //      两条路各管各的：那边写长段，这边是**群里接话** ✓
+        parts.push(quest.unfilteredQuestChat());
       } catch {}
       // ⚠️⚠️ 2026-10-07 加（用户报：「**清除剧情之后她们还在说推柜子出房间**」）：
       //    他清掉剧情之后，**上下文里那几句台词还留着**（两个进程各存一份 recent）⇒
@@ -17193,11 +17155,29 @@ if (privateWork.isWorkChat(event)) return false;
   async understandVoice(event) {
     try {
       const segs = Array.isArray(event?.message) ? event.message : [];
-      if (!segs.some((s) => s?.type === 'record')) return false;
+      const recSeg = segs.find((s) => s?.type === 'record');
+      if (!recSeg) return false;
+      // ⚠️⚠️ 2026-10-19 加（用户截图：QQ 里那条语音**下面直接显示着转好的文字**，
+      //    「帮我根据清华大学出版社出版的数字文化精粹第7章内容做一个PPT」——
+      //    可她还回「语音我这边听不了呀」）——
+      //    **QQ 客户端自己就把语音转成文字了，而且转好的文字就在段里**
+      //    （`record` 段的 `data.text`，引用那条路早就用它了，见上面 L3418 附近）⇒
+      //    这里却**从来没先看它**，直接去调 `fetch_ptt_text` ——
+      //    而那个接口在 SnowLuma（独立实现、拿不到 QQ 内部结果）下**必然超时** ✗
+      //    ⇒ 现在**先看段里有没有现成的文字**，有就直接用、一次接口都不调 ✓
+      let text = String(recSeg?.data?.text ?? '').trim();
+      if (text) {
+        event.message = segs.map((s) =>
+          s?.type === 'record' ? { type: 'text', data: { text } } : s,
+        );
+        log.info(
+          `[语音] 段里自带 QQ 转好的文字 ⇒ **直接用**（${event.user_id ?? ''}）：「${text.slice(0, 60)}」`,
+        );
+        return true;
+      }
       const mid = String(event?.message_id ?? '').trim();
       if (!mid) return false;
 
-      let text = '';
       for (let i = 0; i < 2 && !text; i++) {
         try {
           const r = await this.call('fetch_ptt_text', {
@@ -19292,7 +19272,7 @@ if (privateWork.isWorkChat(event)) return false;
         if (!mineRunning && this.questLive(gid)) {
           // ⚠️ **静默照旧**（用户要求「发了清除剧情就强制停发一分钟」）——
           //    两个号是各自收到这条指令的，都要静默；只是**清**这件事归主导方。
-          this.muteGroup(gid, 60000, '收到 /清除剧情（这条不是我起的头）');
+          this.muteGroup(gid, 60000, '收到 /清除剧情（这条不是我起的头）', { strict: true });
           log.info(
             `[剧情] /清除剧情：群 ${gid} 正在演的这条**不是我起的头** → 我不清、也不回执`,
           );
@@ -19364,7 +19344,7 @@ if (privateWork.isWorkChat(event)) return false;
       //    他发这条的意图就是"清场"，行为要可预期；而"清完剧情、她们又把上文
       //    接下去"正是他要避免的场面（剧情状态清了，可上下文里那几句还在）。
       //    ⚠️ 两个号是**两个进程**，各自收到这条指令、各静默各的 ⇒ 天然都对 ✓
-      this.muteGroup(gid, 60000, `收到 /清除剧情（${r.ok ? '清掉了' : '没得清'}）`);
+      this.muteGroup(gid, 60000, `收到 /清除剧情（${r.ok ? '清掉了' : '没得清'}）`, { strict: true });
       log.info(
         `[剧情] ${event.user_id} 用 /清除剧情：群 ${gid} → ` +
           (r.ok
@@ -19441,7 +19421,7 @@ if (privateWork.isWorkChat(event)) return false;
       }
 
       // ② 这个群**2 分钟不发消息**（到点自动恢复）
-      this.muteGroup(gid, 120000, '收到 /暂停');
+      this.muteGroup(gid, 120000, '收到 /暂停', { strict: true });
 
       log.info(
         `[暂停] ${event.user_id} 用 /暂停：群 ${gid} → ` +
@@ -20162,8 +20142,8 @@ export function detectFakeRecall(text) {
   //      · 2026-09-13 加了 `sessions.js`：**每 30 秒实测一次名单**，
   //        真的记下了谁什么时候上来的 → 机器人**有资格说时长了**。
   //      · 结果这条过滤器开始**误杀真话**。实测那条：
-  //        「就俩，<主人> 和 symxhyg / 一个上了半小时左右，另一个刚上来没一会儿」
-  //        被拦下 —— 而真实记录是 <主人> 24 分钟、symxhyg 7 分钟，**完全对得上**。
+  //        「就俩，hzyzhzy 和 symxhyg / 一个上了半小时左右，另一个刚上来没一会儿」
+  //        被拦下 —— 而真实记录是 hzyzhzy 24 分钟、symxhyg 7 分钟，**完全对得上**。
   //        用户反馈「我刚才问服务器现在有谁，又没回我」。
   //
   //    所以改成：**系统有时长记录时放行**（那是真查来的）；

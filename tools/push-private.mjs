@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * 把当前项目推一份到**私有备份仓库** `<主人>/sakibot`（防数据丢失）。
+ * 把当前项目推一份到**私有备份仓库** `hzyzhzy/sakibot`（防数据丢失）。
  *
- * ⚠️ 和公开的 `<主人>/saki-ai-bot` 是**两个不同的仓库**，各推各的：
+ * ⚠️ 和公开的 `hzyzhzy/saki-ai-bot` 是**两个不同的仓库**，各推各的：
  *   · 公开那份走 `tools/make-public.cjs` 导出到 `qq-ai-bot-public/`，它自己排除
  *     `personas/` / `knowledge/` / `logs/` / `state/` 那些；
  *   · 私有这份**就是这个目录本身**（含 config.yml、accounts、personas/<主人> 人设），
@@ -23,7 +23,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
-const REPO = '<主人>/sakibot';
+const REPO = 'hzyzhzy/sakibot';
 const PROXY = 'http://127.0.0.1:7890';
 
 const dry = process.argv.includes('--dry');

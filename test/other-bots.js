@@ -142,11 +142,17 @@ console.log('\n【8】★ 同类自言自语 → 按独立概率接话（2026-10
   // ⚠️⚠️ 这一条是"高于收紧度"的**实现**：judge 那边同类要**打个折**再传。
   //     ⚠️ 用户特地补过：「**不要完全没紧度了，略低就行了**」—— 所以判的是
   //     `strictness × strictnessFactor`，**不是 0**（传 0 就等于完全放开，他要的不是那个）。
+  // ⚠️ 2026-10-19 改：收紧度现在**不管几档都传给 judge**（原来非 1 档传 `undefined`，
+  //    结果 699 群收紧度 95、judge 压根不知道 ✗）⇒ 字面从 `strictness: isLevel1` 变成
+  //    `strictness: this.isPeerBot(...)`；这条只判"同类打折 + 默认 0.7"这个实现还在 ✓
   check(
-    /strictness: isLevel1[\s\S]{0,320}?strictnessFactor \?\? 0\.7/.test(botSrc),
+    /strictness: this\.isPeerBot\([\s\S]{0,320}?strictnessFactor \?\? 0\.7/.test(botSrc),
     '★★ 说话判断那边：同类按**收紧度 × strictnessFactor（默认 0.7）**传 —— 略低于收紧度，没全放',
   );
-  check(!/strictness: isLevel1[\s\S]{0,120}?\? 0\s*:/.test(botSrc), '★ 确认**不是**直接传 0（"略低"不是"没有"）');
+  check(
+    !/strictness: this\.isPeerBot\([\s\S]{0,200}?\? 0\s*:/.test(botSrc),
+    '★ 确认**不是**直接传 0（"略低"不是"没有"）',
+  );
   check(Number(config.peerChat?.strictnessFactor ?? 0.7) === 0.7, '默认折扣 0.7（40 → 28）');
   check(Number(config.peerChat?.replyChance ?? 0.6) === 0.6, '默认概率 0.6（比收紧度 40 对应的意愿高）');
 }
@@ -1127,7 +1133,8 @@ console.log('\n【21】★★ `/清除剧情` 只由**主导那条线的号**执
     '★★ 正在演的那条**不是我起的头** ⇒ 我不清（判据 = 我没有在跑的线 + 群里在演剧情）',
   );
   check(
-    /this\.muteGroup\(gid, 60000, '收到 \/清除剧情（这条不是我起的头）'\)/.test(src21),
+    // ⚠️ 2026-10-19：`/清除剧情` 那道静默现在是**强制**的（`{ strict: true }`，连 @ 也不回）✓
+    /this\.muteGroup\(gid, 60000, '收到 \/清除剧情（这条不是我起的头）', \{ strict: true \}\)/.test(src21),
     '★ 但**静默照旧**（两个号都停发一分钟 —— 那是他发这条指令的意图）',
   );
   check(
@@ -1510,9 +1517,12 @@ console.log('\n【24】★★ 清剧情要**连残留一起清** + 硬条件剧�
   story24.__clear(G24);
 
   // ③ 清剧情时**顺手**清这两处
+  // ⚠️⚠️ 2026-10-19 改（用户：「**还得清除从开始剧情到清除剧情之间的上下文**」）——
+  //    这里**不传 `uids`** 了：传了就只清那两个号说的话，真人那几句「推一下/继续」还留着，
+  //    她照样能从那些话把上一场接下去 ✗ ⇒ 整段时间的上下文全清 ✓
   check(
-    /recent\.dropWindow\(gid, \{ from, to, uids \}\)/.test(src24),
-    '★★★ `/清除剧情` 顺手抹掉上下文里那段台词（不用用户额外操作）',
+    /recent\.dropWindow\(gid, \{ from, to \}\)/.test(src24),
+    '★★★ `/清除剧情` 顺手抹掉上下文里那段台词（而且**是整段全清**，不挑是谁说的）',
   );
   check(
     /storyline\.removeWindow\(gid, \{ from, to \}\)/.test(src24),
@@ -2072,8 +2082,10 @@ console.log('\n【33】★★ 「花多少时间」不许被当成「花了多�
   check(m1?.type === 'spend' && m1?.scope === 'month', '★★★ 对照：「这个月花了多少钱」照旧认', JSON.stringify(m1));
   const m2 = spend33.looksLikeSpendQuestion('今天花了多少');
   check(m2?.type === 'spend' && m2?.scope === 'day', '★★★ 对照：「今天花了多少」照旧认（含 day 范围）', JSON.stringify(m2));
+  // ⚠️ 2026-10-19 改：问工资**已经交给工具**（用户：「先把问工资这个改成工具吧，不用关键词判断了」）
+  //    ⇒ 这里要反过来验：「你赚了多少」**不再**被关键词路当成查账（不认才不会把聊天顶掉）✓
   const m3 = spend33.looksLikeSpendQuestion('你赚了多少');
-  check(m3?.type === 'earn', '★★ 对照：「你赚了多少」照旧认（earn 那一路）', JSON.stringify(m3));
+  check(m3 === null, '★★ 「你赚了多少」不再走关键词路（工资交给工具）', JSON.stringify(m3));
   const m4 = spend33.looksLikeSpendQuestion('余额还有多少');
   check(m4?.type === 'spend', '★★ 对照：「余额还有多少」照旧认', JSON.stringify(m4));
 }
@@ -2694,10 +2706,17 @@ console.log('\n【45】★★★ `/清除剧情` 要连「她自己的话」一�
   //   两个进程各自收到 `/清除剧情`、各自清自己那份 ⇒ 机制上能覆盖两边 ✓
   const src45 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
 
+  // ⚠️⚠️ 2026-10-19 改：`uids` 里带 `'__self__'` 这件事现在只剩**开新剧情前清残留**那条路
+  //    （`/清除剧情` 那条改成**整段全清、不传 uids** 了 —— 它连 `__self__` 一起带走 ✓
+  //     判据见【24】那条；这里只要确认"她自己那份话确实会被清掉"这个坑没回来 ✓）
   check(
-    /String\(this\.selfId \?\? config\.botQQ \?\? ''\),[\s\S]{0,600}?'__self__',/.test(src45),
-    '★★★ `/清除剧情` 的 `uids` 里必须有 `\'__self__\'` —— ' +
+    /\[\.\.\.peersFor\(gid\)\.map\(String\), '__self__'\]/.test(src45),
+    '★★★ 清残留时 `uids` 里必须有 `\'__self__\'` —— ' +
       '她自己的发言在 `recent` 里存的是这个，只传 QQ 号永远清不掉 ✗',
+  );
+  check(
+    /recent\.dropWindow\(gid, \{ from, to \}\)/.test(src45),
+    '★★★ `/清除剧情` 那条改成整段全清（连她自己的台词一起带走）',
   );
   check(/清掉上一段的聊天残留/.test(src45), '★★★ 开新剧情时也会自动清一次上一段的残留（不用手动 /清除剧情）');
   check(

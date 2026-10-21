@@ -73,6 +73,10 @@ console.log('\n【2】★★★ 攒够了 ⇒ 模型**总结**成短句写进 ow
   r.noteOwnerTalk('明天下午还有个面试', {});
   let asked = null;
   const n = await r.maybeSummarize({
+    // ⚠️ 2026-10-19：`MIN_ITEMS` 从 4 提到 **12**（用户：「**看起来明显不像是总结出来的，
+    //    而是有一条消息就记一条**」—— 攒 4 句就吐 3 条，效果上就是一条消息一条 ✗）
+    //    ⇒ 这里只攒了 4 条，得**强制**跑一次才验得到总结逻辑本身 ✓
+    force: true,
     ask: async (opts) => {
       asked = opts;
       return '{"items":["今晚通宵，一早要把车送去年检","明天下午有面试"]}';

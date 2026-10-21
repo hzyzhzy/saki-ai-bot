@@ -1,4 +1,4 @@
-﻿# NapCat 看门狗：NapCat 挂了就自动拉起来，不需要人工介入。
+# NapCat 看门狗：NapCat 挂了就自动拉起来，不需要人工介入。
 #
 # 背景：NapCat 崩过一次（NapCatWinBootMain 进程消失、3001 端口没了），
 # 机器人在那之后默默重连了 9 分钟，群里完全没反应，用户只能干等。
@@ -448,7 +448,12 @@ function Sync-ExtraBots {
     if ($ExtraLastStart.ContainsKey($qq) -and ((Get-Date) - $ExtraLastStart[$qq]).TotalSeconds -lt 90) { continue }
     $ExtraLastStart[$qq] = Get-Date
     Say "❌ 号 $qq 不在了 —— 重新拉起"
-  Start-Process -FilePath 'wscript.exe' -ArgumentList '//nologo', '_run-bot-hidden.vbs' -WorkingDirectory $BotDir -WindowStyle Hidden
+    # ⚠️⚠️ 2026-10-20 修：**必须把账号当参数传下去** ✗
+    #    原来这一行没传 `$qq` ⇒ vbs 走"不带参数"那条路（= config.yml 里的主号）⇒
+    #    实际拉起的是**主号**，被 singleton 一挡就退出 ⇒ 那两个号**永远补不上**，
+    #    而看门狗每 90 秒还是照喊一句「不在了 —— 重新拉起」✗
+    #    （2026-10-20 04:06~04:08 实测：看门狗日志反复两行，而那两个号的 console 一直没更新）
+    Start-Process -FilePath 'wscript.exe' -ArgumentList '//nologo', '_run-bot-hidden.vbs', $qq -WorkingDirectory $BotDir -WindowStyle Hidden
   }
 }
 

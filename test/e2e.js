@@ -421,7 +421,21 @@ async function main() {
     sentTexts().includes('清空'),
     '「清空对话」指令被识别并回复',
   );
-  check(llmCalls.length === callsBefore, '「清空对话」没有浪费一次模型调用');
+  // ⚠️ 把"多出来的是哪一次"当 detail 传下去 —— 只报"多了"没法查（踩过几次）
+  const extraCalls = llmCalls.slice(callsBefore);
+  check(
+    llmCalls.length === callsBefore,
+    '「清空对话」没有浪费一次模型调用',
+    extraCalls.length
+      ? `${extraCalls.length} 次：` +
+        JSON.stringify(
+          extraCalls.map((c) => ({
+            stream: !!c.body?.stream,
+            last: String(c.body?.messages?.at(-1)?.content ?? '').slice(0, 60),
+          })),
+        )
+      : '',
+  );
 
   // ─────────────────────────────────────────────────────────────────
   console.log('\n[7] `/好感度` 群命令（<主人> 报「发了没回复」，2026-09-15 修）');

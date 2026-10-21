@@ -1559,7 +1559,20 @@ console.log('\n[让位] 光"看见台词"不算，得有真剧情在跑');
     by: '10000001',
     premise: '闲聊',
   });
+  // ⚠️⚠️ 2026-10-20：`touchLine()` 现在**拒绝给"没真剧情在跑"的线续期**
+  //    （堵住"两个号互相闲聊把假剧情态无限续命"那个永动机，见它自己的注释）。
+  //    ⇒ 这里改成**直接把盘上的 `seen` 置真**，照样造出"我看过它的台词"这个前置，
+  //      下面几条断言一条都不减 ✓
   quest.touchLine('200000001');
+  {
+    const lp = process.env.QQBOT_QUEST_LINES_FILE || join(ROOT, 'state', 'quest-lines.json');
+    const lj = JSON.parse(readFileSync(lp, 'utf8'));
+    if (lj['200000001']) {
+      lj['200000001'].seen = true;
+      lj['200000001'].at = Date.now();
+      writeFileSync(lp, JSON.stringify(lj), 'utf8');
+    }
+  }
   check(quest.lineSeen('200000001') === true, '前置：lineSeen 被置真（模拟"看见同类发了一句像剧情的话"）');
   check(!quest.sharedPremise('200000001'), '前置：但根本没有共享起因（没真开过剧情）');
   check(b6.tryQuestStart(evt, seg('/剧情 门缝里透进一点光')) === true, '命令被处理了');
@@ -1782,7 +1795,10 @@ console.log('\n【16】★★ 发了 /清除剧情 ⇒ 强制静默 1 分钟（2
   check(b.isMuted(G16) === false, '★ 传 0 秒 = **解除静默**（调用方要取消就靠它）');
 
   // 静默期内 **@ 她也不回**（用户要的是"强制停发"，不是"少说两句"）
-  b.muteGroup(G16, 60000, '自检');
+  // ⚠️ 2026-10-19：静默现在分**两种**（见 `muteGroup` 的 `opts.strict`），这里验的是**强制**那种：
+  //   · 强制（`/清除剧情` / `/暂停`）⇒ 连 @ 都不回 ← 本条
+  //   · 非强制（「让她闭嘴」「她想歇会儿」）⇒ 被 @ 能叫出来（用户：「除非被 @」）
+  b.muteGroup(G16, 60000, '自检', { strict: true });
   const evAt16 = {
     message_type: 'group',
     group_id: G16,
@@ -1794,8 +1810,20 @@ console.log('\n【16】★★ 发了 /清除剧情 ⇒ 强制静默 1 分钟（2
     ],
     sender: { card: '路人甲', nickname: '路人甲' },
   };
-  check(b.decide(evAt16) === null, '★★ 静默期内**连 @ 她都不回**（"强制"就是这个意思）');
+  check(b.decide(evAt16) === null, '★★ 强制静默期内**连 @ 她都不回**（"强制"就是这个意思）');
   check(b.shouldJoinChat(evAt16) === null, '★★ 主动接话那条路也直接不接');
+  // ⚠️ 2026-10-19 加：非强制那种（他说"让她闭嘴"）**被 @ 要能叫出来** —— 用户原话「除非被 @」。
+  //    这里只验标记本身（不跑 decide：那还要过同类/冷却一堆闸，容易红得莫名其妙 ✗）
+  b.muteGroup(G16, 60000, '自检-非强制');
+  check(
+    b.isMuted(G16) === true && b.isMutedStrict(G16) === false,
+    '★ 非强制静默（"让她闭嘴"那种）标成非强制 ⇒ 被 @ 能叫出来',
+  );
+  check(
+    /strictMute \|\| !atMeHere/.test(readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8')),
+    '★★ `decide()` 里**强制静默时忽略"被 @"这个豁免**',
+  );
+  b.muteGroup(G16, 0, '自检');
 
   // 接线（光有函数不算数）
   const bsrc16 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
@@ -1814,7 +1842,9 @@ console.log('\n【16】★★ 发了 /清除剧情 ⇒ 强制静默 1 分钟（2
     '★★ 清上下文时**不传 uids**（那段时间谁说的都清，连他本人说的也清）',
   );
   check(
-    /decide\(event, voluntary = null\) \{[\s\S]{0,1200}?isMuted\(/.test(bsrc16),
+    // ⚠️ 2026-10-19 再放宽（1200 → 2600）：`decide()` 开头现在有两段长注释
+    //    （刚 mute 的那条要回 / 静默分强制与非强制），窗口卡太死会因为它变红 ✗
+    /decide\(event, voluntary = null\) \{[\s\S]{0,2600}?isMuted\(/.test(bsrc16),
     '★★ `decide()` **最前面**就拦（所有回复路径的总入口）',
   );
   check(

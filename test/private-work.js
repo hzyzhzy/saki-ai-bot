@@ -856,10 +856,7 @@ console.log('\n【23】★★ 工作号不许出现"机器味"的特殊回复（
     ),
     '★ 「起始账」这个财务指令也不做',
   );
-  check(
-    /!privateWork\.noGimmick\(\) &&\s*bilibili\.looksLikeVideoQuestion/.test(b3),
-    '★ B站播报不做（同报账那条）',
-  );
+  // ⚠️ 2026-10-20 删（B 站自动触发没了，改工具）—— `looksLikeVideoQuestion` 那段删了
   const dmGate = (
     b3.match(/!\(privateWork\.enabled\(\) && event\.message_type === 'private'\)/g) ?? []
   ).length;
@@ -3051,6 +3048,14 @@ console.log(
   // 用户要的：这种时候**别让他干等**，该发就发；那份真没了就如实说 ✓
   {
     const uid7 = '10000035';
+    // ⚠️ 2026-10-20 加：兜底补发现在**先问模型一句"他是不是真要文件"**
+    //    （真事故：她随口说"没有"，代码就把上次交付的旧产物又发了一遍 ✗）
+    //    ⇒ 这条用例里客户明确说"文件丢了、再给一份" ⇒ 判定要回「是」✓
+    pw.__setPhrase(async ({ system }) => {
+      if (String(system).includes('要回某个之前发给他的文件')) return '是';
+      if (String(system).includes('她答应了什么')) return '发';
+      return '';
+    });
     const out7 = pw.outDir(uid7);
     mkdirSync(out7, { recursive: true });
     writeFileSync(join(out7, '课程设计报告_彩色版.docx'), 'body', 'utf8');
@@ -3071,6 +3076,10 @@ console.log(
       lastDeliver: { at: Date.now(), sent: ['课程设计报告_彩色版.docx'] },
     });
     pw.__setPhrase(async ({ system }) => {
+      // ⚠️ 2026-10-20 加：兜底补发现在**先问模型"他是不是真要文件"**
+      //    （真事故：她随口说"没有"，代码就把上次交付的旧产物又发了一遍 ✗）
+      //    ⇒ 这条用例里客户明确说"文件丢了、再给一份" ⇒ 判定回「是」✓
+      if (String(system).includes('要回某个之前发给他的文件')) return '是';
       if (system.includes('她答应了什么')) return '发';
       if (system.includes('原样抄')) return '课程设计报告_彩色版.docx';
       return '';
@@ -3082,15 +3091,21 @@ console.log(
     );
     await new Promise((r) => setTimeout(r, 900));
     const ups7 = s7.filter((x) => x.a === 'upload_private_file');
+    // ⚠️⚠️⚠️ 2026-10-20 改（用户：「**难道之前不是在思考链判定是否调用的吗**」）——
+    //    原来这条要求"她一答应、代码就兜底发" ⇒ 正是它导致**上次的旧产物被乱发** ✗
+    //    （现场：「为什么谷雨又发了之前的产物」：她随口说了句"没有"，代码就去发
+    //      实训项目.zip / 实训改版.zip —— 跟这次要的面试题毫无关系 ✗✗）
+    //    ⇒ 规矩反过来：**补发只由她的 `[工具:补发]` 决定**，光嘴上答应不发 ✓
     check(
-      ups7.length >= 1,
-      '★★★ 嘴上答应"我再发一遍"、没写暗号 ⇒ **代码兜底真发**（别让他干等 ✗）',
+      ups7.length === 0,
+      '★★★ 嘴上答应"我再发一遍"但**没写暗号** ⇒ 代码不发（补发只由她的暗号决定 ✓）',
       `发了 ${ups7.length} 个`,
     );
     check(
-      ups7.some((x) => /课程设计报告_彩色版\.docx$/.test(String(x.p.file))),
-      '★★★ 兜底发的就是那份彩色版 ✓',
-      String(ups7[0]?.p?.name),
+      /只答应了不写暗号[\s\S]{0,60}不会发出去/.test(
+        readFileSync(join(ROOT, 'src', 'private-work.js'), 'utf8'),
+      ),
+      '★★ 提示词里写死了"答应补发必须同时写 [工具:补发]"（不然对面干等 ✗）',
     );
 
     // ⑧ 反过来：这一单**还没交付过** ⇒ 不许乱发（那种要走 `[工具:交付]`）

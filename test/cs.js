@@ -158,7 +158,7 @@ const llmServer = createServer((req, res) => {
 //    结果玩家名单拿不到（真实踩过：cs 测试报「实时结果里带上了在线玩家名单」失败）。
 let mcQueries = 0;
 let mcTcpQueries = 0;
-const MC_PLAYERS = ['Kirito', 'Asuna', '<主人>'];
+const MC_PLAYERS = ['Kirito', 'Asuna', 'hzyzhzy'];
 
 /** 假 MC 的 HTTP 状态 API（mcstatus.io 格式） */
 const mcServer = createServer((req, res) => {
@@ -460,7 +460,7 @@ async function main() {
   //
   //    根因**不在"她忘了"** —— 是 `selectFor()` 的 `needServer` 关键词表里
   //    **只有「管理员 / 腐竹」这种身份词，没有任何人名或别名**：
-  //    「Luminiflux是谁」「<主人>是谁」「LSF_Official.在b站上的成就怎么样」
+  //    「Luminiflux是谁」「hzyzhzy是谁」「LSF_Official.在b站上的成就怎么样」
   //    **一个词都不命中** ⇒ 整份 `hzymtr-server.md`（含管理员名录）**压根不进上下文**
   //    ⇒ 她手里没有名单，只能答"我不认识" ✗。
   //    ⚠️ `anime.md` 和群资料库**早就加了** `mentionsAnyTerm` 这条判据，**只有服务器库漏了**。

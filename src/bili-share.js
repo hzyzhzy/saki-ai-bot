@@ -448,6 +448,12 @@ export async function runOnce(bot, groups = [], { force = false, groupId = '', k
 
   // ② 定时：逐群看谁该发（顺序随机，免得永远先照顾排前面的群）✓
   if (!list.length) return { sent: false, why: '没有 1 档群' };
+  // ⚠️⚠️ 2026-10-20（用户：「两个 bot 会同时转发视频」）：判定前**先重读共享状态** ——
+  //    每个号是独立进程，内存里那份是启动时读的；别的号刚发完落盘的 `lastAt`
+  //    不重读就看不见 ⇒ 三个号一起判"该发" ⇒ 同时转发 ✗（重读后共享冷却真正生效 ✓）
+  //    ⚠️ 只重读这条**定时**路；「立刻发送」在上面那个分支里已经 return 了，
+  //       不会被这里拦（用户手动点的就该发 ✓）
+  reload();
   const order = list.slice().sort(() => Math.random() - 0.5);
   let lastWhy = '今天都不用发';
   for (const gid of order) {
@@ -602,6 +608,51 @@ export function __reset() {
   st = { day: '', by: {}, sent: [], sentByGid: {}, recent: {}, nowKw: {} };
   gidDataSeen = false; // 重置后"按群记账"从头开始 ⇒ 老兜底那道也恢复（套件要用 ✓）
   save();
+}
+
+/** ⚠️ 仅供套件：拿到**内部状态**的引用（生产代码不要用 —— 和 `recent.js` 的 `__storeForTest` 同一个惯例） */
+export function __stForTest() {
+  return st;
+}
+
+/**
+ * ⚠️⚠️ 2026-10-20 加（用户：「**转发视频的随机时间还有点问题，有时候两个 bot 会同时转发视频**」）：
+ *
+ * **根因**：每个 QQ 号是一个**独立进程**，各自的 `st`（冷却 / 条数 / 去重池）都只在
+ *   **启动那一刻**从共享文件读一次 ⇒ 三个号各自判"该发了"，谁先挑到谁就发 ——
+ *   表现就是**两个号几乎同时转发视频** ✗（发完各自写回同一个文件，后写的还把先写的
+ *   `lastAt` 冲掉 ⇒ 连冷却都被冲没了）。
+ *
+ * 状态文件本来就是**三个进程共用**的（`state/bili-share.json`）⇒ 修法不是新建文件，
+ *   而是**每次判定前重读一遍**：A 号刚发完落盘的 `lastAt`，B 号重读后立刻看得见 ⇒
+ *   共享冷却真正生效 ✓
+ *
+ * ⚠️ 只在**定时判定**这条路上重读（`runOnce` 非 force）：
+ *   · 「立刻发送」是用户手动点的，**就该发**（重读反而可能把它拦掉 ✗）；
+ *   · 文件很小（几十 KB），10 分钟一次的重读开销可以忽略 ✓
+ */
+export function reload() {
+  load();
+}
+
+/**
+ * **号间错峰**：同一个 tick 时间点，三个号的进程会**同时**醒来判定 ⇒
+ *   即便共享了状态，同一秒内的两次判定还是会互相看不见（竞态窗口）。
+ * ⇒ 给每个号一个**固定的、互不相同的**相位偏移（拿号的尾巴算哈希，
+ *   稳定 —— 重启之后同一号还是同一个偏移），把"同时醒"错开成"先后醒" ✓
+ *
+ * @param {string} selfId 这个号的 QQ
+ * @param {number} every 定时器间隔（毫秒；偏移不会超过它的一半）
+ * @returns {number} 毫秒偏移（0 ~ every/2）
+ */
+export function staggerMs(selfId, every = 10 * 60 * 1000) {
+  const s = String(selfId ?? '').trim();
+  const span = Math.max(60000, Math.floor(Number(every) / 2));
+  if (!s) return 0;
+  // 号尾三位当种子 —— 简单、稳定、不同号之间够分散
+  let h = 0;
+  for (const ch of s.slice(-3)) h = (h * 31 + (ch.codePointAt(0) ?? 0)) >>> 0;
+  return h % span;
 }
 
 /**
