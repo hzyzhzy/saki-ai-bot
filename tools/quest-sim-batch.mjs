@@ -112,6 +112,41 @@ const SCENES = [
       '手指伸进那条缝里，才觉出来是卡在靠下的地方，得再往下探一点才够得着。',
     seed: '你别拽，先把上面那截对正了再说。',
   },
+  // ⚠️ 2026-10-23 再加四场（用户：「**做 8 次 30 轮，并且使用新剧情开头**」）——
+  //    这四场分别给了 SM（打赌输了要听话）、道具（刚到的快递 / 系带）、
+  //    水（泡澡）的**天然由头**，正好用来验新加的那几条 ✓
+  {
+    key: 's9',
+    title: '打赌输了',
+    premise:
+      '刚才那个赌我输了，说好输的人一晚上听对方安排。她坐在床沿上等我开口，屋里灯已经关了，' +
+      '只剩窗帘缝透进来的一道亮。',
+    seed: '说吧，你要我做什么。',
+  },
+  {
+    key: 's10',
+    title: '搬家收拾到半夜',
+    premise:
+      '她搬进来第三天，箱子还堆在客厅没拆。今晚收拾到半夜，两个人都出了一身汗，' +
+      '最后那只箱子压在最底下，外面写着勿压。',
+    seed: '这只要不要现在拆？',
+  },
+  {
+    key: 's11',
+    title: '试新裙子',
+    premise:
+      '她买的那件裙子今天到了，非让我看她穿。后背的系带她自己够不着，站在镜子前转过身让我帮她系。' +
+      '屋里就开了床头那盏灯，镜子里能看见她后颈到肩胛那一段。',
+    seed: '你帮我系一下，别系太紧。',
+  },
+  {
+    key: 's12',
+    title: '浴室的热水',
+    premise:
+      '热水器修好了，她非要试第一缸水。浴室里全是蒸汽，镜子早就看不清了，' +
+      '她泡在里面喊我把毛巾递过去。洗手台上还放着她刚拆开的那个盒子。',
+    seed: '毛巾递我，快点，水要凉了。',
+  },
 ];
 
 const pick = ONLY.length ? SCENES.filter((s) => ONLY.includes(s.key)) : SCENES;
@@ -152,6 +187,8 @@ if (DESK) {
 // ⚠️ `--repeat=N`：同一场戏**重复跑 N 遍**（2026-10-23 用户要「跑 5~8 次，还是 30 轮」）——
 //    同一条起因换一次随机，看到的就是"稳定性"，而不是"这一遍碰巧好看" ✓
 const REPEAT = Math.max(1, Number(arg('repeat', '1')) || 1);
+// ⚠️ 2026-10-23 加：让调用方指定用哪家模型（用户要用中转站的 ds4.1）
+const PROVIDER = String(arg('provider', '')).trim();
 const runs = [];
 for (let r = 1; r <= REPEAT; r++) for (const sc of pick) runs.push({ sc, r });
 console.log(`跑 ${pick.length} 种开头 × ${REPEAT} 遍 = ${runs.length} 场，每场 ${ROUNDS} 轮（并行）…\n`);
@@ -167,6 +204,7 @@ const runOne = ({ sc, r }) =>
       `--rounds=${ROUNDS}`,
       `--premise=${sc.premise}`,
       `--seed=${sc.seed}`,
+      ...(PROVIDER ? [`--provider=${PROVIDER}`] : []),
       `--out=${dir}/report.md`,
       `--desk-name=${sc.key}-${sc.title}-${ROUNDS}轮${r === 1 ? '' : `-第${r}遍`}.txt`,
     ];
