@@ -540,6 +540,12 @@ async function biliSearch({ keyword, order = 'click', tids = 0, pubtime = 0, pag
         .replace(/\s+/g, ' ')
         .trim()
         .slice(0, 200),
+      /* ⚠️ 2026-10-22 加（用户：「**避开官方大号**」）：
+       *    搜索接口的每一项都带 `official_verify`（`type: 1` = 认证号，0 = 普通用户）。
+       *    实测踩过：挑到「明日方舟」官方号的视频（422 万播放），评论**被风控拦了**
+       *    （页面弹「受到神秘力量干扰，请稍后再试」）⇒ 官方号评论区审核严得多 ✗
+       *    ⇒ 主动评论那条路要能认出"这是认证号"，直接跳过 ✓ */
+      official: Number(v?.official_verify?.type) === 1,
       url: String(v.arcurl ?? (v.bvid ? `https://www.bilibili.com/video/${v.bvid}` : '')),
     }))
     .filter((v) => v.title);
@@ -552,6 +558,36 @@ async function biliSearch({ keyword, order = 'click', tids = 0, pubtime = 0, pag
  *    （实测直接回 `code=-799 请求过于频繁`，而且模块自己会把那个接口封 45 分钟）。
  *    搜索接口**稳定可用**。
  */
+/**
+ * 从任意文本里抠出**视频标识**（BV 号 **或 av 号**）—— 2026-10-22 加
+ *
+ * ## ⚠️⚠️ 为什么必须同时认 av 号（真 bug，2026-10-22 查出来的）
+ *
+ *   主动评论一直报「**关键词都搜空了 / 都评论过了**」，今天下午两轮（16:11 / 16:31）
+ *   9 个词全军覆没、一条都没发出去 ✗
+ *   查下来根本不是"都评论过"（`visited` 名单里只有 **2 条**），而是：
+ *
+ *   **搜索接口返回的 `arcurl` 是 `av` 号格式**（`http://www.bilibili.com/video/av1174613828644`），
+ *   而 `pickVideo()` 里的正则只认 `video/(BV[0-9A-Za-z]+)` ⇒ **20 条全被过滤掉** ⇒
+ *   `fresh.length === 0` ⇒ 日志却写成"都评论过了"（那句话在当时那个判断分支里）✗
+ *
+ *   ⇒ 判据统一走这个函数：**BV / av 都认**，取到的那个就当作唯一标识
+ *     （`state` 里的 `visited` 名单混着存没问题，两者都是唯一 id；
+ *      `https://www.bilibili.com/video/<av号>` 这个 URL 一样能打开 ✓）
+ *
+ * @param {string} text 任意含链接的文本
+ * @returns {string} `BV1xx411c7mD` 或 `av1174613828644`；都没有就空串
+ */
+export function pickVideoKey(text) {
+  const s = String(text ?? '');
+  return (
+    (s.match(/video\/((?:BV[0-9A-Za-z]{10}|av\d+))/i) || [])[1] ||
+    (s.match(/\b(BV[0-9A-Za-z]{10})\b/) || [])[1] ||
+    (s.match(/\b(av\d+)\b/i) || [])[1] ||
+    ''
+  );
+}
+
 /**
  * 从一段文字里抠出所有 BV 号（2026-10-16 加）。
  * ⚠️ 只认标准的「BV + 10 位」—— 群里那些链接长这样：
@@ -642,7 +678,7 @@ export async function searchVideos(keyword, { limit = 8, order = 'click', tids =
  *   ② 加分区过滤（`tids=17` 单机游戏）干净很多，但条数会变少
  *      （实测 30 条里只剩 6 条）→ 筛完不够 4 条就**放开分区再拿一遍**。
  */
-export async function topicVideos(keyword, { limit = 8, tids = 0, match = null, deny = null } = {}) {
+export async function topicVideos(keyword, { limit = 8, tids = 0, match = null, deny = null, order = 'totalrank' } = {}) {
   const kw = String(keyword ?? '').trim();
   const hit =
     typeof match === 'function'
@@ -653,10 +689,15 @@ export async function topicVideos(keyword, { limit = 8, tids = 0, match = null, 
   // ⚠️ `deny`：**蹭字的标题**（实测「我的世界」会搜出《这是我的世界》AI剧集、
   //    《世界上的另一个我》这种，光靠 match 拦不住，得点名排掉）
   const grab = async (useTids) =>
-    // ⚠️ 2026-10-15：`order` 用 **`totalrank`（综合排序 = 按相关性）**，
+    // ⚠️ 2026-10-15：`order` 默认 **`totalrank`（综合排序 = 按相关性）**，
     //    不是 `click`（按播放量）—— 后者会把「安岛」搜成「困孤岛」那类泛化热门 ✗
     //    （见 `SEARCH_ORDERS` 上面那段注释）
-    (await biliSearch({ keyword: kw, order: 'totalrank', tids: useTids ? tids : 0 })).filter(
+    // ⚠️⚠️ 2026-10-22：**`order` 现在可以传进来了**（用户：「看看今天下午主动发评论成功没有」
+    //    ⇒ 查出来是"关键词都搜空了/都评论过了"）。
+    //    根因：综合排序的结果**是固定的** —— 同一个词永远搜回那前 N 条，
+    //    一旦都进过 `visited` 名单，这个词就**永远搜不出新的** ✗
+    //    ⇒ 调用方可以换排序（`pubdate` 按时间 = 每次都是新的那批）✓
+    (await biliSearch({ keyword: kw, order, tids: useTids ? tids : 0 })).filter(
       (v) => hit(v.title) && !(deny && deny.test(v.title)),
     );
   let list = tids ? await grab(true) : await grab(false);

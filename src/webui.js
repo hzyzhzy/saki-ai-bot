@@ -3753,12 +3753,17 @@ const routes = {
       if (existsSync(pdir)) {
         for (const n of readdirSync(pdir)) {
           if (!n.endsWith('.md')) continue;
+          // ⚠️ 2026-10-23 加（用户：「**默认在知识库查看界面隐藏这个知识库**」）：
+          //    下划线 / 点开头的一律不列 —— 剧情成人提示词那批就在
+          //    `personas/_shared/prompt/adult-*.md`，它不该出现在界面上 ✗
+          if (/^[_.]/.test(n)) continue;
           inPersona.add(n.toLowerCase());
           files.push(mk(pdir, n, 'persona'));
         }
       }
       for (const n of readdirSync(KNOW)) {
         if (!n.endsWith('.md')) continue;
+        if (/^[_.]/.test(n)) continue; // 同上
         // ⚠️ 人设包里已经有同名的 ⇒ 跳过。界面上只显示**真正生效**的那一份 ——
         //    否则你会看到两份 persona.md，改了不生效的那个还以为"保存了没反应"。
         if (inPersona.has(n.toLowerCase())) continue;

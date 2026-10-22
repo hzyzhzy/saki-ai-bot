@@ -2214,7 +2214,20 @@ console.log('\n【N】软拒绝：这一段在绕就重写一次（用户：「�
   );
 
   // ④ 铁律里真的有「不许拐」，而且两处（写段 / 群里接话）都补了
-  const qsrc = readFileSync(join(ROOT, 'src', 'quest.js'), 'utf8');
+  // ⚠️⚠️ 2026-10-23 改：铁律的**正文搬进了 `personas/_shared/prompt/`**
+  //    （用户要求「开关注入的内容只进私人仓库」）⇒ 断言要看"源码 + 那两个 md"，
+  //    只盯 `src/quest.js` 会误报"铁律没了" ✗
+  const qsrc = [
+    readFileSync(join(ROOT, 'src', 'quest.js'), 'utf8'),
+    ...['adult-quest.md', 'adult-quest-chat.md'].map((n) => {
+      const f = join(ROOT, 'personas', '_shared', 'prompt', n);
+      try {
+        return existsSync(f) ? readFileSync(f, 'utf8') : '';
+      } catch {
+        return '';
+      }
+    }),
+  ].join('\n');
   check(/不许拐/.test(qsrc), '★★★ 铁律里有「不许拐」（软拒绝的拐弯落点被点名）');
   check(
     /研究机制是最常见的那个逃生门/.test(qsrc) && /该做的那一步，直接往前走/.test(qsrc),

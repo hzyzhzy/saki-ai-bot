@@ -69,6 +69,33 @@ console.log('\n【A】标点清洗（纯函数）');
   check(/[，,。]/.test(r), '换成了逗号/句号（不是直接删掉留个空）');
 }
 
+console.log('\n【A2】模型把"改稿过程"一起吐出来时要剥掉（2026-10-23 加）');
+{
+  // ★ 用户本地模拟里抓到的真实形态（60 轮出现 1 次，发出去就是乱码）
+  const draft = bot.stripDraftResidue;
+  const src = [
+    '说完我就没再往下数了',
+    '【其实是靠里那摞垫子被我膝盖压塌了半边，闷响一下，我整个人就僵在那儿了】——这句不要',
+    '改：',
+    '说完我就没再往下数了，靠里那摞垫子被我的膝盖压塌下去半边，闷闷地响了一声。',
+  ].join('\n');
+  const r = draft(src);
+  check(!r.includes('这句不要'), '草稿的自我批注被剥掉', JSON.stringify(r));
+  check(!/^\s*改[:：]\s*$/m.test(r), '「改：」那行不剩', JSON.stringify(r));
+  check(!r.includes('闷响一下'), '被否掉的草稿那段不剩', JSON.stringify(r));
+  check(r.includes('闷闷地响了一声'), '终稿留着', JSON.stringify(r));
+}
+{
+  // ⚠️ 最常见的误伤风险：正常台词里出现"改"字，一个字都不许动
+  const norm = '你改什么改，我又没让你改。\n改天再说吧';
+  check(bot.stripDraftResidue(norm) === norm, '正常台词（含"改"字）原样不动');
+  const norm2 = '今天好累啊\n你也是';
+  check(bot.stripDraftResidue(norm2) === norm2, '普通消息原样不动');
+  const only = '别动\n【这句太长了要换个说法】这句不要\n你轻点';
+  const r2 = bot.stripDraftResidue(only);
+  check(!r2.includes('这句不要') && r2.includes('别动') && r2.includes('你轻点'), '只有批注、没有「改：」时也剥得干净', JSON.stringify(r2));
+}
+
 {
   // 各种破折号写法都要认（用户可能打一个或两个、全角或半角）
   const cases = [

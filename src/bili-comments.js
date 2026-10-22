@@ -162,14 +162,35 @@ function send(req, timeoutMs = 90000) {
 
 /** ⚠️ 上传视频前必须调它：一个 user-data-dir 只能被一个 Chrome 占着
  *  ⚠️ 顺手**暂停 40 分钟**：投稿那单要跑 5~12 分钟，期间评论回复要是又起浏览器，
- *     就会把 profile 抢回去、把上传挤掉 ✗ */
+ *     就会把 profile 抢回去、把上传挤掉 ✗
+ *
+ * ## ⚠️⚠️ 2026-10-22 修（真 bug：主动评论**一直抢不到 profile**）
+ *
+ *   原来这里是 `send({op:'quit'})` 之后**立刻** `proc.kill()` ——
+ *   而 `proc` 是 `bili-browser-serve.mjs` 那个 **node** 进程，**Chrome 是它的子进程**：
+ *   杀 node 时 Chrome 往往还活着（甚至变孤儿继续跑）⇒ `user-data-dir` **一直被占着** ✗
+ *
+ *   实测后果（今天两轮真实主动评论都挂在这）：
+ *     `[主动评论] ⚠️ Chrome 起不来（第 4/4 次，profile 还被占着）` ⇒ 整个活白跑 ✗
+ *
+ *   ⇒ 现在：`quit` 之后**等它自己退出**（Chrome 关闭要几秒，最多等 8 秒），
+ *     真不退出才 kill ✓
+ */
 export async function release({ pauseMs = 40 * 60 * 1000 } = {}) {
   pausedUntil = Date.now() + pauseMs;
   if (!proc) return false;
-  try { await send({ op: 'quit' }, 5000); } catch { /* ignore */ }
-  try { proc.kill(); } catch { /* ignore */ }
+  const p = proc;                       // ⚠️ 用局部变量：下面 on('exit') 会把 proc 置空
+  try { await send({ op: 'quit' }, 8000); } catch { /* ignore */ }
+  // ⚠️ 等它真的退（那才是 Chrome 关掉、profile 放开的那一刻）
+  await new Promise((resolve) => {
+    let done = false;
+    const fin = () => { if (!done) { done = true; resolve(); } };
+    try { p.once('exit', fin); } catch { fin(); }
+    setTimeout(fin, 8000);
+  });
+  try { p.kill(); } catch { /* ignore */ }
   proc = null; ready = false; starting = null;
-  log.info(`[B站评论] 已释放常驻浏览器（让位给上传视频，暂停 ${Math.round(pauseMs / 60000)} 分钟）`);
+  log.info(`[B站评论] 已释放常驻浏览器（让位给上传视频/主动评论，暂停 ${Math.round(pauseMs / 60000)} 分钟）`);
   return true;
 }
 
@@ -576,6 +597,25 @@ let running = false;
 let lastCheckAt = 0;
 
 /** 每 30 秒被 `index.js` 调一次 */
+/* ⚠️⚠️ 2026-10-22 加（用户：「**为什么刚才 chrome 的窗口一直在自己打开然后关闭**」）
+ *
+ *    现场（日志）：
+ *      [20:17:22] 开始检查… → [20:17:25] 常驻浏览器退出（code 1）→ 起不来（profile 被占）
+ *      [20:18:23] 又一轮 → 起不来
+ *      [20:19:23] 又一轮 → 起不来   …… 每 **1 分钟** 一次
+ *
+ *    两个原因叠在一起：
+ *      ① `checkEveryMinutes` 被设成了 **1**（默认 5）⇒ 每分钟就 tick 一次；
+ *      ② `state/bili-profile` 里有**残留锁**（我今天杀过两次 Chrome）⇒ Chrome 每次起来就 exit 1；
+ *     ⇒ 每分钟创建/销毁一次 Chrome，屏幕上就是"窗口一直自己开又关" ✗
+ *
+ *    ⇒ 加**失败退避**：连续 3 次起不来就停 10 分钟，别每分钟撞 ✓
+ *      （网页真出问题时，"每分钟重试一次"也修不好，只会让用户看到一堆闪烁）
+ */
+let failStreak = 0;
+let failPauseUntil = 0;
+const FAIL_PAUSE_MS = 10 * 60 * 1000;
+
 export function tick() {
   const c = settings();
   if (!c.enable) return;
@@ -583,6 +623,8 @@ export function tick() {
   void patrolLogin().catch(() => {});
   if (running) return;
   if (Date.now() < pausedUntil) { log.debug('[B站评论] 投稿窗口内，暂停'); return; }
+  // ⚠️ 连续起不来 ⇒ 退避中（别每分钟撞一次）
+  if (Date.now() < failPauseUntil) return;
   if (Date.now() - lastCheckAt < c.checkEveryMinutes * 60 * 1000) return;
   lastCheckAt = Date.now();
   running = true;
@@ -590,10 +632,28 @@ export function tick() {
   void runOnce({ max: c.maxPerRun })
     .then((r) => {
       running = false;
-      if (r.ok) log.info(`[B站评论] 跑完：发了 ${r.sent} 条${r.out ? '｜' + r.out.slice(0, 300) : ''}`);
-      else log.warn(`[B站评论] 没跑成：${r.out}`);
+      if (r.ok) {
+        failStreak = 0;
+        failPauseUntil = 0;
+        log.info(`[B站评论] 跑完：发了 ${r.sent} 条${r.out ? '｜' + r.out.slice(0, 300) : ''}`);
+      } else {
+        failStreak += 1;
+        log.warn(`[B站评论] 没跑成：${r.out}`);
+        if (failStreak >= 3) {
+          failPauseUntil = Date.now() + FAIL_PAUSE_MS;
+          log.warn(
+            `[B站评论] ⛔ 连续 ${failStreak} 次起不来 ⇒ **暂停 ${FAIL_PAUSE_MS / 60000} 分钟**` +
+              `（别再每分钟创建/销毁一次 Chrome；多半是 state/bili-profile 有残留锁）`,
+          );
+          failStreak = 0;
+        }
+      }
     })
-    .catch((e) => { running = false; log.warn(`[B站评论] 出错：${e.message}`); });
+    .catch((e) => {
+      running = false;
+      failStreak += 1;
+      log.warn(`[B站评论] 出错：${e.message}`);
+    });
 }
 
 /** 预热（机器人启动时就起浏览器 —— 用户 2026-10-22：「每次启动机器人时都启动一个…一直运行」） */

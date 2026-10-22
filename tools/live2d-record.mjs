@@ -337,9 +337,9 @@ say(`canvas：${prep.rect.w}×${prep.rect.h} @ (${prep.rect.x},${prep.rect.y})`)
 say(`藏掉覆盖 UI ${prep.hidden} 个；刷绿 ${prep.painted} 层；模式=${BOXED ? 'boxed（不抠图）' : '绿幕'}`);
 await page.waitForTimeout(600); // 等重绘稳定
 
-/* ── 从这里开始才算"演出时间"：之前的加载/刷绿全部留给后期裁掉 ── */
-const prepEndMs = Date.now() - tRec;
-say(`演出起点 = 录制开始后 ${(prepEndMs / 1000).toFixed(2)}s（后期从这个点裁开）`);
+/* ── 布景就绪（加载/刷绿都到这里为止）；真正的演出起点要等口型锚点设好才算 ── */
+const prepReadyMs = Date.now() - tRec;
+say(`布景就绪 = 录制开始后 ${(prepReadyMs / 1000).toFixed(2)}s`);
 
 /* ── 动作编排：按**台词时间轴**在指定秒数点动作/表情按钮 ──
  * 两种来源：
@@ -412,6 +412,13 @@ if (mouthTrack) {
   //    结果它和 player 的渲染循环抢主线程 ⇒ **Live2D 动画和聊天滚动双双开始跳帧** ✗
   //    诊断代码要么放在录制之外测，要么测完就删 —— 别留在生产路径上。
 }
+
+/* ⚠️⚠️ 演出起点必须在**口型锚点设好之后**再取：
+ *   原来这里用的是口型锚点之前的 prepReadyMs，而设锚点/读动作表还要几百毫秒到一秒，
+ *   那段空转也被算进正片 ⇒ 画面比配音**快约 1 秒**，嘴型看着像在对下一句 ✗
+ *   现在把 trimStart 对齐到 anchor 所在的那一刻（再往下几毫秒才真正开录）。 */
+const prepEndMs = Date.now() - tRec;
+say(`演出起点 = 录制开始后 ${(prepEndMs / 1000).toFixed(2)}s（后期从这个点裁开）`);
 
 const tStart = Date.now();
 let ai = 0;

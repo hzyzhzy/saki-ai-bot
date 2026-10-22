@@ -3107,8 +3107,20 @@ function pwFriendTable(d) {
           }
           return "";
         })()
-      // ⚠️ 去掉 `stage === "waiting"` 这个前提 —— 只要有"说好的时间"就显示倒计时 ✓
-      + (f.etaAt ? "<div class=\"hint pw-eta\" data-eta=\"" + f.etaAt + "\">…</div>" : "")
+      // ⚠️⚠️⚠️ 2026-10-22 改（用户截图：「**为什么又要 3 小时才发**」）——
+      //    原来这里**不判 stage**，只要有 `etaAt` 就显示"还有 X 分钟自动发送产物" ⇒
+      //    可那单**还在做**（`stage=running`），`etaAt` 只是**开跑时估的 180 分钟**
+      //    （做完才按实际耗时重算）⇒ 界面看着像"又要等 3 小时"✗✗
+      //    ⇒ 分开说：
+      //      · 做完了（`waiting`）⇒ "还有 X 自动发送产物"（这才是真的倒计时）
+      //      · 还在做 ⇒ "还在做（说好 X 前后给他）"（估值，不装成倒计时）✓
+      + (f.etaAt
+        ? f.stage === "waiting"
+          ? "<div class=\"hint pw-eta\" data-eta=\"" + f.etaAt + "\">…</div>"
+          : "<div class=\"hint\">⏳ 还在做（说好 " +
+            new Date(Number(f.etaAt)).toLocaleString("zh-CN", { hour12: false }) +
+            " 前后给他）</div>"
+        : "")
       + (f.sentAt
         ? "<div class=\"hint\">已发 " + (f.sentCount || 0) + " 个（" + new Date(f.sentAt).toLocaleString("zh-CN", { hour12: false }) + "）</div>"
         : "")
@@ -6879,6 +6891,17 @@ async function biliLoginStart() {
 async function renderBiliPub() {
   // ⚠️ 2026-10-22：进这个页先刷一次 B 站登录状态（它是后面所有功能的前提）
   loadBiliLogin();
+  /* ⚠️⚠️ 2026-10-22 加（用户：「**我没关啊，怎么每次我打开都会被关掉？**」）
+   *
+   * 真因：保存时**无条件把三个开关从页面上读出来写回去** ——
+   *   `enable: $('bp2-enable').value === '1'`
+   * 可页面上那个值可能是**旧的**（打开页面时是关的、后来在别处打开了、页面没刷新）
+   * ⇒ 用户改别的设置一点保存，就把"关"盖回去了 ✗
+   *
+   * ⇒ 现在**进页面时把三个开关的初始值记下来**，保存时**只有真变了才传**；
+   *   没变就不传 ⇒ 后端 `put()` 见到 undefined 就不写 ⇒ 磁盘上那份原样保留 ✓
+   */
+  window.__BP_INIT = window.__BP_INIT || {};
   const st = $('bp-status');
   let j;
   try {
@@ -6927,6 +6950,13 @@ async function renderBiliPub() {
   if ($('bp2-start')) $('bp2-start').value = pr.startHour ?? 10;
   if ($('bp2-end')) $('bp2-end').value = pr.endHour ?? 22;
   if ($('bp2-keywords')) $('bp2-keywords').value = (pr.keywords || []).join('\n');
+  /* ⚠️⚠️ 记下三个开关的**初始值**（见函数开头那段注释）——
+   *    保存时只有真变了才传，没变就不传 ⇒ 不会再拿旧值把磁盘上的覆盖掉 ✓ */
+  window.__BP_INIT = {
+    pub: !!c.enable,
+    cmt: !!(j.comments || {}).enable,
+    pro: pr.enable === true,
+  };
   if ($('bp2-status')) {
     $('bp2-status').innerHTML = pr.enable
       ? '<b style="color:#3fb950">● 已开启</b> · 今天 ' + (prs.countToday || 0) + '/' + (prs.targetToday || 0) +
@@ -6984,9 +7014,20 @@ async function renderBiliPub() {
 function bpBindSave() {
 $('bp-save') && ($('bp-save').onclick = async function () {
   this.disabled = true;
+  /* ⚠️⚠️ 2026-10-22（用户：「**我没关啊，怎么每次我打开都会被关掉？**」）——
+   *   三个开关**只在页面上真的变了才传**；没变就传 `undefined`
+   *   （`JSON.stringify` 会把 undefined 的键整个丢掉 ⇒ 后端 `put()` 不写 ⇒ 磁盘那份保留）✓
+   *   ⚠️ 原来是无条件读页面值写回去 ⇒ 页面上的旧值会把别处刚打开的状态盖掉 ✗ */
+  const bpInit0 = window.__BP_INIT || {};
+  const bpPick = (id, was) => {
+    const el = $(id);
+    if (!el) return undefined;
+    const now = el.value === '1';
+    return now === was ? undefined : now;
+  };
   const body = {
     cfg: {
-      enable: $('bp-enable').value === '1',
+      enable: bpPick('bp-enable', !!bpInit0.pub),
       windowStart: $('bp-ws').value,
       windowEnd: $('bp-we').value,
       group: $('bp-group').value,
@@ -7000,13 +7041,13 @@ $('bp-save') && ($('bp-save').onclick = async function () {
     },
     // ⚠️ 2026-10-22：B站评论回复也在这页存（字段照 biliShare：每天条数/时间段/间隔/关键词）
     comments: {
-      enable: $('bc-enable') ? $('bc-enable').value === '1' : false,
+      enable: bpPick('bc-enable', !!bpInit0.cmt),
       checkEveryMinutes: Number(($('bc-check') || {}).value) || 5,
       maxPerRun: Number(($('bc-max') || {}).value) || 3,
     },
     // ⚠️ 2026-10-21：B站**主动评论**（去别人视频下发）也在这页存
     proactive: {
-      enable: $('bp2-enable') ? $('bp2-enable').value === '1' : false,
+      enable: bpPick('bp2-enable', !!bpInit0.pro),
       keywords: ($('bp2-keywords') || {}).value || '',
       minPerDay: Number(($('bp2-min') || {}).value) || 1,
       maxPerDay: Number(($('bp2-max') || {}).value) || 2,

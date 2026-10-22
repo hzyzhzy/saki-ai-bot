@@ -73,6 +73,21 @@ const isLocalUrl = (u) => {
   }
 };
 
+/**
+ * ⚠️⚠️ 2026-10-22 加（用户：「**可以只冷启动一次吗，把状态保持住**」）：
+ *    `new Agent()` 用的是 undici **默认参数** —— `keepAliveTimeout` 只有 **4 秒**：
+ *    空闲 4 秒就把 TCP/TLS 连接断掉 ⇒ 群里两条消息之间通常隔十几秒
+ *    ⇒ **每条消息都在重新建连**（TLS 握手 + 代理握手），实测首字 1.4 秒 vs 热了之后 0.2 秒 ✗
+ *    ⇒ 把空闲保持时间抬到 **5 分钟**：一条线连着聊的时候，连接一直是热的 ✓
+ *    （`keepAliveMaxTimeout` 是"服务端 Keep-Alive 头允许的上限"，也一起抬，
+ *      不然服务端只给 60 秒的话我们想保也保不住。）
+ */
+const AGENT_OPTS = {
+  keepAliveTimeout: 5 * 60 * 1000, // 空闲 5 分钟才断
+  keepAliveMaxTimeout: 30 * 60 * 1000, // 服务端允许的上限也抬
+  connections: 32,
+};
+
 /** 用指定出口发一次请求 */
 function rawFetch(url, opts, mode) {
   // ⚠️⚠️ 2026-10-17 修（真 bug：**回归里 12 个套件全挂**）——
@@ -87,11 +102,11 @@ function rawFetch(url, opts, mode) {
   //      EnvHttpProxyAgent**，管不着这里手装的 `ProxyAgent` ✗（两套东西）
   //    ⚠️ 生产也受益：`baseURL` 配成**本机中转站**的人，以前会被代理砸掉 ✗
   if (isLocalUrl(url)) {
-    directAgent ??= new Agent();
+    directAgent ??= new Agent(AGENT_OPTS);
     return undiciFetch(url, { ...opts, dispatcher: directAgent });
   }
   if (mode === 'proxy') {
-    proxyAgent ??= new ProxyAgent(PROXY_URL);
+    proxyAgent ??= new ProxyAgent({ uri: PROXY_URL, ...AGENT_OPTS });
     return undiciFetch(url, { ...opts, dispatcher: proxyAgent });
   }
   // ⚠️ 2026-10-09：直连也走 undici 的 fetch —— 理由见文件顶部那个 import 的注释
@@ -123,7 +138,7 @@ function applyEgress(mode) {
   const changed = egress !== mode;
   egress = mode;
   try {
-    setGlobalDispatcher(mode === 'proxy' ? (proxyAgent ??= new ProxyAgent(PROXY_URL)) : (directAgent ??= new Agent()));
+    setGlobalDispatcher(mode === 'proxy' ? (proxyAgent ??= new ProxyAgent({ uri: PROXY_URL, ...AGENT_OPTS })) : (directAgent ??= new Agent(AGENT_OPTS)));
   } catch (e) {
     log.warn(`[网络] 设置全局出口失败（${e.message}）—— 可能仍在用启动时那个`);
   }
@@ -190,6 +205,16 @@ function stripLoneSurrogates(body) {
 }
 
 export async function llmFetch(url, opts = {}) {
+  /* ⚠️⚠️ 2026-10-22 加（用户：「**402/401 立即停，不再重试整轮**」）——
+   *    **死锁期间直接抛错、一个字节都不发** ✓
+   *    今天实测：DeepSeek 余额不足（402）之后，每条消息还是完整地发请求、
+   *    带 8 万字提示词、等 402、降级、再 402 ⇒ 一天撞 **570 次** ✗
+   *    ⚠️ 这里抛的错**故意不带 401/402/429 字样** —— 免得被 `isHardFail()` 再判成硬失败、
+   *      又绕一圈（死锁期间不该再记账）✓ */
+  if (FO.deadUntil > Date.now()) {
+    const left = Math.ceil((FO.deadUntil - Date.now()) / 60000);
+    throw new Error(`LLM 已暂停（${FO.deadReason || '欠费/凭据'}，还要等 ${left} 分钟）—— 期间不发任何请求`);
+  }
   // ⚠️⚠️ 所有 llm 请求都在这里过一道「孤立代理项」闸 —— 理由见上面那个函数。
   if (opts && typeof opts.body === 'string') {
     opts = { ...opts, body: stripLoneSurrogates(opts.body) };
@@ -276,14 +301,34 @@ const FO = {
   modelIdx: 0,
   /** 这个时刻之前都保持降级（毫秒时间戳）；到点自动回主模型重试 */
   until: 0,
+  /* ⚠️⚠️ 2026-10-22 加（用户：「**402/401 立即停，不再重试整轮**」）
+   *
+   *    今天实测：16:40 起 DeepSeek 官方 `Insufficient Balance`（402），
+   *    一天里 402 出现了 **570 次** —— 也就是**每条消息都还完整地发一次请求、
+   *    带 8 万字提示词、等它 402、再降级、再失败** ✗
+   *
+   *    ⇒ 现在：**402（余额不足）/ 401（凭据失效）且已经无路可降** ⇒
+   *      进 10 分钟"死锁"，期间 `llmFetch` **直接抛错、一个字节都不发** ✓
+   *      （欠费了本来就说不了话，快速失败比反复撞省钱得多）
+   *      `noteLlmOk()` 一次成功就清掉；10 分钟到自动恢复 ✓ */
+  deadUntil: 0,
+  deadReason: '',
+  /** 连续几次"整家不能用"（402/401）—— 到 3 次就进死锁，成功一次清零 */
+  deadStrikes: 0,
   /** 最近一次失败的原因（给日志/界面看） */
   lastErr: '',
   /** 连续失败次数 */
   fails: 0,
 };
 
-/** 降级保持多久（用户要求 10 分钟） */
-const FALLBACK_HOLD_MS = 10 * 60 * 1000;
+/** 降级保持多久（2026-10-22 用户：「**改成 2 分钟重试**」—— 原来是 10 分钟，太久了：
+ *  主模型只是偶发抖动时，10 分钟内全都用不上它 ✗） */
+const FALLBACK_HOLD_MS = 2 * 60 * 1000;
+
+/* ⚠️ 2026-10-22 加：**欠费/凭据失效的死锁时长**
+ *    用户：「402/401 立即停，不再重试整轮」——
+ *    连续 3 次 402/401 ⇒ 暂停 **10 分钟**，期间一个字节都不发 ✓ */
+const DEAD_HOLD_MS = 10 * 60 * 1000;
 
 /** 现在的"优先级列表"：providers 数组（**顺序 = 优先级，第 0 个就是主模型**） */
 function providerChain() {
@@ -383,6 +428,28 @@ export function noteLlmFailure(why = '', kind = 'other') {
   FO.lastErr = String(why || '').slice(0, 200);
   FO.fails += 1;
 
+  /* ⚠️⚠️ 2026-10-22 加（用户：「**402/401 立即停，不再重试整轮**」）——
+   *    402（余额不足）/ 401（凭据失效）是**整家不能用**，不是限流。
+   *    今天 402 撞了 **570 次**：每条消息都完整地发一次请求（8 万字提示词）→ 402 → 降级 → 再失败 ✗
+   *    ⇒ 连续撞到 **3 次**就认定"这条链上没有一家能用" ⇒ **进 10 分钟死锁**：
+   *      期间 `llmFetch` 直接抛错，**一个字节都不发** ✓
+   *      （欠费了本来就说不了话，快速失败比反复撞省钱得多） */
+  if (kind === 'credits' || kind === 'auth') {
+    FO.deadStrikes = (Number(FO.deadStrikes) || 0) + 1;
+    if (FO.deadStrikes >= 3) {
+      FO.deadUntil = Date.now() + DEAD_HOLD_MS;
+      FO.deadReason = kind === 'credits' ? '余额不足（402）' : '凭据失效（401）';
+      FO.deadStrikes = 0;
+      try {
+        log.error(
+          `[模型] ⛔ ${FO.deadReason} 连续 3 次 ⇒ **暂停所有模型调用 ${Math.round(DEAD_HOLD_MS / 60000)} 分钟**` +
+            `（期间不发送任何请求，不再烧钱；到点自动重试）`,
+        );
+      } catch { /* ignore */ }
+      return false;
+    }
+  }
+
   const curIdx = Math.min(FO.level, chain.length - 1);
   const cur = chain[curIdx];
   const fb = cur?.fallbackModels || [];
@@ -410,9 +477,22 @@ export function noteLlmFailure(why = '', kind = 'other') {
   }
 
   if (FO.level >= chain.length - 1) {
-    // ⚠️ 已经在最低一级：**不重置计时**，但也不越界
-    FO.until = Date.now() + FALLBACK_HOLD_MS;
-    try { log.warn(`[模型] 最低一级也失败了（${FO.lastErr}）⇒ 10 分钟后再试主模型`); } catch { /* ignore */ }
+    // ⚠️⚠️⚠️ 2026-10-22 修（用户：「**现在不应该降级吧，主模型中转站是能用的**」）——
+    //    **真 bug**：原来这里又把 `until` 续了一整个周期 ⇒ 降级到一家**欠费（402）**的之后，
+    //    每次失败都续期 ⇒ **永远回不到主模型** ✗✗
+    //    实测：主模型（中转站）单独测 200 完全正常，可 17:38 的剧情推进连续两次 402，
+    //    而且之前十几分钟一直 402 —— 就是降级状态被无限续期、卡在欠费那家。
+    //    ⇒ 最低一级也失败 = 这条链上**没有任何一家能用** ⇒ **立刻回主模型重试** ✓
+    //      （主模型真挂了的话，下一次请求会再降一次，不会死循环；
+    //        但它只是偶发抖动时，这样能马上回到能用的那家 ✓）
+    FO.level = 0;
+    FO.modelIdx = 0;
+    FO.until = 0;
+    try {
+      log.warn(`[模型] 最低一级也失败了（${FO.lastErr}）⇒ **立刻回主模型重试**（不再续期）`);
+    } catch {
+      /* ignore */
+    }
     return false;
   }
   FO.level += 1;
@@ -428,6 +508,10 @@ export function noteLlmFailure(why = '', kind = 'other') {
 /** 一次成功 ⇒ 清掉失败计数（⚠️ **不立刻回主模型**：用户要的是"10 分钟后再试"） */
 export function noteLlmOk() {
   if (FO.fails) FO.fails = 0;
+  /* ⚠️ 2026-10-22：成功一次就把"欠费/凭据"的连续计数和死锁清掉 ✓
+   *    （可能只是某一家恢复了，或者用户刚充了钱） */
+  if (FO.deadStrikes) FO.deadStrikes = 0;
+  if (FO.deadUntil) { FO.deadUntil = 0; FO.deadReason = ''; }
 }
 
 /** 给界面看：现在是不是降级中、降的是谁、还有多久回主 */
@@ -444,6 +528,12 @@ export function llmFallbackStatus() {
     level: FO.level,
     modelIdx: FO.modelIdx,
     total: chain.length,
+    /* ⚠️ 2026-10-22 加：**死锁状态**（402/401 连续 3 次 ⇒ 暂停 10 分钟）
+     *    界面上要能一眼看出"不是坏了，是欠费了在等" ✓ */
+    dead: FO.deadUntil > Date.now(),
+    deadReason: FO.deadReason || '',
+    deadLeftMinutes: FO.deadUntil > Date.now() ? Math.ceil((FO.deadUntil - Date.now()) / 60000) : 0,
+    deadStrikes: Number(FO.deadStrikes) || 0,
     activeName: cur?.name || '',
     mainName: chain[0]?.name || '',
     /** 现在实际在用的模型名（界面直接显示这个最直观） */
@@ -476,13 +566,20 @@ export function llmFallbackReset() {
  * ⚠️ 只在**这些**情况降级：
  *   · 网络层彻底失败（连不上 / DNS / 超时）—— 说明这家服务挂了
  *   · 401 / 403（key 失效或没权限）
+ *   · **402（余额不足 / 欠费）** ← 2026-10-22 加，见下面那条注释
  *   · 429（限流 —— 换一家能继续用）
  *   · 5xx（对方服务端故障）
  * 🚫 **不降**：400（多半是自己请求体写错，换模型一样错）、内容层面的截断/空回复
  */
 function isHardFail(e) {
   const msg = String(e?.message || '');
-  if (/^(LLM 接口返回 (401|403|429|5\d\d))/.test(msg)) return true;
+  /* ⚠️⚠️ 2026-10-22 加 **402**（真事故）：
+   *    用户问「今天下午主动发评论成功没有」⇒ 查出来 16:49 明明**挑到视频了**，
+   *    但写评论时 `HTTP 402 Insufficient Balance`（DeepSeek 余额不足）⇒
+   *    402 **原来不在这个白名单里** ⇒ 不降级 ⇒ 主模型一直欠费、一直 402，
+   *    主动评论 / 说话判断 / 润色全废，日志里只留一行"润色失败 HTTP 402" ✗
+   *    ⇒ 余额不足 = 这家**彻底不能用了**，必须降级到下一家 ✓ */
+  if (/^(LLM 接口返回 (401|402|403|429|5\d\d))/.test(msg)) return true;
   const code = String(e?.cause?.code || e?.code || '');
   if (/^(ECONNREFUSED|ENOTFOUND|ECONNRESET|ETIMEDOUT|EAI_AGAIN|UND_ERR)/.test(code)) return true;
   if (/fetch failed|timeout|超时|socket hang up/i.test(msg)) return true;
@@ -506,7 +603,15 @@ function isRateLimit(e) {
 }
 
 /** 这次失败该按什么类型记账（给 `noteLlmFailure` 的第二个参数） */
-const failKind = (e) => (isRateLimit(e) ? 'rate' : 'other');
+const failKind = (e) => {
+  const m = String(e?.message || '');
+  /* ⚠️ 2026-10-22 细分：`rate`（限流，同家换模型）/ `credits`（402 余额不足）/
+   *    `auth`（401 凭据失效）—— 后两种是**整家不能用**，跟限流不是一回事 ✓ */
+  if (/(^|[^0-9])429([^0-9]|$)/.test(m) || /rate.?limit|too many requests|限流|频率超限/i.test(m)) return 'rate';
+  if (/(^|[^0-9])402([^0-9]|$)/.test(m) || /insufficient|余额|欠费|credits exhausted/i.test(m)) return 'credits';
+  if (/(^|[^0-9])401([^0-9]|$)/.test(m) || /authentication|unauthorized|凭据|api key/i.test(m)) return 'auth';
+  return 'other';
+};
 
 /**
  * **包一层：失败就降级、成功就记一笔**（2026-10-22）
@@ -699,8 +804,9 @@ export async function* streamChat(messages, outerSignal, opts = {}) {
        *   兜底自动使用后一级的模型 10 分钟，10 分钟之后自动重试」）
        *   ⚠️ 只在"确实是服务端/鉴权/限流"这类**硬失败**时降级；
        *     400（参数错）多半是自己请求体写错了，换模型也一样错 ⇒ 不降 ✓ */
-      if (res.status === 401 || res.status === 403 || res.status === 429 || res.status >= 500) {
-        // ⚠️ 2026-10-22：**429 单独记成 rate** ⇒ 同一家换个模型（用户要求），其余照旧跨家
+      if (res.status === 401 || res.status === 402 || res.status === 403 || res.status === 429 || res.status >= 500) {
+        // ⚠️ 2026-10-22：**429 单独记成 rate** ⇒ 同一家换个模型（用户要求），
+        //    其余（含 **402 余额不足**）照旧跨家 —— 欠费了换哪个模型都一样欠 ✗
         noteLlmFailure(`HTTP ${res.status}`, res.status === 429 ? 'rate' : 'other');
       }
       throw new Error(`LLM 接口返回 ${res.status} ${res.statusText}${body ? ` :: ${body.slice(0, 400)}` : ''}`);
@@ -1034,7 +1140,7 @@ export async function phrase(p = {}) {
        *   ⚠️ 这条路径原来是**静默返回空串** ⇒ 主模型挂了也永远不降级 ✗
        *     而 `phrase` 是**润色/说话判断/抽取**这些高频调用用的，
        *     它一直空着 ⇒ 那些功能全退化，但日志里只看得到"润色失败" ✗ */
-      if (res.status === 401 || res.status === 403 || res.status === 429 || res.status >= 500) {
+      if (res.status === 401 || res.status === 402 || res.status === 403 || res.status === 429 || res.status >= 500) {
         noteLlmFailure(`phrase HTTP ${res.status}`, res.status === 429 ? 'rate' : 'other');
       }
       return '';

@@ -7,6 +7,17 @@ rem    不带参数 = 老行为（那个号由 config.yml 的 mainAccount 决定
 rem    ⚠️ 不带参数这条路**必须一直留着**：老用户升级上来时账号目录还是空的，
 rem      启动脚本也还是老的，行为不能变。
 cd /d "%~dp0"
+
+rem ⚠️⚠️⚠️ 2026-10-22 加（用户：「**Word 无法创建工作文件，请检查临时环境变量**」必须彻底解决）——
+rem    系统 TEMP 已经涨到 **14.46GB / 4083 个条目**，Word 在里面建临时文件会失败 ⇒
+rem    弹一个模态框卡住 agent（它点不了那个框，只能等到超时，还误以为 Word 坏了 ✗）
+rem    ⇒ **在这里把 TEMP/TMP 钉死到干净的 C:\Temp**：
+rem      · `setx` 只对"新登录的进程"生效，看门狗/机器人继承的还是老环境 ⇒ 靠它不管用 ✗
+rem      · 写在这个 bat 里 ⇒ **每一个号启动时都一定用新目录**，不依赖环境变量传递 ✓
+if not exist "C:\Temp" mkdir "C:\Temp"
+set "TEMP=C:\Temp"
+set "TMP=C:\Temp"
+
 set "SAKI_ACCT=%~1"
 if not "%SAKI_ACCT%"=="" set "QQBOT_ACCOUNT=%SAKI_ACCT%"
 if not exist "logs" mkdir "logs"

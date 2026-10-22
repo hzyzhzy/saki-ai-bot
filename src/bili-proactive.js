@@ -22,6 +22,9 @@ import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from '
 import { join } from 'node:path';
 import { config, ROOT, stateDir } from './config.js';
 import { log } from './log.js';
+/* ⚠️ 2026-10-22 加：**BV / av 号都认**（B站搜索结果给的是 av 号，只认 BV 会全被过滤 ✗）
+ *    `bilibili.js` 只依赖 config/log ⇒ 不会有循环依赖 ✓ */
+import { pickVideoKey } from './bilibili.js';
 
 const SCRIPT = join(ROOT, 'tools', 'bili-proactive-comment.mjs');
 /** 历史留多少条（够界面回看就行） */
@@ -87,9 +90,20 @@ function load() {
        *     一个 BV 号才 12 字节，攒到一万条也才 120KB，根本不占地方 ✓
        */
       visited: Array.isArray(o.visited) ? o.visited : [],
+      /* ⚠️⚠️ 2026-10-22 加：**风控暂停**
+       *    ⚠️ 这三个字段**必须一起加在这儿** —— `load()` 是**白名单式**的（只返回列出来的字段），
+       *    只往 `save()` 里写、不往 `load()` 里加的话，下次读回来就**凭空消失**了 ✗
+       *    （刚才实测踩到：写进去"6 小时后解封"，`status()` 读出来是 0）
+       *    ⇒ 以后往 state 里加字段，**load / save 两处都要动** ✓ */
+      blockedUntil: Number(o.blockedUntil) || 0,
+      blockedReason: String(o.blockedReason || ''),
+      blockedCount: Number(o.blockedCount) || 0,
     };
   } catch {
-    return { day: '', count: 0, target: 0, sent: [], visited: [] };
+    return {
+      day: '', count: 0, target: 0, sent: [], visited: [],
+      blockedUntil: 0, blockedReason: '', blockedCount: 0,
+    };
   }
 }
 
@@ -127,6 +141,17 @@ export function due(now = new Date()) {
   if (!c.keywords.length) return { ok: false, why: '关键词是空的' };
   const st = rollDay(load(), c);
   save(st);
+  /* ⚠️⚠️ 2026-10-22 加（参考别人项目的做法：**命中风控就短期跳过，别无效重试**）
+   *    BiliPai 的做法：「命中 -351 后**短期跳过** APP API，避免无效重试」；
+   *    B站接口文档（[v_voucher 验证](https://github.com/pskdje/bilibili-API-collect/blob/main/docs/misc/sign/v_voucher.md)）说：
+   *      「当同一接口在**短时间内被同一用户/IP/UA 多次请求**或异常时，会触发风控」
+   *    ⇒ 风控是**账号/IP 级的临时限制**，继续撞只会延长 ⇒ 必须停下来等 ✓
+   *    （今天实测撞了 3 次「受到神秘力量干扰，请稍后再试！」，全是硬撞出来的 ✗） */
+  const blocked = Number(st.blockedUntil) || 0;
+  if (blocked > Date.now()) {
+    const left = Math.ceil((blocked - Date.now()) / 60000);
+    return { ok: false, why: `被 B站风控了，还要等 ${left} 分钟（${st.blockedReason || '风控'}）` };
+  }
   const h = now.getHours();
   // 跨零点的时段（比如 22~2）也要能用
   const inWin = c.startHour <= c.endHour ? h >= c.startHour && h < c.endHour : h >= c.startHour || h < c.endHour;
@@ -149,25 +174,56 @@ export async function pickVideo() {
   const bili = await import('./bilibili.js');
   // 打乱后依次试：某个词搜不到就换下一个（和 bili-share 一个路子）
   const order = c.keywords.slice().sort(() => Math.random() - 0.5);
+  /* ⚠️⚠️ 2026-10-22 加（用户：「**看看今天下午主动发评论成功没有**」⇒ 查出来两次都是
+   *    「关键词都搜空了 / 都评论过了」⇒ **一条都没发出去** ✗）
+   *
+   *    真因：每个词都只按**综合排序**搜前 8 条，而综合排序的结果是**固定的** ——
+   *    同一个词永远搜回那几条，一旦它们都进过 `visited`，这个词就**永远废了** ✗
+   *    （今天 16:11 和 16:31 两轮、9 个词全部撞这个）
+   *
+   * ⇒ 两处改动：
+   *   ① **每个词随机挑一个排序**（`pubdate` 按时间 = 每次都是新的那批，最不容易撞）；
+   *   ② 一次搜 **20 条**（不是 8），fresh 的概率高得多 ✓
+   * ⚠️ 随机排序也让"同一个词每天搜到的东西不一样"，更像人在刷 B 站 ✓ */
+  const ORDERS = ['pubdate', 'totalrank', 'click', 'dm', 'stow', 'scores'];
   for (const kw of order) {
     try {
-      const list = await bili.topicVideos(kw, { limit: c.maxResults });
+      const ord = ORDERS[Math.floor(Math.random() * ORDERS.length)];
+      const list = await bili.topicVideos(kw, { limit: 20, order: ord });
+      /* ⚠️⚠️ 2026-10-22 修（真 bug）：**搜索结果里给的是 `av` 号，不是 BV 号** ——
+       *    原来这里只认 `video/(BV…)` ⇒ 20 条全被过滤 ⇒ `fresh` 永远为空 ⇒
+       *    日志还写成"都评论过了"（其实一条都没评论过，`visited` 里只有 2 条）✗
+       *    ⇒ 统一走 `bili.pickVideoKey()`（BV / av 都认）✓
+       *
+       * ⚠️⚠️ 同日再加（用户：「**避开官方大号**」）：
+       *    实测挑到「明日方舟」官方号那条（422 万播放）⇒ 评论**被风控拦了**
+       *    （页面弹「受到神秘力量干扰，请稍后再试」）✗
+       *    ⇒ 两条判据直接跳过：
+       *      ① **认证号**（搜索接口的 `official_verify.type === 1`）—— 官方号评论区审核严；
+       *      ② **播放量太高**（> 200 万）—— 这种视频评论区几十万条，她那条发出去也没人看见，
+       *         而且同样容易被风控盯上 ✓
+       *    ⚠️ 这两个阈值故意写死在代码里（不进界面）—— 它们不是"用户偏好"，
+       *       而是"什么样能发得出去"的实测结论 ✓ */
+      const MAX_PLAY = 2_000_000;
       const fresh = (list || []).filter((v) => {
-        const bv = (String(v.url || '').match(/video\/(BV[0-9A-Za-z]+)/) || [])[1] || '';
-        return bv && !done.has(bv);
+        const key = bili.pickVideoKey(v.url);
+        if (!key || done.has(key)) return false;
+        if (v.official) return false;                                  // 认证号（官方大号）跳过
+        if ((Number(v.play) || 0) > MAX_PLAY) return false;            // 太热门的跳过
+        return true;
       });
       if (!fresh.length) {
         /* ⚠️ 2026-10-21 踩到：搜**限流**时接口返回空数组，这里就报「都评论过了」——
          *   用户看到日志"所有关键词都评论过了"，其实一条都没评论过 ✗
          *   ⇒ 分开说：搜到 0 条 = 可能被限流/这个词没结果；搜到了但都发过 = 真都发过 ✓ */
         log.info((list || []).length
-          ? `[B站主动评论] 「${kw}」搜到 ${list.length} 条，但都评论过了，换下一个词`
-          : `[B站主动评论] 「${kw}」**搜到 0 条**（可能被限流了 / 这个词没结果），换下一个词`);
+          ? `[B站主动评论] 「${kw}」（${ord}）搜到 ${list.length} 条，但都评论过了，换下一个词`
+          : `[B站主动评论] 「${kw}」（${ord}）**搜到 0 条**（可能被限流了 / 这个词没结果），换下一个词`);
         continue;
       }
       fresh.sort((a, b) => (Number(b.play) || 0) - (Number(a.play) || 0));
       const v = fresh[0];
-      const bvid = (String(v.url || '').match(/video\/(BV[0-9A-Za-z]+)/) || [])[1] || '';
+      const bvid = bili.pickVideoKey(v.url);
       if (!bvid) continue;
       return { bvid, url: `https://www.bilibili.com/video/${bvid}`, title: String(v.title || ''), up: String(v.up || ''), play: Number(v.play) || 0, keyword: kw };
     } catch (e) {
@@ -190,12 +246,10 @@ export async function runOnce({ bvid = '', url = '', manual = false } = {}) {
   else if (url) args.push('--url', url);
   else return { ok: false, err: '没给 bvid / url' };
 
-  /* ⚠️⚠️ 2026-10-21 用户：「**评论视频一定不要重复评论**」
-   *   进脚本**之前**先挡一道（手动点两次、或者定时和手动撞一起，都在这里拦住）：
-   *   这个 BV 号只要在永久名单里，就直接拒绝，连浏览器都不开 ✓
-   */
-  const bvIn = (String(bvid || '').match(/BV[0-9A-Za-z]+/) || [])[0]
-    || (String(url || '').match(/BV[0-9A-Za-z]+/) || [])[0] || '';
+  /* ⚠️ 2026-10-22：**BV / av 都认**（搜索结果给的是 av 号，见 `pickVideoKey` 那段）
+   *    ⚠️ 用顶部那个静态 import —— 原来写成函数内 `await import` ⇒
+   *      `alreadyCommented()`（另一个函数）里就用不到，直接 `ReferenceError` ✗（实测踩了） */
+  const bvIn = pickVideoKey(bvid) || pickVideoKey(url) || '';
   {
     const pre = load();
     if (bvIn && ((pre.visited || []).includes(bvIn))) {
@@ -212,6 +266,11 @@ export async function runOnce({ bvid = '', url = '', manual = false } = {}) {
   try {
     bc = await import('./bili-comments.js');
     await bc.release({ pauseMs: 4 * 60 * 1000 });
+    /* ⚠️⚠️ 2026-10-22 加（真事故：完整跑一遍时脚本崩了，Chrome `exit code 21`）：
+     *    `release()` 只是**让它退出**，Chrome 真正放开 `user-data-dir` 的互斥体**还要几秒** ⇒
+     *    立刻 spawn 脚本 ⇒ 脚本起 Chrome 撞上"profile 还被占着" ⇒ 整个活白跑 ✗
+     *    ⇒ 这里**等一会儿**再起脚本（脚本自己也有 4 次重试兜底 ✓） */
+    await new Promise((r) => setTimeout(r, 5000));
   } catch { /* 没装/没起过都无所谓 */ }
 
   const out = await new Promise((resolve) => {
@@ -238,8 +297,9 @@ export async function runOnce({ bvid = '', url = '', manual = false } = {}) {
   }
 
   // 记一笔（用户要的「显示出来发送的视频链接」就靠这个 sent 列表）
+  // ⚠️ 2026-10-22：BV / av 都认（脚本回执里给的可能还是 av 号）
   const st = load();
-  const bv = (String(res.video || '').match(/video\/(BV[0-9A-Za-z]+)/) || [])[1] || bvid || bvIn || '';
+  const bv = pickVideoKey(res.video) || pickVideoKey(bvid) || bvIn || '';
   st.sent = [{ at: Date.now(), bvid: bv, url: String(res.video || ''), title: String(res.title || ''), text: String(res.comment || ''), ok: res.ok === true, manual: !!manual }, ...(st.sent || [])].slice(0, KEEP);
   /* ⚠️ 只要**发成功**（或者脚本发现"页面上已经有我的评论了"），就把这个 BV 记进**永久名单**
    *   ⇒ 以后不管 sent 怎么裁，都不会再去同一个视频下发第二次 ✓
@@ -247,6 +307,35 @@ export async function runOnce({ bvid = '', url = '', manual = false } = {}) {
    *   用户的要求是「**一定不要重复评论**」，所以宁可这条不再重试（他去 B站 看一眼就知道有没有）✓ */
   if (bv && (res.ok === true || res.already === true || res.uncertain === true)) {
     st.visited = [...new Set([...(st.visited || []), bv])];
+  }
+
+  /* ⚠️⚠️ 2026-10-22 加（参考别人项目：**命中风控就短期跳过，别无效重试**）
+   *
+   *   别人的做法：
+   *     · BiliPai ——「命中 -351 后**短期跳过** APP API，避免无效重试」
+   *     · goban（B站评论监控/举报）——「检查间隔建议不低于 300 秒」「每个账号配合理的每日上限」
+   *     · 接口文档 ——「同一接口在**短时间内被同一用户/IP/UA 多次请求**会触发风控」
+   *
+   *   今天实测：连撞三次「**受到神秘力量干扰，请稍后再试！**」，每次都是 20 分钟后
+   *   定时任务自动再撞一次 ⇒ 等于**主动给账号叠惩罚** ✗
+   *
+   *   ⇒ 现在：脚本认出风控 ⇒ 这里**全局暂停**，而且**越撞越久**（6 / 12 / 24 / 48 小时封顶）。
+   *     发成功一次就清零 ✓
+   */
+  if (res.ok === true) {
+    st.blockedCount = 0;
+    st.blockedUntil = 0;
+    st.blockedReason = '';
+  } else if (res.blocked) {
+    const n = (Number(st.blockedCount) || 0) + 1;
+    const hours = Math.min(48, 6 * Math.pow(2, n - 1));
+    st.blockedCount = n;
+    st.blockedReason = String(res.blockedReason || '风控').slice(0, 60);
+    st.blockedUntil = Date.now() + hours * 3600 * 1000;
+    log.warn(
+      `[B站主动评论] ⛔ 被 B站风控（${st.blockedReason}）⇒ **暂停 ${hours} 小时**（连续第 ${n} 次，` +
+        `到 ${new Date(st.blockedUntil).toLocaleString('zh-CN', { hour12: false })}）`,
+    );
   }
   if (res.ok && !manual) {
     st.count = (Number(st.count) || 0) + 1;
@@ -295,12 +384,20 @@ export function status() {
   const c = settings();
   const st = load();
   const today = dayStr();
+  const blockedUntil = Number(st.blockedUntil) || 0;
   return {
     ...c,
     running,
     today,
     countToday: st.day === today ? st.count : 0,
     targetToday: st.day === today ? st.target : 0,
+    /* ⚠️ 2026-10-22 加：**风控暂停**（界面上要一眼看出"不是坏了，是在等风控过去"）
+     *    否则用户看到「今天 0/N」会以为又是 bug 跑了 ✗ */
+    blocked: blockedUntil > Date.now(),
+    blockedUntil,
+    blockedLeftMinutes: blockedUntil > Date.now() ? Math.ceil((blockedUntil - Date.now()) / 60000) : 0,
+    blockedReason: String(st.blockedReason || ''),
+    blockedCount: Number(st.blockedCount) || 0,
     /** 最近发过的（界面「显示出来发送的视频链接」就是读它） */
     recent: (st.sent || []).slice(0, 20),
   };
@@ -316,8 +413,9 @@ export function __reset() {
  * ⚠️ 给界面用：手动发之前先问一句，好当场提示「已经评论过了」，而不是等日志里才看到 ✓
  */
 export function alreadyCommented(bvidOrUrl = '') {
-  const bv = (String(bvidOrUrl).match(/BV[0-9A-Za-z]+/) || [])[0] || '';
-  if (!bv) return false;
+  // ⚠️ 2026-10-22：BV / av 都认（搜索结果给 av 号）
+  const key = pickVideoKey(bvidOrUrl);
+  if (!key) return false;
   const st = load();
-  return (st.visited || []).includes(bv);
+  return (st.visited || []).includes(key);
 }

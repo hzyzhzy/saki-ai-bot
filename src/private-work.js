@@ -251,7 +251,35 @@ export function asCustomer(uid) {
 }
 
 export function isSelfSide(uid) {
-  return isOwnerId(uid) || isPeerUid(uid);
+  return isOwnerId(uid) || isPeerUid(uid) || isLocalAccount(uid);
+}
+
+/**
+ * ⚠️⚠️⚠️ 2026-10-22 加（用户：「**为什么谷雨给 saki 发了个文件？那里也没有任务啊**」）——
+ * **本机其它机器人账号**也算"自己人"。
+ *
+ * 真事故：主号 `10000002`（Saki）给谷雨发了一份课设报告，谷雨把它当成**客户发来的文件**收了，
+ * 还尝试把产物**传回去**（`highway upload failed` 三条）✗✗
+ *
+ * 真因：`config.ownerQQ = "10000001"`（主人的**另一个**号）⇒
+ *   `isOwnerId(10000002)` 是 false，`peers`（同类池）里也没有它 ⇒
+ *   `isSelfSide` 判 false ⇒ `asCustomer` 返回 true ⇒ **机器人之间互相当成客户** ✗
+ *
+ * ⇒ 本机 `accounts/<QQ>.yml` 里存在的号，**全是自己的机器人** ⇒ 一律当"自己人"，
+ *   不走客户那套（不接单、不交付、不收文件）✓
+ *   ⚠️ 只认 5~12 位数字（防把奇怪的值当号）✓
+ */
+export function isLocalAccount(uid) {
+  const id = String(uid ?? '').trim();
+  if (!/^\d{5,12}$/.test(id)) return false;
+  try {
+    // ⚠️ 用字符串拼接，不用模板字符串（2026-10-22 踩过：模板字符串里的反引号打错一个
+    //    整个文件语法直接坏掉，`node --check` 报的位置还不对）✓
+    const base = join(ROOT, 'accounts', id);
+    return existsSync(base + '.yml') || existsSync(base + '.yaml');
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -841,7 +869,16 @@ function agentsMd(name = '') {
     //    **「Microsoft Word: 命令失败」** ⇒ 它以为 Word 坏了，改用 python-docx 从头重建 ⇒ 格式全丢 ✗✗
     //    实测：**那个目录根本不存在**，建好目录后同一份脚本一次就 `ok`（PDF 1.2MB）✓
     //    ⇒ Word 的「命令失败」这个报错**不告诉你原因**，十次有九次是路径/权限/占用 ✓
-    '- ⚠️⚠️ **用 Word 保存 / 导出（SaveAs / ExportAsFixedFormat）之前，目标目录必须先建好**（`mkdir`）；',
+    // ⚠️⚠️⚠️ 2026-10-22 改（真事故：那单**无限重试**了 6 次）——
+    //    链路：agent 想导 PDF 验证 → `ExportAsFixedFormat` 在这台机器上**卡死**
+    //    （触发 Office 的 PDF 组件配置，msiexec 卡十几分钟，工作区里堆了 4 个 16MB 的 Primary*.log）
+    //    → agent 被判超时 exit=1 → 我加的"静默重试"又起一轮 → **又导 PDF → 又卡** ⇒ 死循环 ✗✗
+    //    ⇒ **明确禁掉**：docx 直接交；要检查内容用 python-docx 读回来（秒级、不会卡）✓
+    '- 🚫🚫 **别用 `ExportAsFixedFormat` / `SaveAs(…,17)` 导 PDF** —— 这台机器上**必卡死**',
+    '   （一触发就等 Office 配置，能卡十几分钟 ⇒ 你被判超时、任务反复重来 ✗✗）',
+    '   ⇒ **docx 直接交**；要检查内容就 `python-docx` 读回来验（`Document(路径)` 几行就够）✓',
+    '   ⚠️ 只有客户**明确要 PDF** 时才导，而且优先用 `tools/` 里现成的脚本，别自己写 COM',
+    '- ⚠️⚠️ **用 Word 保存之前，目标目录必须先建好**（`mkdir`）；',
     '   Word 回一句笼统的「**命令失败**」时，**先查这三样**：目标目录在不在 / 文件是不是被占用 / 有没有写权限',
     '   —— 🚫 **别一看到它就断定"Word 坏了"**（实测：目录建好后同一份脚本一次就成功）✗',
     '- 🚫🚫 **不许因为一次 Word 报错就改用 python-docx 从头重建文档** ——',
@@ -5848,6 +5885,15 @@ export function noteFor(event) {
     '- **动手改 / 重做** ⇒ `[工具:动这一单 {"说明":"要改成什么样"}]`',
     '  ⚠️⚠️ **答应了要改就必须写它** —— 光说"我重写一遍 / 我这就改"**不会有人动手** ✗',
     '- 手上有活、想知道做到哪了 ⇒ `[工具:催进度]`；他说**别做了 / 取消** ⇒ `[工具:停]`',
+    // ⚠️⚠️⚠️ 2026-10-22 加（用户：「**那几条应该不能算闲聊，应该是催进度**」）——
+    //    真事故：客户在等的时候说「打完战了」「你知道发枪了」—— 那是**在催**（问好了没），
+    //    可她**没调 `[工具:催进度]`** ⇒ 这两句被当成**新要求**记进了任务描述 ⇒
+    //    面板标题和 agent 的任务都变成闲聊，真正的要求（"封面横线改回原版长度…"）被顶到后面 ✗✗
+    //    ⇒ **他在催的时候，你必须调 `[工具:催进度]`**（那不是新要求）✓
+    '- ⚠️⚠️⚠️ **他在催 / 在问好了没**（「打完战了」「你知道发枪了」「好了吗」「还要多久」',
+    '  「弄完没」「怎么样了」这类）⇒ **必须写 `[工具:催进度]`**，',
+    '  🚫 **不要**把它当成"他又提了新要求" —— 不然任务描述会被这几句占掉 ✗',
+    '  （只有他**真的改了要做什么**才进任务描述：换章节、改配色、加内容那种）✓',
     '- **干完了要发给他** ⇒ `[工具:交付 {"范围":"整体|部分","文件":["哪个文件"],"时间":"现在"}]`',
     '  · `范围`：**整体** = 全部产物；**部分** = 这次只动了其中几个（比如只改了文档）',
     '  · `文件`：`部分` 时点名（用客户那个叫法就行，代码自己对得上）；`整体` 可以不给',
@@ -7412,12 +7458,21 @@ function deliverEtaAt(s, now = Date.now()) {
   //    口径：**以"这一轮实际做了多久"为准**（`jobStartedAt`），不再用开跑时那个
   //    "真人估时"（`estimateEtaMin`）当交付等待 —— 两套口径并存，实测会打架：
   //    一单实际只做了 22 分钟，界面却显示"还有 4 小时 11 分钟"✗
+  // ⚠️⚠️⚠️ 2026-10-22 改（用户：「**改，不要改错了**」）——
+  //    `spent` 的口径换成 **`s.workMs`（agent 真在跑的累计时长）**：
+  //      原来用墙钟（`now - jobStartedAt`）⇒ 把**卡住 / 等协议端 / 被打断**的时间也算进去 ⇒
+  //      实测那单卡在 Office 配置上 2 小时 ⇒ 算出"还要等 2 小时" ✗✗
+  //    ⚠️ **退回顺序**（一个都不能少）：
+  //      ① `s.workMs`（≥1 分钟才认 —— 太小的不算，可能是刚开的单还没累计）
+  //      ② 没有才退墙钟（`jobStartedAt` → `outBaseAt` → `stageAt`）
+  //      ⇒ 老 state 没有 `workMs` ⇒ 行为**和以前一样**，不会因为这次改动变怪 ✓
   const startedAt =
     Number(s?.jobStartedAt) || // ← 这一轮开跑（首选）
     Number(s?.outBaseAt) ||
     Number(s?.stageAt) ||
     0;
-  const spent = startedAt ? Math.max(0, now - startedAt) : 0;
+  const workMs = Number(s?.workMs) || 0;
+  const spent = workMs >= 60 * 1000 ? workMs : startedAt ? Math.max(0, now - startedAt) : 0;
   // 三段规则（用户原话）：
   //   · < 2 小时 ⇒ **做多久就等多久**（像真人的节奏，做完再"歇一会儿"）
   //   · 2~6 小时 ⇒ **逐渐缩减**（越接近 6 小时等得越少，线性缩到 0）
@@ -8046,13 +8101,26 @@ async function startJob(uid, bot) {
     // ⚠️ 2026-10-16 修（用户：「任务界面还是在 ppt 那里」）——
     //    原来是把 `s.need` **硬切尾部 200 字** ⇒ 面板上那条标题成了「【开工】pt 那就15吧…」✗
     //    看着就像"还停在 PPT 那件事"⇒ 改成**按行取最近三句**（那是这次的要求）✓
+    // ⚠️⚠️⚠️ 2026-10-22 改（用户：「**为什么会有过滤门槛**」）——
+    //    对，我上一版用"长度 < 8 就跳过"去猜"这句是不是催进度/闲聊" ⇒
+    //    **那就是拿字数当判据猜人话，违反铁律** ✗（而且「你啥时候能改出来」8 个字就漏过去了）
+    //    ⇒ 正确做法：**用 agent 自己写的那句** ——
+    //      她开工时在 `要交的东西.md` 第一行写的「这次要做的活：…」（或新版「这单要做的是：…」），
+    //      那是她按客户**最新要求**自己概括的，比代码从 `need` 里截准得多 ✓
+    //      ⚠️ 读不到（老工作区没这行）才退回 `need` 尾部 —— **不加任何过滤** ✓
+    let agentTitle = '';
+    try {
+      const todoFile = join(dir, '要交的东西.md');
+      const body = readFileSync(todoFile, 'utf8');
+      const m = body.match(/^#{0,6}\s*(?:这次要做的活|这单要做的是)\s*[:：]\s*(.+)$/m);
+      if (m) agentTitle = String(m[1]).trim();
+    } catch {
+      /* 没有就算了，退回 need */
+    }
     const taskText = (
-      String(s.need ?? '')
-        .trim()
-        .split('\n')
-        .filter(Boolean)
-        .slice(-3)
-        .join(' / ') || '(他没说清要做什么)'
+      agentTitle ||
+      String(s.need ?? '').trim().split('\n').filter(Boolean).slice(-3).join(' / ') ||
+      '(他没说清要做什么)'
     ).slice(-160);
     // ⚠️⚠️⚠️ 2026-10-20 修（用户：「**之前都可以合成一个卡片，为什么现在不行**」）——
     //    原来复用的**只有** `s.readHistId`（= 预读那条）⇒
@@ -8097,6 +8165,10 @@ async function startJob(uid, bot) {
     //    （现场日志：`开跑 → 跑完 → 没有本单开跑快照（outBase 为空）⇒ 发出 0/0 个文件`）
     //    ⇒ 空的时候存一个**哨兵值**：表示"记过了，那一刻产物里什么都没有" ✓
     s.outBase = outStamp(uid) || SNAP_EMPTY;
+    // ⚠️⚠️ 2026-10-22 加：**新的一单** ⇒ `workMs`（真干活累计）**清零** ✓
+    //    （`outBase` 是"这一单"的产物基线，`workMs` 是"这一单"的耗时 —— 生命周期一致，
+    //      所以必须在这里一起重置，否则上一单的时长会累到下一单 ✗）
+    s.workMs = 0;
     // ⚠️⚠️ 2026-10-18 加（用户：「交付只需要交**从这次对话开始到结束**之间改过的文件」）——
     //    记一个"本单开跑时刻"，交付时用它过滤 `产物/` 根下的**目录**
     //    （本轮没动过的目录不压 zip —— 现场那个 116MB 的旧项目每轮都被压一遍发出去 ✗）
@@ -8106,6 +8178,10 @@ async function startJob(uid, bot) {
 
   let kill = null;
   let res = null;
+  // ⚠️⚠️⚠️ 2026-10-22 加（用户：「**改，不要改错了**」）——
+  //    **本轮开跑时刻**：只用来累计"agent 真在跑"的时长（见 `finally` 那段）✓
+  //    ⚠️ 和 `outBaseAt`（产物基线的分界）不是一回事，别混 ✓
+  const roundT0 = Date.now();
   try {
     // ⚠️ 2026-10-19：真起上手了 ⇒ 把"没起成"的记号清掉（提示词就不会再提醒她了）✓
     if (s.jobFailWhy) {
@@ -8146,6 +8222,24 @@ async function startJob(uid, bot) {
   } catch (e) {
     log.warn(`[私聊工作] 起 agent 出错（${uid}）：${e.message}`);
   } finally {
+    // ⚠️⚠️⚠️ 2026-10-22 加（用户：「**改，不要改错了**」）——
+    //    累计**这一轮 agent 真在跑**的时长到 `s.workMs`：
+    //      交付等待（`deliverEtaAt`）以后用它，不再用"墙钟"（开跑→做完）——
+    //      墙钟会把**卡住 / 等协议端 / 被打断**的时间也算进"制作时间" ⇒ 越卡等得越久 ✗
+    //    ⚠️ **单轮封顶** = 私聊 agent 的超时上限（默认 15 分钟）：
+    //      卡在 Word 弹框上那轮会一直"在跑"，不封顶就白算 ⇒ 实测那单卡出 2 小时、算出"再等 2 小时" ✗
+    //    ⚠️ 无论成功/失败/被打断都累加（那一轮它确实跑了）✓
+    try {
+      const cap = Math.max(60 * 1000, nz(W().agentTimeoutMs, 15 * 60 * 1000));
+      const ms = Math.min(Math.max(0, Date.now() - roundT0), cap);
+      if (ms >= 1000) {
+        s.workMs = (Number(s.workMs) || 0) + ms;
+        save();
+        log.info(`[私聊工作] 这一轮真跑了 ${Math.round(ms / 60000)} 分钟（累计 ${Math.round((Number(s.workMs) || 0) / 60000)} 分钟）`);
+      }
+    } catch (e) {
+      log.debug(`[私聊工作] 累计耗时失败（不影响干活）：${e.message}`);
+    }
     // ⚠️⚠️ 2026-10-22 修（插话引入的竞态）——
     //    插话是"先删旧的、800ms 后起新的"，可**旧那单的 finally 可能晚于新那单的 set** ⇒
     //    一删就把**新的**从 `jobs` 里抹掉了 ⇒ 面板看着没活、后面再来要求又被当成"没在跑"✗
@@ -8728,6 +8822,23 @@ async function deliverInner(uid, bot, pick = null) {
           `${r0.dropped.map((f) => f.name).join('、')} ✓`,
       );
       files = r0.kept;
+    }
+  }
+
+  // ⚠️⚠️⚠️ 2026-10-22 加（用户：「**能不能去找根本的原因**」）——
+  //    **中间临时文件不许发**：实测交付时把 `__src-1792667116728.docx` 发了出去 ——
+  //    那是 agent 处理过程中的**副本**（和 `_最终版.docx` 同大小同时间），不是成果 ✗
+  //    ⇒ 按**文件名前缀**剔（这是"认文件名"，不是猜人话）：
+  //      `__src-*` / `__tmp-*` / `__mid-*` / `__work-*` / `~$*`（Word 锁文件）✓
+  {
+    const before = files.length;
+    files = files.filter(
+      (f) => !/^(__src-|__tmp-|__mid-|__work-|~\$)/i.test(String(f?.name ?? '')),
+    );
+    if (files.length !== before) {
+      log.info(
+        `[私聊工作] 交付时剔掉 ${before - files.length} 个**中间临时文件**（__src- / ~$ 这类，不是成果）✓`,
+      );
     }
   }
 
@@ -9669,6 +9780,13 @@ async function sweepDeliver() {
   if (!botRef) return;
   const now = Date.now();
   for (const [uid, s] of Object.entries(st.uid ?? {})) {
+    // ⚠️⚠️⚠️ 2026-10-22 加（用户：「**还是再发，完全没修好**」）——
+    //    **自己人（主人 / 本机其它机器人 / 同类池）在 `sweepDeliver` 里直接跳过**：
+    //      他们的 state 可能还停在 `waiting`（历史遗留）⇒ 每分钟都走一遍收敛判断
+    //      ⇒ 日志刷「已经在交付了」「是自己人 ⇒ 不交付」，看着像"还在发" ✗
+    //    ⚠️ 真发不发由 `deliver()` 里的 `asCustomer` 兜底（那道闸永远在）；
+    //      这里只是**省掉无意义的循环**，不影响任何客户 ✓
+    if (!asCustomer(uid)) continue;
     // ⚠️⚠️⚠️ 2026-10-19 加（用户：「**要查看交付工具的状态，这个优先级高**」+「做」）——
     //    **状态自动收敛**：产物已经做出来了，可 `stage` 还卡在 `intake`/`confirming`
     //    ⇒ 下面那条 `if (s?.stage !== 'waiting') continue;` 会**直接跳过** ⇒
@@ -9677,9 +9795,54 @@ async function sweepDeliver() {
     //      而 agent 是**独立**在 `产物/` 里干活的 ⇒ 两边脱节 ✗
     //    ⇒ 这里补一条：**有产物 + 他 10 分钟没再说话 + 手上没在跑活** ⇒ 自动进 `waiting`
     //      （保守：还在聊需求、活还在跑的时候绝不推进 ✓）
+    // ⚠️⚠️⚠️ 2026-10-22 加（真事故：那单文档 17:39 就改好了，可 `stage` 停在 `done`（15:41 交过一次、
+    //    发 0 个），之后 agent 又改了内容 ⇒ **状态没推回 waiting** ⇒ 交付永远不再触发 ⇒
+    //    客户一直收不到（用户连问三次「为什么还没发」）✗✗
+    //    ⇒ 补一条**结构的**收敛判据（不是猜人话）：
+    //      `stage` 停在 `done` + **手头没在跑活** + **产物比上次交付（`sentAt`）新** ⇒
+    //      说明「活改完了但没走交付流程」⇒ 推回 `waiting`，让它按实际耗时算好时间再发 ✓
+    if (s?.stage === 'done' && !jobs.has(uid)) {
+      let arts2 = [];
+      try {
+        arts2 = listOut(uid) ?? [];
+      } catch {}
+      const sentAtMs = Number(s.sentAt) || 0;
+      const fresher = arts2.some((f) => Number(f?.mtime ?? 0) > sentAtMs + 5000);
+      // ⚠️⚠️⚠️ 2026-10-22 修（用户：「**关键难道不是为什么发吗？如果下次是真正的客户怎么办？
+      //    能不能去找根本的原因**」）——
+      //    **根因之一**：`sentAt` 为空（**从来没交付过**）时，`sentAtMs = 0` ⇒
+      //    "产物比上次交付新"这条**恒成立** ⇒ `产物/` 里的**全部历史文件**都被当成"这一轮的新东西" ✗✗
+      //    （实测：主号那份 `sentAt` 是空的、`产物/` 里躺着 10-19/10-20 的旧文件 ⇒ 被一起推去交付）
+      //    ⇒ **没交付过就没有"上次交付"可比** ⇒ 不许走这条收敛（`deliver` 一次都没发生过的单，
+      //      本来就该由"跑完 ⇒ 进 waiting"那条正路走，而不是靠这条兜底）✓
+      //    ⚠️ 这对**真客户**同样成立：客户发个文件、我从没交付过 ⇒ 绝不会因为"产物目录里有东西"就发他 ✓
+      const engaged2 = !!String(s?.histId ?? '').trim();
+      if (arts2.length && fresher && sentAtMs > 0 && asCustomer(uid) && engaged2) {
+        // ⚠️ 只有"产物真的比上次交付新"才推（不然交完就反复重推 ⇒ 无限重发 ✗）
+        const r0 = deliverEtaAt(s, now);
+        s.stage = 'waiting';
+        s.etaAt = r0.etaAt;
+        s.etaMinutes = Math.round(r0.wait / 60000);
+        save();
+        log.info(
+          `[私聊工作] 状态停在"已交付"但**产物比上次交付新** ⇒ 推回待交付` +
+            `（实际做了 ${Math.round(r0.spent / 60000)} 分钟 ⇒ 再等 ${Math.round(r0.wait / 60000)} 分钟）✓`,
+        );
+      }
+    }
+    // ⚠️⚠️⚠️ 2026-10-22 加（用户：「**为什么谷雨给 saki 发了个文件？那里也没有任务啊**」+
+    //    「**关键不是没认出来机器人，关键是为什么会发**」）——
+    //    **根因就是这条自动收敛太宽**：只要「`产物/` 里有东西 + 他 10 分钟没说话」就推 `waiting` ⇒
+    //    交付。可"产物"里那个 docx 是**他自己发过来的文件**（预读时复制/备份进来的），
+    //    根本没有派过活 ⇒ 于是把**他的原件**又传回去了 ✗✗
+    //    ⇒ 加一道**结构闸**：**这单必须真开过工**才允许收敛 —— 判据是 `histId`
+    //      （`histId` 只在 `startJob` 真正起 agent 时写，收文件/预读**不写**）✓
+    //    ⚠️ 这是"这单有没有开工过"，不是猜人话 ✓
+    const engaged = !!String(s?.histId ?? '').trim();
     if (
       (s?.stage === 'intake' || s?.stage === 'confirming') &&
       !jobs.has(uid) &&
+      engaged &&
       now - (Number(s.talkAt) || 0) > 10 * 60 * 1000
     ) {
       let arts = [];

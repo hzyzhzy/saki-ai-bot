@@ -144,7 +144,10 @@ const DRY = flag('dry');
 
 let bvid = String(arg('bvid', '')).trim();
 const urlIn = String(arg('url', '')).trim();
-if (!bvid && urlIn) bvid = (urlIn.match(/video\/(BV[0-9A-Za-z]+)/) || [])[1] || '';
+// ⚠️ 2026-10-22：**BV / av 都认**（B站搜索结果里给的是 `av` 号，只认 BV 会全被过滤 ✗）
+if (!bvid && urlIn) {
+  bvid = (urlIn.match(/video\/((?:BV[0-9A-Za-z]{10}|av\d+))/i) || [])[1] || '';
+}
 if (!bvid) { say('❌ 要 --bvid BVxxx 或 --url <视频链接>'); process.exit(2); }
 const VIDEO_URL = `https://www.bilibili.com/video/${bvid}`;
 
@@ -192,13 +195,33 @@ const SHOT_DIR = join(ROOT, 'logs', `bili-proactive-${stamp}`);
 mkdirSync(SHOT_DIR, { recursive: true });
 
 /* ── ① 打开视频页，抓内容 ───────────────────────── */
-const ctx = await chromium.launchPersistentContext(PROFILE, {
-  ...browserOpts(),
-  headless: true,
-  viewport: { width: 1500, height: 1000 },
-  ignoreDefaultArgs: ['--enable-automation'],
-  args: ['--disable-blink-features=AutomationControlled'],
-});
+/* ⚠️⚠️ 2026-10-22 加**重试**（真事故：完整跑一遍时脚本直接崩了，`exit code 21`）——
+ *    Chrome 的 `exit code 21` = **这个 user-data-dir 还被另一个 Chrome 占着** ✗
+ *    现场：主号那个「评论回复」的**常驻浏览器**正开着同一个 profile，
+ *    `runOnce()` 虽然先调了 `release()`，但 Chrome **退出要几秒**才放开互斥体 ⇒
+ *    脚本立刻去起就撞上了 ⇒ 整个活白跑（还留一堆 Chrome 日志刷屏）✗
+ *    ⇒ 起不来就**等几秒重试**，最多 4 次（总共约 12 秒），别一次失败就崩 ✓ */
+let ctx = null;
+for (let attempt = 1; attempt <= 4; attempt++) {
+  try {
+    ctx = await chromium.launchPersistentContext(PROFILE, {
+      ...browserOpts(),
+      headless: true,
+      viewport: { width: 1500, height: 1000 },
+      ignoreDefaultArgs: ['--enable-automation'],
+      args: ['--disable-blink-features=AutomationControlled'],
+    });
+    break;
+  } catch (e) {
+    const msg = String(e?.message || '');
+    // ⚠️ 只有"profile 被占"才值得重试；别的原因（找不到 Chrome 之类）重试也没用
+    const busy = /exitCode=21|SingletonLock|already in use|user data directory is already in use|Target page, context or browser has been closed/i.test(msg);
+    say(`⚠️ Chrome 起不来（第 ${attempt}/4 次${busy ? '，profile 还被占着' : ''}）：${msg.split('\n')[0].slice(0, 120)}`);
+    if (attempt === 4) { say('❌ 四次都没起来 ⇒ 放弃这一轮'); process.exit(4); }
+    await new Promise((r) => setTimeout(r, busy ? 4000 : 1500));
+  }
+}
+if (!ctx) { say('❌ 浏览器没起来'); process.exit(4); }
 const page = await ctx.newPage();
 say(`打开 ${VIDEO_URL}`);
 await page.goto(VIDEO_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
@@ -229,6 +252,30 @@ say(`UP：${info.up}`);
 const extra = await fetchExtra(bvid);
 say(`内容：弹幕 ${extra.danmaku.length} 条 ｜ 热评 ${extra.hot.length} 条 ｜ 分P ${extra.parts.length} 个 ｜ 简介 ${extra.desc.length} 字`);
 if (extra.danmaku.length) say(`弹幕抽样：${extra.danmaku.slice(0, 8).map((x) => x.text).join(' / ')}`);
+
+/* ── ①.6 **看画面**（2026-10-22 加，用户：「bot看视频的时候可以逐帧看视频画面的文字吗」→「接」）
+ *
+ * ⚠️ 为什么值得：上面拿的全是"别人说的话"（标题/弹幕/热评），**画面里有什么完全不知道** ✗
+ *    而很多视频的关键信息就在**画面上的字**里（字幕、界面文字、标题卡）。
+ * ⚠️⚠️ **绝不能因为它拖慢/搞挂整条流程**：
+ *    · 整段有硬上限（`budgetMs`），超了就当没有；
+ *    · 任何失败都只是 `texts: []`，后面提示词里那一段就不出现；
+ *    · 读字慢（16 秒/帧）+ 模型额度随时会用完 ⇒ 这是**加分项，不是必需项** ✓
+ * ⚠️ 复用**已经开着的** `page` 拿播放地址（省一次打开，页面里 `__playinfo__` 现成的）✓
+ */
+let frames = { ok: false, texts: [] };
+try {
+  const { frameText } = await import('../src/bili-vision.js');
+  frames = await frameText({ page, count: 3, budgetMs: 75000 });
+  say(frames.ok
+    ? `画面文字：${frames.texts.length} 帧读到字（${frames.model}，${(frames.ms / 1000).toFixed(0)}s）`
+    : `画面文字：没读到（${frames.err}）—— 跳过，不影响发评论`);
+  if (frames.ok && frames.texts.length) {
+    say(`画面抽样：${frames.texts[0].replace(/\s+/g, ' ').slice(0, 80)}`);
+  }
+} catch (e) {
+  say(`画面文字：出错（${e.message}）—— 跳过`);
+}
 
 /* ⚠️⚠️ 第三道保险（2026-10-21 用户：「**评论视频一定不要重复评论**」）
  *   前两道在 `src/bili-proactive.js`（永久 bvid 名单 + 发之前挡一道），
@@ -277,6 +324,15 @@ const sys = [
   '9. ⚠️ **「倒」最多一个**（三四条里一次就够），连着用就成复读 ✗',
   '10. 🚫 别用「因此 / 此外 / 然而 / 而且」这类书面语连接词；别对称排比（「不是…而是…」）✗',
   '11. ✅ **句子长短不一**，别每条都卡在同一个长度；真人评论是想到哪说到哪 ✓',
+  /* ⚠️ 2026-10-22 加：**画面上的字**怎么用（用户要求"逐帧看画面文字"就是为了这个）
+   *    ⚠️ 只给方向：可以提一处，但别原样念 —— 念字幕是最典型的"AI 在读屏" ✗ */
+  '12. ✅ 如果下面给了【画面上的字】，**可以提其中一处**（比只看标题强得多，说明你真看了）——' +
+    '但要**换成你的话**，🚫 别把字幕原样念一遍、也别逐帧复述 ✗',
+  /* ⚠️ 2026-10-22 加（实测生成过「第三帧那个"下"卡在那儿…」）——
+   *    "第几帧 / 截图 / 抽帧 / 画面文字" 全是**我们内部的说法**，观众根本不知道，
+   *    从她嘴里说出来就像机器在报日志 ✗ ⇒ 换成"刚才那个""中间那段"这种人的说法 ✓ */
+  '13. 🚫 别说「第几帧」「截图」「抽帧」「画面文字」这种**技术词** —— ' +
+    '你就说「刚才那个」「中间那段」「最后那一下」，像人一样 ✓',
 ].filter(Boolean).join('\n');
 const user = [
   `视频：《${extra.title || info.title}》`,
@@ -291,6 +347,15 @@ const user = [
     ? '【弹幕抽样】观众在画面里看到的东西（**这些才是视频的实际内容**，可以顺着聊）：\n' +
       extra.danmaku.map((x) => `· ${emojiText(x.text)}`).join('\n')
     : '（这个视频没有弹幕可参考）',
+  '',
+  /* ⚠️ 2026-10-22 加：**画面里读到的字**（抽帧 + 视觉模型）。
+   *    和弹幕的区别：弹幕是观众**说**的，这是画面上**真有**的字（字幕/界面/标题卡）✓
+   *    ⚠️ 读不到就整段不出现（`frames.ok` 为假）—— 别让模型以为"画面没字" */
+  frames.ok && frames.texts.length
+    ? '【画面上的字】我抽了几帧、把画面里的文字读出来了（**这是视频里真实出现的内容**）：\n' +
+      frames.texts.map((t, i) => `· 第 ${i + 1} 帧：${emojiText(t).replace(/\n/g, ' ／ ').slice(0, 200)}`).join('\n') +
+      '\n（⚠️ 只读字、没看画面，别把没读到的部分当真）'
+    : '',
   '',
   extra.hot.length
     ? '【热门评论】观众关心什么（别跟这些说一样的）：\n' + extra.hot.map((x) => `· ${emojiText(x).slice(0, 80)}`).join('\n')
@@ -341,16 +406,57 @@ try {
    *     不行就换 `fill()`（对 contenteditable 更可靠），再不行 `insertText`，
    *     三种都不行就**直接报错**（绝不假装发了）✓
    */
-  const editor = page.locator('.brt-editor').first();
+  /* ⚠️⚠️ 2026-10-22 修（真 bug：`locator resolved to hidden <div class="brt-editor">`）——
+   *    页面上有**好几个** `.brt-editor`（页头一个隐藏的、评论区里一个真的），
+   *    `.first()` 挑中的是**隐藏的那个** ⇒ 等 15 秒超时 ⇒ 整个活白跑 ✗
+   *    ⇒ 遍历找**可见的**那个；一个都没有就先点一下「发一条友善的评论」把评论区展开 ✓ */
+  const pickEditor = async () => {
+    const eds = page.locator('.brt-editor');
+    const n = await eds.count().catch(() => 0);
+    for (let i = 0; i < n; i++) {
+      const e = eds.nth(i);
+      if (await e.isVisible().catch(() => false)) return e;
+    }
+    return null;
+  };
+  let editor = await pickEditor();
+  if (!editor) {
+    // 评论区没展开 ⇒ 点一下占位区（文字各家版本不太一样，用模糊匹配）
+    say('没找到可见的输入框 ⇒ 试着点开评论区');
+    for (const sel of ['.reply-box .brt-editor', '.comment-send .brt-editor', 'div[contenteditable="true"]']) {
+      const e = page.locator(sel).first();
+      if (await e.isVisible().catch(() => false)) { editor = e; break; }
+    }
+  }
+  if (!editor) {
+    await page.screenshot({ path: join(SHOT_DIR, 'noeditor.png') }).catch(() => {});
+    throw new Error('页面上找不到可见的评论输入框（截图 noeditor.png）');
+  }
   await editor.waitFor({ state: 'visible', timeout: 15000 });
   await editor.scrollIntoViewIfNeeded().catch(() => {});
   await editor.click({ timeout: 15000 });
   await new Promise((r) => setTimeout(r, 600));
 
   const probe = comment.slice(0, 6).replace(/\s+/g, '');
+  /* ⚠️⚠️ 2026-10-22 修（真 bug，截图看出来的）：输入框里**同一条评论出现了两遍** ✗
+   *    真因：① `keyboard.type` 明明输进去了，但 `typedOk()` 判失败
+   *          （`.brt-editor` 的 innerText 有时候读不到 / 有细微差异）
+   *          ⇒ 兜底的 `fill()` 又执行一遍 ⇒ **变成两条** ⇒ 发出去就是重复评论 ✗
+   *    ⇒ 两处一起改：
+   *      ① `typedOk()` 除了"包含"，还要**只出现一次**（出现两次 = 兜底重复填了）；
+   *      ② 每次兜底**之前先清空**（全选 + 删除），别在原文后面追加 ✓
+   */
+  const readBox = async () => String(await editor.innerText().catch(() => '')).replace(/\s+/g, '');
   const typedOk = async () => {
-    const t = await editor.innerText().catch(() => '');
-    return String(t).replace(/\s+/g, '').includes(probe);
+    const t = await readBox();
+    if (!t.includes(probe)) return false;
+    return t.split(probe).length - 1 === 1;   // ⚠️ 出现两遍就算失败
+  };
+  const clearBox = async () => {
+    await editor.click({ timeout: 8000 }).catch(() => {});
+    await page.keyboard.press('Control+A').catch(() => {});
+    await page.keyboard.press('Delete').catch(() => {});
+    await new Promise((r) => setTimeout(r, 400));
   };
 
   // ① 键盘输入（最像真人）
@@ -358,14 +464,15 @@ try {
   await new Promise((r) => setTimeout(r, 900));
   // ② fill（对 contenteditable 直接设内容，会触发 input 事件）
   if (!(await typedOk())) {
-    say('键盘输入没进去 ⇒ 换 fill()');
+    say('键盘输入没进去（或重复了）⇒ 清空后用 fill()');
+    await clearBox();
     await editor.fill(comment).catch(() => {});
     await new Promise((r) => setTimeout(r, 900));
   }
   // ③ insertText（剪贴板式插入）
   if (!(await typedOk())) {
-    say('fill 也没进去 ⇒ 换 insertText');
-    await editor.click({ timeout: 8000 }).catch(() => {});
+    say('fill 也没进去 ⇒ 清空后用 insertText');
+    await clearBox();
     await page.keyboard.insertText(comment).catch(() => {});
     await new Promise((r) => setTimeout(r, 900));
   }
@@ -444,6 +551,32 @@ try {
     .then((t) => String(t || '').replace(/\s+/g, '').includes(String(comment).replace(/\s+/g, '').slice(0, 10)))
     .catch(() => false);
 
+  /* ⚠️⚠️ 2026-10-22 加：**明确识别"被风控"**（参考别人项目的做法）
+   *
+   *   今天实测撞到的原文：**「受到神秘力量干扰，请稍后再试！」**（截图抓到的）
+   *   社区文档的说法（[v_voucher 验证](https://github.com/pskdje/bilibili-API-collect/blob/main/docs/misc/sign/v_voucher.md)）：
+   *     「当同一接口在**短时间内被同一用户/IP/UA 多次请求**或异常时，会触发风控」
+   *   ⇒ 这是**账号/IP 级的临时限制**，**继续撞只会延长**（别人的项目 BiliPai 是
+   *      「命中风控后**短期跳过**，避免无效重试」）✗
+   *
+   *   ⇒ 这里把页面上的固定文案**认出来**，回执里带 `blocked: true`，
+   *     上层（`bili-proactive.js`）据此**全局暂停**，别让 20 分钟一次的定时任务一直撞 ✓
+   *   ⚠️ 只认**页面给的固定字面**（不是猜人话），符合 AGENTS 的"认协议"例外 ✓ */
+  const riskHit = await page.evaluate(() => {
+    const t = document.body.innerText || '';
+    const pats = [
+      '受到神秘力量干扰',
+      '请稍后再试',
+      '操作过于频繁',
+      '操作太频繁',
+      '评论功能已被限制',
+      '发送失败，请重试',
+    ];
+    const hit = pats.find((p) => t.includes(p));
+    return hit || '';
+  }).catch(() => '');
+  if (riskHit) say(`⚠️ 页面上出现风控提示：「${riskHit}」`);
+
   let appeared = false;
   for (let i = 0; i < 2 && !appeared; i++) {
     if (i) await new Promise((r) => setTimeout(r, 3000));
@@ -490,8 +623,17 @@ try {
     say('❌ 输入框里还留着这段话、接口也查不到 ⇒ 真的没提交');
     markVisited('uncertain');
     console.log(JSON.stringify({
-      ok: false, uncertain: true, video: VIDEO_URL, title: info.title, comment,
-      err: '点了发布但没提交（接口也查不到，可能被风控拦了）',
+      ok: false,
+      uncertain: true,
+      // ⚠️ 2026-10-22：**把"是不是风控"明确报上去** —— 上层据此全局暂停，别一直撞 ✓
+      blocked: !!riskHit,
+      blockedReason: riskHit || '',
+      video: VIDEO_URL,
+      title: info.title,
+      comment,
+      err: riskHit
+        ? `被 B站风控拦了（页面提示「${riskHit}」）—— 这不是代码问题，是账号/IP 级临时限制`
+        : '点了发布但没提交（接口也查不到，可能被风控拦了）',
     }));
   }
 } catch (e) {

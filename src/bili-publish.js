@@ -774,17 +774,61 @@ export async function runOnce({ topic = '', publish = true } = {}) {
 }
 
 /* ── 定时入口：index.js 每 30 秒调一次 ── */
+/* ⚠️⚠️ 2026-10-22 加（用户：「**为什么刚才 chrome 的窗口一直在自己打开然后关闭**」）
+ *
+ *    真凶**不是**评论回复，是**投稿**：
+ *      [22:32:30] [B站投稿] agent 回来了（exit 1）：… 失败：没有成片
+ *      [22:32:37] [B站投稿] 到点了，开始今天的自动投稿   ← **7 秒后又开一轮**
+ *
+ *    根因：`tick()` 每 **30 秒**跑一次，而**失败不写 `st.done`** ⇒ 立刻又满足条件 ⇒
+ *    每 30 秒重跑一遍 agent（agent 内部为了上传视频会起 **Chrome**）⇒
+ *    屏幕上看就是 **Chrome 窗口反复打开又关掉** ✗✗
+ *
+ *    ⇒ 加**当天失败上限**：同一天最多试 **2 次**，第 3 次直接跳过今天 ✓
+ *      （失败原因通常是"没做出成片"，隔 30 秒再试一遍也不会变好；
+ *        而且每次重试都要烧一次 agent 的钱 —— 今天 20:00-21:00 那 ¥11.74 里就有它）
+ *    ⚠️ 这个计数只放内存：重启会清零（重启本身就是一次"重新试"，合理）✓
+ */
+let pubFailToday = { day: '', n: 0 };
+/* ⚠️⚠️ 2026-10-22 改（用户：「**没做完不要拉起投稿，做完就立刻拉起就行了**」）
+ *    从 2 收紧到 **1** —— 今天失败一次就**不再试**：
+ *    · 失败原因通常是"没做出成片"（agent 真要能做完，第一次就做完了）
+ *    · 每试一次都要：起 agent（DSH，烧 DeepSeek 的钱）+ 起 Chrome（上传）⇒ 屏幕反复闪
+ *    · 「做完就立刻拉起」现在是**天然满足**的：agent 做完成片会**当场自己上传** ✓
+ *      （`bili-upload.mjs` 在同一个 agent 会话里跑，不是等下一轮 tick） */
+const PUB_FAIL_MAX = 1;
+
 export function tick() {
   const c = settings();
   if (!c.enable) return;
   const day = dayKey();
   const st = loadState();
   if (st.done && st.done[day]) return;             // 今天已经做过了
+  if (pubFailToday.day !== day) pubFailToday = { day, n: 0 };
+  if (pubFailToday.n >= PUB_FAIL_MAX) return;      // ⚠️ 今天失败太多次 ⇒ 今天不再试
   const at = planFor(day);
   if (Date.now() < at) return;
   if (busy) return;
-  log.info('[B站投稿] 到点了，开始今天的自动投稿');
-  void runOnce({ publish: true });
+  log.info(`[B站投稿] 到点了，开始今天的自动投稿（今天第 ${pubFailToday.n + 1} 次尝试）`);
+  void runOnce({ publish: true })
+    .then((r) => {
+      // ⚠️ `why: 'busy'` 不是失败（是"上一条还在跑，这次跳过"）⇒ 不能算进失败次数 ✗
+      if (r && (r.ok || r.why === 'busy' || r.why === 'agent-busy')) {
+        if (r.ok) pubFailToday = { day, n: 0 };
+        return;
+      }
+      pubFailToday.n += 1;
+      if (pubFailToday.n >= PUB_FAIL_MAX) {
+        log.warn(
+          `[B站投稿] ⛔ 今天已经失败 ${pubFailToday.n} 次（${(r && r.err) || '没成片'}）⇒ **今天不再试**` +
+            `（别再每 30 秒起一次 agent/Chrome）`,
+        );
+      }
+    })
+    .catch((e) => {
+      pubFailToday.n += 1;
+      log.warn(`[B站投稿] 出错（今天第 ${pubFailToday.n} 次）：${e.message}`);
+    });
 }
 
 /** 给界面看的当前状态 */
