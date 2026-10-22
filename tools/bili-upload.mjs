@@ -29,11 +29,15 @@ import { chromium } from 'playwright-core';
 import { mkdirSync, existsSync, writeFileSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+// ⚠️ 2026-10-22：统一在这里决定用哪个浏览器
+//    （系统 Chrome 优先 + 独立 profile；没有 Chrome 才用内置 Chromium）
+import { browserOpts , biliProfileDir } from './lib/browser.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const CHROME =
   process.env.BILI_CHROME || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
-const PROFILE = process.env.BILI_PROFILE || join(ROOT, 'state', 'bili-profile');
+// ⚠️ 2026-10-21：**按 QQ 号分 profile**（主号走老路径 state/bili-profile，别的号 state/bili-profile-<QQ>）
+const PROFILE = biliProfileDir();
 const UPLOAD_URL = 'https://member.bilibili.com/platform/upload/video/frame';
 
 /* ── 参数 ─────────────────────────────────────────── */
@@ -152,7 +156,7 @@ say(`模式: ${PUBLISH ? '⚠️ 正式投稿（会真的发出去）' : '预览
 
 /* ── 开浏览器 ─────────────────────────────────────── */
 const ctx = await chromium.launchPersistentContext(PROFILE, {
-  executablePath: CHROME,
+  ...browserOpts(),
   headless: HEADLESS,
   viewport: null,
   ignoreDefaultArgs: ['--enable-automation'],
@@ -302,35 +306,194 @@ try {
     }
   }
 
-  /* ⑦ 标签（B站的标签输入，回车确认） */
+  /* ⑦ 标签（B站的标签输入，回车确认）
+   * ⚠️ 2026-10-21 实测：草稿/自动标签会先占位（最多 10 个），
+   *    直接往后加会被挤掉 ⇒ 先清空、再逐个加、加完逐个核对 ✓ */
   if (TAGS) {
-    const tagBox =
-      (await page.$('input[placeholder*="标签"]')) || (await page.$('.tag-input input'));
+    const wantTags = TAGS.split(/[,，]/).map((x) => x.trim()).filter(Boolean).slice(0, 10);
+    const tagInput = () =>
+      page.$('input[placeholder*="标签"]').then((x) => x || page.$('.tag-input input'));
+    const tagBox = await tagInput();
     if (tagBox) {
-      for (const t of TAGS.split(/[,，]/).map((x) => x.trim()).filter(Boolean).slice(0, 10)) {
-        await tagBox.click();
-        await nap(200, 500);
-        await tagBox.fill(t);
-        await nap(300, 800);
-        await page.keyboard.press('Enter');
-        await nap(400, 900);
+      const cleared = await page.evaluate(() => {
+        const chips = [...document.querySelectorAll('.label-item-v2-container')];
+        for (const c of chips) {
+          const close = c.querySelector('.close');
+          if (close) close.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        }
+        return chips.length;
+      });
+      if (cleared) {
+        say(`已清掉原有标签 ${cleared} 个`);
+        await nap(600, 1200);
       }
-      say(`已加标签：${TAGS}`);
+      for (const t of wantTags) {
+        const box = (await tagInput()) || tagBox;
+        await box.click();
+        await nap(200, 500);
+        await box.fill(t);
+        await nap(400, 800);
+        await page.keyboard.press('Enter');
+        await nap(500, 900);
+      }
+      const readTags = () =>
+        page.evaluate(() =>
+          [...document.querySelectorAll('.label-item-v2-content')].map((x) => x.innerText.trim()),
+        );
+      let got = await readTags();
+      let missing = wantTags.filter((t) => !got.includes(t));
+      if (missing.length) {
+        say(`⚠️ 少了 ${missing.join('、')} ⇒ 再补一次`);
+        for (const t of missing) {
+          const box = (await tagInput()) || tagBox;
+          await box.click();
+          await box.fill('');
+          await page.keyboard.type(t, { delay: 60 });
+          await nap(500, 900);
+          await page.keyboard.press('Enter');
+          await nap(500, 900);
+        }
+        got = await readTags();
+        missing = wantTags.filter((t) => !got.includes(t));
+      }
+      say(`已加标签：${got.join(',')}${missing.length ? `（仍缺：${missing.join('、')}）` : ''}`);
     } else {
       say('⚠️ 找不到标签框 ⇒ 跳过');
     }
   }
 
-  /* ⑧ 封面 */
+  /* ⑧ 封面
+   * ⚠️ 2026-10-21 实测（**踩过**）：直接把文件塞给页面上第二个 file input，
+   *    日志会显示「已上传封面」，但投稿时照样报「请先上传封面」⇒ 根本没生效 ✗
+   *    正确流程：点「添加封面」→ 弹层里塞图片 input → 等预览/「完成」可点 → 点完成 ✓ */
   if (COVER && existsSync(resolve(COVER))) {
-    const coverInputs = await page.$$('input[type="file"]');
-    if (coverInputs.length > 1) {
-      await coverInputs[1].setInputFiles(resolve(COVER));
-      say('已上传封面');
-      await nap(1500, 3000);
-    } else {
-      say('⚠️ 只有一个 file input ⇒ 封面上传跳过');
+    try {
+      const openCover = page.locator('text=添加封面').first();
+      if (await openCover.count()) {
+        await openCover.click();
+        await nap(1200, 2000);
+      }
+      const imgInput = await page.$('input[type="file"][accept*="image"]');
+      if (!imgInput) throw new Error('封面弹层里找不到图片 input');
+      await imgInput.setInputFiles(resolve(COVER));
+      say('已选封面图，等上传…');
+      let doneBtn = null;
+      const coverDl = Date.now() + 90 * 1000;
+      while (Date.now() < coverDl) {
+        await new Promise((r) => setTimeout(r, 1500));
+        // ⚠️ 这个「完成」是 <div class="button submit">，不是 <button> —— 按 tag 找必然找不到 ✗
+        const b = page.locator('.cover-editor-content-right-bottom .button.submit').first();
+        if ((await b.count()) && (await b.isVisible().catch(() => false))) {
+          doneBtn = b;
+          break;
+        }
+      }
+      if (!doneBtn) throw new Error('封面弹层没等到「完成」按钮');
+      await doneBtn.click();
+      await nap(1000, 1800);
+      /* ⚠️ 点「完成」后 B站还会弹一次确认：
+       *   「检测到个人空间封面（16:9）未修改…是否将 4:3 的改动同步到 16:9？」
+       *   ⇒ 必须点「确认同步」，否则弹层一直盖着，后面连「立即投稿」都点不到 ✗ */
+      const syncBtn = page.locator('.videoup-confirm-modal .button:has-text("确认同步")').first();
+      if ((await syncBtn.count()) && (await syncBtn.isVisible().catch(() => false))) {
+        await syncBtn.click();
+        say('已确认同步 4:3 → 16:9 封面');
+        await nap(1000, 1800);
+        const done2 = page.locator('.cover-editor-content-right-bottom .button.submit').first();
+        if ((await done2.count()) && (await done2.isVisible().catch(() => false))) {
+          await done2.click();
+          await nap(1000, 1800);
+        }
+      }
+      // 等弹层真的关掉，再往下走（否则分区/投稿都会被它挡住）
+      const closeDl = Date.now() + 20 * 1000;
+      while (Date.now() < closeDl) {
+        const open = await page.evaluate(() => {
+          const el = document.querySelector('.cover-editor');
+          if (!el) return false;
+          const r = el.getBoundingClientRect();
+          return r.width > 0 && r.height > 0;
+        });
+        if (!open) break;
+        await new Promise((r) => setTimeout(r, 800));
+      }
+      const stillEmpty = await page.evaluate(() => {
+        const el = document.querySelector('.cover-empty');
+        if (!el) return false;
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+      });
+      say(stillEmpty ? '⚠️ 封面区还是空态 ⇒ 可能没传上' : '✅ 封面已上传');
+    } catch (e) {
+      say(`⚠️ 封面上传失败（不影响继续）：${e.message}`);
     }
+  }
+
+  /* ⚠️⚠️ 2026-10-22 加：`--dump-zones` —— **抓 B站现在真实的分区清单**
+   *
+   * 为什么要这个：用户报「分区不是定死的」，但 `src/bili-publish.js` 里那份 ZONES
+   *   是照老结构写的（「生活/日常」那套），**B站已经改版了**，清单里的名字在页面上
+   *   一个都点不到 ⇒ 每条视频都落到默认分区 ✗（实测落到 vlog）
+   * 分区控件**要上传完视频才渲染** ⇒ 只能用真视频探一次（用 `--video` 传个小文件）。
+   * 输出：一行 JSON（一级 → 二级数组），直接贴进 `bili-publish.js` 的 ZONES 就行 ✓
+   */
+  if (flag('dump-zones')) {
+    const out = {};
+    /* ⚠️ 一定要用「分区」那个 H3 定位（页面里还有别的 .select-controller，
+     *    第一个是标签分类 ⇒ 点错了只会抓到「音乐」这种无关值 ✗ 2026-10-22 实测踩到） */
+    const openZone = async () => {
+      const ok = await page.evaluate(() => {
+        const h3 = [...document.querySelectorAll('h3')].find((el) => (el.innerText || '').trim() === '分区');
+        if (!h3) return false;
+        h3.scrollIntoView({ block: 'center' });
+        let box = h3;
+        for (let i = 0; i < 6 && box; i++) {
+          box = box.parentElement;
+          if (!box) break;
+          const c = box.querySelector('.select-controller');
+          if (c) { c.click(); return true; }
+        }
+        return false;
+      });
+      if (ok) await nap(700, 1200);
+      return ok;
+    };
+    const listItems = () =>
+      page.evaluate(() =>
+        [...document.querySelectorAll('.drop-list-v2-item, .select-item-cont, .select-item')]
+          .filter((x) => { const r = x.getBoundingClientRect(); return r.width > 0 && r.height > 0; })
+          .map((x) => (x.innerText || '').trim())
+          .filter((t) => t && t.length <= 12),
+      );
+    const clickItem = (txt) =>
+      page.evaluate((t) => {
+        const items = [...document.querySelectorAll('.drop-list-v2-item, .select-item-cont, .select-item')]
+          .filter((x) => { const r = x.getBoundingClientRect(); return r.width > 0 && r.height > 0; });
+        const hit = items.find((x) => (x.innerText || '').trim() === t);
+        if (!hit) return false;
+        hit.click();
+        return true;
+      }, txt);
+
+    if (!(await openZone())) die('点不开分区控件（找不到「分区」H3 或它旁边的 .select-controller）');
+    const lvl1 = [...new Set(await listItems())];
+    say(`一级分区 ${lvl1.length} 个：${lvl1.join(' / ')}`);
+    const TRY_SUB = new Set(['生活', '游戏', '知识', '人工智能', '动画', '娱乐']);
+    for (const z1 of lvl1) {
+      if (!TRY_SUB.has(z1)) { out[z1] = []; continue; }
+      if (!(await openZone())) continue;
+      if (!(await clickItem(z1))) continue;
+      await nap(600, 1000);
+      const subs = [...new Set(await listItems())].filter((x) => x !== z1);
+      out[z1] = subs;
+      say(`  ${z1} → ${subs.join('、') || '（没有二级）'}`);
+    }
+    await shot(page, 'zones');
+    console.log('===== ZONES_JSON =====');
+    console.log(JSON.stringify(out, null, 2));
+    say('（只探查，什么都没提交）');
+    try { await ctx.close(); } catch {}
+    process.exit(0);
   }
 
   /* ⚠️⚠️ 2026-10-20 加：**分区 + 创作声明** —— 这两个是 B站投稿的必填项，

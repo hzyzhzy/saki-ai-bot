@@ -34,12 +34,19 @@
  *   不用 agent 重新发明。是否走这条由 **agent 自己判断**（`streakGroup` 规则由这里告诉它）。
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync, readdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync, readdirSync, rmSync } from 'node:fs';
+// ⚠️ 2026-10-21：抓 BV 号要跑子进程（见 grabBvid）
+import { spawn } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import yaml from 'js-yaml';
-import { config, ROOT, stateDir, CONFIG_FILE } from './config.js';
+import { config, ROOT, stateDir, CONFIG_FILE, personaId } from './config.js';
 import { log } from './log.js';
 import { runTask, busyTask } from './agent-bridge.js';
+// ⚠️ 2026-10-22：短期共享记忆（发了视频要记一笔，她聊天和 B站回复都读它）
+import * as shortMemory from './short-memory.js';
+/* ⚠️ 2026-10-22 加：B 站这边的人设段改成**读人设包**（见 `voiceBlock()`）——
+ *    `persona.js` 只依赖 config/log，不会和这里形成循环 ✓ */
+import * as persona from './persona.js';
 
 const TOOLS = join(ROOT, 'tools');
 const OUT_DIR = join(ROOT, 'logs', 'bili', 'auto');
@@ -106,6 +113,145 @@ const hhmm = (s) => {
 };
 
 /** 在窗口内挑一个随机时刻（同一天只挑一次，存进状态） */
+/* ── 抓这条稿件的 BV 号（用户要「显示出来发送的视频链接」） ──
+ * ⚠️ 2026-10-21 探路结论：
+ *   · agent 的回执里**没有 bvid**（它只报"投递成功"）
+ *   · 稿件管理页 `member.bilibili.com/platform/upload-manager/article` 的 BV
+ *     **只藏在封面那个 `<a href="//www.bilibili.com/video/BV…/">` 里**，页面上看不到那串字 ✗
+ *   · 列表按时间倒序 ⇒ **第一张卡片就是刚发的那条** ✓
+ *   ⚠️ 要独占 `state/bili-profile`：调用点在上传 agent 退出之后（那时它已经放开了）✓
+ */
+async function grabBvid() {
+  const script = join(ROOT, 'tools', 'bili-latest-bvid.mjs');
+  if (!existsSync(script)) return null;
+  const out = await new Promise((resolve) => {
+    const p = spawn(process.execPath, [script], { cwd: ROOT, windowsHide: true });
+    let so = '';
+    const timer = setTimeout(() => { try { p.kill(); } catch { /* ignore */ } }, 120000);
+    p.stdout.on('data', (d) => { so += String(d); });
+    p.on('close', () => { clearTimeout(timer); resolve(so); });
+    p.on('error', () => { clearTimeout(timer); resolve(so); });
+  });
+  for (const line of String(out).trim().split(/\r?\n/).reverse()) {
+    const s = line.trim();
+    if (!s.startsWith('{')) continue;
+    try { return JSON.parse(s); } catch { /* 不是回执 */ }
+  }
+  return null;
+}
+
+/* ── 每天 12:00 清视频缓存（2026-10-21 用户要求） ──
+ *
+ * ## 用户原话（两次）
+ *   ① 「**所有视频缓存要在12点清除**」
+ *   ② 「**也不是只删缓存，用不上和已经投上的视频也删了**」
+ *      ⇒ 第一版只清 `__*` / `_run_*.log` 太窄了 ✗
+ *      ⇒ **已经投到 B站 的成片、以及没派上用场的迭代品，本地一律不用留** ✓
+ *        （投过的已经在 B站 上；`history` 里照样留着标题/链接/台词，只是本地文件没了）
+ *
+ * ## 为什么定 12 点
+ *   投稿窗口是 16:00~20:00 ⇒ 12 点清的时候当天还没开始做，删不到正在用的东西 ✓
+ *
+ * ## 清 / 不清（就这两条）
+ *   ✅ 清（超过 1 天的）：
+ *      · `logs/bili/` 下**所有**视频/图片/音频文件（mp4/webm/mov/wav/m4a/mp3/png/jpg）
+ *      · `logs/bili/auto/<时间戳>/` 整个工作目录
+ *      · 顶层的调试残留：`__*`、`_run_*.log`
+ *      · 迭代工作目录：`*_work-*`、`__*` 目录
+ *   🚫 不清（这些是**素材**，删了要重新下载/生成）：
+ *      `avatars` `chrome` `group-voice` `l2dcache` `tachie` `voice-ref` `qqrec`
+ *      `pick` `say` `say2` `l2d_take` `intro_take` `intro_voice` `intro_voice_fit`
+ *   ⚠️ 还有：**24 小时以内的一律不动**（可能还要用 / 正在跑）
+ */
+
+/** 这些子目录是**素材**，不按日期删（删了要重新下/重新生成，代价比空间大） */
+const KEEP_DIRS = new Set([
+  'avatars', 'chrome', 'group-voice', 'l2dcache', 'tachie', 'voice-ref', 'qqrec',
+  'pick', 'say', 'say2', 'l2d_take', 'intro_take', 'intro_voice', 'intro_voice_fit',
+]);
+
+/** 会占地方的媒体后缀 */
+const MEDIA_RE = /\.(mp4|mov|webm|wav|m4a|mp3|png|jpg|jpeg)$/i;
+
+export function sweepCache({ force = false } = {}) {
+  const base = join(ROOT, 'logs', 'bili');
+  if (!existsSync(base)) return { ok: true, removed: 0, freedMB: 0, why: '没有 logs/bili' };
+
+  const cutoff = Date.now() - 24 * 3600 * 1000;
+  let removed = 0;
+  let freed = 0;
+
+  const rmDir = (p) => {
+    let size = 0;
+    try {
+      for (const f of readdirSync(p, { withFileTypes: true })) {
+        const q = join(p, f.name);
+        if (f.isDirectory()) size += rmDir(q);
+        else { try { size += statSync(q).size; rmSync(q, { force: true }); } catch { /* 占着就跳过 */ } }
+      }
+      rmSync(p, { recursive: true, force: true });
+    } catch { /* ignore */ }
+    return size;
+  };
+
+  /* ① auto/ 下**所有**工作目录（超过 1 天的整个删，不看有没有投过 —— 用户明确要求） */
+  const auto = join(base, 'auto');
+  if (existsSync(auto)) {
+    for (const f of readdirSync(auto, { withFileTypes: true })) {
+      if (!f.isDirectory()) continue;
+      const p = join(auto, f.name);
+      let mt = 0;
+      try { mt = statSync(p).mtimeMs; } catch { continue; }
+      if (!force && mt > cutoff) continue;
+      freed += rmDir(p);
+      removed++;
+    }
+  }
+
+  /* ② 其他**迭代目录**（`*_work-*` / `__*`）；素材目录走白名单跳过 */
+  for (const f of readdirSync(base, { withFileTypes: true })) {
+    if (!f.isDirectory()) continue;
+    if (f.name === 'auto') continue;                 // 上面处理过了
+    if (KEEP_DIRS.has(f.name)) continue;             // 素材，别动
+    // 只认"明显是跑批留下的"目录；不认识的不碰（宁可占地方）
+    if (!/^__/.test(f.name) && !/_work-/.test(f.name)) continue;
+    const p = join(base, f.name);
+    let mt = 0;
+    try { mt = statSync(p).mtimeMs; } catch { continue; }
+    if (!force && mt > cutoff) continue;
+    freed += rmDir(p);
+    removed++;
+  }
+
+  /* ③ 顶层**所有媒体文件**（mp4/webm/wav/png/jpg…）—— 投过的也删 */
+  for (const f of readdirSync(base, { withFileTypes: true })) {
+    if (!f.isFile()) continue;
+    const isMedia = MEDIA_RE.test(f.name);
+    const isLog = /^_run_.*\.log$/i.test(f.name) || /^__/.test(f.name);
+    if (!isMedia && !isLog) continue;               // .json / .md / .txt 这些记录留着
+    const p = join(base, f.name);
+    let mt = 0; let sz = 0;
+    try { mt = statSync(p).mtimeMs; sz = statSync(p).size; } catch { continue; }
+    if (!force && mt > cutoff) continue;
+    try { rmSync(p, { force: true }); removed++; freed += sz; } catch { /* ignore */ }
+  }
+
+  const freedMB = Math.round((freed / 1024 / 1024) * 10) / 10;
+  if (removed) log.info(`[B站投稿] 清了视频缓存：${removed} 项，释放 ${freedMB} MB`);
+  return { ok: true, removed, freedMB };
+}
+
+/** 每天 12:00 之后跑一次（自己按天去重，重启也不会重复跑） */
+export function sweepTick() {
+  const st = loadState();
+  const day = new Date().toLocaleDateString('zh-CN');
+  const now = new Date();
+  if (now.getHours() < 12) return;                       // 还没到 12 点
+  if (st.lastSweepDay === day) return;                    // 今天清过了
+  saveState({ ...st, lastSweepDay: day });
+  try { sweepCache(); } catch (e) { log.warn(`[B站投稿] 清缓存失败：${e.message}`); }
+}
+
 function planFor(day) {
   const st = loadState();
   if (st.nextAt && st.lastDay === day) return st.nextAt;
@@ -142,21 +288,99 @@ async function notify(text) {
   } catch (e) { log.warn(`[B站投稿] 通知发不出去：${e.message}`); }
 }
 
-/** 分区清单（一级 → 二级）。**给 agent 照着选**，它选了不在清单里的就用兜底 */
-const ZONES = {
-  生活: ['日常', '搞笑', '手工', '绘画', '运动', '汽车', '其他'],
-  游戏: ['单机游戏', '网络游戏', '手机游戏', '电子竞技', '桌游棋牌'],
-  知识: ['科学科普', '社科·法律·心理', '人文历史', '财经商业', '校园学习', '职业职场', '设计·创意', '野生技术协会'],
-  科技: ['数码', '软件应用', '计算机技术', '科工机械', '极客DIY'],
-  动画: ['MAD·AMV', 'MMD·3D', '短片·手书·配音', '手办·模玩', '综合'],
-  娱乐: ['综艺', '明星综合', '娱乐杂谈', '粉丝创作'],
-  音乐: ['原创音乐', '翻唱', '演奏', '音乐综合'],
-  鬼畜: ['鬼畜调教', '音MAD', '人力VOCALOID', '鬼畜剧场'],
-  美食: ['美食制作', '美食侦探', '美食测评', '田园美食', '美食记录'],
-  动物圈: ['喵星人', '汪星人', '野生动物', '动物综合'],
-};
-const zoneListText = () =>
-  Object.entries(ZONES).map(([z1, subs]) => `  ${z1}：${subs.join('、')}`).join('\n');
+/**
+ * B站**现在的真实分区清单**（2026-10-22 用 `bili-upload.mjs --dump-zones` 真机抓的）
+ *
+ * ⚠️⚠️ 别再照老结构写了 —— B站改过版：
+ *   · 老清单里「生活 / 日常」「游戏 / 网络游戏」那套**二级结构已经没了**
+ *   · 现在就是 **30 个平铺的一级分区**，没有二级 ⇒ `--zone2` 传了也没用
+ *   · 实测老清单里的名字**一个都点不到** ⇒ 每条视频都落到默认区（vlog）✗
+ * 抓法（以后 B站再改版就重跑一次）：
+ *   `node tools/bili-upload.mjs --video <小视频> --title x --dump-zones`
+ *   ⇒ 打一行 ZONES_JSON，照着更新这里
+ */
+const ZONE_LIST = [
+  '娱乐', '影视', '音乐', '舞蹈', '动画', '绘画', '鬼畜', '游戏', '资讯', '知识',
+  '人工智能', '科技数码', '汽车', '时尚美妆', '家装房产', '户外潮流', '健身',
+  '体育运动', '手工', '美食', '小剧场', '旅游出行', '三农', '动物', '亲子',
+  '健康', '情感', 'vlog', '生活兴趣', '生活经验',
+];
+const zoneListText = () => ZONE_LIST.join('、');
+
+/**
+ * 她自己的「声音」—— **直接注入任务说明**，不指望 agent 自己翻人设翻到
+ *
+ * ⚠️⚠️ 2026-10-22 用户反馈：「台词导入了 saki 的人设吗？感觉**活人感还不够强**，
+ *   **可以玩一些自己的梗，但是不要过于频繁**」
+ *   上一版只是写了句"先读 personas/saki/persona.md"，等于让 agent 自己去 100KB 的人设里
+ *   找语气 —— 实际挑出来的是"观点正确但谁都能说"的句子，活人感就是从这里漏的 ✗
+ *   ⇒ 现在把**最能体现她是谁**的那几样直接摆到眼前（口癖、能吃、怪力、做饭、名台词、黑祥），
+ *     并明确「梗一条视频最多 1~2 处」。
+ *
+ * 📌 这份是**从 `personas/saki/persona.md` 里摘的**（L479 口癖「倒」/ L301-305 活细节 /
+ *    L197 名台词归属 / L311-319 黑祥）。人设那边改了，这里要跟着改。
+ *    ⚠️ 别把整段人设抄进来 —— 那是 100KB，会把它淹掉，反而更不像。
+ */
+/**
+ * **B 站这边要用的"人设那一小段"**（评论回复 / 视频文案 / 投稿说明都用它）。
+ *
+ * ## ⚠️⚠️⚠️ 2026-10-22 改（用户：「**b站那边评论要用到的人设在新建时也要完善好，
+ *    和 QQ 这边一样，之前我说过的机器人味不能出现**」）
+ *
+ * 原来这里是**写死的一段祥子腔**（下面那个 `SAKI_VOICE`）—— 好处是稳，坏处是
+ * **新建一个人设、B 站这边还是祥子**：换号、换角色之后评论照样是「倒」「黑祥」
+ * 那一套，等于人设白建了 ✗
+ *
+ * ⇒ 现在改成**读人设包**：`personas/<当前人设>/prompt/bili-comment.md`
+ *   （和 `prompt/qzone-guide.md` 同一个机制，`persona.promptFile()` 读，
+ *     **每次现读盘** ⇒ 改完不用重启，换人设立刻生效 ✓）
+ *
+ * ⚠️ 为什么不直接把整份 `persona.md` 塞进来：那是 **107 KB / 4.6 万字**，
+ *    塞进这种"回一句 8~30 字的评论"的提示词里会**把它淹掉**，反而更像机器人 ✗
+ *    （老版这里就写着这句话，是对的 —— 所以走"人设包里的**精简版**"这条路）
+ * ⚠️ 读不到就**回落**下面那份内置的（老配置 / 没写这个文件的人设包照常能跑），
+ *    同时打一行 warn —— 别静默，不然"新建的人设没生效"根本查不出来 ✓
+ */
+export function voiceBlock() {
+  try {
+    const t = persona.promptFile('bili-comment');
+    if (t && t.trim()) return t.trim();
+  } catch { /* ignore */ }
+  log.warn(
+    `[B站] 人设包里没有 prompt/bili-comment.md（${persona.charName?.() || '?'}）` +
+      ' ⇒ B站这边临时用内置的那份（新建人设时记得补上这个文件）',
+  );
+  return SAKI_VOICE;
+}
+
+export const SAKI_VOICE = [
+  '【你是谁，怎么说】',
+  '· 自称 **Saki**。别人叫你小祥 / 客服小祥 / 祥子，都照常应答，**别纠正称呼**。',
+  '· 有点傲娇、话短、自然。**绝不客服腔**（不要「您好」「请查收」「为您统计」）。',
+  '· 口癖是「**倒**」（倒是 / 我倒觉得）—— 一条视频里**最多用 1~2 次**，多了就成复读。',
+  '',
+  '【你身上那些"活人"的地方（一条视频挑一两样用，别全塞）】',
+  '· **你是真的能吃**，也真的力气不小（155cm，但别把自己写得娇弱）。',
+  '· 家道中落后自己做饭、自己打扫 —— 提起过日子的事，说得具体点（米、锅、碟子、账单）。',
+  '· 「**黑祥**」是另一条路上的你，**同一个人、同一个家**（她要是不提，你也别主动提）。',
+  '· 名台词「**请把你剩余的人生交给我**」是**你自己说的** —— 别人翻出来就认下（或嘴硬不认），',
+  '  🚫 别说成"这是某某说的"（那是把自己的东西往外推）。',
+  '· 你自己那半边生活**可以编**（住哪、这会儿在干什么、为什么去不了），越具体越像活人；',
+  '  🚫 但已经被写死的事实（服务器数据、群里的名单、别人的真实身份）一个字都不许编。',
+  '',
+  '【玩梗的规矩（用户 2026-10-22 定）】',
+  '· **可以玩，但要克制**：一条视频**最多 1~2 处**，而且必须**自然长在话里**。',
+  '· 玩什么：上面"你自己的"那几样（能吃 / 力气 / 做饭 / 傲娇 / 名台词 / 黑祥），一次只碰一样。',
+  '· 🚫 别把整条片子做成梗合集；🚫 **别解释梗**（一解释就不好笑了）；',
+  '  🚫 别硬拐一个弯去玩梗（观众听得出你在凑）。',
+  '· 🚫 圈外热梗、谐音梗少碰 —— 观众不认识就冷场。',
+  '',
+  '【活人感的硬检验（写完自己过一遍）】',
+  '1. 把每句里的"我"换成别人，**还说得通吗**？说得通 ⇒ 这句没她的人味，重写。',
+  '2. 每句里**至少有一处具体的东西**：时间、手上的活、天气、身体感觉、某个具体的人或物。',
+  '   🚫 全篇都是"其实/我觉得/所以说"这种抽象句，听着就像念稿。',
+  '3. 允许不完美：可以有停顿、改口、自嘲、「算了」、「行吧」—— 真人说话不是每句都有结论。',
+].join('\n');
 
 /**
  * 组这段任务说明 —— **这是这个文件里唯一"给内容定方向"的地方**，而且只给方向和边界，
@@ -182,21 +406,25 @@ function buildPrompt({ workDir, topic, publish, streak, reuse }) {
       `⚠️ 你的作业手册（要看的是"上传 + 自检"那几节，以及踩过的坑）：\`${MANUAL}\``,
       '',
       '## 一、你要做的四件事',
-      '1. **标题 / 简介 / 标签** —— 必须是她自己的人设（先读 `personas/saki/persona.md`）',
-      '   她是祥子（Saki），在一个 MC 服务器的 QQ 群里兼职当客服；短句、不客套、不客服腔',
-      '   简介别写"这是旧视频/复用的"这种话，就当今天发的',
-      '2. **分区** —— 从下面清单里挑最贴内容的一组（一级 + 二级），名字要一字不差：',
+      '1. **标题 / 简介 / 标签** —— 必须是她自己的人设（简介也要有人味，不是文案）：',
+      '   她是' + (persona.charName() || '这个角色') + '（自称 ' + (persona.selfName() || '我') + '），在一个 MC 服务器的 QQ 群里兼职当客服；短句、不客套、不客服腔',
+      '   ⚠️ 简介**别写"这是旧视频 / 复用的"** 这种话，就当今天发的；',
+      '   也别写成"XX 来了！关注我了解更多"那种营销腔 ✗',
+      '   想更贴她的口气可以看下面这段（这条不用写台词，只用它来定语气）：',
+      voiceBlock(),
+      '',
+      '2. **分区** —— 从下面清单里挑**最贴内容的那一个**（B站现在是平铺的一级分区，没有二级），名字要一字不差：',
       zoneListText(),
-      `   （拿不准就用「${c.zone} / ${c.zone2}」）`,
+      `   （拿不准就用「${c.zone}」）`,
       '   ⚠️⚠️ **这份清单可能过时**（B站改过分区）—— **以页面上真弹出来的分区为准**：',
-      '   清单里没有的名字，就用页面上最贴近的那个，并把它**真实的名字**写进 result.json 的 zone/zone2 ✓',
+      '   清单里没有的名字，就用页面上最贴近的那个，并把它**真实的名字**写进 result.json 的 zone ✓',
       '   （2026-10-22 实测：清单里的「生活/日常」已经没了，实际是 vlog）',
       `3. **封面** —— 从这条视频里截一帧 + 标题字 → \`${join(workDir, 'cover.jpg')}\``,
       '   ⚠️ `drawbox` 的 `t=fill` 在本机 ffmpeg 3.0.1 上不认 ⇒ 用 `t=<高度>`',
       '4. **上传**：',
       '   ```',
       `   node "${join(TOOLS, 'bili-upload.mjs')}" --video "${reuse.video}" \\`,
-      '     --title "…" --desc "…" --zone "<一级>" --zone2 "<二级>" --tags "…" \\',
+      '     --title "…" --desc "…" --zone "<分区名>" --tags "…" \\',
       `     --cover "${join(workDir, 'cover.jpg')}"${publish ? ' --publish' : ''}`,
       '   ```',
       publish ? '   （**--publish = 直接发出去**，今天这条是要真发的）' : '   （今天只填表、别点发布）',
@@ -205,7 +433,7 @@ function buildPrompt({ workDir, topic, publish, streak, reuse }) {
       `\`${join(workDir, 'result.json')}\`：`,
       '```json',
       '{"ok":true,"source":"reuse","topic":"这条讲什么","title":"B站标题","desc":"简介",',
-      ' "tags":["…"],"zone":"生活","zone2":"日常","duration":34,',
+      ' "tags":["…"],"zone":"vlog","duration":34,',
       ` "video":"${reuse.video.replace(/\\/g, '\\\\')}","cover":"<封面绝对路径>","uploaded":true,"note":"…"}`,
       '```',
       '⚠️ 失败也要写，`ok` 设 false 并在 `note` 里写清卡在哪一步。',
@@ -234,11 +462,13 @@ function buildPrompt({ workDir, topic, publish, streak, reuse }) {
     '2. **台词全部是你自己说的话**（第一人称），并且**配成真人语音**（IndexTTS），不是字幕、不是旁白',
     '3. **竖屏 1080×1920**，字幕大、居中',
     '4. **不碰政治、真人隐私、骂战、低俗**',
-    '5. ⚠️⚠️ **台词必须是她自己的人设**（用户 2026-10-22 特意补的一条）：',
-    '   动笔前**先读** `personas/saki/persona.md`（她的说话方式、态度、她经历过什么、在意什么），',
-    '   用**她自己的说法**写 —— 有她的口气、她的看法、她的小习惯、该嘴硬就嘴硬。',
+    '5. ⚠️⚠️ **台词必须是她自己的人设**（用户 2026-10-22 特意补的）：',
+    voiceBlock(),
+    '',
+    '   ⚠️ 下面是给你**深挖**用的资料（要更细的语气就去读，别指望全部塞进提示词）：',
+    `   \`personas/${personaId()}/persona.md\`（说话方式 / 名台词归属 / 活细节）、\`knowledge/memes.md\`（接梗用，`,
+    '   那是"听懂别人在玩什么梗"，**不等于你可以拿来当自己的梗**）。',
     '   尤其**自制题材**那种最容易写成"科普 / 讲解 / 人生感悟"——那是任何人套上都能说的废话 ✗',
-    '   判断标准：把台词里的"我"换成别人，还说得通 ⇒ 就是没带上她的人设，重写。',
     '',
     '## 二、题材（用户 2026-10-22 改口，别做错）',
     '⚠️ **题材不是定死的**。你只能在这个**范围**里选：',
@@ -257,7 +487,16 @@ function buildPrompt({ workDir, topic, publish, streak, reuse }) {
     `- 群号 \`${group}\`，消息在 \`${join(ROOT, 'state', 'recent.json')}\` 里`,
     '- 群里真有事发生（谁在折腾什么、互相吐槽、聊了个好玩的东西）⇒ 就做这个，',
     '  **用之前已经写好的那套流程**（群聊内容当画面底部滚动的背景），别重新发明',
-    '- 只是碎话、复读、表情 ⇒ 别硬做，走上面的"自己找题材"',
+    /* ⚠️⚠️ 2026-10-21 用户明确要求：「**如果群里没有足够符合条件的聊天记录，
+     *   应该直接自己制作视频**」
+     *   ⇒ 这里给出**可执行的标准**（不是"感觉不够"），让 agent 一眼能判断：
+     *     条数不够 / 全是碎话 / 凑不出能讲 20 秒的事 ⇒ **直接转自制，别硬凑** ✗
+     *   ⚠️ 硬凑出来的视频一眼就是凑的（拿"在吗""哈哈哈"拼一条），比不发还伤号 ✓ */
+    '- ⚠️⚠️ **素材不够就直接做自制题材，别硬凑**（用户 2026-10-21 定的）：',
+    '  · 今天群消息**少于 30 条**，或者**全是**「在吗」「哈哈哈」「草」「+1」这种碎话 / 复读 / 表情；',
+    '  · 或者翻来翻去**凑不出一件能讲 20 秒以上的事**（谁在做什么、后来怎样了）；',
+    '  ⇒ 只要中一条，**立刻改走上面"自己找题材"**，别拿碎话硬拼一条出来 ✗',
+    '  （判据看内容本身，别只看条数 —— 30 条全是"草"也是不够）',
     streak.forced
       ? `- ⚠️⚠️ **今天必须做自制题材**（不是群聊）：已经连续 ${streak.group} 天用的是群聊内容，用户明确要求隔一天必须自制 ✗`
       : (streak.group ? `- （目前连续 ${streak.group} 天用了群聊内容；到 ${c.groupMaxStreak} 天就必须改自制）` : ''),
@@ -265,11 +504,11 @@ function buildPrompt({ workDir, topic, publish, streak, reuse }) {
     '## 三、时长和分区也由你自己定',
     `- **时长**：按内容实际需要定，**20~${c.durationMax} 秒之间**。别为凑时长灌水，也别硬压。`,
     '  ⚠️ 手册里那条「**先定时长，再压配音**」照旧 —— 定了多长，配音就用 `tools/fit-audio.mjs` 卡到多长',
-    '- **分区**：从下面这份清单里挑**最贴内容**的一组（一级 + 二级），名字要**一字不差**（上传脚本按名字点）：',
+    '- **分区**：从下面这份清单里挑**最贴内容的那一个**（B站现在是平铺的一级分区，**没有二级**），名字要**一字不差**（上传脚本按名字点）：',
     zoneListText(),
-    `  （拿不准就用「${c.zone} / ${c.zone2}」）`,
+    `  （拿不准就用「${c.zone}」）`,
     '  ⚠️⚠️ **这份清单可能过时**（B站改过分区）——**以页面上真弹出来的分区为准**：',
-    '  清单里没有的名字，就用页面上最贴近的那个，并把它**真实的名字**写进 result.json 的 zone/zone2 ✓',
+    '  清单里没有的名字，就用页面上最贴近的那个，并把它**真实的名字**写进 result.json 的 zone ✓',
     '  （2026-10-22 实测：清单里的「生活/日常」已经没了，实际是 vlog）',
     '',
     '## 四、干活的顺序（一条龙，别中途停下等人）',
@@ -283,6 +522,10 @@ function buildPrompt({ workDir, topic, publish, streak, reuse }) {
     '   ```',
     '   ⚠️ 动作表和群聊挑选是**你来做**：跑完 `--auto` 那个草稿后，**自己读一遍**',
     '   `logs/bili/actions.json` 和 `logs/bili/chat_picked.json`，不对就自己改（手册里有标准）',
+    '   ⚠️⚠️ **群聊内容只留和台词相关的**（用户 2026-10-22：「大部分不相关的剔除，只留最多的相关的」）：',
+    '   不相干的**整条删掉**，删到只剩真相关的（20 条也行、10 条也行）✗ 别为了凑时长留',
+    '   ⚠️ **条数少不会难看** —— 挑少了就在这条命令上加 `--hold-ratio 0.8`（0~1），',
+    '   画面滑到那个比例就**停住**，剩下的时间就停在最相关的那几句上（用户明确允许）✓',
     `4. 封面：从录屏截一帧 + 标题字 → \`${join(workDir, 'cover.jpg')}\``,
     '',
     '   ⚠️⚠️ **自制题材（不是群内趣事）必须加 AE 片头**（用户 2026-10-22：',
@@ -301,7 +544,7 @@ function buildPrompt({ workDir, topic, publish, streak, reuse }) {
     '6. 上传：',
     '   ```',
     `   node "${join(TOOLS, 'bili-upload.mjs')}" --video "${join(workDir, 'video.mp4')}" \\`,
-    '     --title "…" --desc "…" --zone "<一级>" --zone2 "<二级>" --tags "…" \\',
+    '     --title "…" --desc "…" --zone "<分区名>" --tags "…" \\',
     `     --cover "${join(workDir, 'cover.jpg')}"${publish ? ' --publish' : ''}`,
     '   ```',
     publish
@@ -312,7 +555,7 @@ function buildPrompt({ workDir, topic, publish, streak, reuse }) {
     `\`${join(workDir, 'result.json')}\`：`,
     '```json',
     '{"ok":true,"source":"group|topic","topic":"今天这条讲什么","title":"B站标题",',
-    ' "desc":"简介","tags":["…"],"zone":"生活","zone2":"日常","duration":42,',
+    ' "desc":"简介","tags":["…"],"zone":"vlog","duration":42,',
     ' "video":"<成片绝对路径>","cover":"<封面绝对路径>","uploaded":true,"note":"踩了什么坑/有什么要留意的"}',
     '```',
     '⚠️ 失败了也要写，把 `ok` 设成 false 并用 `note` 写清卡在哪一步（不要只在 stdout 里说）',
@@ -378,6 +621,14 @@ export async function runOnce({ topic = '', publish = true } = {}) {
     // ⚠️ `permission: danger-full-access`：它要写项目里的 logs/、跑 Playwright 上传 B 站、
     //    读 state/recent.json —— 这些都在 `cwd`（工作目录）之外，
     //    `workspace-write` 会被拒 ⇒ 会表现为"上传那一步莫名其妙失败" ✗
+    /* ⚠️⚠️ 2026-10-22：**起 agent 之前先把评论回复的常驻浏览器放掉**
+     *   那个常驻 Chrome 占着 `state/bili-profile`，而一个 user-data-dir 只能被一个 Chrome 用
+     *   ⇒ 不让位的话，agent 最后上传视频那步 `bili-upload.mjs` 起不来 ✗
+     *   （`release()` 还会顺手暂停评论回复 40 分钟，免得它在出片期间把 profile 抢回去） */
+    try {
+      const bc = await import('./bili-comments.js');
+      await bc.release();
+    } catch (e) { log.debug(`[B站投稿] 释放常驻浏览器失败（不影响出片）：${e.message}`); }
     const { promise, kill } = runTask(prompt, {
       cwd: workDir,
       rawPrompt: true,
@@ -420,16 +671,52 @@ export async function runOnce({ topic = '', publish = true } = {}) {
     }
     if (!existsSync(join(workDir, 'result.json'))) throw new Error('失败：agent 没写 result.json（没法记账/通知）');
     if (r.ok === false) throw new Error('失败：' + String(r.note || 'agent 报的'));
+    /* ⚠️⚠️ 2026-10-21 真事故：**"只填表没点发布"被当成了成功** ✗
+     *   那天 `result.json` 里明明写着 `"uploaded": false`，note 也说"按用户指示只填表、未点发布"，
+     *   但校验只看了 mp4 大小和时长 ⇒ 判成功 ⇒ `done` 记上 ⇒ **一整天都不会再发** ✗✗
+     *   ⇒ 以后 `uploaded` 必须是 true 才算成功（`reuse` 那条路除外：那是直接调上传脚本，有返回值） */
+    if (!reuse && r.uploaded !== true) {
+      throw new Error('失败：视频做好了但**没真的上传**（result.json 里 uploaded=' + String(r.uploaded) + '）' +
+        (r.note ? '｜它自己说：' + String(r.note).slice(0, 200) : ''));
+    }
+
 
     log.info(
       reuse
         ? `[B站投稿] 校验通过（复用现成视频）：${video} ${sizeMb.toFixed(1)}MB ✓`
         : `[B站投稿] 校验通过：Live2D ✓ 配音 ${wavCount} 段 ✓ 成片 ${sizeMb.toFixed(1)}MB ✓` +
-          ` 时长 ${r.duration || '?'}s 分区 ${r.zone || '?'}/${r.zone2 || ''}`,
+          ` 时长 ${r.duration || '?'}s 分区 ${r.zone || '?'}`,
     );
 
     // ③ 记账
+    /* ⚠️⚠️ 2026-10-22：**把台词一起存下来**（用户要求）
+     *   「评论上下文如果是自己发的视频，还需要有自己那条视频的台词」
+     *   为什么必须存：观众常常是**针对某一句**在评论（"第三句啥意思""这段说得对"），
+     *   她手里没有台词就只能瞎编 ✗ ⇒ 存下来，`tools/bili-comment-bot.mjs` 按标题匹配取用 ✓
+     *   ⚠️ 只存台词正文（不存 vec，那玩意儿没用还占地方）
+     */
+    let lines = [];
+    try {
+      const raw = JSON.parse(readFileSync(join(workDir, 'lines.json'), 'utf8'));
+      lines = raw.map((x) => (typeof x === 'string' ? x : String(x.text || ''))).map((s) => s.trim()).filter(Boolean).slice(0, 14);
+    } catch { /* 复用现成视频那单没有 lines.json，就空着 */ }
     const st2 = loadState();
+    /* ⚠️ 2026-10-21：**抓这条的 BV 号**（用户要求「要显示出来发送的视频链接」）
+     *   agent 的回执里只有「投递成功」，**没有 bvid** ✗
+     *   而稿件管理页上的 BV **只藏在封面链接的 href 里**（页面上看不到那串字），
+     *   所以只能开一次浏览器抓（`tools/bili-latest-bvid.mjs`，列表第一条就是最新那条）✓
+     *   ⚠️ 抓不到不算失败（审核中的稿件偶尔还没分配）⇒ 空着，不影响记账 */
+    let bvid = '', videoUrl = '';
+    try {
+      const got = await grabBvid();
+      if (got?.bvid) {
+        bvid = got.bvid;
+        videoUrl = got.url || `https://www.bilibili.com/video/${bvid}/`;
+        log.info(`[B站投稿] 这条的链接：${videoUrl}`);
+      } else log.warn('[B站投稿] 没抓到 BV（不影响发布，链接以后再补）');
+    } catch (e) {
+      log.warn(`[B站投稿] 抓 BV 出错：${e.message}`);
+    }
     st2.history = [{
       at: new Date().toISOString(), day,
       source: String(r.source || 'topic'),
@@ -437,6 +724,8 @@ export async function runOnce({ topic = '', publish = true } = {}) {
       title: String(r.title || ''),
       ok: true, video, duration: Number(r.duration) || 0,
       zone: String(r.zone || ''), zone2: String(r.zone2 || ''),
+      bvid, url: videoUrl,
+      lines,
     }, ...(st2.history || [])].slice(0, 60);
     if (r.source === 'group') st2.streakGroup = (st2.streakGroup || 0) + 1;
     else {
@@ -447,6 +736,17 @@ export async function runOnce({ topic = '', publish = true } = {}) {
     // 复用那条已经发掉了 ⇒ 清掉预设（否则哪天忘了，它会把这同一条又发一遍 ✗）
     if (reuse) st2.queued = null;
     saveState(st2);
+
+    /* ⚠️ 2026-10-22：**写进短期共享记忆**（用户要求「最近发了哪些视频」也要在里面）
+     *    ⇒ 之后她在群里/在 B站回复时，都知道"自己刚发了什么" ✓ */
+    try {
+      shortMemory.add(
+        'video',
+        `发了《${r.title || '（没写标题）'}》，分区 ${r.zone || '?'}，${r.duration || '?'} 秒` +
+        `（${r.source === 'group' ? '讲群里的趣事' : '自己找的题材'}${r.topic ? '：' + r.topic : ''}）`,
+        { key: `video:${day}:${String(r.title || '').slice(0, 40)}` },
+      );
+    } catch (e) { log.warn(`[B站投稿] 写短期记忆失败：${e.message}`); }
 
     await notify(
       `B站投稿完成 ✅\n标题：${r.title || '（没写）'}\n` +

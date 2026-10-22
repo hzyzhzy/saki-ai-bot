@@ -579,6 +579,19 @@ function saveConfig(patch) {
   //    可 `config.yml` 里**一个字都没写进去**（只有一行 warn 落在日志里）✗
   //    ⇒ 三处都要有：`put(...)` / `HANDLED` / `order`。
   put('biliPublish', patch.biliPublish);
+  // ⚠️ 2026-10-22：**B站评论回复**（同样三处都要有：put / HANDLED / order，
+  //    少一处就会"界面显示已保存、config.yml 里其实没写进去"✗ 这个坑 biliPublish 已经踩过一次）
+  put('biliComments', patch.biliComments);
+  // ⚠️ 2026-10-21：**B站主动评论**（去别人视频下发）—— 同样是三处都要有。
+  //    ⚠️ 这一行就是我自己刚踩过的：POST 里写了 `saveConfig({ biliProactive: … })`，
+  //    但 `saveConfig` **只对这里 `put()` 列出的段做写入** ⇒ 静默丢弃，
+  //    界面显示「已保存 ✓」、`config.yml` 里一个字都没有（验收脚本当场抓到）✗
+  put('biliProactive', patch.biliProactive);
+  /* ⚠️ 2026-10-21 加：**语音**（用户：「加一个语音设置模块放在功能卡片，内置开关，
+   *   然后各个QQ账号可以选择用哪个语音」）
+   *   ⚠️ `voice` **不在** `SHARED_SECTIONS` 里 ⇒ 按号私有 ⇒ 写进 `accounts/<QQ>.yml`
+   *      ⇒ **每个 QQ 号能有自己的音色** ✓（正是用户要的） */
+  put('voice', patch.voice);
   // ⚠️ 2026-09-22 加：**谁在改人设**要留下痕迹。
   //    查"config.yml 被莫名改成别的人设"时，就是靠这行定位到是哪个套件干的。
   //    带上文件名一眼能看出改的是**真实配置**还是套件的临时配置。
@@ -607,6 +620,11 @@ function saveConfig(patch) {
     'llm', 'onebot', 'trigger', 'context', 'qzone', 'status', 'faces', 'chat', 'attitude',
     'teach', 'chunking', 'webui', 'life', 'quest', 'affinity', 'friend', 'persona',
     'imagegen', 'groupParams', 'ownerQQ', 'botQQ', 'logLevel', 'biliPublish',
+    // ⚠️ 2026-10-21：这两段走的是上面 `put(...)` 那条路，但**必须同时登记在这里** ——
+    //    不然每次保存都会吵一句「白名单里没有它」（虚警，但会掩盖真的漏字段）✗
+    'biliComments', 'biliProactive',
+    // ⚠️ 2026-10-21：语音（按号私有，走上面 put 那条路）
+    'voice',
   ]);
   for (const k of Object.keys(patch ?? {})) {
     if (!HANDLED.has(k)) log.warn(`saveConfig 收到没处理的字段「${k}」—— 白名单里没有它，这次它**不会被写进 config.yml**`);
@@ -630,6 +648,9 @@ function saveConfig(patch) {
     'life',
     'quest',
     'biliPublish',
+    'biliComments',
+    'biliProactive',
+    'voice',
     'ownerQQ',
     'botQQ',
     'adminQQ',
@@ -1407,6 +1428,239 @@ const routes = {
 
   /** 测试模型连通性（用界面当前填的值，不落盘） */
   /** 列出 API 上可用的模型（用于界面上的模型下拉框） */
+  /* ════════════════════════════════════════════════════════════════
+   * ⚠️ 2026-10-22 加：**多模型提供商 + 优先级排序 + 模型设定存档**
+   *   用户原话：「给主模型加个**可保存之前的模型设定**并**新加一个模型提供商**的功能，
+   *   再加一个**模型优先级卡片滑动排序**设置」
+   *
+   * ## 核心设计（别改）：**启用某个提供商 = 把它的值写回扁平字段**
+   *   `bot.js` / `llm.js` 读的一直是 `llm.baseURL / apiKey / model / temperature…`
+   *   ⇒ 这里只维护"多提供商"这一层，启用时**同步写扁平字段** ✓
+   *     · 调用链一行都不用改
+   *     · 也不会有"列表里是这个、实际用的是那个"的坑 ✗
+   * ════════════════════════════════════════════════════════════════ */
+
+  /** 列表 + 当前激活 + 档案 + 降级状态 */
+  'GET /api/llm-providers': async (_req, res) => {
+    const l = config.llm || {};
+    let fo = null;
+    try { fo = (await import('./llm.js')).llmFallbackStatus(); } catch { /* ignore */ }
+    /* ⚠️⚠️ 2026-10-22 改（用户：「**把大模型那里本来有的设置直接全部剪切过来，
+     *    api 配置也要剪切过来，不要搞丢了，然后排在模型提供商的第一个**」）
+     *
+     *    原来界面是**两张卡**：上面「大模型」（扁平那套）+ 下面「模型提供商」列表
+     *    ⇒ 同一个地址/密钥填两遍，用户当场问「**为什么还要留两套一样的设置**」✗
+     *
+     *    现在只留「模型提供商」一张卡，**第一个就是主模型**。而 `providers` 还空着时
+     *    （老配置就是这种情况），这里**把扁平那套原样搬成第 0 项**返回给界面 ——
+     *    ⚠️ **只在内存里造，不写盘**：`saveConfig()` 是 `yaml.load + yaml.dump`，
+     *       一写就会把 `config.yml` 里的注释全冲掉（那是用户自己维护的）✗
+     *       等他点「保存列表」时再落盘 ✓
+     *    ⚠️ apiKey **原样带过去**，绝不打码/清空（用户刚因为密钥被清掉报过一次 ✗） */
+    const list = Array.isArray(l.providers) ? l.providers : [];
+    const autoList = (!list.length && String(l.baseURL || '').trim())
+      ? [{
+          id: 'p-main',
+          name: '主模型',
+          baseURL: String(l.baseURL || '').replace(/\/+$/, ''),
+          apiKey: String(l.apiKey || ''),
+          model: String(l.model || ''),
+          temperature: Number.isFinite(l.temperature) ? l.temperature : 1,
+          maxTokens: Number.isFinite(l.maxTokens) ? l.maxTokens : 8000,
+          timeout: Number.isFinite(l.timeout) ? l.timeout : 60000,
+          auto: true,   // 界面据此提示"还没保存过"
+        }]
+      : [];
+    send(res, 200, {
+      ok: true,
+      providers: list.length ? list : autoList,
+      activeId: String(l.activeId || (list.length ? '' : 'p-main')),
+      profiles: Array.isArray(l.profiles) ? l.profiles : [],
+      /* ⚠️ 2026-10-22：**降级状态**（用户：「优先级在前的模型不可用，兜底自动使用后一级的
+       *   模型 10 分钟，10 分钟之后自动重试」）—— 界面上要能看见现在降到哪一级、还剩多久 ✓ */
+      fallback: fo,
+      // 现在**实际在用**的那套（扁平字段）—— 界面上"当前生效"就显示它
+      current: {
+        baseURL: String(l.baseURL || ''),
+        model: String(l.model || ''),
+        apiKey: String(l.apiKey || ''),
+        temperature: Number(l.temperature ?? 1),
+        maxTokens: Number(l.maxTokens ?? 8000),
+        timeout: Number(l.timeout ?? 60000),
+      },
+    });
+  },
+
+  /** 手动"立刻回主模型重试"（不用等满 10 分钟） */
+  'POST /api/llm-fallback/reset': async (_req, res) => {
+    try {
+      const llm = await import('./llm.js');
+      llm.llmFallbackReset();
+      send(res, 200, { ok: true, fallback: llm.llmFallbackStatus() });
+    } catch (e) {
+      send(res, 200, { ok: false, error: e.message });
+    }
+  },
+
+  /**
+   * 保存提供商列表（**数组顺序 = 优先级，第 0 个就是主模型**，界面拖拽后整张表回传）
+   * body: { providers: [...], activeId?: 'id' }
+   *
+   * ⚠️⚠️ 2026-10-22 改（用户：「**api 配置也要剪切过来，不要搞丢了**」）：
+   *   · 每一项现在**也带** temperature / maxTokens / timeout（原来只存在扁平字段里）；
+   *   · **apiKey 空 = 沿用原来的，绝不写空** —— 用户刚报过一次「你怎么把我的 api 删了」✗
+   *     根因就是这里原来写 `patch.apiKey = hit.apiKey || ''`：启用一个没填密钥的提供商
+   *     就把扁平那套的密钥冲成空串，界面上就是 401 / `api key is invalid` ✗
+   *   · `activeId` 不再当"用哪个"的开关 —— **顺序即优先级**，恒等于第 0 项 ✓
+   */
+  'POST /api/llm-providers': async (req, res) => {
+    try {
+      const b = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+      const num = (v, d) => (Number.isFinite(Number(v)) && v !== '' && v !== null ? Number(v) : d);
+      const clean = (Array.isArray(b.providers) ? b.providers : []).slice(0, 20).map((p, i) => ({
+        id: String(p?.id || `p${i + 1}`).slice(0, 40),
+        name: String(p?.name || `提供商 ${i + 1}`).slice(0, 40),
+        baseURL: String(p?.baseURL || '').replace(/\/+$/, '').slice(0, 300),
+        apiKey: String(p?.apiKey || '').slice(0, 400),
+        model: String(p?.model || '').slice(0, 120),
+        note: String(p?.note || '').slice(0, 200),
+        /* ⚠️⚠️ 2026-10-22 加（用户：「**那个主模型如果是被限流报错的话，先换相同供应商正常模型**」）
+         *    同一个 baseURL + 同一个 key 下的**备用模型**，限流时按顺序试，
+         *    试完才跨到下一家供应商 ✓（界面上是逗号分隔的一行）
+         *    ⚠️ 最多 8 个 —— 再多就不是"备用"了，那叫没有主模型 */
+        fallbackModels: (Array.isArray(p?.fallbackModels)
+          ? p.fallbackModels
+          : String(p?.fallbackModels || '').split(/[,，、\n]/))
+          .map((x) => String(x || '').trim()).filter(Boolean).slice(0, 8),
+        /* ⚠️ 2026-10-22：**跟着提供商一起存**（用户要把「大模型」那套整个剪切过来）。
+         *    没填 = null ⇒ `llmCfg()` 里回落到扁平值 ✓ */
+        temperature: Number.isFinite(Number(p?.temperature)) && p?.temperature !== '' ? Number(p.temperature) : null,
+        maxTokens: Number.isFinite(Number(p?.maxTokens)) && p?.maxTokens !== '' ? Number(p.maxTokens) : null,
+        timeout: Number.isFinite(Number(p?.timeout)) && p?.timeout !== '' ? Number(p.timeout) : null,
+      }));
+      // ⚠️ id 不许重复（重复会让"启用"点到别人头上）
+      const seen = new Set();
+      for (const p of clean) {
+        if (seen.has(p.id)) p.id = `${p.id}-${Math.random().toString(36).slice(2, 6)}`;
+        seen.add(p.id);
+      }
+      /* ⚠️⚠️ **密钥不许被空值冲掉**：某个提供商没填 apiKey、而它跟当前生效的那套
+       *    是同一个地址 ⇒ 沿用原来的密钥（用户刚被清过一次）✓ */
+      const cur = config.llm || {};
+      for (const p of clean) {
+        if (!p.apiKey && cur.apiKey && String(cur.baseURL || '').replace(/\/+$/, '') === p.baseURL) {
+          p.apiKey = String(cur.apiKey);
+        }
+      }
+      const patch = { providers: clean };
+      const first = clean[0];
+      if (first) {
+        if (!first.baseURL) return send(res, 200, { ok: false, error: `第 1 个（主模型）「${first.name}」没填 baseURL` });
+        /* ⚠️ 第 1 个 = 主模型 ⇒ **同步写扁平字段**（`bot.js` / `llm.js` 读的就是这几个）。
+         *    顺序即优先级，所以这里不再看 `activeId` 指谁 ✓ */
+        patch.activeId = first.id;
+        patch.baseURL = first.baseURL;
+        patch.model = first.model || '';
+        if (first.apiKey) patch.apiKey = first.apiKey;          // ⚠️ 空就**不动**原来的
+        if (first.temperature != null) patch.temperature = first.temperature;
+        if (first.maxTokens != null) patch.maxTokens = first.maxTokens;
+        if (first.timeout != null) patch.timeout = first.timeout;
+      } else {
+        patch.activeId = '';
+      }
+      saveConfig({ llm: patch });
+      /* ⚠️⚠️ 2026-10-22 加（真 bug：改完顺序还在用旧的降级目标）：
+       *    `FO.level` 是**内存里的序号**（第几级），而这里刚把数组**重新排过** ⇒
+       *    原来的 level=1 可能从「第二个」变成了「第三个」，甚至变成刚修好的那个 ✗
+       *    实测现场：用户把主模型拖回第一位，界面显示主模型是 DeepSeek（能用），
+       *    但 `FO.level` 还停在 1 ⇒ **实际仍在用那个 400 的中转站** ⇒ 聊天全挂 ✗
+       *    ⇒ 保存列表 = "我改好了，重新试" ⇒ **顺手把降级复位** ✓ */
+      try {
+        const llmMod = await import('./llm.js');
+        llmMod.llmFallbackReset();
+        log.info('[模型] 提供商列表已保存 ⇒ 降级状态复位（下次调用就用第 1 个）');
+      } catch { /* ignore */ }
+      log.info(`[模型] 提供商已保存：${clean.length} 个，主模型=${first ? `${first.name}（${first.model || '?'}）` : '(无)'}`);
+      send(res, 200, { ok: true, providers: clean, activeId: patch.activeId ?? config.llm.activeId });
+    } catch (e) {
+      send(res, 200, { ok: false, error: e.message });
+    }
+  },
+
+  /**
+   * 存一份「模型设定」快照（用户：「**可保存之前的模型设定**」）
+   * body: { name }
+   * ⚠️ 快照里**带上整套 providers + activeId + 扁平字段** ⇒ 切回去时一模一样 ✓
+   */
+  'POST /api/llm-profiles/save': async (req, res) => {
+    try {
+      const b = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+      const name = String(b.name || '').trim().slice(0, 40);
+      if (!name) return send(res, 200, { ok: false, error: '给这份设定起个名字' });
+      const l = config.llm || {};
+      const snap = {
+        name,
+        savedAt: Date.now(),
+        providers: JSON.parse(JSON.stringify(Array.isArray(l.providers) ? l.providers : [])),
+        activeId: String(l.activeId || ''),
+        baseURL: String(l.baseURL || ''),
+        apiKey: String(l.apiKey || ''),
+        model: String(l.model || ''),
+        temperature: Number(l.temperature ?? 1),
+        maxTokens: Number(l.maxTokens ?? 8000),
+        timeout: Number(l.timeout ?? 60000),
+      };
+      const list = (Array.isArray(l.profiles) ? l.profiles : []).filter((x) => x?.name !== name);
+      list.unshift(snap);
+      saveConfig({ llm: { profiles: list.slice(0, 20) } });
+      log.info(`[模型] 存了一份设定「${name}」（${snap.providers.length} 个提供商）`);
+      send(res, 200, { ok: true, profiles: list.slice(0, 20) });
+    } catch (e) {
+      send(res, 200, { ok: false, error: e.message });
+    }
+  },
+
+  /** 载入某份设定（整份覆盖回来） */
+  'POST /api/llm-profiles/load': async (req, res) => {
+    try {
+      const b = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+      const name = String(b.name || '').trim();
+      const l = config.llm || {};
+      const hit = (Array.isArray(l.profiles) ? l.profiles : []).find((x) => x?.name === name);
+      if (!hit) return send(res, 200, { ok: false, error: `没有这份设定：${name}` });
+      saveConfig({
+        llm: {
+          providers: hit.providers || [],
+          activeId: hit.activeId || '',
+          baseURL: hit.baseURL || config.llm.baseURL,
+          apiKey: hit.apiKey || '',
+          model: hit.model || '',
+          temperature: Number.isFinite(hit.temperature) ? hit.temperature : config.llm.temperature,
+          maxTokens: Number.isFinite(hit.maxTokens) ? hit.maxTokens : config.llm.maxTokens,
+          timeout: Number.isFinite(hit.timeout) ? hit.timeout : config.llm.timeout,
+        },
+      });
+      log.info(`[模型] 载入设定「${name}」⇒ 现在用 ${hit.model}（${hit.baseURL}）`);
+      send(res, 200, { ok: true, applied: hit });
+    } catch (e) {
+      send(res, 200, { ok: false, error: e.message });
+    }
+  },
+
+  /** 删一份设定 */
+  'POST /api/llm-profiles/delete': async (req, res) => {
+    try {
+      const b = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+      const name = String(b.name || '').trim();
+      const l = config.llm || {};
+      const list = (Array.isArray(l.profiles) ? l.profiles : []).filter((x) => x?.name !== name);
+      saveConfig({ llm: { profiles: list } });
+      send(res, 200, { ok: true, profiles: list });
+    } catch (e) {
+      send(res, 200, { ok: false, error: e.message });
+    }
+  },
+
   'POST /api/models': async (req, res) => {
     const t = JSON.parse((await readBody(req)).toString('utf8') || '{}');
     // 界面上可能改了 baseURL / apiKey 还没保存，所以以传来的为准
@@ -1422,7 +1676,11 @@ const routes = {
       //    ⇒ 换成 `llmFetch`（和真正聊天用的是同一条网络出口 ✓）
       const r = await llmFetch(`${baseURL}/models`, {
         headers: { Authorization: `Bearer ${apiKey}` },
-        signal: AbortSignal.timeout(20000),
+        /* ⚠️ 2026-10-22：20 秒 → 45 秒。
+         *    `llmFetch` 会**先试全局出口**（现在这台是代理），代理连不上这家（国内中转站）
+         *    时会先耗掉一段才换直连 —— 20 秒不够 ⇒ 界面上「拉列表」永远报 `fetch failed`，
+         *    而同一时刻裸直连是 200 ✗（实测：`/v1/models` 直连 200、走 webui 这条路失败） */
+        signal: AbortSignal.timeout(45000),
       });
       if (!r.ok) {
         const body = await r.text().catch(() => '');
@@ -1447,16 +1705,19 @@ const routes = {
 
   'POST /api/test-llm': async (req, res) => {
     const t = JSON.parse((await readBody(req)).toString('utf8'));
-    const saved = { ...config.llm };
-    if (t.llm) Object.assign(config.llm, t.llm);
     const started = Date.now();
     try {
-      const reply = await ping();
+      /* ⚠️⚠️ 2026-10-22 改（真 bug：界面上的「测试连通性」测的不是你填的那套）：
+       *    原来是 `Object.assign(config.llm, t.llm)` 然后 `ping()` —— 可 `ping()` 内部走
+       *    `llmCfg()`，而 `providers` 非空时**chain[0] 会把 baseURL/model 盖掉** ⇒
+       *    测第二个提供商其实测的是第一个，降级时测的还是第三个 ✗
+       *    实测后果：用户填了个免费账号用不了的模型，点测试全绿，真发消息才 400 ✗
+       *    ⇒ 改成把要测的那套**直接交给 `ping(over)`**，不碰全局配置、不碰降级状态 ✓ */
+      const over = (t && t.llm && typeof t.llm === 'object') ? t.llm : null;
+      const reply = await ping(over);
       send(res, 200, { ok: true, ms: Date.now() - started, reply: String(reply).trim().slice(0, 60) });
     } catch (e) {
       send(res, 200, { ok: false, error: e.message });
-    } finally {
-      Object.assign(config.llm, saved); // 测试不改真实配置
     }
   },
 
@@ -2302,10 +2563,112 @@ const routes = {
    * ⇒ 设置面板在 `webui.html` 的 `tab-biliPub`；这里只有接口。
    *   ⚠️ 2026-10-22：原来那个独立页 `/bili-publish` 已经删掉（用户不要第二个页面）✗
    */
+  /* ══════════════════════════════════════════════════════════════════
+   * ⚠️⚠️ 2026-10-22 加：**B 站一键登录**（用户原话：
+   *   「**可不可以纯靠 webui 完成整个 b 站登录过程，方便没有 agent 的用户操作？**」）
+   *
+   * 以前只能命令行跑 `node tools/bili-login.mjs` ⇒ 没有 agent 的人根本不知道要这么做 ✗
+   *
+   * ## 两条路由
+   *   · `GET  /api/bili/login` —— 现在什么状态（idle / running / ok / fail + 登的是谁）
+   *   · `POST /api/bili/login` —— **起一个后台进程**，弹 Chrome 让人扫码
+   *
+   * ## ⚠️ 为什么 POST 必须"立刻返回"
+   *   登录要**等人扫码**，最长 10 分钟 ⇒ HTTP 请求绝不能挂着等（浏览器会超时、
+   *   界面会像卡死）✗ ⇒ 起 **detached 子进程**（`unref()`），请求马上返回，
+   *   界面自己**轮询 GET** 看进度 ✓
+   *
+   * ## ⚠️ 状态走文件，不走内存
+   *   `tools/bili-login.mjs` 是**独立进程**，写完状态就退出 ⇒ 只能通过
+   *   `state/bili-login-<QQ>.json` 交换（主号也是 `<QQ>` 命名，不搞例外 ——
+   *   界面和脚本两边算路径的代码各只有一份，少一个分支就少一种错）✓
+   *
+   * ## ⚠️ 按号分
+   *   登录的是**当前这个 webui 进程所属的 QQ 号**的 B 站账号
+   *   （profile 目录 `state/bili-profile-<QQ>` 也是按号分的）✓
+   * ══════════════════════════════════════════════════════════════════ */
+
+  'GET /api/bili/login': async (_req, res) => {
+    const qq = String(ACCOUNT.id || '').trim();
+    const file = join(ROOT, 'state', qq ? `bili-login-${qq}.json` : 'bili-login.json');
+    const profile = join(ROOT, 'state', qq && !ACCOUNT.isMain ? `bili-profile-${qq}` : 'bili-profile');
+    let st = null;
+    try { st = JSON.parse(readFileSync(file, 'utf8')); } catch { /* 还没登过 */ }
+    // 进程还活着吗（状态里记了 pid）—— 死了但状态还是 running ⇒ 当成"中断了"
+    let alive = false;
+    if (st?.state === 'running' && st.pid) {
+      try { process.kill(Number(st.pid), 0); alive = true; } catch { alive = false; }
+    }
+    const hasProfile = existsSync(join(profile, 'Default'));
+    send(res, 200, {
+      ok: true,
+      qq,
+      account: qq ? accounts.displayName(qq) : '',
+      state: st ? (st.state === 'running' && !alive ? 'stale' : st.state) : 'idle',
+      uid: Number(st?.uid) || 0,
+      uname: String(st?.uname || ''),
+      at: Number(st?.at) || 0,
+      err: String(st?.err || ''),
+      running: !!alive,
+      // 有 profile 目录只说明"登录过"，不代表 cookie 还有效（B站会把登录态踢掉）
+      hasProfile,
+      profile,
+    });
+  },
+
+  'POST /api/bili/login': async (_req, res) => {
+    try {
+      const qq = String(ACCOUNT.id || '').trim();
+      const file = join(ROOT, 'state', qq ? `bili-login-${qq}.json` : 'bili-login.json');
+      // ⚠️ 已经在跑就别起第二个（两个 Chrome 抢同一个 profile 会互相踢）
+      let st = null;
+      try { st = JSON.parse(readFileSync(file, 'utf8')); } catch { /* ignore */ }
+      if (st?.state === 'running' && st.pid) {
+        let alive = false;
+        try { process.kill(Number(st.pid), 0); alive = true; } catch { alive = false; }
+        if (alive) return send(res, 200, { ok: true, already: true, pid: Number(st.pid) });
+      }
+      const script = join(ROOT, 'tools', 'bili-login.mjs');
+      if (!existsSync(script)) return send(res, 200, { ok: false, error: '找不到 tools/bili-login.mjs' });
+      // ⚠️ 先把状态写成 running（脚本自己也会写，但这样界面**立刻**就有反馈，
+      //    不用等脚本启动那几百毫秒）✓
+      try {
+        writeFileSync(file, JSON.stringify({ state: 'running', uid: 0, uname: '', err: '', at: Date.now(), pid: 0 }, null, 2), 'utf8');
+      } catch { /* ignore */ }
+      const child = spawn(process.execPath, [script], {
+        cwd: ROOT,
+        // ⚠️ 必须把**当前号**传下去 —— `biliProfileDir()` 就是靠这个环境变量分目录的，
+        //    不传的话子进程会当成主号，去开主号的 profile ⇒ 抢主号那个常驻浏览器 ✗
+        env: { ...process.env, QQBOT_ACCOUNT: qq },
+        detached: true,          // ⚠️ 脱离机器人进程：登录要等人扫码，最长 10 分钟
+        stdio: 'ignore',
+        windowsHide: true,       // ⚠️ 但 Chrome 窗口本身**要看得见**（那是给人扫的）
+      });
+      child.unref();
+      log.info(`[B站登录] 界面点了「登录」（号 ${qq || '主号'}）⇒ 已起进程 pid ${child.pid}，等扫码`);
+      send(res, 200, { ok: true, started: true, pid: child.pid });
+    } catch (e) {
+      send(res, 200, { ok: false, error: e.message });
+    }
+  },
+
   'GET /api/bili-publish': async (_req, res) => {
     const bp = await import('./bili-publish.js');
-    const c = bp.settings();
-    send(res, 200, { ok: true, cfg: c, state: bp.status() });
+    const bc = await import('./bili-comments.js');
+    const bpr = await import('./bili-proactive.js');
+    const sm = await import('./short-memory.js');
+    // ⚠️ `commentsToday` 是给面板显示"今天已回 X/Y 条"的（评论回复的今日进度）
+    const cs = bc.status();
+    send(res, 200, {
+      ok: true,
+      cfg: bp.settings(),
+      comments: bc.settings(),
+      // ⚠️ 2026-10-21：**主动去别人视频下评论**（用户要「手动发一条 + 显示出来发送的视频链接」）
+      proactive: bpr.settings(),
+      proactiveState: bpr.status(),
+      memory: sm.status(),
+      state: { ...bp.status(), commentsToday: cs.todayCount },
+    });
   },
 
   'POST /api/bili-publish': async (req, res) => {
@@ -2342,15 +2705,170 @@ const routes = {
         if (dead in (config.biliPublish || {})) clean[dead] = null;
       }
       saveConfig({ biliPublish: clean });
+
+      /* ⚠️ 2026-10-22：**B站评论回复**的开关也在这个页面上（用户要求"所有设置都放在里面"）
+       *  ⚠️ 它单独一段 `biliComments`，别和投稿那段混着存（混了以后想单独关评论就关不掉）
+       *  ⚠️ 字段照 `biliShare` 那套：每天条数（区间）/ 时间段 / 两条间隔 / 关键词 */
+      const cm = body?.comments || {};
+      if (cm && typeof cm === "object" && Object.keys(cm).length) {
+        const cclean = {};
+        if (typeof cm.enable === "boolean") cclean.enable = cm.enable;
+        if (cm.checkEveryMinutes !== undefined) {
+          cclean.checkEveryMinutes = Math.max(1, Math.min(120, Number(cm.checkEveryMinutes) || 5));
+        }
+        if (cm.maxPerRun !== undefined) cclean.maxPerRun = Math.max(1, Math.min(6, Number(cm.maxPerRun) || 3));
+        // ⚠️ 用户 2026-10-22：「取消每天最少和最多，间隔也删掉」⇒ 老字段顺手清掉
+        for (const dead of ["minPerDay", "maxPerDay", "startHour", "endHour", "cooldownMs", "keywords", "everyMinutes"]) {
+          if (dead in (config.biliComments || {})) cclean[dead] = null;
+        }
+        if (Object.keys(cclean).length) saveConfig({ biliComments: cclean });
+      }
+
+      /* ⚠️ 2026-10-21：**B站主动评论**（去别人视频下发）—— 又是一段独立的，别混进上面两个
+       *  ⚠️ 加新设置项时**三处都要动**：这里解析 + `put(...)` + `HANDLED` 名单（少一处就存不进去 ✗） */
+      const bpr = body?.proactive || {};
+      if (bpr && typeof bpr === "object" && Object.keys(bpr).length) {
+        const pclean = {};
+        if (typeof bpr.enable === "boolean") pclean.enable = bpr.enable;
+        if (bpr.keywords !== undefined) {
+          pclean.keywords = (Array.isArray(bpr.keywords) ? bpr.keywords : String(bpr.keywords).split(/[,，、\n]/))
+            .map((t) => String(t).trim()).filter(Boolean).slice(0, 30);
+        }
+        // ⚠️ 2026-10-21：上限 20 → **50**（用户问「每天最多为什么还有上限20啊」）
+        if (bpr.minPerDay !== undefined) pclean.minPerDay = Math.max(1, Math.min(50, Number(bpr.minPerDay) || 1));
+        if (bpr.maxPerDay !== undefined) pclean.maxPerDay = Math.max(1, Math.min(50, Number(bpr.maxPerDay) || 2));
+        /* ⚠️ 2026-10-22 加：**两次之间至少几分钟**（用户：「根据 b站的限制对应更改 webui 限制设置逻辑」）
+         *   B站 真正卡的是**间隔**（实测 3 分钟内连发第二条就失败），
+         *   而这个值原来是 `tick()` 里**硬编码 20 分钟**，用户改不了 ✗
+         *   ⇒ 开出来，下限 10（比实测红线留 3 倍余量）、上限 180（一天最多 8 次）✓ */
+        if (bpr.intervalMinutes !== undefined) pclean.intervalMinutes = Math.max(10, Math.min(180, Number(bpr.intervalMinutes) || 20));
+        if (bpr.startHour !== undefined) pclean.startHour = Math.max(0, Math.min(23, Number(bpr.startHour) || 10));
+        if (bpr.endHour !== undefined) pclean.endHour = Math.max(0, Math.min(24, Number(bpr.endHour) || 22));
+        if (bpr.maxResults !== undefined) pclean.maxResults = Math.max(4, Math.min(20, Number(bpr.maxResults) || 8));
+        if (Object.keys(pclean).length) saveConfig({ biliProactive: pclean });
+      }
+
       const bp = await import('./bili-publish.js');
+      const bc = await import('./bili-comments.js');
+      const bprS = await import('./bili-proactive.js');
+      const sm = await import('./short-memory.js');
       // ⚠️ 存完立刻读回来核对（这功能一旦"以为开了其实没开"，是第二天才发现）
-      send(res, 200, { ok: true, cfg: bp.settings(), state: bp.status() });
+      send(res, 200, {
+        ok: true, cfg: bp.settings(), comments: bc.settings(),
+        proactive: bprS.settings(), proactiveState: bprS.status(),
+        memory: sm.status(), state: bp.status(),
+      });
     } catch (e) {
       send(res, 200, { ok: false, error: e.message });
     }
   },
 
   /** 立刻做一条（自定义题材可选）—— 就是用户要的「手动转发视频那样自己输入题材」 */
+  /**
+   * **释放常驻浏览器**（2026-10-22 加）
+   *
+   * 用户原话：「**你别老是动我的开关啊，我一打开就关掉**」
+   * ⇒ 以前我为了"独占 Chrome profile"（上传视频 / 探路要用）会去改 `enable` ✗
+   * ⇒ 现在改成调这个接口：**不动开关**，只让常驻浏览器临时让位，并暂停一段时间
+   *
+   * POST { pauseMinutes?: number }  → { ok, released, pauseMinutes }
+   * 之后到点它会自己重起（下次 tick），不用管 ✓
+   */
+  'POST /api/bili-comments/release': async (req, res) => {
+    try {
+      const bc = await import("./bili-comments.js");
+      let body = {};
+      try { body = (await readJson(req)) || {}; } catch { /* 允许空 body */ }
+      const mins = Math.max(1, Math.min(180, Number(body?.pauseMinutes) || 40));
+      const released = await bc.release({ pauseMs: mins * 60000 });
+      send(res, 200, { ok: true, released, pauseMinutes: mins, state: bc.status() });
+    } catch (e) {
+      send(res, 200, { ok: false, error: e.message });
+    }
+  },
+
+  /**
+   * **手动去别人视频下发一条评论**（2026-10-21 加）
+   *
+   * 用户原话：「也可以加个**手动发一条**，但是要**显示出来发送的视频链接**」
+   *
+   * POST { bvid?: 'BVxxx', url?: 'https://…' }  → { ok, started: true }
+   * ⚠️ **不等它跑完**（要 1~3 分钟：开浏览器 → 看视频 → 写 → 点发布，会超时）⇒
+   *   立刻回"已开始"，结果靠 `GET /api/bili-publish` 的 `proactiveState.recent` 轮询（带链接）✓
+   * ⚠️ 不给 bvid/url 就**自己按关键词搜一个**（和定时那条一个路子）
+   */
+  'POST /api/bili-proactive/now': async (req, res) => {
+    try {
+      let body = {};
+      try { body = (await readJson(req)) || {}; } catch { /* 允许空 body */ }
+      const bpr = await import('./bili-proactive.js');
+      const bvid = String(body?.bvid || '').trim();
+      const url = String(body?.url || '').trim();
+      /* ⚠️ 2026-10-21 用户：「**评论视频一定不要重复评论**」
+       *   ⇒ 手动发之前**先同步查一次**：这个 BV 已经在永久名单里就当场回绝，
+       *     别等异步跑完、日志里才看见（界面上要能立刻看到原因）✓ */
+      if ((bvid || url) && bpr.alreadyCommented(bvid || url)) {
+        return send(res, 200, {
+          ok: false, already: true,
+          error: '这个视频已经评论过了，不重复评论',
+        });
+      }
+      void (async () => {
+        let use = { bvid, url };
+        if (!use.bvid && !use.url) {
+          const v = await bpr.pickVideo();
+          if (!v) { log.warn('[B站主动评论] 手动发：没搜到合适的视频'); return; }
+          use = { bvid: v.bvid };
+        }
+        const r = await bpr.runOnce({ ...use, manual: true });
+        if (r.ok) log.info(`[B站主动评论] 手动发成功：${r.video}｜「${String(r.comment || '').slice(0, 40)}」`);
+        else if (r.uncertain) log.warn(`[B站主动评论] 手动发：点了发布但没核实到（${r.video}）—— 去 B站 看一眼`);
+        else log.warn(`[B站主动评论] 手动发失败：${r.err || ''}`);
+      })().catch((e) => log.warn(`[B站主动评论] 手动发出错：${e.message}`));
+      send(res, 200, { ok: true, started: true });
+    } catch (e) {
+      send(res, 200, { ok: false, error: e.message });
+    }
+  },
+
+  /* ── 语音设置（2026-10-21 加）──────────────────────────
+   * 用户：「加一个**语音设置模块**放在功能卡片，**内置开关**，
+   *      然后**各个QQ账号可以选择用哪个语音**，
+   *      再加一个**戳一戳回的消息默认用语音回复**，这个开关默认关闭」
+   *
+   * ⚠️ `voice` 段**按号私有**（不在 SHARED_SECTIONS）⇒ 每个号能选自己的音色 ✓
+   * ⚠️ 音色列表从 `logs/bili/voice-ref/` 现读（用户往里丢新的 wav 就能选到）✓
+   */
+  'GET /api/voice': async (_req, res) => {
+    const gv = await import('./group-voice.js');
+    send(res, 200, {
+      ok: true,
+      cfg: gv.voiceSettings(),
+      voices: gv.listVoices(),
+      current: gv.voiceRef().split(/[\\/]/).pop(),
+    });
+  },
+
+  'POST /api/voice': async (req, res) => {
+    try {
+      const body = await readJson(req);
+      const c = body || {};
+      const clean = {};
+      if (typeof c.enable === 'boolean') clean.enable = c.enable;
+      if (typeof c.pokeVoice === 'boolean') clean.pokeVoice = c.pokeVoice;
+      if (c.ref !== undefined) {
+        const name = String(c.ref || '').trim().slice(0, 120);
+        // ⚠️ 只收文件名（别让人写 `../` 之类的路径）
+        clean.ref = /^[\w\-. \u4e00-\u9fa5]+\.(wav|mp3|m4a)$/i.test(name) ? name : '';
+      }
+      if (Object.keys(clean).length) saveConfig({ voice: clean });
+      const gv = await import('./group-voice.js');
+      send(res, 200, { ok: true, cfg: gv.voiceSettings(), current: gv.voiceRef().split(/[\\/]/).pop() });
+    } catch (e) {
+      send(res, 200, { ok: false, error: e.message });
+    }
+  },
+
   'POST /api/bili-publish/run': async (req, res) => {
     try {
       const body = await readJson(req);

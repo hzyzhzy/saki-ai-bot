@@ -1209,14 +1209,21 @@ console.log('\n【23】★★ 必须 @ 她才能接任务（用户：「接任�
   await wait(40);
   check(h2 === true && calls.tasks.length === 1, '★★ @ 了她 ⇒ 照常接', String(calls.tasks.length));
 
-  // ③ 引用她那条消息 ⇒ 也算（那本来就是冲她说的）
+  // ③ ⚠️ 2026-10-21 改（用户：「**在群里所有的和任务相关的都必须要@她才能启动**」）——
+  //    原来这里断言"引用她那条 ⇒ 也算在跟她说话"，
+  //    现在**引用谁那条都不算**（真事故：黑祥没 @ 她、只挂着引用，
+  //    就把正在跑的视频活顶掉、另开了一个 ✗）⇒ 断言反过来：**不接** ✓
   ab.__reset();
   const calls3 = stubRunner();
   const b3 = botWith();
   const m3 = [{ type: 'reply', data: { id: '1' } }, textSeg(taskText)];
   const h3 = await ab.handle(evOf(OWNER, m3), m3, b3);
   await wait(40);
-  check(h3 === true && calls3.tasks.length === 1, '★ 引用她那条 ⇒ 也算在跟她说话', String(calls3.tasks.length));
+  check(
+    h3 === false && calls3.tasks.length === 0,
+    '★★ 只挂着引用、没 @ 她 ⇒ **不接**（2026-10-21 收紧：引用不算 @）',
+    String(calls3.tasks.length),
+  );
 
   // ④ `/任务撤回` 不带 @ 也照旧管用（例外）
   ab.__reset();

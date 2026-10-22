@@ -295,5 +295,55 @@ console.log('\n【7】★★ 主人给的活 ⇒ 她那句回执**不进上下�
   check(recent.contextText(G).includes('爱素'), '★ 正常的「【标题】链接」分享照旧记（判据够窄）');
 }
 
+console.log('\n【N】剧情进行中，对话上下文窗口要拉长（用户：「剧情时上下文的窗口要拉长一点」）');
+{
+  const history = await import('../src/history.js');
+  const KEY = 'group:999000888';
+  const base = Math.max(1, Number(config.trigger?.historyRounds) || 6);
+  const qRounds = history.questHistoryRounds();
+
+  // 塞满日常窗口的 4 倍（多出来的必须**留在内存里**，否则"临时拉长"补不回来）
+  history.clearHistory(KEY);
+  for (let i = 0; i < base * 4; i++) history.remember(KEY, `u${i}`, `a${i}`);
+
+  const daily = history.getHistory(KEY);
+  check(
+    daily.length === base * 2,
+    `★ 日常聊天照旧是 ${base} 轮（${base * 2} 条）—— 不能因为这次改动变多`,
+    `${daily.length} 条`,
+  );
+
+  const inQuest = history.getHistory(KEY, { rounds: qRounds });
+  check(
+    qRounds > base && inQuest.length === qRounds * 2,
+    `★★ 剧情时是 ${qRounds} 轮（${qRounds * 2} 条）—— 真的能多拿到`,
+    `${inQuest.length} 条`,
+  );
+  check(
+    inQuest.length > daily.length,
+    '★★ 两种窗口拿到的条数确实不一样（不然等于没改）',
+    `${daily.length} → ${inQuest.length}`,
+  );
+  check(
+    inQuest.at(-1)?.content === `a${base * 4 - 1}` && daily.at(-1)?.content === `a${base * 4 - 1}`,
+    '★ 两种窗口取到的都是**最近**那几条（顺序没乱、没取到旧的）',
+  );
+
+  // ⚠️ 反例：`quest.historyRoundsFactor` 被调大时，内存里也必须留得下
+  const savedFactor = config.quest?.historyRoundsFactor;
+  config.quest = { ...(config.quest ?? {}), historyRoundsFactor: 8 };
+  const bigRounds = history.questHistoryRounds();
+  for (let i = 0; i < bigRounds * 2 + 4; i++) history.remember(KEY, `v${i}`, `b${i}`);
+  check(
+    history.getHistory(KEY, { rounds: bigRounds }).length === bigRounds * 2,
+    '★★ 倍率调大之后照样拿得满（内存上限跟着倍率走，不是写死 3 倍）',
+    `${history.getHistory(KEY, { rounds: bigRounds }).length} 条`,
+  );
+  if (savedFactor === undefined) delete config.quest.historyRoundsFactor;
+  else config.quest.historyRoundsFactor = savedFactor;
+
+  history.clearHistory(KEY);
+}
+
 console.log(`\n结果: ${failures === 0 ? '全部通过 ✅' : `${failures} 项失败 ❌`}\n`);
 process.exit(failures === 0 ? 0 : 1);

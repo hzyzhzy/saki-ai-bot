@@ -73,9 +73,15 @@ if (has('skip-tts')) {
 
 /* ①.5 音频整形：把配音卡到目标时长（视频规格优先） ──
  * ⚠️ 顺序很关键：**先定时长 D，再压配音**。
- *   老流程是「配音多长视频就多长」，台词一写长视频就没边了 ✗ */
-step('①.5 音频整形到 ' + DURATION + 's（超了加速、短了补静音）', [join(ROOT, 'tools', 'fit-audio.mjs'),
-  '--voice', VOICE_DIR, '--duration', String(DURATION), '--out', VOICE_FIT]);
+ *   老流程是「配音多长视频就多长」，台词一写长视频就没边了 ✗
+ * ⚠️⚠️ 2026-10-22 用户：「感觉 saki 的语速有点快了，**都调慢一点**」
+ *   ⇒ 这里统一传 `--pace 0.92`（放慢 8%，atempo 不变调）。
+ *     注意 fit-audio 会把目标时长一起折算（D/0.92），否则刚放慢又被压回去 ✗
+ *     ⇒ 最终视频会**长 8.7%**，这是放慢语速必然的代价 ✓
+ *   想更快/更慢：`--pace 1.0`（原速）/ `0.88`（更慢） */
+step('①.5 音频整形到 ' + DURATION + 's（放慢 ' + arg('pace', '0.92') + '× 后超了加速、短了补静音）', [join(ROOT, 'tools', 'fit-audio.mjs'),
+  '--voice', VOICE_DIR, '--duration', String(DURATION), '--out', VOICE_FIT,
+  '--pace', arg('pace', '0.92')]);
 
 /* ② 口型轨 ────────────────────────────────────── */
 step('② 口型轨（按配音算张嘴量）', [join(ROOT, 'tools', 'mouth-track.mjs'),
@@ -155,6 +161,9 @@ step('⑦ 合成成片', [join(ROOT, 'tools', 'bili-intro3.mjs'),
   // ⚠️ 片头只在**自制题材**那条路加（用户 2026-10-22：「群里的趣事类不用变，
   //    agent 自己搜集题材做的才要用上 ae」）⇒ 透传：给了 --intro 才叠前 3 秒
   ...(arg('intro', '') ? ['--intro', resolve(arg('intro', '')), '--intro-sec', arg('intro-sec', '3')] : []),
+  // ⚠️ 群聊滑到哪儿停住（用户 2026-10-22：「片段时长不够，就滑完**静止在最相关的几句话**」）
+  //    挑得少 ⇒ 传个小一点的比例（如 0.8）；不传 = 滑到底
+  ...(arg('hold-ratio', '') ? ['--hold-ratio', arg('hold-ratio', '1')] : []),
   '--out', OUT]);
 
 /* ⑧ 收尾 ──────────────────────────────────────── */

@@ -102,6 +102,32 @@ console.log(`已复制：${basename(src)} → ${basename(dst)}（${statSync(dst)
 // ⚠️ 参数一律走**环境变量**：这个项目的路径里有空格 + 中文，拼命令行必掉进引号地狱 ✗
 const ps = `
 $ErrorActionPreference = 'Stop'
+# ⚠️⚠️⚠️ 2026-10-21 加（用户截图：Word 弹「**Word 无法创建工作文件，请检查临时环境变量**」）——
+#    实测这台机器的 TEMP 已经涨到 **22.69GB**（里头有个 7.68GB 的旧目录），
+#    文件数多到连统计都超时 ⇒ **Word 在里头建临时文件会失败** ⇒ 弹框卡死
+#    ⇒ COM 调用全部 25 秒超时 ⇒ agent 以为 Word 坏了 ✗✗
+#    ⇒ **给 Word 一个专用的干净临时目录**（固定路径、只有它自己用），别用系统 TEMP ✓
+$wordTmp = Join-Path $env:LOCALAPPDATA 'Temp\\word-safe'
+try { New-Item -ItemType Directory -Force -Path $wordTmp | Out-Null } catch {}
+$env:TEMP = $wordTmp
+$env:TMP = $wordTmp
+# ⚠️⚠️ 2026-10-21 加（用户截图：Word 弹「**文件正在使用：xxx.docx 被 "zy hg" 锁定，无法编辑**」）——
+#    真因：每次用 Word 都留下**没退出的残留实例**（实测一次操作堆了 4 个 WINWORD），
+#    实例一直锁着文档 ⇒ 下次打开就弹"只读副本 / 合并更改 / 等通知"那个框，
+#    而 agent **没有鼠标、点不了这个框** ⇒ 卡死、报"命令失败"、最后误以为 Word 坏了 ✗✗
+#    ⇒ **打开前先把坑清掉**：
+#      ① 杀掉**没有主窗口标题**的 WINWORD（有标题的是用户自己开着的，别动 ✓）
+#      ② 删掉同目录的 ~$xxx.docx 锁文件
+try {
+  Get-Process WINWORD -ErrorAction SilentlyContinue |
+    Where-Object { $_.MainWindowTitle -eq '' } |
+    ForEach-Object { try { $_.Kill() } catch {} }
+  Start-Sleep -Milliseconds 300
+} catch {}
+try {
+  Get-ChildItem (Split-Path $env:DOCX_FILE) -Filter '~$*' -Force -ErrorAction SilentlyContinue |
+    Remove-Item -Force -ErrorAction SilentlyContinue
+} catch {}
 try {
   $w = New-Object -ComObject Word.Application
 } catch {
@@ -111,7 +137,9 @@ try {
 try {
   $w.Visible = $false
   $w.DisplayAlerts = 0
-  $d = $w.Documents.Open($env:DOCX_FILE, $false, $false)
+  # ⚠️ Open 的四个参数都显式给：ConfirmConversions=false（别弹"转换格式"框）、
+  #    ReadOnly=false、AddToRecentFiles=false ⇒ 少一个都可能弹框 ✓
+  $d = $w.Documents.Open($env:DOCX_FILE, $false, $false, $false)
   $anchor = $env:DOCX_AFTER
   $insert = $env:DOCX_TEXT
   if ($env:DOCX_NEWPAGE -eq '1') {

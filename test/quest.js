@@ -1961,7 +1961,7 @@ console.log('\n【17】★★ /暂停：**打断正在生成的** + **静默 2 �
   );
 }
 
-console.log('\n【18】★★ 剧情的「用词红线」——人设里那条硬线在剧情里被收窄（2026-10-07 用户拍板）');
+console.log('\n【18】★★ 剧情的「用词红线」——人设那条硬线**只禁违禁词、不禁情节**（10-07 拍板，10-22 又收窄一次）');
 {
   // ## 用户原话
   //   「**不是不写细节，是不写违禁词就行了，没细节剧情会很苍白**」
@@ -1979,7 +1979,7 @@ console.log('\n【18】★★ 剧情的「用词红线」——人设里那条�
   const questSide = String(quest.questPersonaText() ?? '');
   const chatSide = String(knowledge.personaText() ?? '');
   check(
-    questSide.length > 5000 && questSide.length !== chatSide.length,
+    questSide.length > 5000 && Math.abs(questSide.length - chatSide.length) < 3000,
     '★ 剧情这边**还是完整人设**（不是换了一份精简的）',
     `${questSide.length} 字 / 聊天那份 ${chatSide.length} 字`,
   );
@@ -1987,16 +1987,35 @@ console.log('\n【18】★★ 剧情的「用词红线」——人设里那条�
     !/不写性内容/.test(questSide),
     '★★ 剧情里**不再出现**「不写性内容」那条硬线声明（它就是"绕开情节"的推手）',
   );
-  check(!/账号安全/.test(questSide), '★ 连带那句「账号安全」也不在剧情提示词里了');
-  check(/用词红线/.test(questSide), '★★ 换成了剧情版用词红线');
+  // ⚠️ 2026-10-22 反过来：人设本身改成"只禁违禁词、不禁情节"之后，
+  //    「账号安全」这句**该留着**（它是真的账号安全，跟情节无关）✓
+  check(/账号安全/.test(questSide), '★ 「账号安全」那句**留着**（那是真的账号安全，不是情节禁令）');
+  // ⚠️ 2026-10-22：人设已经改成新措辞 ⇒ 剧情那份**不再靠替换**，直接用原文
+  //    ⇒ 这里只确认"硬线声明还在、内容是新那套"；兜底替换逻辑另有一条源码断言盯着（见下）
+  check(/唯一的硬线/.test(questSide), '★ 硬线声明还在（内容换成了"不出现违禁词"）');
   check(/不出现违禁词/.test(questSide), '★★ 红线的内容 = 不写违禁词');
   check(
     /细节照写/.test(questSide),
     '★★ 而且明确**允许写细节**（用户说"没细节剧情会很苍白" —— 这条别被谁删掉）',
   );
-  check(/不写性内容/.test(chatSide), '★★ 聊天的**人设原文一点没动**（那条硬线只对剧情收窄）');
-  check(/账号安全/.test(chatSide), '★ 聊天那边「账号安全」那句还在');
+  // ⚠️ 2026-10-22 用户拍板：「**只禁违禁词、不禁情节**」—— 改的是**人设本身**，
+  //    所以聊天那份也必须一起变（以前这里是"聊天那份一点没动"）。
+  check(
+    !/不写性内容/.test(chatSide),
+    '★★★ 聊天那份也**没有旧措辞**了（用户 2026-10-22 要求改人设本身，不是只改剧情那一路）',
+  );
+  check(
+    /不出现违禁词/.test(chatSide) && /细节照写/.test(chatSide),
+    '★★★ 聊天那份同样是"只禁违禁词 + 细节照写"',
+  );
   const src18 = readFileSync(join(ROOT, 'src', 'quest.js'), 'utf8');
+  // ⚠️ 2026-10-22 加：人设改成新措辞之后，`questPersonaText()` 里那 4 条 replace
+  //    **通常一条都匹配不到**了 —— 但它是**兜底**（哪天 persona 被改回旧措辞、
+  //    或者换了别人设包，它会自动把那句换掉）⇒ 一条都不许删，这里钉住。
+  check(
+    /不写性内容/.test(src18) && /replace\(/.test(src18),
+    '★★★ 兜底替换逻辑**还在**（人设万一被改回旧措辞，剧情不会又退化成绕开情节）',
+  );
   check(
     /persona = questPersonaText\(\)/.test(src18),
     '★★ `buildSystem` 用的**真的是**剧情版人设（不是写了函数却没人调）',
@@ -2119,6 +2138,114 @@ console.log('        （用户 2026-10-19：做成开关放模型页面，只有
   check(/不许编事实|不许编/.test(t), '★★★ 也不许放开真假（放开的是写法，不是真假）');
 
   cfg21.llm.unfiltered = keep;
+}
+
+console.log('\n【重试】★★ 开场 JSON 坏掉 ⇒ 自动再要一次（用户：「关键是看为什么会失败」）');
+{
+  // 现场形态（`logs/bot-2026-10-22.log` 01:33:17）：raw **以 `{` 开头**、20 秒正常耗时，
+  //   但 JSON 中间坏了 ⇒ `parseJson` 判死 ⇒ 群里漏出「模型没给可解析的开场」✗
+  //   现在改成：坏就带着「只输出 JSON / 引号用「」/ 别换行」**再要一次**（只一次）。
+  reset();
+  replies = [
+    // ① 截断的 JSON（正是"开头是 { 、后面没了"那种）
+    '{"premise": "她在打工回家的路上被自行车撞了，手肘擦破一大块", "event": "她手肘受伤',
+    // ② 第二次正常
+    J({ premise: '她在打工回家的路上被自行车撞了', event: '她手肘受伤了', text: '……被自行车撞了，手肘破了。没事。' }),
+  ];
+  const r = await quest.begin({ ask, manual: true, groupId: '(模拟重试)' });
+  check(r?.ok === true, '★★ 第一次坏 JSON ⇒ 自动重试后**开得起来**（不再直接判死）', r?.reason ?? '');
+  check(prompts.length === 2, '★★ 确实多要了一次（ask 被调 2 次，不是假装成功）', String(prompts.length));
+  check(/被自行车撞了/.test(String(r?.text ?? '')), '★ 用的是第二次那一版');
+
+  // ③ 两次都坏 ⇒ 才判失败（⚠️ 只重试一次，不许无限烧钱）
+  reset();
+  replies = ['{"premise": "坏', '{"premise": "还是坏'];
+  const r2 = await quest.begin({ ask, manual: true, groupId: '(模拟重试2)' });
+  check(r2?.ok === false, '★★ 两次都不行 ⇒ 才判失败', r2?.reason ?? '');
+  check(prompts.length === 2, '★ 也就两次调用（没有第 3 次）', String(prompts.length));
+}
+
+console.log('\n【N】软拒绝：这一段在绕就重写一次（用户：「有没有可能是模型的软拒绝，故意不往下写清楚」）');
+{
+  // ⚠️ 2026-10-22 加。对照实验（真实 API、同一提示词只换起因）证实了：
+  //    性题材 ⇒ 「够我们弄明白这门到底认的是什么了」「先商量一下规则」
+  //    中性题材（同样的"不做到就出不去"）⇒「那扇门是我让睦去锁的」（一步说到核心）
+  //    ⇒ 软拒绝不发拒绝声明，它**在核心前一步拐弯**；铁律压不住 ⇒ 只能事后判 + 重写。
+
+  // ① 没传 judge ⇒ 整段检测不发生（老调用方 / 离线套件行为一个字不变）
+  check(
+    (await quest.dodgedThePoint({ premise: '起因', text: '一段话' })) === false,
+    '★★ 没传 `judge` ⇒ 不判（老路径行为不变）',
+  );
+
+  // ② **没有起因就不是剧情** ⇒ 一次调用都不花（用户要求：「检测只有剧情时有」）
+  let called = 0;
+  const countingJudge = async () => {
+    called++;
+    return '否';
+  };
+  check(
+    (await quest.dodgedThePoint({ judge: countingJudge, premise: '', text: '一段话' })) === false &&
+      called === 0,
+    '★★★ 没有起因 ⇒ 一个字都不判、一次调用都不花（日常聊天绝不触发）',
+    `实际调用 ${called} 次`,
+  );
+
+  // ③ 模型自己判：答"否" = 在绕
+  check(
+    (await quest.dodgedThePoint({ judge: async () => '否', premise: '起因', text: '先商量一下规则' })) ===
+      true,
+    '★★ 模型答「否」⇒ 判定在绕',
+  );
+  check(
+    (await quest.dodgedThePoint({ judge: async () => '是', premise: '起因', text: '她把手按上去' })) ===
+      false,
+    '★ 模型答「是」⇒ 不算绕',
+  );
+  check(
+    (await quest.dodgedThePoint({
+      judge: async () => {
+        throw new Error('boom');
+      },
+      premise: '起因',
+      text: 'x',
+    })) === false,
+    '★ 判定调用失败 ⇒ 当"没绕"（宁可放过一句，也别把这段扔掉）',
+  );
+
+  // ④ 铁律里真的有「不许拐」，而且两处（写段 / 群里接话）都补了
+  const qsrc = readFileSync(join(ROOT, 'src', 'quest.js'), 'utf8');
+  check(/不许拐/.test(qsrc), '★★★ 铁律里有「不许拐」（软拒绝的拐弯落点被点名）');
+  check(
+    /研究机制是最常见的那个逃生门/.test(qsrc) && /该做的那一步，直接往前走/.test(qsrc),
+    '★★ 写段 / 接话**两处**铁律都补上了',
+  );
+  // ⑤ 检测只挂在剧情生成那两个函数上
+  const callCount = (qsrc.match(/dodgedThePoint\(\{ judge:/g) ?? []).length;
+  check(
+    callCount === 2,
+    '★★★ 检测只有两处调用（`begin` / `advance`）—— 聊天那条路一个字没动',
+    `实际 ${callCount} 处`,
+  );
+
+  // ⑥ 端到端：开场判为"绕" ⇒ 会再要一次，用的是重写那版
+  reset();
+  replies = [
+    JSON.stringify({ premise: '起因', event: 'e', text: '她问他要不要先商量一下规则。' }),
+    '否',
+    JSON.stringify({ premise: '起因', event: 'e', text: '她把手按在他手背上，没松开。' }),
+  ];
+  const rY = await quest.begin({ ask, judge: ask, manual: true, groupId: '(模拟软拒绝)' });
+  check(
+    rY?.ok === true && /按在他手背上/.test(String(rY?.text ?? '')),
+    '★★★ 判为"绕"之后**重写**，发出去的是重写那版',
+    String(rY?.text ?? '').slice(0, 24),
+  );
+  check(
+    prompts.length === 3,
+    '★ 一共 3 次调用（生成 + 判定 + 重写），没有更多',
+    String(prompts.length),
+  );
 }
 
 console.log(`\n结果: ${failures === 0 ? '全部通过 ✅' : `${failures} 项失败 ❌`}\n`);

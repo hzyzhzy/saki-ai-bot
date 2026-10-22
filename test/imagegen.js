@@ -542,7 +542,12 @@ console.log('\n【10】★ 接线断言（源码级 —— 这两个坑互相拉
     '★ 两处 early-return 都放行了"只有拍照标记"的回复',
   );
   check(
-    /return sentText \|\| \(keepMarkers\.length \|\| photo \? '' : null\)/.test(src),
+    // ⚠️ 2026-10-22 放宽（这条是**上一次提交"视频片段"时留下的假红**）：
+    //    现在的写法是 `return sentText || (keepMarkers.length || photo || vp.clips.length ? '' : null)`
+    //    —— 多了一个 `vp.clips.length`（她这条只发了视频片段时也不许回 null）。
+    //    **要守的语义没变**：条件里必须含 `keepMarkers.length` 和 `photo`、结尾必须是 `? '' : null`；
+    //    中间再并进别的"发过东西"的条件是合理的，所以不钉死字面（钉死就会一改一红）。
+    /return sentText \|\| \([^?]*keepMarkers\.length[^?]*photo[^?]*\? '' : null\)/.test(src),
     '★ 返回值不是 null —— 否则 `sentFirst` 保持 false → 触发重试 → **回两遍**',
   );
 

@@ -49,6 +49,14 @@ const W = 1080;
 const H = 1920;
 // 输出帧率：源（Chrome 录屏/webm）都是 VFR，必须统一成 CFR 才不跳帧
 const FPS_OUT = Number(arg('fps-out', '25'));
+/**
+ * 聊天背景**滑到进度的多少就停住**（1 = 一直滑到底）。
+ *
+ * 用户 2026-10-22：「聊天记录片段时长实在不够，也可以**直接滑动完之后静止在最相关的
+ * 几句话那里**」——相关性优先、条数可以少，这时别硬凑滚动，停在那几句上 ✓
+ * 例：`--hold-ratio 0.8` ⇒ 只滚到总可滚高度的 80%，最后一屏就是"最相关的那几句"
+ */
+const HOLD_RATIO = Math.max(0.1, Math.min(1, Number(arg('hold-ratio', '1')) || 1));
 const PANEL_H = 1450; // 聊天面板高度（上下留标题栏和字幕）
 
 /* ── ① 台词 + 配音时长 ────────────────────────── */
@@ -326,10 +334,11 @@ const html = `<!doctype html><html lang="zh"><head><meta charset="utf-8">
   .top { height: ${TOP_H}px; flex: 0 0 ${TOP_H}px; overflow: hidden; }
   .top img { width: 100%; display: block; }
 
-  /* ⚠️ 右边留出 Live2D 的位置（2026-10-21）：人物半身约 556px 宽、压在右半边，
-   *   不留白的话自己的蓝色气泡（靠右）会被人物整个盖住、字全看不见 ✗
-   *   ⇒ 聊天列只占左侧 ~560px，人物在右侧，互不遮挡 ✓ */
-  .feed { flex: 1; overflow: hidden; padding: ${S(18)}px ${S(520)}px ${S(46)}px ${S(20)}px; position: relative; }
+  /* ⚠️⚠️ 右边**只剩 20px**（2026-10-22 用户截图：「saki 自己的聊天框和头像**又没有贴着右边**了」）
+   *   上一版为了"不让蓝色气泡被人物盖住"把右边留了 520px ⇒ 她自己发的消息离右边还有半屏，
+   *   **一眼就不像 QQ** ✗（真 QQ 里自己的消息就是贴着右边缘的）
+   *   ⇒ 改回贴边。代价是人物半身会压住一部分右侧气泡 —— 用户明确选择"要贴右"✓ */
+  .feed { flex: 1; overflow: hidden; padding: ${S(18)}px ${S(20)}px ${S(46)}px ${S(20)}px; position: relative; }
 
   .time { text-align: center; font-size: ${S(13)}px; color: #9aa9b8; margin: ${S(14)}px 0 ${S(12)}px; }
 
@@ -402,8 +411,19 @@ const html = `<!doctype html><html lang="zh"><head><meta charset="utf-8">
   //    每段从 220px 变成 350px+ ⇒ 25fps 下每帧位移又超标 ⇒ 背景又开始跳 ✗
   //    改成"每段固定滑 ~220px"，内容怎么变都是同一个手感 ✓
   const PX_PER_STOP = 220;
+
+  /* ── 「滑到哪儿就停住」（用户 2026-10-22）────────────────────────
+   * 原话：「聊天记录片段时长实在不够，也可以**直接滑动完之后静止在最相关的几句话那里**」
+   * ⇒ 相关性优先、条数可以少；条数少了总高度就小，这时**别硬凑滚动**，
+   *   在 --hold-ratio 指定的位置停住，后面时间就停在那几句上 ✓
+   *   ⚠️ 做法是把"可滚高度"直接乘上比例 —— 所有滚动目标都以它为准，
+   *      段数、每段位移、最后停在哪儿全都自动跟着变，不用改别的地方 ✓
+   */
+  const HOLD = ${HOLD_RATIO};
+
+  function maxScroll() { return Math.max(0, (feed.scrollHeight - feed.clientHeight) * HOLD); }
   function stopCount() {
-    return Math.max(6, Math.round(maxScroll() / PX_PER_STOP));
+    return Math.max(4, Math.round(maxScroll() / PX_PER_STOP));
   }
   // 每次滑动用多久（秒）—— 故意不均匀，模仿手指快慢
   const DURS = [1.05, 0.9, 1.25, 0.95, 1.15, 0.88, 1.2, 1.0, 1.1, 0.92, 1.22, 0.98, 1.08, 0.86, 1.18, 1.02];

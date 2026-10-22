@@ -17,6 +17,12 @@ import * as life from './life.js';
 // ⚠️ 2026-10-15 加：B 站视频分享（只发链接、只发 1 档群、默认关）
 import * as biliShare from './bili-share.js';
 import * as biliPublish from './bili-publish.js';
+// ⚠️ 2026-10-22：B站评论回复（走真浏览器子进程，见 tools/bili-comment-bot.mjs）
+import * as biliComments from './bili-comments.js';
+// ⚠️ 2026-10-21：B站**主动去别人视频下发评论**（搜视频 → 让她写一条 → 真发 → 记链接）
+import * as biliProactive from './bili-proactive.js';
+// ⚠️ 2026-10-22：QQ 侧短期摘要（写进短期共享记忆）
+import * as qqDigest from './qq-digest.js';
 // ⚠️ 2026-10-05 加：同类机器人主动搭话（群里冷场时 @ 它 / 戳它一下）
 import * as peerChat from './peer-chat.js';
 import * as storyline from './storyline.js';
@@ -1212,12 +1218,37 @@ if (biliShare.anyEnabled(biliGroups)) {
   );
 }
 
+/**
+ * 「**这个号要不要跑 B站 那一套**」—— 2026-10-21 用户：
+ *   「**b站那一套也要分QQ账号**，以后也许会加一个b站账号给其他QQ号」
+ *
+ * ⚠️ 为什么不能只靠 `isMainAccount()`：
+ *   配置已经从共用段改成**按号私有**（`biliPublish` / `biliComments` / `biliProactive`），
+ *   但 `config.yml` 顶层那份仍然是"默认值" ⇒ **三个号都会读到 `enable: true`**
+ *   ⇒ 不点名的话三个号会各投一条、各回一遍 ✗
+ * ⇒ 判据：**主号一律跑**；别的号必须在那个段的 `accounts: [QQ, ...]` 里**被点名**才跑 ✓
+ *   （以后给爱音接一个 B站 号：`accounts/10000012.yml` 里写 `biliPublish.enable: true`
+ *     + `accounts: ['10000012']` 就行 —— 登录态那边 profile 已经按号分开了）
+ */
+function biliWanted(section) {
+  const c = config[section] || {};
+  if (c.enable !== true) return false;
+  if (isMainAccount()) return true;
+  const list = (Array.isArray(c.accounts) ? c.accounts : []).map(String);
+  const me = String(bot?.selfId || '');
+  return !!me && list.includes(me);
+}
+
 // ── B站全自动投稿（2026-10-22 加）──────────────────────────
 // 用户：「设置一个时间段，每天随机在这段时间制作发送…全部 agent 完成」（A 档 = 直接发布）
-// ⚠️ 只在**主号**上跑：三个号的进程都读同一份配置 ⇒ 不加这道闸会三个号各做一条、发三条 ✗
-//    （和 biliShare 不一样：那个是"分享别人的视频"，多号同时跑顶多重复一次；
-//      这个是"自己生成并投稿"，重复投稿更糟）
-if (config.biliPublish?.enable && isMainAccount()) {
+// ⚠️ 默认只在**主号**上跑（别的号要在 `accounts` 里点名）：三个号都读同一份默认配置 ⇒
+//    不加这道闸会三个号各做一条、发三条 ✗
+if (biliWanted('biliPublish')) {
+  // ⚠️ 2026-10-21 用户：「**所有视频缓存要在12点清除**」
+  //    每 10 分钟看一次，12 点之后当天第一次跑（`sweepTick` 自己按天去重）
+  setInterval(() => {
+    try { biliPublish.sweepTick(); } catch (e) { log.warn(`[B站投稿] 清缓存 tick 出错：${e.message}`); }
+  }, 10 * 60 * 1000).unref();
   const everyPub = 30 * 1000; // 每 30 秒看他到点没（一天只做一次，判据在模块里）
   setInterval(() => {
     try { biliPublish.tick(); } catch (e) { log.warn(`[B站投稿] tick 出错：${e.message}`); }
@@ -1227,6 +1258,69 @@ if (config.biliPublish?.enable && isMainAccount()) {
     `今天是 ${st.todayDone ? '已经做过了' : st.nextAt}；连续群聊 ${st.streakGroup}/${st.groupMaxStreak} 天`);
 } else if (config.biliPublish?.enable) {
   log.info('B站投稿：本进程不是主号 ⇒ 不跑（只在主号上执行，防重复投稿）');
+}
+
+/* ── B站**评论回复**（2026-10-22 加）─────────────────────────
+ * 用户：「继续接管 b 站账号的下一步，要能回复在 b 站对她的回复消息」
+ * ⚠️ 同样只在**主号**跑：浏览器登录态是同一个账号，多号一起跑会互相抢 profile ✗
+ * ⚠️ 默认关着（`biliComments.enable`）—— 在 B站对外说话得用户自己开
+ */
+if (biliWanted('biliComments')) {
+  setInterval(() => {
+    try { biliComments.tick(); } catch (e) { log.warn(`[B站评论] tick 出错：${e.message}`); }
+  }, 30 * 1000).unref();
+  // ⚠️ 2026-10-22 用户：「每次启动机器人时都启动一个最大化节省资源的浏览器实例，一直运行」
+  //    ⇒ 开机就把常驻浏览器拉起来（之后每次检查只要 goto 一下，2~3 秒）
+  try { biliComments.warmup(); } catch (e) { log.warn(`[B站评论] 预热浏览器失败：${e.message}`); }
+  const cs = biliComments.status();
+  log.info(`B站评论回复：已开启（每 ${cs.checkEveryMinutes} 分钟看一次，一次最多回 ${cs.maxPerRun} 条，` +
+    `只看 ${cs.sinceHours}h 内的；常驻浏览器：${cs.browserReady ? '已就绪' : '正在启动'}）`);
+} else if (config.biliComments?.enable) {
+  log.info('B站评论回复：本进程不是主号 ⇒ 不跑');
+}
+
+/* ── B站**主动去别人视频下发评论**（2026-10-21 加）───────────
+ * 用户：「继续主动去别人视频下发评论的工作」「和分享视频一样，可以差不多直接复用那边的所有设置」
+ * ⚠️ 只在主号跑（同一个浏览器登录态，多号一起跑会抢 profile ✗）
+ * ⚠️ 默认关着 —— 这是在陌生人视频下公开说话，必须用户自己开
+ */
+if (biliWanted('biliProactive')) {
+  setInterval(() => {
+    try { biliProactive.tick(); } catch (e) { log.warn(`[B站主动评论] tick 出错：${e.message}`); }
+  }, 30 * 1000).unref();
+  const bp = biliProactive.status();
+  log.info(`B站主动评论：已开启（关键词 ${bp.keywords.length} 个｜每天 ${bp.minPerDay}~${bp.maxPerDay} 条｜` +
+    `${bp.startHour}~${bp.endHour} 点｜今天 ${bp.countToday}/${bp.targetToday}）`);
+} else if (config.biliProactive?.enable) {
+  log.info('B站主动评论：本进程不是主号 ⇒ 不跑');
+}
+
+/* ── 语音：启动时后台预热 TTS（2026-10-21 加）───────────────
+ * ⚠️ 为什么要预热：IndexTTS 冷启动要 **91 秒**（加载模型），
+ *   而 `synth()` 在没热起来时是**故意**返回失败的（让那一条先发文字，用户不用干等）——
+ *   于是**她第一次想发语音的那条永远是文字**，用户看到的就是"工具没生效" ✗
+ *   ⇒ 启动后延迟 45 秒（等机器人自己稳定）**在后台把 TTS 拉起来**，
+ *     之后她一调 `[工具:语音]` 就是真的语音 ✓
+ *   ⚠️ 只在 `voice.enable` 开着时预热（关了就别占显存）
+ */
+if (config.voice?.enable === true) {
+  setTimeout(() => {
+    import('./group-voice.js')
+      .then((gv) => gv.warmup())
+      .catch((e) => log.debug(`[群语音] 预热失败：${e.message}`));
+  }, 45 * 1000).unref();
+}
+
+/* ── QQ 侧的**短期摘要**（2026-10-22 加）─────────────────────
+ * 用户要求：短期记忆里要有「在 QQ 这边最近发生了什么事」
+ * ⚠️ 只在主号跑：三个号都写会把同一件事记三遍 ✗
+ */
+if (isMainAccount()) {
+  setInterval(() => {
+    try { qqDigest.tick(); } catch (e) { log.warn(`[QQ摘要] tick 出错：${e.message}`); }
+  }, 30 * 1000).unref();
+  const qd = qqDigest.status();
+  if (qd.enable) log.info(`QQ 短期摘要：每 ${qd.everyMinutes} 分钟总结一次群聊（写进短期记忆）`);
 }
 
 // ── 待发箱：通道恢复之后自动补发 ─────────────────────────────
@@ -1264,6 +1358,38 @@ function startOutboxTick() {
 // ⚠️ 待发箱的定时器**无条件注册**（和剧情那个一样）：
 //    总开关只该管"要不要主动生成"，不该管"已经生成、只是没发出去的东西"。
 startOutboxTick();
+
+/**
+ * ⚠️⚠️⚠️ 2026-10-22 加（用户：「**上传的时候失败了也要记下来，下次重启继续发**」）——
+ * **待补发产物**：群任务做完了、但文件没发出去（上传超时 / 群文件空间满 / 协议端正好挂着）
+ * ⇒ `agent-bridge.js` 把它落盘到 `state/pending-arts.json`
+ * ⇒ 这里**启动时补一次 + 每 5 分钟补一次**，直到发出去为止 ✓
+ *
+ * 真事故（2026-10-22 00:11）：`丰川祥子出场.mp4` 做好了，发的时候协议端正好挂了
+ * ⇒ 只在日志里留一行 ⇒ 重启后谁也不知道还有东西没发 ⇒ 用户问「752 群做好的文件又没发出来」✗
+ */
+function startPendingArtsTick() {
+  const every = 5 * 60 * 1000;
+  let running = false;
+  const tick = async () => {
+    if (running) return;
+    running = true;
+    try {
+      if (!bot?.selfId) return; // 没登录就别试（下一轮再说）
+      const ab = await import('./agent-bridge.js');
+      await ab.retryPendingArts(bot);
+    } catch (e) {
+      log.debug(`[任务] 待补发轮询出错：${e.message}`);
+    } finally {
+      running = false;
+    }
+  };
+  // 启动时先试一次（等 20 秒：让协议端先连上）
+  setTimeout(() => void tick(), 20 * 1000).unref?.();
+  setInterval(tick, every).unref();
+  log.info('待补发产物：启动后 20 秒试一次，之后每 5 分钟一次（发不出去的会一直留着重试）');
+}
+startPendingArtsTick();
 
 // ── 二级剧情（任务系统）的推进 ─────────────────────────────
 //

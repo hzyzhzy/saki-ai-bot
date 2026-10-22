@@ -616,6 +616,8 @@
            + 「不要新建一个页面，和其他的功能页面一样在同一个页面」）
            —— **自动生成并投稿**，和上面那个「分享别人的视频」是两件事，别混 -->
       <button data-tab="biliPub">B站投稿</button>
+  <button data-tab="biliCmt">B站评论</button>
+  <button data-tab="voice">语音</button>
       <button data-tab="quest">二级剧情</button>
       <button data-tab="affinity">好感度 / 好友</button>
       <button data-tab="workmode">工作模式</button>
@@ -950,42 +952,77 @@
       </div>
     </div>
 
+    <!-- ⚠️⚠️ 2026-10-22 删掉（用户：「**为什么还要留两套一样的设置**」
+         + 「把大模型那里本来有的设置直接全部剪切过来，api 配置也要剪切过来，
+            不要搞丢了，然后排在模型提供商的第一个」）
+         ⇒ 原来这张「大模型」卡和下面的「模型提供商」列表是**同一批字段填两遍**，
+           而且两套都能写 `config.yml` 的 `llm.*`，很容易互相覆盖（用户当天就丢了 API Key ✗）
+         ⇒ 现在**只留「模型提供商」一张卡，第一个就是主模型**，
+           地址 / 密钥 / 模型名 / 温度 / 最大 token / 超时**全部搬进每张提供商卡片** ✓
+         ⚠️ `saveModel()` 里读不到这些框时传的是 `undefined`（= 不写），
+            所以删掉这张卡**不会**把配置里的密钥清空 ✓ -->
     <div class="card">
       <h2>大模型</h2>
-      <p class="hint">换成别的服务（百炼、Kimi、本地 Ollama…）也可以，只要兼容 OpenAI 接口。改完记得保存。</p>
-      <div class="row">
-        <div style="flex:2">
-          <label>API 地址（baseURL）</label>
-          <input type="text" id="llm-baseURL" placeholder="https://api.deepseek.com/v1">
-        </div>
-        <div style="flex:1.4">
-          <label>模型（点右边按钮从 API 拉取列表）</label>
-          <div style="display:flex;gap:8px">
-            <select id="llm-model" style="flex:1"></select>
-            <button class="ghost" onclick="loadModels()" id="btn-models" style="white-space:nowrap;padding:8px 12px">刷新列表</button>
-          </div>
-        </div>
-      </div>
-      <p class="hint" id="model-hint" style="margin-top:8px"></p>
-      <label>API Key</label>
-      <input type="password" id="llm-apiKey" placeholder="sk-...">
-      <div class="row">
-        <div><label>temperature（0~2，越大越发散）</label><input type="number" step="0.1" min="0" max="2" id="llm-temperature"></div>
-        <div><label>单次最大 token</label><input type="number" id="llm-maxTokens"></div>
-        <div><label>超时（毫秒）</label><input type="number" id="llm-timeout"></div>
-      </div>
+      <p class="hint">
+        配置已经<b>合并到下面「模型提供商」</b>了 —— <b>第一个就是主模型</b>，
+        地址 / 密钥 / 模型名 / 温度 / 最大 token / 超时都在那张卡片里改。<br>
+        ⚠️ 想让别的模型顶上，把它<b>拖到第一个</b>（或点卡片上的「设为主模型」），再点「保存列表」。
+      </p>
+    </div>
+
+    <!-- ══════════════════════════════════════════════════════════════
+         ⚠️ 2026-10-22 加（用户：「**给主模型加个可保存之前的模型设定并新加一个
+         模型提供商的功能，再加一个模型优先级卡片滑动排序设置**」）
+
+         ## 三块
+         ① **提供商**（可加可删、**拖动排序 = 优先级**，第 1 个就是主模型）
+         ② **模型设定存档**（存下当前整套配置，随时切回来）
+         ③ ⚠️ 2026-10-22 改了：原来还有第三块「大模型」卡，和 ① 是同一批字段填两遍
+            （用户：「为什么还要留两套一样的设置」）⇒ **已删**，配置全并进 ① 的第一张卡 ✓
+         ══════════════════════════════════════════════════════════════ -->
+    <div class="card">
+      <h2>模型提供商（第一个 = 主模型，拖动排序 = 优先级）</h2>
+      <p class="hint">
+        每个提供商 = 一整套「地址 + 密钥 + 模型 + 温度 / 最大 token / 超时」。<br>
+        <b>排在第 1 个的就是主模型</b>（原来那张「大模型」卡的配置已经搬到这里了）。
+        拖卡片调顺序，或者点卡片上的「设为主模型」把它提到第一位 ✓<br>
+        ⚠️ <b>API Key 留空 = 沿用原来的</b>，不会把已保存的密钥冲掉。
+      </p>
+      <!-- ⚠️ 2026-10-22：**降级状态条**（用户：「优先级在前的模型不可用，要兜底自动使用
+           后一级的模型 10 分钟，10 分钟之后自动重试」）⇒ 得让人一眼看出现在降到哪了 -->
+      <div id="prov-fallback" style="display:none;padding:10px 12px;margin:10px 0;border-radius:8px;
+           background:rgba(255,170,0,.12);border:1px solid rgba(255,170,0,.4)"></div>
+      <div id="prov-list" style="margin:12px 0"></div>
       <div class="btns">
-        <button class="act" onclick="saveModel()">保存</button>
-        <button class="ghost" onclick="testLLM()">测试连通性</button>
-        <span class="msg" id="msg-llm"></span>
+        <button class="ghost" onclick="addProvider()">＋ 添加提供商</button>
+        <button class="act" onclick="saveProviders()">保存列表</button>
+        <span class="msg" id="msg-prov"></span>
       </div>
+      <p class="hint" style="margin-top:8px">
+        ⚠️ 拖动卡片时<b>整张表按新顺序保存</b>；<b>顺序 = 优先级</b>，第一个不可用会自动降到第二个，
+        10 分钟后自动回来重试。
+      </p>
+    </div>
+
+    <div class="card">
+      <h2>模型设定存档</h2>
+      <p class="hint">
+        把当前这套（提供商列表 + 当前启用 + 温度/超时等）<b>整体存下来</b>，以后一键切回去。<br>
+        ⚠️ 存档<b>包含 API Key</b>，就存在本地 <code>config.yml</code> / 账号文件里（不出机器）。
+      </p>
+      <div class="row" style="align-items:flex-end">
+        <div style="flex:2"><label>存成什么名字</label><input type="text" id="pf-name" placeholder="例如：DeepSeek 主力 / Gemini 备用"></div>
+        <div style="flex:1"><button class="act" style="width:100%" onclick="saveProfile()">存下来</button></div>
+      </div>
+      <div id="pf-list" style="margin:12px 0"></div>
+      <span class="msg" id="msg-pf"></span>
     </div>
 
     <div class="card">
       <h2>对话处理（慢消息 · 思考链 · 备选模型 · 剧情放开写）</h2>
       <p class="hint">
         这几项是<b>行为开关</b>，和上面的模型配置（地址 / 密钥 / 温度）<b>分开放</b> ——
-        在这里点保存<b>不会动 api 地址、密钥、温度那些</b>（那几项在上面的「大模型」卡片里）。
+        在这里点保存<b>不会动 api 地址、密钥、温度那些</b>（那几项在上面「模型提供商」的第一张卡里）。
       </p>
       <div style="margin-top:14px;font-weight:600">生成太慢 / 三类对话 / 备选模型</div>
 
@@ -1394,6 +1431,20 @@
     <div class="card">
       <h2>它学到的 <span class="pill" id="learned-count"></span></h2>
       <p class="hint">群主在群里教它的内容。想删就在群里说「忘记：主题名」。</p>
+      <!-- ⚠️⚠️ 2026-10-21 加（用户：「**这个学习做一个开关，再加一个是否有学到提示的开关**」）——
+           ① 学习开关 = `teach.enable`：关掉 ⇒ **一条都不学**（连"记住了"都不认）
+           ② 学到提示 = `teach.notify`：关掉 ⇒ **照学，但不在群里回那句"记下了"** ✓ -->
+      <div class="row" style="margin-top:10px;align-items:center;gap:20px;flex-wrap:wrap">
+        <label style="display:flex;align-items:center;gap:6px;margin:0">
+          <input type="checkbox" id="teach-enable" style="width:auto;margin:0" onchange="teachSet('enable', this.checked)">
+          学习开关（关掉就一条都不学）
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;margin:0">
+          <input type="checkbox" id="teach-notify" style="width:auto;margin:0" onchange="teachSet('notify', this.checked)">
+          学到之后回一句（关掉就闷着学）
+        </label>
+        <span class="hint" id="teach-msg" style="margin:0"></span>
+      </div>
       <div id="learned-list" class="mono"></div>
     </div>
   </section>
@@ -1700,6 +1751,31 @@
        只发**链接**（QQ 卡片被挡了：json/share 段都回「发送者版本过低」✗）、
        只在 **1 档群**发、**默认关闭**、**没填关键词不会发** ✓ -->
   <section id="tab-biliPub" class="hidden">
+  <!-- ⚠️⚠️ 2026-10-22 加（用户：「**可不可以纯靠 webui 完成整个 b 站登录过程，
+       方便没有 agent 的用户操作？**」）
+       ⇒ 以前只能命令行跑 `node tools/bili-login.mjs`，没 agent 的人根本不知道 ✗
+       现在这里点一下 → 后台起进程 → 弹 Chrome → 扫码 → 状态自己变 ✓
+       ⚠️ 登录的是**当前这个 QQ 号自己的** B 站账号（profile 按号分） -->
+  <div class="card">
+    <h3>B站账号（登录）</h3>
+    <p class="hint">
+      这一套 B 站功能（投稿 / 评论回复 / 主动评论）用的都是
+      <b>当前这个 QQ 号自己的 B 站账号</b>。<br>
+      第一次用先点下面的按钮：会弹一个 Chrome 窗口，在里面<b>扫码或输密码</b>就行。
+    </p>
+    <div id="bl-status" class="d" style="display:block;margin:12px 0;padding:10px 12px;border-radius:8px;
+         background:rgba(255,255,255,.04)">读取中…</div>
+    <div class="btns">
+      <button class="act" onclick="biliLoginStart()" id="bl-btn">登录 / 重新登录</button>
+      <button class="ghost" onclick="loadBiliLogin()">刷新状态</button>
+      <span class="msg" id="msg-bl"></span>
+    </div>
+    <p class="hint" style="margin-top:8px">
+      ⚠️ 登录窗口最长等 <b>10 分钟</b>；扫完它自己会关掉，这里的状态会变成「已登录」。<br>
+      ⚠️ 登录只是拿到登录态，<b>不会发任何东西</b>；要开始回复/投稿还得把下面那些开关打开。
+    </p>
+  </div>
+
   <div class="card">
     <h3>B站投稿（自动生成并发布）</h3>
     <div style="background:rgba(74,158,255,.09);border-left:3px solid #4a9eff;padding:9px 13px;border-radius:0 6px 6px 0;font-size:12.5px;line-height:1.7;margin:10px 0">
@@ -1766,6 +1842,112 @@
   <div class="card">
     <h3>最近记录</h3>
     <div id="bp-history" class="d" style="display:block;margin-top:8px"></div>
+  </div>
+</section>
+
+<section id="tab-biliCmt" class="hidden">
+  <!-- ⚠️ 2026-10-21 用户：「**把B站评论单开一个板块，离开B站投稿板块**」
+       从 tab-biliPub 整块搬过来的两张卡：评论回复 + 主动评论。
+       ⚠️ 数据还是那套接口（/api/bili-publish），切到这个 tab 时会调 renderBiliPub() 刷一遍 ✓ -->
+
+<div class="card">
+    <h3>B站评论回复（接管账号）</h3>
+    <div class="d" style="display:block;margin-bottom:8px">
+      开着的时候，每隔一段时间去看一眼她视频下的新评论，<b>用她自己的口气回一句</b>。
+      ⚠️ 走的是<b>真浏览器</b>（和上传视频同一套登录态），不是接口 —— 不容易被风控。
+    </div>
+    <!-- ⚠️ 2026-10-22 用户：「和分享视频一样，差不多直接复用那边的所有设置」
+         ⇒ 字段照 `biliShare` 那套：每天条数（区间）/ 时间段 / 两条间隔 / 关键词筛选
+         ⚠️ 原来那个「每隔 N 分钟」**删掉了** —— 那是"多久检查一次"，不是"多久回一条"，
+            用户问过「为什么最低是 5 分钟」（因为起一次浏览器要 20~30 秒，5 分钟内反复起没意义）。
+            现在改成"两条之间至少隔多久"，下限 1 分钟 ✓ -->
+    <div style="display:flex;gap:12px;flex-wrap:wrap;margin:10px 0">
+      <div style="flex:1;min-width:160px"><div class="d" style="display:block">开关</div>
+        <select id="bc-enable" style="width:100%"><option value="0">关闭</option><option value="1">开启（自动回复新评论）</option></select></div>
+      <div style="flex:1;min-width:150px"><div class="d" style="display:block">多久看一次（分钟）</div><input id="bc-check" type="number" min="1" max="120" value="5" style="width:100%"></div>
+      <div style="flex:1;min-width:150px"><div class="d" style="display:block">一次最多回几条</div><input id="bc-max" type="number" min="1" max="6" value="3" style="width:100%"></div>
+    </div>
+    <div class="d" style="display:block">
+      有几个新评论就回几个（一次最多这么多条）；只回 <b>48 小时内</b>的，几天前的不翻出来回。
+    </div>
+    <div id="bc-status" class="d" style="display:block"></div>
+    <div class="d" style="display:block;margin-top:6px">
+      ⚠️ <b>默认关闭</b>：这是在 B 站上对外说话，得你自己开。同一条评论<b>一辈子只回一次</b>（记在短期记忆里）。
+    </div>
+    <!-- ⚠️⚠️ 2026-10-22 用户截图报的：「连保存按钮都没有，怎么保存啊？」
+         上一版这张卡片**自己不带保存按钮**，得往上滚到「内容来源」那张去点 ——
+         谁看都觉得没地方存 ✗ ⇒ 这里单独放一个，和上面那个是**同一个处理函数** -->
+    <div style="margin-top:14px"><button class="btn primary" id="bp-save2">保存设置</button></div>
+  </div>
+
+  <!-- ⚠️ 2026-10-21 加：**B站主动去别人视频下评论**
+       用户：「继续主动去别人视频下发评论的工作」「和分享视频一样，可以差不多直接复用那边的所有设置」
+            「也可以加个手动发一条，但是要显示出来发送的视频链接」 -->
+  <div class="card">
+    <h3>B站主动评论（去别人的视频下说两句）</h3>
+    <div class="d" style="display:block;margin-bottom:8px">
+      按关键词<b>搜别人的视频</b>，挑播放量最高的那条，看完让她自己写一句发在评论区。
+      ⚠️ 走的是<b>真浏览器</b>（和上传视频同一套登录态），不是接口。
+    </div>
+    <div style="display:flex;gap:12px;flex-wrap:wrap;margin:10px 0">
+      <div style="flex:1;min-width:160px"><div class="d" style="display:block">开关</div>
+        <select id="bp2-enable" style="width:100%"><option value="0">关闭</option><option value="1">开启（自己去别人视频下发）</option></select></div>
+      <div style="flex:1;min-width:100px"><div class="d" style="display:block">每天最少</div><input id="bp2-min" type="number" min="1" max="50" value="1" style="width:100%"></div>
+      <div style="flex:1;min-width:100px"><div class="d" style="display:block">每天最多</div><input id="bp2-max" type="number" min="1" max="50" value="2" style="width:100%"></div>
+      <!-- ⚠️ 2026-10-22 加（用户：「我是说 b站是怎么限的，你再根据 b站的限制对应更改 webui 限制设置逻辑」）：
+           B站 真正卡的是**间隔**不是"每天几条" —— 实测连发第二条（3 分钟内）直接被拦，
+           而且被折叠的评论删了重发会触发 5 日评论功能限制。
+           这个值原来是**硬编码 20 分钟**（用户改不了），现在开出来 ✓ -->
+      <div style="flex:1;min-width:130px"><div class="d" style="display:block">两次之间至少（分钟）</div><input id="bp2-interval" type="number" min="10" max="180" value="20" style="width:100%"></div>
+      <div style="flex:1;min-width:100px"><div class="d" style="display:block">从几点</div><input id="bp2-start" type="number" min="0" max="23" value="10" style="width:100%"></div>
+      <div style="flex:1;min-width:100px"><div class="d" style="display:block">到几点</div><input id="bp2-end" type="number" min="0" max="24" value="22" style="width:100%"></div>
+    </div>
+    <div class="d" style="display:block;margin-bottom:6px">
+      ⚠️ <b>间隔比每天条数更重要</b>：B站 对"短时间内连着发"最敏感（实测 3 分钟内连发第二条就失败），
+      而被系统折叠的评论删了重发会触发 <b>5 日评论功能限制</b>。
+      ⇒ 建议 <b>每天 3~5 条、间隔 20~60 分钟</b>，别把一天的量挤在一小时内。
+    </div>
+    <div class="d" style="display:block">看哪类视频（一行一个，逗号也行；<b>空 = 不发</b>）</div>
+    <textarea id="bp2-keywords" rows="3" style="width:100%" placeholder="我的世界&#10;轨道交通"></textarea>
+    <div id="bp2-status" class="d" style="display:block;margin-top:6px"></div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-top:10px">
+      <div style="flex:1;min-width:220px"><div class="d" style="display:block">手动发一条（留空 = 按关键词自己搜一个）</div>
+        <input id="bp2-manual" type="text" style="width:100%" placeholder="BV1xx411c7mD 或视频链接"></div>
+      <button class="btn" id="bp2-now">立刻发一条</button>
+      <button class="btn primary" id="bp2-save">保存设置</button>
+    </div>
+    <div id="bp2-recent" class="d" style="display:block;margin-top:8px"></div>
+  </div>
+
+</section>
+
+<section id="tab-voice" class="hidden">
+  <!-- ⚠️ 2026-10-21 用户：「加一个语音设置模块放在功能卡片，内置开关，
+       然后各个QQ账号可以选择用哪个语音，再加一个戳一戳回的消息默认用语音回复，
+       这个开关默认关闭」
+       ⚠️ 这一段是**按号私有**的（不在 SHARED_SECTIONS）⇒ 你现在是哪个号，
+         改的就是哪个号的音色；要给别的号选，先切到那个号再进来改 ✓ -->
+  <div class="card">
+    <h3>语音</h3>
+    <div class="d" style="display:block;margin-bottom:8px">
+      她自己决定哪句"说出来"（思考链里调 <code>[工具:语音]</code> 整条出声，
+      或者 <code>[语音]…[/语音]</code> 只让一小截出声）。
+      ⚠️ 合成不出来 / 超时 ⇒ <b>自动改发文字</b>，话不会丢。
+    </div>
+    <div style="display:flex;gap:12px;flex-wrap:wrap;margin:10px 0">
+      <div style="flex:1;min-width:170px"><div class="d" style="display:block">总开关</div>
+        <select id="vc-enable" style="width:100%"><option value="1">开启</option><option value="0">关闭（一律不发语音）</option></select></div>
+      <div style="flex:1;min-width:200px"><div class="d" style="display:block">戳一戳的回复用语音</div>
+        <select id="vc-poke" style="width:100%"><option value="0">不用（默认，回文字）</option><option value="1">用语音回</option></select></div>
+    </div>
+    <div style="margin-top:6px"><div class="d" style="display:block">用哪个音色（这个是<b>按号</b>的 —— 每个 QQ 号可以不一样）</div>
+      <select id="vc-ref" style="width:100%"></select></div>
+    <div id="vc-status" class="d" style="display:block;margin-top:8px"></div>
+    <div class="d" style="display:block;margin-top:6px">
+      ⚠️ 音色文件放在 <code>logs/bili/voice-ref/</code>，往里丢新的 wav 这里就能选到。
+      ⚠️ 第一次用要冷启动（约 90 秒），<b>那一条会先发文字</b>，之后就能出声。
+    </div>
+    <div style="margin-top:14px"><button class="btn primary" id="vc-save">保存设置</button></div>
   </div>
 </section>
 
@@ -3713,7 +3895,7 @@ document.querySelectorAll('nav button').forEach(b => {
     //     2026-10-15 加「B站分享」时**又漏了一次** —— `bili` 没加进这个数组 ⇒
     //     点过去是一片空白（连卡片都不显示，因为它的 section 一直挂着 `hidden`）✗
     //     ⇒ 现在有一条套件断言**自动对账**（`test/webui.js`：每个 `data-tab` 都得在这个数组里）✓）
-    ['model','groups','faces','knowledge','persona','qzone','life','bili','biliPub','quest','groupcfg','affinity','workmode','tools','qqlogin','status','about','accounts'].forEach(t => {
+    ['model','groups','faces','knowledge','persona','qzone','life','bili','biliPub','biliCmt','voice','quest','groupcfg','affinity','workmode','tools','qqlogin','status','about','accounts'].forEach(t => {
       const el = $('tab-' + t);
       if (el) el.classList.toggle('hidden', t !== b.dataset.tab);
     });
@@ -3727,6 +3909,12 @@ document.querySelectorAll('nav button').forEach(b => {
     if (b.dataset.tab === 'bili') renderBili();
     // ⚠️ 2026-10-22 加：B 站自动投稿那一页
     if (b.dataset.tab === 'biliPub') renderBiliPub();
+    /* ⚠️ 2026-10-21 用户：「把B站评论单开一个板块，离开B站投稿板块」
+     *   评论那个 tab 跟投稿 tab **共用同一个接口**（/api/bili-publish 一次返回投稿+评论+主动评论）
+     *   ⇒ 切过来直接复用 renderBiliPub() 刷一遍就行，别写第二套 ✓ */
+    if (b.dataset.tab === 'biliCmt') renderBiliPub();
+    // ⚠️ 2026-10-21 加：语音设置页
+    if (b.dataset.tab === 'voice') renderVoice();
     if (b.dataset.tab === 'quest') { renderQuest(); renderStoryline(); startQuestPoll(); }
     else stopQuestPoll();
     // ⚠️ 2026-09-16：按群设定自己一页了（原来挤在二级剧情页里）
@@ -3782,18 +3970,21 @@ async function reloadAll() {
   $('id-botQQ').value = c.botQQ || '';
 
   // 模型
-  $('llm-baseURL').value = c.llm.baseURL || '';
-  // 模型下拉框：先把当前值放进去，再尝试从 API 拉完整列表
-  fillModelSelect([c.llm.model].filter(Boolean), c.llm.model);
+  /* ⚠️⚠️ 2026-10-22 改：原来这张「大模型」卡已经并进下面的「模型提供商」了
+   *    （用户：「为什么还要留两套一样的设置」+「把大模型那里本来有的设置直接全部剪切过来」）
+   *    ⇒ 这几个框**已经不存在**，这里不能再碰它们：
+   *      · `$('llm-baseURL').value = …` 和 `$('llm-apiKey').value = …` 会 `Cannot set properties of null`
+   *      · `fillModelSelect(...)` / `loadModels({silent:true})` 的默认 id 都指向这些框 ⇒ 也会炸
+   *    ⚠️ 一旦在这里抛错，**后面整段都不会执行** —— 备选模型（bk*）、慢消息开关、
+   *       思考链开关全都填不上，界面上看着像"我改了备用模型没生效" ✗
+   *    ⇒ 主模型那套改由 `loadProviders()` 渲染（第一个就是主模型）✓
+   *    ⚠️ 备选模型那一套（`llm-bk*` / 勾选时启用）**一个字都没动**，还是原来的用途 ✓ */
   renderQzone();
   $('qz-face').innerHTML =
     '<option value="">不配图</option>' +
     FACES.map((f) => '<option value="' + esc(f.tag) + '">' + esc(f.tag) + '</option>').join('');
-  loadModels({ silent: true });
-  $('llm-apiKey').value = c.llm.apiKey || '';
-  $('llm-temperature').value = c.llm.temperature ?? 0.5;
-  $('llm-maxTokens').value = c.llm.maxTokens ?? 800;
-  $('llm-timeout').value = c.llm.timeout ?? 60000;
+  // ⚠️ 2026-10-22 加：多提供商列表 + 存档 + 降级状态（用户要的三件）
+  loadProviders();
   // ⚠️ 2026-10-07：慢模型丢弃积压（**默认开** —— 只有明确写成 false 才算关）
   $('llm-slowDrop').checked = c.llm.slowQueueDrop !== false;
   // ⚠️ 2026-10-09：判据从"秒"改成"**条**"（用户：「改成超过 3 条消息的个数，
@@ -3919,6 +4110,15 @@ async function reloadAll() {
     kv('NapCat 连接', '<span class="mono">' + esc(c.onebot.mode + ' ' + c.onebot.url) + '</span>');
 
   $('learned-count').textContent = r.stats.learned + ' 条';
+  // ⚠️ 2026-10-21 加：两个学习开关的状态回填（`config.teach` 由 `configForUi()` 一起带回来）
+  {
+    const tc = (r.config && r.config.teach) || {};
+    const e1 = $('teach-enable');
+    const e2 = $('teach-notify');
+    // ⚠️ 缺省都当"开"（`config.js` 里 enable / notify 默认 true）✓
+    if (e1) e1.checked = tc.enable !== false;
+    if (e2) e2.checked = tc.notify !== false;
+  }
   $('learned-list').innerHTML = r.learnedTopics.length
     ? r.learnedTopics.map((t, i) => (i + 1) + '. ' + esc(t)).join('<br>')
     : '<span style="color:#6b7280">还没有学到额外的东西</span>';
@@ -3983,6 +4183,39 @@ async function cleanupRun(dryRun) {
 //    直接抛错，把 reloadAll 后面所有初始化全带停了（见上面「日常事件」那段注释）。
 // ⚠️ 状态里的 `stale` 是"开过、但项目挪了位置，自启项还指着旧路径" ——
 //    这种要显眼地说出来，否则用户会以为"开着呢"但开机其实起不来。
+// ⚠️⚠️ 2026-10-21 加（用户：「**这个学习做一个开关，再加一个是否有学到提示的开关**」）——
+//   ① `enable` 关 ⇒ 一条都不学（后端 `saveKnowledge` 直接返回）
+//   ② `notify` 关 ⇒ 照学，但**不在群里回那句"记下了"** ✓
+//   ⚠️ `teach` 段在 `saveConfig` 的 `put()` / `HANDLED` / `order` **三处都有** ⇒ 能存进去 ✓
+async function teachSet(key, val) {
+  const msg = $('teach-msg');
+  if (msg) msg.textContent = '正在保存…';
+  const patch = {};
+  patch[key] = val === true;
+  const r = await api('/api/config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ teach: patch }),
+  }).catch((e) => ({ ok: false, error: e.message }));
+  if (!r || !r.ok) {
+    if (msg) msg.textContent = '没保存成功：' + (r?.error || '看看服务端日志');
+    return;
+  }
+  if (msg) {
+    msg.textContent =
+      key === 'enable'
+        ? val
+          ? '✅ 学习已开'
+          : '✅ 学习已关（一条都不学）'
+        : val
+          ? '✅ 学到之后会回一句'
+          : '✅ 闷着学，不吭声';
+  }
+  setTimeout(() => {
+    if (msg) msg.textContent = '';
+  }, 4000);
+}
+
 async function loadAutostart() {
   const box = $('autostart-status');
   if (!box) return;
@@ -4123,6 +4356,9 @@ function bkFillGemini() {
 /** 列表为空时，至少放一个可编辑的项，别让用户没得选 */
 function ensureModelEditable() {
   const sel = $('llm-model');
+  // ⚠️ 2026-10-22：主模型那张卡已经并进「模型提供商」⇒ 这个框**可能不存在**，
+  //    这里必须挡一下（否则 `sel.options` 直接抛错，把调用它的整段逻辑带崩）✓
+  if (!sel) return;
   if (!sel.options.length) {
     sel.innerHTML = '<option value="">（拉取失败，请直接输入模型名）</option>';
   }
@@ -4198,12 +4434,8 @@ async function saveLife() {
     body: JSON.stringify({ life: {
       enable: $('life-enable').checked,
       holidays: $('life-holidays').checked,
-      minPerDay: Number($('life-minPerDay').value),
-      maxPerDay: Number($('life-maxPerDay').value),
       cooldownMs: Math.round(Number($('life-cooldownMin').value) * 60000),
       lateToleranceMs: Math.round(Number($('life-lateMin').value) * 60000),
-      startHour: Number($('life-startHour').value),
-      endHour: Number($('life-endHour').value),
     }})
   });
   flash(el, r.ok, r.ok ? '已保存并生效（节奏类参数下次检查时生效）' : ('保存失败：' + r.error));
@@ -5386,6 +5618,327 @@ async function loadOwnerName() {
   } catch {}
 }
 
+/* ══════════════════════════════════════════════════════════════════
+ * ⚠️ 2026-10-22 加：**多提供商 + 拖动排序 + 设定存档**
+ *   用户：「给主模型加个可保存之前的模型设定并新加一个模型提供商的功能，
+ *   再加一个模型优先级卡片滑动排序设置」
+ *
+ * ## 拖动排序用的是**原生 HTML5 drag & drop**（不引库：这页面是自包含单文件）
+ * ## ⚠️ 顺序 = 优先级，但**真正用哪个由 activeId 决定**（别让用户以为拖一下就切换了）
+ * ══════════════════════════════════════════════════════════════════ */
+let PROV = [];        // 提供商列表（顺序=优先级）
+let PROV_ACTIVE = ''; // 当前启用的 id
+let PF_LIST = [];     // 存档列表
+let dragIdx = -1;     // 正在拖第几个
+
+function provCardHtml(p, i) {
+  const on = i === 0;                      // ⚠️ 第 0 个 = 主模型（顺序即优先级）
+  const numOr = (v) => (v === null || v === undefined || v === '' ? '' : v);
+  return `<div class="prov-item" draggable="true" data-idx="${i}"
+       style="border:1px solid ${on ? '#4a9eff' : 'rgba(255,255,255,.12)'};border-radius:10px;
+              padding:12px;margin-bottom:10px;background:${on ? 'rgba(74,158,255,.08)' : 'transparent'};cursor:grab">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+      <span style="opacity:.5;cursor:grab">⠿</span>
+      <b style="flex:1">${esc(p.name || '未命名')}</b>
+      ${on ? '<span style="color:#4a9eff;font-size:12px">● 主模型（优先级最高）</span>' : ''}
+      ${on ? '' : `<button class="ghost" style="padding:4px 10px" onclick="promoteProvider(${i})">设为主模型</button>`}
+      <button class="ghost" style="padding:4px 10px;color:#f85149" onclick="delProvider(${i})">删除</button>
+    </div>
+    <div class="row" style="gap:8px">
+      <div style="flex:1;min-width:120px"><div class="d" style="display:block">名字</div>
+        <input type="text" value="${esc(p.name || '')}" oninput="PROV[${i}].name=this.value" style="width:100%"></div>
+      <div style="flex:2;min-width:180px"><div class="d" style="display:block">API 地址（baseURL）</div>
+        <input type="text" value="${esc(p.baseURL || '')}" oninput="PROV[${i}].baseURL=this.value" placeholder="https://api.deepseek.com/v1" style="width:100%"></div>
+    </div>
+    <div class="row" style="gap:8px;margin-top:6px">
+      <div style="flex:2;min-width:180px"><div class="d" style="display:block">模型名（点右边可拉列表，也能直接手打）</div>
+        <div style="display:flex;gap:6px">
+          <input type="text" list="prov-models-${i}" value="${esc(p.model || '')}" oninput="PROV[${i}].model=this.value"
+                 placeholder="deepseek-chat" style="width:100%">
+          <button class="ghost" style="padding:4px 8px;white-space:nowrap" onclick="provLoadModels(${i})">拉列表</button>
+        </div>
+        <datalist id="prov-models-${i}"></datalist></div>
+      <div style="flex:2;min-width:180px"><div class="d" style="display:block">API Key（留空 = 沿用原来的）</div>
+        <input type="password" value="${esc(p.apiKey || '')}" oninput="PROV[${i}].apiKey=this.value" placeholder="sk-..." style="width:100%"></div>
+    </div>
+    <div class="row" style="gap:8px;margin-top:6px">
+      <div style="flex:1;min-width:110px"><div class="d" style="display:block">temperature（0~2）</div>
+        <input type="number" step="0.1" min="0" max="2" value="${numOr(p.temperature)}"
+               oninput="PROV[${i}].temperature=this.value===''?null:Number(this.value)" placeholder="1" style="width:100%"></div>
+      <div style="flex:1;min-width:110px"><div class="d" style="display:block">单次最大 token</div>
+        <input type="number" value="${numOr(p.maxTokens)}"
+               oninput="PROV[${i}].maxTokens=this.value===''?null:Number(this.value)" placeholder="8000" style="width:100%"></div>
+      <div style="flex:1;min-width:110px"><div class="d" style="display:block">超时（毫秒）</div>
+        <input type="number" value="${numOr(p.timeout)}"
+               oninput="PROV[${i}].timeout=this.value===''?null:Number(this.value)" placeholder="60000" style="width:100%"></div>
+    </div>
+    <div style="margin-top:6px">
+      <div class="d" style="display:block">同家备用模型（<b>限流时按顺序换</b>，逗号分隔；留空 = 直接跨到下一家）</div>
+      <input type="text" value="${esc((p.fallbackModels || []).join(','))}"
+             oninput="PROV[${i}].fallbackModels=this.value.split(/[,，、\\n]/).map(s=>s.trim()).filter(Boolean)"
+             placeholder="例：kimi-k2.8-preview,glm-5.3-flash" style="width:100%">
+    </div>
+    <div style="display:flex;align-items:center;gap:10px;margin-top:8px">
+      <button class="ghost" style="padding:4px 10px" onclick="provTest(${i})">测试连通性</button>
+      <span class="msg" id="prov-msg-${i}"></span>
+    </div>
+  </div>`;
+}
+
+function renderProviders() {
+  const box = $('prov-list');
+  if (!box) return;
+  if (!PROV.length) {
+    box.innerHTML = '<div class="d" style="display:block;padding:14px;text-align:center">'
+      + '还没有提供商 ⇒ 点下面的「＋ 添加提供商」加一个，第 1 个就是主模型 ✓</div>';
+    return;
+  }
+  box.innerHTML = PROV.map((p, i) => provCardHtml(p, i)).join('');
+  // 绑拖动
+  [...box.querySelectorAll('.prov-item')].forEach((el) => {
+    el.addEventListener('dragstart', (e) => {
+      dragIdx = Number(el.dataset.idx);
+      e.dataTransfer.effectAllowed = 'move';
+      el.style.opacity = '0.4';
+    });
+    el.addEventListener('dragend', () => { el.style.opacity = '1'; });
+    el.addEventListener('dragover', (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
+    el.addEventListener('drop', (e) => {
+      e.preventDefault();
+      const to = Number(el.dataset.idx);
+      if (dragIdx < 0 || dragIdx === to) return;
+      const [moved] = PROV.splice(dragIdx, 1);
+      PROV.splice(to, 0, moved);
+      dragIdx = -1;
+      renderProviders();
+      const m = $('msg-prov');
+      if (m) flash(m, true, '顺序已改，记得点「保存列表」');
+    });
+  });
+}
+
+function addProvider() {
+  const n = PROV.length + 1;
+  PROV.push({
+    id: `p${Date.now().toString(36)}`,
+    name: `提供商 ${n}`,
+    baseURL: '', apiKey: '', model: '',
+    // ⚠️ 2026-10-22：**留空 = 沿用主模型那套**（`null` 存进配置，`llmCfg()` 会回落）✓
+    temperature: null, maxTokens: null, timeout: null,
+  });
+  renderProviders();
+}
+
+function delProvider(i) {
+  const p = PROV[i];
+  if (!p) return;
+  if (!confirm(`删掉「${p.name}」？`)) return;
+  PROV.splice(i, 1);
+  renderProviders();
+}
+
+/**
+ * 把第 i 个**提到第一位**（= 设为主模型）并立刻保存。
+ *
+ * ⚠️ 2026-10-22 改：原来这个按钮叫「启用」，靠 `activeId` 决定用谁 ——
+ *    那和"拖动排序 = 优先级"是**两套互相打架的机制**（拖到第一位的可能不是 activeId 指的）。
+ *    用户要的是「排在模型提供商的第一个」⇒ 现在**顺序就是唯一的判据**，
+ *    这个按钮等价于"挪到第一位 + 保存" ✓
+ */
+async function promoteProvider(i) {
+  const p = PROV[i];
+  if (!p) return;
+  if (!p.baseURL) { flash($('msg-prov'), false, '这个提供商还没填 API 地址'); return; }
+  if (i > 0) {
+    const [moved] = PROV.splice(i, 1);
+    PROV.unshift(moved);
+  }
+  PROV_ACTIVE = PROV[0]?.id || '';
+  renderProviders();
+  await saveProviders();
+  flash($('msg-prov'), true, `已把「${PROV[0]?.name || ''}」设为主模型 ✓`);
+}
+
+/** 拉某个提供商的模型列表（用**它自己**的地址和密钥，不碰别的卡） */
+async function provLoadModels(i) {
+  const p = PROV[i];
+  const m = $(`prov-msg-${i}`);
+  if (!p) return;
+  if (!p.baseURL) { flash(m, false, '先填 API 地址'); return; }
+  if (m) { m.textContent = '正在拉取…'; m.style.color = '#888'; }
+  try {
+    const r = await api('/api/models', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ baseURL: String(p.baseURL || '').trim(), apiKey: String(p.apiKey || '').trim() }),
+    });
+    const dl = $(`prov-models-${i}`);
+    if (r.ok && r.models && r.models.length) {
+      if (dl) dl.innerHTML = [...new Set(r.models)].map((x) => `<option value="${esc(x)}"></option>`).join('');
+      flash(m, true, `拉到 ${r.models.length} 个，点输入框就能选`);
+    } else {
+      flash(m, false, `拉取失败：${r.error || '未知'} —— 可以直接手打模型名`);
+    }
+  } catch (e) {
+    flash(m, false, '拉取出错：' + e.message);
+  }
+}
+
+/** 测某个提供商能不能通（只测这一套，不改真实配置） */
+async function provTest(i) {
+  const p = PROV[i];
+  const m = $(`prov-msg-${i}`);
+  if (!p) return;
+  if (m) { m.textContent = '测试中…'; m.style.color = '#888'; }
+  try {
+    const r = await api('/api/test-llm', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ llm: {
+        baseURL: String(p.baseURL || '').trim(),
+        model: String(p.model || '').trim(),
+        apiKey: String(p.apiKey || '').trim(),
+      } }),
+    });
+    flash(m, r.ok, r.ok ? `连通，${r.ms}ms，返回「${r.reply}」` : `失败：${r.error}`);
+  } catch (e) {
+    flash(m, false, '测试出错：' + e.message);
+  }
+}
+
+async function saveProviders() {
+  const m = $('msg-prov');
+  /* ⚠️ 2026-10-22：**必须走 `api()`**（它会带 `x-saki-account` 头）——
+   *    裸 `fetch` 不带那个头 ⇒ 后端永远当成主号，改的是**主号**的配置，
+   *    而界面上看着像改成功了 ✗（语音那个 tab 就踩过一次） */
+  const r = await api('/api/llm-providers', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ providers: PROV, activeId: PROV_ACTIVE }),
+  });
+  if (!r.ok) { flash(m, false, '保存失败：' + (r.error || '')); return; }
+  PROV = r.providers || PROV;
+  PROV_ACTIVE = r.activeId || (PROV[0]?.id || '');
+  renderProviders();
+  flash(m, true, `已保存 ${PROV.length} 个提供商 ✓ 主模型 = ${PROV[0]?.name || ''}`);
+}
+
+async function loadProviders() {
+  try {
+    const j = await api('/api/llm-providers');
+    if (!j.ok) return;
+    PROV = Array.isArray(j.providers) ? j.providers : [];
+    PROV_ACTIVE = String(j.activeId || (PROV[0]?.id || ''));
+    PF_LIST = Array.isArray(j.profiles) ? j.profiles : [];
+    renderProviders();
+    renderProfiles();
+    renderFallback(j.fallback);
+  } catch { /* ignore */ }
+}
+
+/* ⚠️ 2026-10-22：**降级状态条**
+ *   用户要求：「优先级在前的模型不可用，兜底自动使用后一级的模型 10 分钟，
+ *   10 分钟之后自动重试」⇒ 这里把"降到哪一级 / 还剩多久 / 为什么降"显示出来 ✓ */
+function renderFallback(fo) {
+  const box = $('prov-fallback');
+  if (!box) return;
+  // ⚠️ 2026-10-22：**同家换模型也算降级中**（`sameVendor`）——
+  //    用户要求「主模型被限流时先换相同供应商的正常模型」⇒ 界面上要能看出"没换家，只换了模型" ✓
+  if (!fo || (!fo.level && !fo.modelIdx)) { box.style.display = 'none'; return; }
+  const mm = Math.floor((fo.secondsLeft || 0) / 60);
+  const ss = (fo.secondsLeft || 0) % 60;
+  box.style.display = 'block';
+  if (fo.sameVendor) {
+    box.innerHTML = `⚠️ <b>主模型被限流</b> ⇒ 同一家（${esc(fo.activeName || '?')}）换成
+      「<b>${esc(fo.activeModel || '?')}</b>」
+      <br>${mm} 分 ${String(ss).padStart(2, '0')} 秒后<b>自动回主模型重试</b>
+      <span style="opacity:.7;font-size:12px">（这家还剩 ${fo.fbLeft || 0} 个备用模型没试）</span>
+      ${fo.lastErr ? `<br><span style="opacity:.7;font-size:12px">原因：${esc(fo.lastErr)}</span>` : ''}
+      <div style="margin-top:8px"><button class="ghost" style="padding:4px 10px" onclick="resetFallback()">立刻回主模型重试</button></div>`;
+    return;
+  }
+  box.innerHTML = `⚠️ <b>正在降级运行</b>：主模型「${esc(fo.mainName || '?')}」不可用
+    ⇒ 现在用第 ${fo.level + 1} 级「<b>${esc(fo.activeName || '?')}</b>」（${esc(fo.activeModel || '')}）
+    <br>${mm} 分 ${String(ss).padStart(2, '0')} 秒后<b>自动回主模型重试</b>
+    ${fo.lastErr ? `<br><span style="opacity:.7;font-size:12px">原因：${esc(fo.lastErr)}</span>` : ''}
+    <div style="margin-top:8px"><button class="ghost" style="padding:4px 10px" onclick="resetFallback()">立刻回主模型重试</button></div>`;
+}
+
+async function resetFallback() {
+  const r = await (await fetch('/api/llm-fallback/reset', { method: 'POST' })).json();
+  renderFallback(r.fallback);
+  flash($('msg-prov'), true, '已复位 ⇒ 下次调用就用主模型');
+}
+
+/* ── 设定存档 ─────────────────────────────────── */
+function renderProfiles() {
+  const box = $('pf-list');
+  if (!box) return;
+  if (!PF_LIST.length) {
+    box.innerHTML = '<div class="d" style="display:block;padding:10px">还没有存过设定</div>';
+    return;
+  }
+  box.innerHTML = PF_LIST.map((p) => {
+    const when = p.savedAt ? new Date(p.savedAt).toLocaleString('zh-CN', { hour12: false }) : '';
+    return `<div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid rgba(255,255,255,.08)">
+      <div style="flex:1">
+        <b>${esc(p.name || '')}</b>
+        <div class="d" style="display:block;font-size:12px">${esc(p.model || '')} · ${esc((p.baseURL || '').replace(/^https?:\/\//, ''))} · ${when}</div>
+      </div>
+      <button class="ghost" style="padding:4px 10px" onclick="loadProfile('${esc(p.name || '')}')">载入</button>
+      <button class="ghost" style="padding:4px 10px;color:#f85149" onclick="delProfile('${esc(p.name || '')}')">删除</button>
+    </div>`;
+  }).join('');
+}
+
+async function saveProfile() {
+  const m = $('msg-pf');
+  const name = String(($('pf-name') || {}).value || '').trim();
+  if (!name) { flash(m, false, '先给这份设定起个名字'); return; }
+  const r = await (await fetch('/api/llm-profiles/save', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  })).json();
+  if (!r.ok) { flash(m, false, '存不下来：' + (r.error || '')); return; }
+  PF_LIST = r.profiles || [];
+  renderProfiles();
+  if ($('pf-name')) $('pf-name').value = '';
+  flash(m, true, `已存「${name}」✓`);
+}
+
+async function loadProfile(name) {
+  const m = $('msg-pf');
+  if (!confirm(`载入「${name}」？\n会覆盖当前的提供商列表和模型配置。`)) return;
+  const r = await (await fetch('/api/llm-profiles/load', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  })).json();
+  if (!r.ok) { flash(m, false, '载入失败：' + (r.error || '')); return; }
+  flash(m, true, `已载入「${name}」✓`);
+  await loadProviders();
+  // 把上面那张卡也刷一遍
+  try {
+    const j = await (await fetch('/api/llm-providers')).json();
+    if (j.ok) {
+      if ($('llm-baseURL')) $('llm-baseURL').value = j.current.baseURL || '';
+      if ($('llm-model')) $('llm-model').innerHTML = `<option>${esc(j.current.model || '')}</option>`;
+      if ($('llm-temperature')) $('llm-temperature').value = j.current.temperature ?? 1;
+      if ($('llm-maxTokens')) $('llm-maxTokens').value = j.current.maxTokens ?? 8000;
+      if ($('llm-timeout')) $('llm-timeout').value = j.current.timeout ?? 60000;
+    }
+  } catch { /* ignore */ }
+}
+
+async function delProfile(name) {
+  const m = $('msg-pf');
+  if (!confirm(`删掉设定「${name}」？`)) return;
+  const r = await (await fetch('/api/llm-profiles/delete', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  })).json();
+  if (!r.ok) { flash(m, false, '删不掉：' + (r.error || '')); return; }
+  PF_LIST = r.profiles || [];
+  renderProfiles();
+  flash(m, true, '已删除');
+}
+
 async function saveModel() {  // ⚠️ 2026-10-19：保存按钮现在**两张卡片上都有**（大模型 / 剧情放开写）⇒ 提示两处都写
   const showMsg = (ok, text) => {
     for (const id of ['msg-llm', 'msg-llm2']) {
@@ -5464,15 +6017,25 @@ async function saveModel() {  // ⚠️ 2026-10-19：保存按钮现在**两张�
   if (r.ok) reloadAll();
 }
 
+/**
+ * 测试主模型连通性。
+ * ⚠️ 2026-10-22：原来那张「大模型」卡删掉之后**没有调用点了**（每张提供商卡片
+ *    现在用 `provTest(i)` 测自己那套）。这里保留但加防护 —— 免得哪天有人再调它，
+ *    读已删的框直接抛 `Cannot read properties of null` ✗
+ */
 async function testLLM() {
   const el = $('msg-llm');
+  const base = $('llm-baseURL');
+  const mdl = $('llm-model');
+  const key = $('llm-apiKey');
+  if (!base || !mdl || !key) { flash(el, false, '主模型那套已经并到「模型提供商」卡片了，用那张卡上的「测试连通性」'); return; }
   flash(el, null, '测试中…');
   const r = await api('/api/test-llm', {
     method: 'POST', headers: {'Content-Type':'application/json'},
     body: JSON.stringify({ llm: {
-      baseURL: $('llm-baseURL').value.trim(),
-      model: $('llm-model').value.trim(),
-      apiKey: $('llm-apiKey').value.trim(),
+      baseURL: base.value.trim(),
+      model: mdl.value.trim(),
+      apiKey: key.value.trim(),
     }})
   });
   flash(el, r.ok, r.ok ? `连通，${r.ms}ms，返回「${r.reply}」` : `失败：${r.error}`);
@@ -6218,6 +6781,94 @@ async function qzoneManualPost() {
 // ⚠️ 2026-10-16：「立刻发送」那格**这一轮渲染的是哪个群**（换群时才知道要不要换内容 ✓）
 let biliNowGid = '__none__';
 
+/* ── B站账号登录（2026-10-22 加：一键登录）──────────────────
+ * 用户原话：「**可不可以纯靠 webui 完成整个 b 站登录过程，方便没有 agent 的用户操作？**」
+ *
+ * ⚠️ 登录要**等人扫码**（最长 10 分钟）⇒ 后端只负责"起进程 + 读状态"，
+ *    界面自己**每 2 秒轮询**一次 —— 别指望一个请求挂到底（浏览器会超时、界面像卡死）✗
+ * ⚠️ 走 `api()` 不走裸 `fetch`：裸 fetch 不带 `x-saki-account`，
+ *    会永远操作**主号**（语音那个 tab 就踩过）✗
+ */
+let BL_POLL = null;
+
+function startBiliLoginPoll() {
+  if (BL_POLL) return;
+  BL_POLL = setInterval(() => { loadBiliLogin(); }, 2000);
+}
+function stopBiliLoginPoll() {
+  if (BL_POLL) { clearInterval(BL_POLL); BL_POLL = null; }
+}
+
+function renderBiliLogin(j) {
+  const box = $('bl-status');
+  const btn = $('bl-btn');
+  if (!box) return;
+  const when = j.at ? new Date(j.at).toLocaleString('zh-CN', { hour12: false }) : '';
+  const who = j.uname ? `${j.uname}（uid ${j.uid}）` : (j.uid ? `uid ${j.uid}` : '');
+  const skin = (bg, bd) =>
+    `display:block;margin:12px 0;padding:10px 12px;border-radius:8px;background:${bg};border:1px solid ${bd}`;
+
+  if (j.state === 'running') {
+    box.style.cssText = skin('rgba(74,158,255,.10)', 'rgba(74,158,255,.4)');
+    box.innerHTML = '⏳ <b>正在等你扫码…</b>（Chrome 窗口已经弹出来了，最长等 10 分钟）<br>'
+      + '<span style="opacity:.75;font-size:12.5px">扫完窗口会自己关掉，这里会自动变成「已登录」</span>';
+    if (btn) btn.disabled = true;
+    startBiliLoginPoll();
+    return;
+  }
+  if (btn) btn.disabled = false;
+  stopBiliLoginPoll();
+  if (j.state === 'ok') {
+    box.style.cssText = skin('rgba(22,163,74,.12)', 'rgba(22,163,74,.45)');
+    box.innerHTML = `✅ <b>已登录</b>：${esc(who)}${when ? ` · ${esc(when)}` : ''}`;
+    return;
+  }
+  if (j.state === 'fail') {
+    box.style.cssText = skin('rgba(248,81,73,.12)', 'rgba(248,81,73,.45)');
+    box.innerHTML = `❌ <b>登录没成功</b>：${esc(j.err || '未知原因')}`;
+    return;
+  }
+  if (j.state === 'stale') {
+    box.style.cssText = skin('rgba(255,170,0,.12)', 'rgba(255,170,0,.45)');
+    box.innerHTML = '⚠️ 上次登录<b>中断了</b>（那个 Chrome 窗口可能还开着）'
+      + '<br><span style="opacity:.75;font-size:12.5px">先关掉它，再点一次「登录 / 重新登录」</span>';
+    return;
+  }
+  box.style.cssText = skin('rgba(255,255,255,.04)', 'rgba(255,255,255,.12)');
+  box.innerHTML = j.hasProfile
+    ? '⬜ <b>还没确认登录态</b>（有登录目录，但没成功记录过）—— 点「登录 / 重新登录」走一遍最稳'
+    : '⬜ <b>还没登录过</b> —— 点下面的「登录 / 重新登录」';
+}
+
+async function loadBiliLogin() {
+  const box = $('bl-status');
+  if (!box) return;
+  try {
+    const j = await api('/api/bili/login');
+    if (!j.ok) { box.textContent = '读不到登录状态'; return; }
+    renderBiliLogin(j);
+  } catch (e) {
+    box.textContent = '读不到登录状态：' + e.message;
+  }
+}
+
+async function biliLoginStart() {
+  const m = $('msg-bl');
+  const btn = $('bl-btn');
+  if (btn) btn.disabled = true;
+  flash(m, null, '正在打开登录窗口…');
+  try {
+    const r = await api('/api/bili/login', { method: 'POST' });
+    if (!r.ok) { flash(m, false, '起不来：' + (r.error || '')); if (btn) btn.disabled = false; return; }
+    flash(m, true, r.already ? '窗口已经开着了，去 Chrome 里扫吧' : '窗口已弹出 ⇒ 去 Chrome 里扫码 / 输密码');
+  } catch (e) {
+    flash(m, false, '起不来：' + e.message);
+    if (btn) btn.disabled = false;
+    return;
+  }
+  await loadBiliLogin();
+}
+
 /* ── B站自动投稿（2026-10-22）──────────────────────────────
  * 用户：「在功能卡片里新增一个 B站投稿设置页，所有设置都放在里面」
  *       + 「不要新建一个页面，和其他的功能页面一样在同一个页面」
@@ -6226,6 +6877,8 @@ let biliNowGid = '__none__';
  *    addEventListener 会越绑越多（点一次保存发三次请求）✗
  */
 async function renderBiliPub() {
+  // ⚠️ 2026-10-22：进这个页先刷一次 B 站登录状态（它是后面所有功能的前提）
+  loadBiliLogin();
   const st = $('bp-status');
   let j;
   try {
@@ -6248,6 +6901,54 @@ async function renderBiliPub() {
   $('bp-streak').value = c.groupMaxStreak;
   $('bp-scope').value = (c.scope || []).join('\n');
   $('bp-notify').value = c.notifyOwner ? '1' : '0';
+  // ② B站评论回复（2026-10-22）—— 同一份接口返回里带着 `comments` 和 `memory`
+  //    ⚠️ 字段照 `biliShare` 那套：每天条数 / 时间段 / 两条间隔 / 关键词
+  const cm = j.comments || {};
+  if ($('bc-enable')) $('bc-enable').value = cm.enable ? '1' : '0';
+  if ($('bc-check')) $('bc-check').value = cm.checkEveryMinutes ?? 5;
+  if ($('bc-max')) $('bc-max').value = cm.maxPerRun ?? 3;
+  if ($('bc-status')) {
+    const m = j.memory || {};
+    const by = m.by || {};
+    const today = (cm && cm.todayCount) || 0;
+    $('bc-status').innerHTML =
+      '短期记忆：<b>' + (m.total || 0) + '</b> 条（视频 ' + (by.video || 0) +
+      ' · B站评论 ' + (by['bili-comment'] || 0) + ' · QQ ' + (by.qq || 0) +
+      '），只保留最近 ' + (m.keepHours || 48) + ' 小时' +
+      (today ? '｜今天已回 ' + today + ' 条' : '');
+  }
+  // ③ B站主动评论（2026-10-21）—— 同一份接口返回里带着 `proactive` / `proactiveState`
+  const pr = j.proactive || {};
+  const prs = j.proactiveState || {};
+  if ($('bp2-enable')) $('bp2-enable').value = pr.enable ? '1' : '0';
+  if ($('bp2-min')) $('bp2-min').value = pr.minPerDay ?? 1;
+  if ($('bp2-max')) $('bp2-max').value = pr.maxPerDay ?? 2;
+  if ($('bp2-interval')) $('bp2-interval').value = pr.intervalMinutes ?? 20;
+  if ($('bp2-start')) $('bp2-start').value = pr.startHour ?? 10;
+  if ($('bp2-end')) $('bp2-end').value = pr.endHour ?? 22;
+  if ($('bp2-keywords')) $('bp2-keywords').value = (pr.keywords || []).join('\n');
+  if ($('bp2-status')) {
+    $('bp2-status').innerHTML = pr.enable
+      ? '<b style="color:#3fb950">● 已开启</b> · 今天 ' + (prs.countToday || 0) + '/' + (prs.targetToday || 0) +
+        ' 条 · 关键词 ' + (pr.keywords || []).length + ' 个'
+      : '<b style="color:#8b98a5">○ 已关闭</b>';
+  }
+  // 用户：「要**显示出来发送的视频链接**」—— 最近发过的一条条列出来，链接可点
+  if ($('bp2-recent')) {
+    const rs = prs.recent || [];
+    if (!rs.length) $('bp2-recent').innerHTML = '<span class="d">还没发过</span>';
+    else {
+      $('bp2-recent').innerHTML = '<div style="margin-bottom:4px">最近发过的：</div>' + rs.map(function (x) {
+        const t = new Date(x.at || Date.now());
+        const when = (t.getMonth() + 1) + '/' + t.getDate() + ' ' + String(t.getHours()).padStart(2, '0') + ':' + String(t.getMinutes()).padStart(2, '0');
+        const ok = x.ok ? '<b style="color:#3fb950">成功</b>' : '<b style="color:#f85149">失败</b>';
+        const link = x.url ? '<a href="' + x.url + '" target="_blank" rel="noopener" style="color:#4a9eff">' + (x.bvid || '链接') + '</a>' : '';
+        return '<div style="margin:2px 0">' + when + ' · ' + ok + ' · ' + link +
+          (x.title ? ' · ' + String(x.title).slice(0, 30) : '') +
+          (x.text ? '<div class="d" style="margin-left:10px">「' + String(x.text).slice(0, 60) + '」</div>' : '') + '</div>';
+      }).join('');
+    }
+  }
   // ② 状态条
   if (st) {
     st.innerHTML =
@@ -6297,6 +6998,22 @@ $('bp-save') && ($('bp-save').onclick = async function () {
       scope: $('bp-scope').value,
       notifyOwner: $('bp-notify').value === '1',
     },
+    // ⚠️ 2026-10-22：B站评论回复也在这页存（字段照 biliShare：每天条数/时间段/间隔/关键词）
+    comments: {
+      enable: $('bc-enable') ? $('bc-enable').value === '1' : false,
+      checkEveryMinutes: Number(($('bc-check') || {}).value) || 5,
+      maxPerRun: Number(($('bc-max') || {}).value) || 3,
+    },
+    // ⚠️ 2026-10-21：B站**主动评论**（去别人视频下发）也在这页存
+    proactive: {
+      enable: $('bp2-enable') ? $('bp2-enable').value === '1' : false,
+      keywords: ($('bp2-keywords') || {}).value || '',
+      minPerDay: Number(($('bp2-min') || {}).value) || 1,
+      maxPerDay: Number(($('bp2-max') || {}).value) || 2,
+      intervalMinutes: Number(($('bp2-interval') || {}).value) || 20,
+      startHour: Number(($('bp2-start') || {}).value) || 10,
+      endHour: Number(($('bp2-end') || {}).value) || 22,
+    },
   };
   try {
     const r = await (await fetch('/api/bili-publish', {
@@ -6316,6 +7033,34 @@ $('bp-save') && ($('bp-save').onclick = async function () {
   this.disabled = false;
 });
 
+// ⚠️ 2026-10-21：**主动评论卡片**的两个按钮
+//    · 保存：转给上面那个 bp-save（同一套 POST，别写第二份逻辑）
+//    · 立刻发一条：POST /api/bili-proactive/now，1~3 分钟出结果，靠轮询 recent 看链接
+$('bp2-save') && ($('bp2-save').onclick = function () { const b = $('bp-save'); if (b) b.click(); });
+$('bp2-now') && ($('bp2-now').onclick = async function () {
+  this.disabled = true;
+  const raw = String(($('bp2-manual') || {}).value || '').trim();
+  const bvid = (raw.match(/BV[0-9A-Za-z]+/) || [''])[0];
+  const st = $('bp2-recent');
+  if (st) st.innerHTML = '<b style="color:#4a9eff">正在去发（开浏览器 + 看视频 + 写，1~3 分钟）…</b>';
+  try {
+    const r = await (await fetch('/api/bili-proactive/now', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(bvid ? { bvid: bvid } : {}),
+    })).json();
+    if (!r.ok) { if (st) st.innerHTML = '<b style="color:#f85149">没能开始：' + (r.error || '') + '</b>'; }
+    else {
+      // 每 8 秒看一次，最多看 4 分钟（结果一出来就停）
+      let n = 0;
+      const timer = setInterval(async function () {
+        n++;
+        try { await renderBiliPub(); } catch (e) { /* ignore */ }
+        if (n >= 30) clearInterval(timer);
+      }, 8000);
+    }
+  } catch (e) { if (st) st.textContent = '没能开始：' + e.message; }
+  this.disabled = false;
+});
 $('bp-run') && ($('bp-run').onclick = async function () {
   this.disabled = true;
   try {
@@ -6328,7 +7073,62 @@ $('bp-run') && ($('bp-run').onclick = async function () {
   } catch (e) { var s3=$('bp-status'); if(s3) s3.textContent='没能开始：'+e.message; }
   this.disabled = false;
 });
+// ⚠️ 2026-10-22：**评论回复那张卡片自己也有一个「保存设置」按钮**（用户截图报的：
+//    「连保存按钮都没有，怎么保存啊？」—— 上一版只有上面「内容来源」那张有）
+//    ⇒ 直接转给上面那个按钮，两处是**同一个动作**（不复制一份逻辑，免得以后改漏一处）
+$('bp-save2') && ($('bp-save2').onclick = function () { const b = $('bp-save'); if (b) b.click(); });
 } // ← bpBindSave 的收尾（漏了这个 } 会让整个 script 块语法错误、页面所有 JS 全挂 ✗）
+
+async function renderVoice() {
+  const st = $('vc-status');
+  try {
+    // ⚠️ 必须走 `api()`（带 `x-saki-account` 头），裸 fetch 会读成主号的配置 ✗
+    const j = await api('/api/voice');
+    if (!j.ok) { if (st) st.textContent = '读取失败'; return; }
+    if ($('vc-enable')) $('vc-enable').value = j.cfg.enable ? '1' : '0';
+    if ($('vc-poke')) $('vc-poke').value = j.cfg.pokeVoice ? '1' : '0';
+    const sel = $('vc-ref');
+    if (sel) {
+      const cur = j.cfg.ref || '';
+      sel.innerHTML = '<option value="">（默认）' +
+        (j.current && !cur ? ' ' + j.current : '') + '</option>' +
+        (j.voices || []).map(function (v) {
+          return '<option value="' + v.name + '">' + v.name + (v.def ? '（内置默认）' : '') + '</option>';
+        }).join('');
+      sel.value = cur;
+      if (sel.value !== cur) sel.value = '';
+    }
+    if (st) {
+      st.innerHTML = '实际在用：<b>' + (j.current || '?') + '</b>' +
+        (j.cfg.enable ? '' : ' · <b style="color:#f85149">总开关关着</b>') +
+        ' · 可选音色 ' + (j.voices || []).length + ' 个';
+    }
+  } catch (e) {
+    if (st) st.textContent = '读取失败：' + e.message;
+  }
+}
+
+$('vc-save') && ($('vc-save').onclick = async function () {
+  this.disabled = true;
+  try {
+    // ⚠️ 同上：走 `api()`，否则存到主号去
+    const r = await api('/api/voice', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        enable: $('vc-enable').value === '1',
+        pokeVoice: $('vc-poke').value === '1',
+        ref: $('vc-ref').value || '',
+      }),
+    });
+    await renderVoice();
+    const st = $('vc-status');
+    if (st) st.innerHTML = (r.ok ? '<b style="color:#3fb950">已保存 ✓</b> · ' : '<b style="color:#f85149">保存失败：' + (r.error || '') + '</b> · ') + st.innerHTML;
+  } catch (e) {
+    const st = $('vc-status');
+    if (st) st.textContent = '保存失败：' + e.message;
+  }
+  this.disabled = false;
+});
 
 // ⚠️ 兜底：页面加载后**先渲染一次**（不等用户点 tab）
 //    2026-10-22 实测：按钮 onclick 绑上了、面板也能切出来，但 render 函数就是不跑
@@ -6336,10 +7136,85 @@ $('bp-run') && ($('bp-run').onclick = async function () {
 //    ⇒ 与其继续猜绑定链，不如**加载时就把表单和状态填好**，点 tab 只是刷新一次 ✓
 //    这样功能不受影响；重复调用幂等（都是覆盖赋值）✓
 document.addEventListener('click', (e) => {
-  const btn = e.target && e.target.closest ? e.target.closest('[data-tab="biliPub"]') : null;
+  // ⚠️ 2026-10-21：评论板块拆出去之后，这里也要认它（两个 tab 共用同一套渲染）
+  const btn = e.target && e.target.closest
+    ? e.target.closest('[data-tab="biliPub"], [data-tab="biliCmt"]')
+    : null;
   if (btn) setTimeout(() => { renderBiliPub().catch(() => {}); }, 60);
 }, true);
 setTimeout(() => { renderBiliPub().catch(() => {}); }, 1200);
+/* ⚠️⚠️ 2026-10-21：语音页的填充 —— **内联、不依赖任何外部函数**
+ *   试过三版都没跑起来（`if (tab==='voice') renderVoice()` / `setTimeout` / `vcBoot`），
+ *   连报错都不出来 ⇒ 说明**那几行顶层代码压根没执行**（不是函数的问题）。
+ *   ⇒ 最后这版：**挂 `window.load` + 立即执行 + 3 秒轮询**三重保险，
+ *     而且逻辑**全部内联**（不再调 renderVoice），排除一切作用域/时序可能 ✓ */
+(function () {
+  var filled = 0;
+  function fillVoice(reason) {
+    if (filled > 3) return;
+    filled++;
+    var sel = document.getElementById('vc-ref');
+    var st = document.getElementById('vc-status');
+    if (!sel) { if (st) st.textContent = '（' + reason + '找不到 vc-ref 元素）'; return; }
+    if (sel.options && sel.options.length > 1) return;   // 已经填过了
+    /* ⚠️⚠️ 2026-10-21 真 bug（用户：「谷雨这里还是开着的啊」「你就不能多检查一下吗」）：
+     *   这里原来用的是**裸 `fetch('/api/voice')`** —— 它**不带 `x-saki-account` 头**，
+     *   而界面的"切号"就是靠那个头让服务端**转发给对应号的进程**的（见 `api()` 包装）
+     *   ⇒ 裸 fetch 永远打到**本机那个号**（主号）⇒ **在谷雨界面看到的其实是主号的配置** ✗✗
+     *   ⇒ 必须走 `api()` 包装 ✓
+     */
+    api('/api/voice')
+      .then(function (j) {
+        if (!j || !j.ok) { if (st) st.textContent = '（' + reason + '接口返回不 ok）'; return; }
+        if (document.getElementById('vc-enable')) document.getElementById('vc-enable').value = j.cfg.enable ? '1' : '0';
+        if (document.getElementById('vc-poke')) document.getElementById('vc-poke').value = j.cfg.pokeVoice ? '1' : '0';
+        var cur = j.cfg.ref || '';
+        sel.innerHTML = '<option value="">（默认）' + (j.current && !cur ? ' ' + j.current : '') + '</option>' +
+          (j.voices || []).map(function (v) {
+            return '<option value="' + v.name + '">' + v.name + (v.def ? '（内置默认）' : '') + '</option>';
+          }).join('');
+        sel.value = cur;
+        if (sel.value !== cur) sel.value = '';
+        if (st) {
+          st.innerHTML = '实际在用：<b>' + (j.current || '?') + '</b>' +
+            (j.cfg.enable ? '' : ' · <b style="color:#f85149">总开关关着</b>') +
+            ' · 可选音色 ' + (j.voices || []).length + ' 个';
+        }
+      })
+      .catch(function (e) { if (st) st.textContent = '（' + reason + '出错：' + (e && e.message ? e.message : e) + '）'; });
+  }
+  // ① 立即试一次  ② load 后再试  ③ 每 1.2 秒补 3 次（防脚本晚到）
+  fillVoice('立即');
+  window.addEventListener('load', function () { fillVoice('load'); });
+  setTimeout(function () { fillVoice('1.2s'); }, 1200);
+  setTimeout(function () { fillVoice('3s'); }, 3000);
+  // ④ 点「语音」这个 tab 时也补一次
+  document.addEventListener('click', function (e) {
+    var b = e.target && e.target.closest ? e.target.closest('[data-tab="voice"]') : null;
+    if (b) setTimeout(function () { filled = 0; fillVoice('切页'); }, 80);
+  }, true);
+  // ⑤ 保存按钮：保存完再刷一次
+  document.addEventListener('click', function (e) {
+    var b = e.target && e.target.closest ? e.target.closest('#vc-save') : null;
+    if (!b) return;
+    e.preventDefault();
+    var sel = document.getElementById('vc-ref');
+    var st = document.getElementById('vc-status');
+    // ⚠️ 同上：**必须走 `api()`**，不然保存会写到主号去（切号等于白切）✗
+    api('/api/voice', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        enable: document.getElementById('vc-enable').value === '1',
+        pokeVoice: document.getElementById('vc-poke').value === '1',
+        ref: sel ? (sel.value || '') : '',
+      }),
+    }).then(function (r) {
+      filled = 0;
+      fillVoice('保存后');
+      if (st) st.innerHTML = (r && r.ok ? '<b style="color:#3fb950">已保存 ✓</b> · ' : '<b style="color:#f85149">保存失败：' + ((r && r.error) || '') + '</b> · ') + st.innerHTML;
+    }).catch(function (err) { if (st) st.textContent = '保存失败：' + (err && err.message ? err.message : err); });
+  }, true);
+})();
 
 async function renderBili() {
   const box = $('bili-status');  try {
@@ -6465,10 +7340,6 @@ async function saveBili() {
         groupId: gid,
         enable: $('bili-enable').checked,
         keywords: $('bili-keywords').value,
-        minPerDay: Number($('bili-min').value),
-        maxPerDay: Number($('bili-max').value),
-        startHour: Number($('bili-sh').value),
-        endHour: Number($('bili-eh').value),
         cooldownMinutes: Number($('bili-cool').value),
         chancePercent: Number($('bili-chance').value),
         deny: $('bili-deny').value,
@@ -6514,7 +7385,6 @@ async function saveQzone() {  const el = $('msg-qzone-cfg');
     body: JSON.stringify({ qzone: {
       enable: $('qz-enable').checked,
       auto: $('qz-auto').checked,
-      maxPerDay: Number($('qz-maxPerDay').value),
       cooldownMs: Number($('qz-cooldownHours').value) * 3600000,
       ugcRight: Number($('qz-ugcRight').value),
       // ⚠️ 2026-09-28：**只传要改的键** —— 后端对 `qzone.comment` 做了**一层深合并**
@@ -7541,6 +8411,19 @@ function renderDraft() {
     //    `personas/_template/relations.md` 的片段库里挑几条落成它。
     '<label style="margin-top:10px">cast.md（出场人物表 / 人际关系 —— 从片段库里摘的）</label>' +
     `<textarea id="pd-cast" rows="12">${escHtml(PDRAFT.docs?.['cast.md'] || '')}</textarea>` +
+    /* ⚠️ 2026-10-22 加（用户：「补，然后**以后自动生成时要自动加好**」）：
+     *   以前起草**不产** life-events.md，只在提醒里说一句"照模板填" ⇒
+     *   新角色没有事件库 ⇒ 每天的日常事件一条都发不出来（爱音哑了好几天就是这个）✗
+     *   ⇒ 现在起草就产，这里给个编辑框，保存时落盘 ✓ */
+    '<label style="margin-top:10px">life-events.md（日常事件库 —— 每段 ≥12 条、全篇 ≥90、0 条台词）</label>' +
+    `<textarea id="pd-life" rows="18">${escHtml(PDRAFT.docs?.['life-events.md'] || '')}</textarea>` +
+    /* ⚠️ 2026-10-22 加（用户：「**b站那边评论要用到的人设在新建时也要完善好，
+     *   和 QQ 这边一样，之前我说过的机器人味不能出现**」）
+     *   ⇒ 起草时也要产这一份，落到 `prompt/bili-comment.md`
+     *   ⚠️ 少了它，B站评论/主动评论会**回落到内置的祥子那份** ⇒ 新角色在 B 站上说话是祥子腔 ✗ */
+    '<label style="margin-top:10px">prompt/bili-comment.md（B 站用的精简版，≤1500 字）' +
+      '<span class="hint" style="display:inline;margin-left:8px">B站评论 / 主动评论 / 视频文案都读它</span></label>' +
+    `<textarea id="pd-bili" rows="16">${escHtml(PDRAFT.docs?.['bili-comment.md'] || '')}</textarea>` +
     (PDRAFT.animeLibName
       ? '<label style="margin-top:10px">新建的动画库 ' +
         escHtml(PDRAFT.animeLibName) +
@@ -7588,6 +8471,11 @@ async function personaDraftSave() {
     ['voices.md', 'pd-voices'],
     // ⚠️ 2026-10-13 加：人际关系（出场人物表）也要落盘
     ['cast.md', 'pd-cast'],
+    // ⚠️ 2026-10-22 加：**B 站那边用的精简版**（用户要求「新建时也要完善好」）
+    //    落点是 `prompt/bili-comment.md`（`DOC_RE` 允许 `prompt/` 前缀）
+    ['prompt/bili-comment.md', 'pd-bili'],
+    // ⚠️ 2026-10-22 加：**日常事件库**（用户：「以后自动生成时要自动加好」）
+    ['life-events.md', 'pd-life'],
   ]) {
     const el = $(key);
     if (!el) continue; // 旧界面/缺元素时不炸

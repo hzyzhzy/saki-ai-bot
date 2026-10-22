@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 让**本机的 agent**（DSH 的 headless 模式）替群里干活。
  *
  * ## 用户定的规则（2026-10-13 原话，一个字都别改）
@@ -66,6 +66,133 @@ const FILE = process.env.QQBOT_AGENT_FILE
 const HIST_FILE = process.env.QQBOT_AGENT_TASKS_FILE
   ? join(ROOT, process.env.QQBOT_AGENT_TASKS_FILE)
   : join(stateDir(), 'agent-tasks.json');
+
+/**
+ * ⚠️⚠️⚠️ 2026-10-22 加（用户：「**上传的时候失败了也要记下来，下次重启继续发**」）——
+ * **待补发产物**：群任务做完了、但文件**没发出去**（上传超时 / 群文件空间满 / 协议端正好挂着）
+ * ⇒ 落盘记一笔，**重启之后自动重发**，直到发出去为止 ✓
+ *
+ * 真事故（2026-10-22 00:11）：`丰川祥子出场.mp4` 做好了，发的时候协议端正好挂了
+ * ⇒ `upload_group_file` 超时 ⇒ 只在日志里留一行、**一个字都没落盘** ⇒
+ *   重启后谁也不知道还有东西没发 ⇒ 用户问「752 群做好的文件又没发出来」✗✗
+ *
+ * 记录长这样（数组，每条一个文件）：
+ * `{ gid, dir, path, name, why, at, tries }`
+ * ⚠️ 最多留 50 条（防无限涨）；超过 7 天的自动丢（那时候再发也没意义了）
+ */
+const PENDING_ARTS_FILE = process.env.QQBOT_PENDING_ARTS_FILE
+  ? join(ROOT, process.env.QQBOT_PENDING_ARTS_FILE)
+  : join(stateDir(), 'pending-arts.json');
+
+function loadPendingArts() {
+  try {
+    const j = JSON.parse(readFileSync(PENDING_ARTS_FILE, 'utf8'));
+    return Array.isArray(j?.items) ? j.items : [];
+  } catch {
+    return [];
+  }
+}
+
+function savePendingArts(items) {
+  try {
+    mkdirSync(dirname(PENDING_ARTS_FILE), { recursive: true });
+    const tmp = `${PENDING_ARTS_FILE}.tmp`;
+    writeFileSync(
+      tmp,
+      JSON.stringify({ items: (items ?? []).slice(-50) }, null, 2),
+      'utf8',
+    );
+    renameSync(tmp, PENDING_ARTS_FILE);
+  } catch (e) {
+    log.warn(`[任务] 待补发产物落盘失败：${e.message}`);
+  }
+}
+
+/** 记一笔"这个文件没发出去"（同一个文件重复记只更新最后一次） */
+function markPendingArt(gid, dir, path, name, why) {
+  const items = loadPendingArts();
+  const key = `${gid}|${path}`;
+  const i = items.findIndex((x) => `${x?.gid}|${x?.path}` === key);
+  const rec = {
+    gid: String(gid),
+    dir: String(dir ?? ''),
+    path: String(path),
+    name: String(name ?? basename(String(path))),
+    why: String(why ?? ''),
+    at: Date.now(),
+    tries: 0,
+  };
+  if (i >= 0) items[i] = { ...items[i], ...rec, tries: Number(items[i]?.tries ?? 0) };
+  else items.push(rec);
+  savePendingArts(items);
+  log.warn(`[任务] 这个文件**没发出去**，已记进待补发（重启后自动重发）：${rec.name}｜${rec.why}`);
+}
+
+/** 发出去了 ⇒ 从待补发里删掉 */
+function clearPendingArt(gid, path) {
+  const items = loadPendingArts();
+  const key = `${gid}|${path}`;
+  const left = items.filter((x) => `${x?.gid}|${x?.path}` !== key);
+  if (left.length !== items.length) savePendingArts(left);
+}
+
+/**
+ * ⚠️⚠️⚠️ 2026-10-22 加（用户：「**刚才已经发过了，你自己补发之前一定要检查一下**」）——
+ * **已发记录**：哪个群、哪个文件、什么时候发成功的。
+ *
+ * 为什么要有：自动重试（`retryPendingArts`）和**我手动补发**都可能在"其实已经发过了"之后
+ * 又发一遍 ⇒ 群里收到两份 ✗✗
+ * 真事故：`Saki对Soyo_打架.mp4` 01:10:34 自动重试已经发成功了，我 01:1x 又手动补了一次 ✗
+ *
+ * ⇒ 规矩：**发任何东西之前先查这里**（`sentRecently`），30 分钟内发过同名的就别再发 ✓
+ */
+const SENT_ARTS_FILE = process.env.QQBOT_SENT_ARTS_FILE
+  ? join(ROOT, process.env.QQBOT_SENT_ARTS_FILE)
+  : join(stateDir(), 'sent-arts.json');
+
+function loadSentArts() {
+  try {
+    const j = JSON.parse(readFileSync(SENT_ARTS_FILE, 'utf8'));
+    return Array.isArray(j?.items) ? j.items : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveSentArts(items) {
+  try {
+    mkdirSync(dirname(SENT_ARTS_FILE), { recursive: true });
+    const tmp = `${SENT_ARTS_FILE}.tmp`;
+    // 只留 24 小时内的、最多 200 条
+    const cut = Date.now() - 24 * 3600 * 1000;
+    writeFileSync(
+      tmp,
+      JSON.stringify({ items: (items ?? []).filter((x) => Number(x?.at ?? 0) > cut).slice(-200) }, null, 2),
+      'utf8',
+    );
+    renameSync(tmp, SENT_ARTS_FILE);
+  } catch (e) {
+    log.warn(`[任务] 已发记录落盘失败：${e.message}`);
+  }
+}
+
+/** 记一笔"这个文件发成功了" */
+function noteSentArt(gid, name) {
+  const items = loadSentArts();
+  items.push({ gid: String(gid), name: String(name), at: Date.now() });
+  saveSentArts(items);
+}
+
+/** 这个文件**刚刚是不是已经发过了**（默认 30 分钟内） */
+export function sentRecently(gid, name, withinMs = 30 * 60 * 1000) {
+  const g = String(gid);
+  const n = String(name);
+  const now = Date.now();
+  return loadSentArts().some(
+    (x) => String(x?.gid) === g && String(x?.name) === n && now - Number(x?.at ?? 0) < withinMs,
+  );
+}
+
 let hist = { tasks: [] };
 function loadHist() {
   try {
@@ -169,6 +296,23 @@ export function tidyStaleTasks(isLive, { minAgeMs = 10000, willResume } = {}) {
     //    （`isLive` 那句 `jobs.has(by)` 把它误判成"还活着"⇒ tidy 每次都跳过它 ✗）
     //    ⇒ 兜底：**开了超过 2 小时的一定是僵尸**（agent 超时最多 15 分钟，早该结束了）
     //      不看 `isLive`、直接收尾 ✓
+    // ⚠️⚠️ 2026-10-21 加（用户截图：面板上多出一条任务标题只有「...」、还挂着 running）——
+    //    那条是"`做什么` 参数只填了省略号"开出来的空单（见 `bot.js` 的 `动这一单` 校验）
+    //    ⇒ 它永远做不出东西，还会一直占着 running ✗
+    //    ⇒ **占位符任务直接收掉**（格式判据，不是"猜人话"，跟她说的是什么无关）
+    if (t.status === 'running') {
+      const txt = String(t.task ?? '').trim();
+      if (txt.length < 2 || /^[\s.。·•・…\-—_*~]+$/.test(txt)) {
+        updHist(String(t.id), {
+          status: 'killed',
+          endedAt: Date.now(),
+          text: '空任务（参数只填了占位符）',
+        });
+        log.warn(`[任务] 那条「${txt || '(空)'}」是占位符空单 ⇒ 收掉（别让它一直挂着 running ✗）`);
+        n++;
+        continue;
+      }
+    }
     if (t.status === 'running') {
       const started = Number(t.startedAt || 0);
       if (started && Date.now() - started > 2 * 3600 * 1000) {
@@ -747,11 +891,45 @@ export async function voiceize(kind, facts, { task = '', gid = '', timeoutMs = 1
       ? await inject({ system, user: `事实：\n${raw.slice(0, 1200)}` })
       : await phrase({ system, user: `事实：\n${raw.slice(0, 1200)}`, maxTokens: 200, timeoutMs });
     const t = String(out ?? '').trim();
-    return t || raw;
+    // ⚠️ 模型说了话 ⇒ 用它（顺手清掉它可能带出来的 markdown 标记）
+    if (t) return stripMd(t);
+    return fallbackLine(kind);
   } catch (e) {
-    log.debug(`[任务] 想自己的话失败（退回原文）：${e.message}`);
-    return raw;
+    log.debug(`[任务] 想自己的话失败：${e.message}`);
+    return fallbackLine(kind);
   }
+}
+
+/**
+ * ⚠️⚠️⚠️ 2026-10-22 加（用户截图：群里冒出「你已经动手有一会儿了（比平时久一点），
+ *    活儿还在做、没卡住 —— **别把开头那句再重复一遍**」）——
+ *    真因：`voiceize` 失败/回空时 **`return raw`**，而 `raw` 是**喂给模型的指令**
+ *    （「**别把开头那句再重复一遍**」这种），**不是人话** ⇒ 原样发进群，还带着 `**` ✗✗
+ *    ⇒ **兜底绝不能是原文**：
+ *      · 按 kind 给一句**确定的人话**（下面这张表）；
+ *      · `result` / `clarify` 这种"必须准确"的档 ⇒ **返回空串、不发**
+ *        （宁可少说一句，也不能发一句像指令的东西 / 编一个结果）✓
+ */
+function fallbackLine(kind) {
+  const k = String(kind ?? '');
+  if (k === 'start') return '行，我这就去弄';
+  if (k === 'progress') return '还在弄，快好了';
+  // ⚠️ 结果档（成没成 / 东西叫什么）**不能编** ⇒ 不发；要发就走 `sendArtifacts` 的兜底句 ✓
+  return '';
+}
+
+/**
+ * ⚠️ 2026-10-22 加：清掉模型可能带出来的 markdown 标记 ——
+ *    群里不该出现 `**粗体**` / `- 列表` / `#` 标题这种（用户反复说过"不要 markdown"）✓
+ */
+function stripMd(s) {
+  return String(s ?? '')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/__([^_]+)__/g, '$1')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/^\s*[-*+]\s+/gm, '')
+    .replace(/^\s*#{1,6}\s+/gm, '')
+    .trim();
 }
 
 /**
@@ -887,6 +1065,22 @@ export async function judgeIntent(text, opts = {}) {
     '',
     '⚠️ 只有确实是"**要她去动手做一件本机上的事**"才算「任务」；',
     '   只是问她问题、聊天、吐槽、说"我今天的任务好多" → 一律「无」。',
+    '',
+    // ⚠️⚠️⚠️ 2026-10-21 加（用户：「**问句不应该触发动这一单吧，只有明确要她动才动**」）——
+    //    真事故 13:16:02：群里一句「你那 webui 改到哪了，改完没」被判成「任务」⇒
+    //    **把正在跑的视频活停掉、另开一个** ✗✗ 那句话里有个"改"字，模型就上当了。
+    //    ⇒ 判据写死成"**他说完之后是不是要她交出一个东西 / 动一次手**"，
+    //      而不是"句子里有没有 改/做/弄 这些字" ✓
+    '⚠️⚠️⚠️ 最容易判错的一类 —— **问进度 / 问结果，一律回答「无」**：',
+    '  · 「改到哪了」「改完没」「做完了吗」「弄好了吗」「还在弄吗」「多久好」「行不行了」',
+    '    ⇒ 这些他要的是**一句话**（回一句"在弄了"就够），**不是要她再动一次手** ⇒ 无 ✗',
+    '    ⚠️ 哪怕句子里带着「改」「做」「弄」这些动词，也是「无」✗',
+    '  · 「能不能帮我做个 PPT？」「你会写那个脚本吗？」「可以把它改成蓝色吗？」',
+    '    ⇒ 前面带疑问，但**他要的是一个东西 / 一次改动** ⇒ 这算「任务」✓',
+    '',
+    '⚠️ 判据只有一条（别按"有没有问号"判）：',
+    '  **他说完之后，是要她交出一个东西、或者动手改一次吗？**',
+    '    · 要 ⇒ 任务　· 只要一句话（回答 / 确认 / 安慰 / 闲聊 / 问进度）⇒ 无',
     '',
     // ⚠️⚠️ 2026-10-13（用户：「如果是**和她有关**的工作，她做的时候**可以夹带私货**，
     //    比如刚才的 crychic ppt」+「和她**无关**的**一定不要**夹带私活」）：
@@ -1644,19 +1838,26 @@ export async function sendArtifacts(bot, gid, dir, { skipImages = false, skipAll
       continue;
     }
     if (it.size > maxBytes) {
-      skipped.push({ name: it.name, why: `超过 ${Math.round(maxBytes / 1024 / 1024)}MB` });
+      // ⚠️ 2026-10-21：日志里把**实际多大**也写出来（原来只说"超过 20MB"，
+      //    查的时候还得自己去量文件 ✗）
+      skipped.push({
+        name: it.name,
+        why: `超过 ${Math.round(maxBytes / 1024 / 1024)}MB（实际 ${Math.round(it.size / 1024 / 1024)}MB）`,
+      });
       continue;
     }
     const into = folderId ? `（进群文件夹 ${folderId}）` : '';
     try {
       if (folderId) {
         try {
+          // ⚠️ 2026-10-22：**大文件不限时**（用户定过「进入了上传过程就不要限时了」）——
+          //    默认 30 秒，6MB 在慢网络下就超时，而**文件其实已经传上去了** ⇒ 重试就发重了 ✗
           await bot.call('upload_group_file', {
             group_id: String(gid),
             file: it.path,
             name: it.name,
             folder_id: folderId,
-          });
+          }, { timeoutMs: 0 });
         } catch (e) {
           // ⚠️⚠️ 2026-10-20 修（用户：「**在群里上传文件要先查看群文件是否有和自己群昵称
           //    一样的文件夹，如果没有先建一个再上传**」——这条 10-13 就做了 ✓，
@@ -1674,7 +1875,7 @@ export async function sendArtifacts(bot, gid, dir, { skipImages = false, skipAll
                   file: it.path,
                   name: it.name,
                   folder_id: folderId,
-                });
+                }, { timeoutMs: 0 });
                 intoOk = true;
               } catch (e2) {
                 log.warn(`[任务] 进群文件夹重试第 ${rt + 1} 次仍失败：${e2?.message ?? ''}`);
@@ -1684,46 +1885,215 @@ export async function sendArtifacts(bot, gid, dir, { skipImages = false, skipAll
           if (!intoOk) {
             // ⚠️ 真进不去 ⇒ **退回根目录再传一次**（别因为文件夹把文件弄丢）
             log.warn(`[任务] 传进群文件夹失败${transient ? '（重试过了）' : ''}，退回根目录重试：${e.message}`);
-            await bot.call('upload_group_file', { group_id: String(gid), file: it.path, name: it.name });
+            await bot.call('upload_group_file', { group_id: String(gid), file: it.path, name: it.name }, { timeoutMs: 0 });
           }
         }
       } else {
-        await bot.call('upload_group_file', { group_id: String(gid), file: it.path, name: it.name });
+        await bot.call('upload_group_file', { group_id: String(gid), file: it.path, name: it.name }, { timeoutMs: 0 });
       }
       sent.push(it.name);
+      // ⚠️ 2026-10-22：发出去了 ⇒ 从待补发里划掉（可能之前失败过）+ 记进"已发"（防重复）✓
+      clearPendingArt(gid, it.path);
+      noteSentArt(gid, it.name);
       log.info(`[任务] 产物已发群${into}：${it.name}（${Math.round(it.size / 1024)}KB）`);
     } catch (e) {
+      const emsg = String(e?.message ?? '');
+      // ⚠️⚠️⚠️ 2026-10-21（用户：「**如果群文件满了，不是可以上传有效时间有限的群文件吗**」）——
+      //    **对，而且协议端本来就支持**：QQ 的「闪传」= 限时文件（7 天自动失效），
+      //    **不占群文件的永久空间** ⇒ `create_flash_task` + `send_flash_msg`。
+      //    实测（2026-10-21）：34.4MB 一把成功，还给了分享链接
+      //    `https://qfile.qq.com/q/VQr2SpjWMY`，群里直接出卡片 ✓
+      //    ⇒ 群文件空间不足时按这个顺序退：
+      //      ① **闪传**（原文件、不转码、群里点开就能下）
+      //      ② 闪传也不行、而且是视频 ⇒ 视频消息（也不吃配额，但会被 QQ 压画质）
+      //      ③ 都不行 ⇒ 记进 skipped，让她跟他说清楚
+      if (/-403|空间不足|空间已满|永久空间/.test(emsg)) {
+        let flashOk = false;
+        try {
+          const t = await bot.call('create_flash_task', {
+            files: [{ file: it.path, name: it.name }],
+          });
+          const fid = String(t?.data?.fileset_id ?? t?.fileset_id ?? '');
+          if (fid) {
+            await bot.call('send_flash_msg', { fileset_id: fid, group_id: String(gid) });
+            sent.push(it.name);
+            // ⚠️ 2026-10-22：闪传发出去了 ⇒ 从待补发里划掉 + 记进"已发" ✓
+            clearPendingArt(gid, it.path);
+            noteSentArt(gid, it.name);
+            log.info(
+              `[任务] 群文件空间不足 ⇒ 改成**闪传（限时文件，7 天）**发：${it.name}` +
+                `（${Math.round(it.size / 1024)}KB，fileset=${fid}）✓`,
+            );
+            flashOk = true;
+          }
+        } catch (e2) {
+          log.warn(`[任务] 闪传也没发成（${it.name}）：${e2?.message ?? ''}`);
+        }
+        if (flashOk) continue;
+        // ② 视频再退一步：当**视频消息**发（那条也不吃群文件配额）
+        if (/\.(mp4|m4v|mov)$/i.test(it.name)) {
+          try {
+            await bot.call('send_group_msg', {
+              group_id: String(gid),
+              message: [
+                {
+                  type: 'video',
+                  data: { file: 'file:///' + String(it.path).replace(/\\/g, '/') },
+                },
+              ],
+            });
+            sent.push(it.name);
+            log.info(`[任务] 闪传也不行 ⇒ 改成**视频消息**直接发：${it.name}（${Math.round(it.size / 1024)}KB）✓`);
+            continue;
+          } catch (e2) {
+            log.warn(`[任务] 视频消息也没发成（${it.name}）：${e2?.message ?? ''}`);
+          }
+        }
+      }
       skipped.push({ name: it.name, why: e?.message ?? '发不出去' });
       log.warn(`[任务] 产物发群失败：${it.name}｜${e?.message ?? ''}`);
+      // ⚠️⚠️⚠️ 2026-10-22 加（用户：「**上传的时候失败了也要记下来，下次重启继续发**」）——
+      //    三条路（群文件 / 闪传 / 视频消息）都失败 ⇒ **落盘**，重启后自动重发 ✓
+      //    （真事故：协议端挂着时上传超时，只在日志里留一行 ⇒ 重启后没人知道还有东西没发 ✗）
+      markPendingArt(gid, dir, it.path, it.name, e?.message ?? '发不出去');
     }
   }
   if (skipped.length) {
     const dirName = String(dir).split(/[\\/]/).filter(Boolean).pop() ?? dir;
-    // ⚠️⚠️⚠️ 2026-10-14 改（用户截图：群里那句「还有「爱音素世婚礼.pptx」（**这次只发前几个**）…
-    //    **都在工作区的「2026-10-13 2349 做一个爱音和素世结婚用的PP」里**」）：
-    //    · 「（这次只发前几个）」是把 maxFiles 这种**技术细节**念出来 ✗
-    //    · 「工作区」「那个文件夹名」**直接把 agent 和她那台电脑暴露了** ✗✗
-    //      （他自己定过：这一段说在哪里的也别写出来）
-    //    ⇒ **群里那句话改成让她自己说**（走她的模型 ✓ 一口气的，不提路径/文件夹/上限），
-    //      而**完整清单 + 在哪儿只写日志**（我查得到、他要问她也答得上）✓
+    // ⚠️⚠️⚠️ 2026-10-22 修（用户截图：「Saki对Soyo_打架.mp4 那个**太大了**没发出去」——
+    //    可那个文件只有 **6.3MB**、上限 100MB，根本不是太大 ✗）——
+    //    真因：兜底话术**不分原因**，一律说"太大或者一次发不完"；
+    //    而"上传失败（超时/协议端挂着）"也被塞进 `skipped` ⇒ 说成了"太大" ✗✗
+    //    ⇒ **按原因分开**：
+    //      · `超过 X MB` ⇒ 真太大 ⇒ 说一句（确实发不出去，得让他知道）
+    //      · 其它（上传失败）⇒ 已经进了**待补发队列**、会自动重发
+    //        ⇒ **一个字都不说**（说了他以为拿不到，过一会儿文件又自己冒出来，更怪 ✗）
+    const tooBigOnes = skipped.filter((s) => /^超过/.test(String(s?.why ?? '')));
+    const failOnes = skipped.filter((s) => !/^超过/.test(String(s?.why ?? '')));
     log.info(
       `[任务] 这几个没发出来（都在 ${dirName}）：${skipped.map((s) => `${s.name}（${s.why}）`).join('、')}`,
     );
+    if (failOnes.length) {
+      log.info(
+        `[任务] 其中 ${failOnes.length} 个是**发送失败**（不是太大）⇒ 已进待补发，会自动重发，**群里不说** ✓`,
+      );
+    }
+    if (!tooBigOnes.length) return { sent, skipped }; // 全是发送失败 ⇒ 交给待补发，不吭声
     const facts =
-      `这次做出来的东西里，有 ${skipped.length} 个没能发到群里（名字：${skipped
+      `这次做出来的东西里，有 ${tooBigOnes.length} 个没能发到群里（名字：${tooBigOnes
         .map((s) => s.name)
         .join('、')}）。用**你自己的话**跟他说一句：这几个太大或者一次发不完，` +
       '他要是想要，你再想办法给他。🚫 **别提任何技术话** ——' +
       '不许出现「工作区」「文件夹」「路径」「上限」「只发前几个」「任务」这些词，' +
       '也**别报目录名**；他要问在哪儿，就用一句人话说「在我这儿存着呢」。';
     const line = await voiceImpl('result', facts, { task: '', gid, timeoutMs: 8000 }).catch(() => '');
-    await taskSay(
-      bot,
-      gid,
-      line || `${clip(skipped.map((s) => s.name).join('、'), 60)} 那几个太大，一下发不完，你要的话我再想办法`,
-    );
+    // ⚠️ 2026-10-21 加：这句**必须发出去**（哪怕走兜底）。
+    //    真事故：34MB 的视频被"超过 20MB"跳过之后，**群里一个字都没说** ——
+    //    用户看到的就是"任务 done 了，东西呢？"✗
+    //    ⇒ ① 兜底句一定发；② 发失败也要留日志（原来这行没有 catch，抛错就被
+    //      上层 `.catch(() => {})` 静默吞了，查都查不到 ✗）
+    try {
+      await taskSay(
+        bot,
+        gid,
+        line || `${clip(skipped.map((s) => s.name).join('、'), 60)} 那几个太大，一下发不完，你要的话我再想办法`,
+      );
+    } catch (e) {
+      log.warn(`[任务] 「有几个太大没发出来」那句没发成：${e.message}`);
+    }
   }
   return { sent, skipped };
+}
+
+/**
+ * ⚠️⚠️⚠️ 2026-10-22 加（用户：「**上传的时候失败了也要记下来，下次重启继续发**」）——
+ * 把 `state/pending-arts.json` 里那些**没发出去的产物**再发一遍。
+ *
+ * 什么时候调：**启动时一次** + **每 5 分钟一次**（`index.js` 里的定时器）✓
+ *
+ * 三条路和 `sendArtifacts` 里一致：群文件 → 空间不足就闪传 → 都不行就留着下次再试。
+ * ⚠️ 只重试**还在盘上**的文件；超过 7 天、或试了 20 次还没成的就丢掉（免得无限重试）✓
+ */
+export async function retryPendingArts(bot) {
+  if (!bot) return { tried: 0, ok: 0, left: 0 };
+  const items = loadPendingArts();
+  if (!items.length) return { tried: 0, ok: 0, left: 0 };
+
+  // ① 先清理：过期的 / 文件没了的 / 试太多次的
+  const keep = [];
+  for (const it of items) {
+    const age = Date.now() - Number(it?.at ?? 0);
+    if (age > 7 * 24 * 3600 * 1000) {
+      log.info(`[任务] 待补发超过 7 天 ⇒ 丢掉：${it?.name}`);
+      continue;
+    }
+    if (!existsSync(String(it?.path ?? ''))) {
+      log.warn(`[任务] 待补发的文件已经不在盘上了 ⇒ 丢掉：${it?.name}`);
+      continue;
+    }
+    if (Number(it?.tries ?? 0) >= 20) {
+      log.warn(`[任务] 待补发试了 20 次还没成 ⇒ 丢掉：${it?.name}（${it?.why ?? ''}）`);
+      continue;
+    }
+    keep.push(it);
+  }
+  if (keep.length !== items.length) savePendingArts(keep);
+  if (!keep.length) return { tried: 0, ok: 0, left: 0 };
+
+  log.info(`[任务] 待补发还有 ${keep.length} 个没发出去 ⇒ 现在再试一遍…`);
+  let ok = 0;
+  for (const it of keep) {
+    const gid = String(it.gid);
+    const path = String(it.path);
+    const name = String(it.name || basename(path));
+    // ⚠️⚠️⚠️ 2026-10-22 加（用户：「**刚才已经发过了，你自己补发之前一定要检查一下**」）——
+    //    **发之前先查"这个文件刚是不是已经发过了"** —— 30 分钟内发过 ⇒ 直接划掉，不再发 ✓
+    //    （真事故：01:10:34 自动重试已经发成功，我 01:1x 又手动补了一次 ⇒ 群里两份 ✗）
+    if (sentRecently(gid, name)) {
+      clearPendingArt(gid, path);
+      log.info(`[任务] 待补发里的「${name}」**刚刚已经发过了** ⇒ 划掉、不再发（防重复）✓`);
+      continue;
+    }
+    let done = false;
+    try {
+      await bot.call('upload_group_file', { group_id: gid, file: path, name }, { timeoutMs: 0 });
+      done = true;
+    } catch (e) {
+      const emsg = String(e?.message ?? '');
+      // 群文件空间不足 ⇒ 闪传（限时文件）
+      if (/-403|空间不足|空间已满|永久空间/.test(emsg)) {
+        try {
+          const t = await bot.call('create_flash_task', { files: [{ file: path, name }] });
+          const fid = String(t?.data?.fileset_id ?? t?.fileset_id ?? '');
+          if (fid) {
+            await bot.call('send_flash_msg', { fileset_id: fid, group_id: gid });
+            done = true;
+            log.info(`[任务] 待补发（空间不足）⇒ 闪传发出：${name} ✓`);
+          }
+        } catch (e2) {
+          log.warn(`[任务] 待补发闪传也失败（${name}）：${e2?.message ?? ''}`);
+        }
+      } else {
+        log.warn(`[任务] 待补发还是发不出去（${name}）：${emsg}`);
+      }
+    }
+    if (done) {
+      clearPendingArt(gid, path);
+      ok++;
+      log.info(`[任务] 待补发**补上了**：${name} → 群 ${gid} ✓`);
+    } else {
+      // 没成 ⇒ 次数 +1，留着下一轮再试
+      const now = loadPendingArts();
+      const i = now.findIndex((x) => `${x?.gid}|${x?.path}` === `${gid}|${path}`);
+      if (i >= 0) {
+        now[i].tries = Number(now[i].tries ?? 0) + 1;
+        savePendingArts(now);
+      }
+    }
+  }
+  const left = loadPendingArts().length;
+  log.info(`[任务] 待补发这一轮：补上 ${ok} 个，还剩 ${left} 个 ✓`);
+  return { tried: keep.length, ok, left };
 }
 
 /**
@@ -2806,6 +3176,9 @@ export async function startRun({
   //    图由那边**边跑边一张张以图片形式发群**，这里就**别再当文件发一遍**
   //    （用户要求：「不要以文件发出来，直接以图片形式发出来」）✓
   mode = '',
+  // ⚠️ 2026-10-22 加：**复用原来那条任务记录**（`resumePending` 接着做同一个活时用）——
+  //    不传 ⇒ 新建一条（正常派活）；传了 ⇒ 把那条改回 running，面板上不会冒出第二条 ✓
+  reuseHistId = '',
 }) {
   const self = related === true;
   const skipImages = String(mode ?? '') === 'image';
@@ -2828,12 +3201,51 @@ export async function startRun({
   //    两个文件夹、两条产物、群里两份结果）
   //    「同时只跑一个」那道兜底原来写在**各个调用点**上 ⇒ 并发时谁都拦不住 ✗
   //    ⇒ 挪进来：**进这里就先把上一个停掉**（一处覆盖所有调用点 ✓）
-  if (state.running && currentKill) {
-    log.warn(`[任务] 已经有一个在跑（${clip(state.running.task, 30)}）⇒ 先把它停掉，再开这个`);
-    killCurrent();
+  // ⚠️⚠️⚠️ 2026-10-21 再修（用户截图：「**为什么一个任务出了两个**」）——
+  //    条件原来是 `state.running && currentKill`：**第一条刚开跑、runner 还没起来时
+  //    `currentKill` 还是 null** ⇒ 这个条件为假 ⇒ 第二条**不拦、直接覆盖 `state.running`**
+  //    ⇒ 面板上留下两条 `running`（第一条的 agent 记录**永远等不到收尾** ✗），
+  //      第一条的 agent 进程成了没人管的孤儿。现场日志：13:09:28 同一秒两条「开跑」。
+  //    ⇒ **只看有没有在跑**（`state.running`）：有就作废它 ——
+  //      · 有 kill 句柄 ⇒ 真杀掉
+  //      · 没句柄（还没起进程）⇒ 直接把状态换掉
+  //      · **两种情况都要把那条历史记录标成 killed**（不然面板一直挂着两条 running ✗）
+  if (state.running) {
+    if (currentKill) {
+      log.warn(`[任务] 已经有一个在跑（${clip(state.running.task, 30)}）⇒ 先把它停掉，再开这个`);
+      killCurrent();
+    } else {
+      log.warn(
+        `[任务] 已经有一个在跑（${clip(state.running.task, 30)}）但它还没起进程` +
+          ` ⇒ 直接把这条作废、换新的这一单（面板上不该留两条 running ✗）`,
+      );
+    }
+    // ⚠️ 历史记录也要跟着改 —— 只清 `state.running` 不改 hist 的话，
+    //    面板上那一条会**永远显示 running**（用户截图看到的就是这个）
+    try {
+      for (const t of hist.tasks) {
+        if (t && String(t.status ?? '') === 'running') {
+          updHist(String(t.id), {
+            status: 'killed',
+            endedAt: Date.now(),
+            text: '被新的那一单顶掉了（同一条回复里连开了两个）',
+          });
+        }
+      }
+    } catch (e) {
+      log.debug(`[任务] 把上一条 running 标成 killed 失败：${e.message}`);
+    }
     state.running = null;
   }
+  // ⚠️⚠️⚠️ 2026-10-21 加（用户截图：「**这一段她自己自言自语为什么也会判定为在问进度啊**」）——
+  //    每轮给一个 `runId`，后面所有"每 2 秒看一眼"的定时器（`要说的话.md` 的 pump、
+  //    进度播报）都靠它认**"我这个任务还是不是当前那个"**。
+  //    真事故：视频那个活被 webui 的活顶掉之后，**它的 pump 还在跑**（那时只检查
+  //    `state.running` 有没有值 ⇒ 新任务顶上来照样为真 ✗）⇒ 旧任务 `要说的话.md` 里
+  //    攒着的四句阶段话被当"进度"一股脑发进群 ⇒ 群里看着就是她一个人在那儿自言自语 ✗✗
+  const runId = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
   state.running = {
+    id: runId,
     gid: String(gid),
     by: String(by),
     byName: String(byName ?? ''),
@@ -2864,18 +3276,41 @@ export async function startRun({
   }
   const dir = reuseOk ? reuse : taskDirFor(task, gid);
   // ⚠️⚠️ 2026-10-13（用户：「加任务页」）：**任务历史**从这里开始记（管理界面 `/agent-tasks` 那页读它）
-  const histId = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-  addHist({
-    id: histId,
-    gid: String(gid),
-    by: String(by),
-    byName: String(byName ?? ''),
-    task: clip(task, 200),
-    dir,
-    startedAt: Date.now(),
-    status: 'running',
-    related: self,
-  });
+  // ⚠️⚠️⚠️ 2026-10-22 加 `reuseHistId`（用户截图：面板上**三条一模一样的任务**都挂着 running）——
+  //    真因：每次重启后 `resumePending()` 都调 `startRun()` ⇒ **每次都 addHist 一条新的** ✗
+  //    （日志：23:37 开跑 → 23:52 自动接着做 → 00:03 又自动接着做 ⇒ 三条 running）
+  //    ⇒ **接着做同一个活时要复用原来那条记录**：不新建，把它改回 running ✓
+  const histId = String(reuseHistId ?? '').trim() || `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  if (reuseHistId && hist.tasks.some((t) => String(t?.id ?? '') === histId)) {
+    // 复用：同一条记录改成"又在跑"，任务名/目录跟着更新（人还是原来那个人）
+    updHist(histId, {
+      status: 'running',
+      endedAt: 0,
+      startedAt: Date.now(),
+      task: clip(task, 200),
+      dir,
+      gid: String(gid),
+      by: String(by),
+      byName: String(byName ?? ''),
+      related: self,
+      resumed: true,
+    });
+    log.info(`[任务] 复用原来那条任务记录（${histId}）⇒ 面板上不会再冒出第二条 ✓`);
+  } else {
+    addHist({
+      id: histId,
+      gid: String(gid),
+      by: String(by),
+      byName: String(byName ?? ''),
+      task: clip(task, 200),
+      dir,
+      startedAt: Date.now(),
+      status: 'running',
+      related: self,
+    });
+  }
+  // ⚠️ 记到 `state.running` 上 —— 重启后 `resumePending()` 才能拿到它去**复用同一条记录** ✓
+  state.running.histId = histId;
   const finishHist = (patch) =>
     updHist(histId, {
       endedAt: Date.now(),
@@ -3021,7 +3456,12 @@ export async function startRun({
     } catch {}
     const pump = async () => {
       try {
-        if (!state.running) {
+        // ⚠️⚠️⚠️ 2026-10-21 修（用户截图：「**这一段她自己自言自语**」）——
+        //    原来只检查 `state.running` **有没有值** ⇒ 一旦有新的任务顶上来，
+        //    被杀掉那一轮的 pump 照样继续跑 ⇒ 它 `要说的话.md` 里攒着的阶段话
+        //    被当成"进度"接连发进群（群里看到的就是她一个人自言自语 ✗✗）
+        //    ⇒ **必须认自己这一轮的 `runId`**：不是当前那轮就立刻停掉 ✓
+        if (!state.running || String(state.running.id ?? '') !== String(runId ?? '')) {
           clearInterval(talkTimer);
           return;
         }
@@ -3130,6 +3570,9 @@ export async function startRun({
       //    她只要在 `[工具:搜图]` 那一下回一句就够；再多说一句就变成"汇报工作"✗
       if (noTalk) return;
       void info; // ⚠️ 工具类型**不再**往下传（传了就会被她"转述成"过程细节）
+      // ⚠️ 2026-10-21：**先认自己还是不是当前那一轮** —— 被杀掉的旧任务
+      //    不该再往群里报一句"还在做"（那就成了自言自语 ✗）
+      if (!state.running || String(state.running.id ?? '') !== String(runId ?? '')) return;
       // 只在**第一次动手**时报一句；报过就不再打扰
       if (state.running?.progressSent) return;
       if (state.running) state.running.progressSent = true;
@@ -3405,6 +3848,18 @@ export async function startRun({
 export async function resumePending(bot) {
   const r = state.resume;
   if (!r || !r.task) return false;
+  // ⚠️ 2026-10-21 加（用户截图：面板上多出一条叫「...」的任务）——
+  //    **占位符空单不恢复**：那是一条"参数只填了省略号"的垃圾记录，
+  //    恢复它等于让 agent 白跑一轮（还会在群里说"我接着弄"）✗
+  {
+    const txt = String(r.task ?? '').trim();
+    if (txt.length < 2 || /^[\s.。·•・…\-—_*~]+$/.test(txt)) {
+      log.warn(`[任务] 待恢复的那条是占位符空单（${JSON.stringify(txt)}）⇒ 直接丢掉，不恢复`);
+      state.resume = null;
+      save();
+      return false;
+    }
+  }
   if (!enabled()) {
     log.warn('[任务] 有一件被打断的活等着接着做，但 agent 现在是关着的 → 先留着');
     return false;
@@ -3459,6 +3914,9 @@ export async function resumePending(bot) {
     related: r.related === true,
     reuseDir: String(r.dir ?? ''),
     mode: resumeMode,
+    // ⚠️ 2026-10-22 加（用户截图：面板上三条一模一样的任务都 running）——
+    //    接着做**同一个活** ⇒ 复用原来那条记录，别再新建一条 ✗
+    reuseHistId: String(r.histId ?? ''),
   }).catch((e) => log.warn(`[任务] 恢复失败：${e.message}`));
   return true;
 }
@@ -3679,24 +4137,25 @@ async function handleTask(event, segs, bot, opts = {}) {
   const byName = String(event?.sender?.card || event?.sender?.nickname || uid);
   const isOwner = uid === ownerId() && !!ownerId();
 
-  // ⚠️⚠️⚠️ 2026-10-13（用户：「**接任务还是要严格一点，必须要 @ 她才能接任务**」）：
-  //    默认只认**明确 @ 了她**（at 段指她 / 正文那个 @ 命中她的任一叫法）；
-  //    "引用她那条消息"也算 —— 那本来就是冲她说的 ✓
-  //    ⚠️ 例外照旧放行（它们本来就不该带 @）：
-  //      · 斜杠指令（`/任务撤回`）；
-  //      · 他**补的那一句**（她刚反问过，`state.clarify` 里挂着）；
-  //      · 主人回「同意 / 不行」（挂在待批的那件事上，`state.pending`）。
-  //    ⚠️ 配置 `agent.requireAt: false` 可以退回老行为（不带 @ 也算派活）。
+  // ⚠️⚠️⚠️ 2026-10-13（用户：「**接任务还是要严格一点，必须要 @ 她才能接任务**」）
+  // ⚠️⚠️⚠️ 2026-10-21 再收紧（用户：「**在群里所有的和任务相关的都必须要@她才能启动**」）：
+  //    **任务相关的口子只剩两个**：① @ 了她　② 斜杠指令（`/任务撤回`）。
+  //    原来还放过这两个，今天全关了（真事故在下面）：
+  //      · `atReply` —— "引用"就放行（引用**谁**那条都算）
+  //        ✗ 现场 13:16:02：黑祥一句「你那 webui 改到哪了，改完没」**没 @ 她**，
+  //          只因为挂着引用就被当成新派活 ⇒ **把正在跑的视频活停掉、另开一个** ✗✗
+  //      · `inContinue` —— 单回一句「继续 / 接着做」就放行
+  //        ✗ 同样不带 @ 就能重启一路活
+  //    ⚠️ 保留的两个例外（它们不是"派活"，是**她自己在等的那一句回话**）：
+  //      · `state.clarify`：她刚反问过「哪个 py？」⇒ 他回的那句本来就不会带 @（一问答完了）
+  //      · `state.pending`：别人派的活等她批，**主人**回「同意 / 不行」
+  //      这两个要是也要求 @，反问一次就再也接不上了 ✗（要关的话告诉我，一起关）
   if (cfg().requireAt !== false) {
     const isCmd = /^[/／]/.test(clean);
     const inClarify = !!state.clarify && String(state.clarify.gid) === gid;
     const inPending = !!state.pending && String(state.pending.gid) === gid && isOwner;
-    const atReply = segments.some((s) => s?.type === 'reply');
-    // ⚠️ 「继续」也算例外（那是接上一段的工作，本来就不该带 @ ✓）
-    const inContinue =
-      !!(state.continues && state.continues[gid]) && /^(继续|接着|接着弄|继续吧|继续做|接着做|go|continue)$/i.test(clean.trim());
-    if (!forHer && !atReply && !isCmd && !inClarify && !inPending && !inContinue) {
-      log.debug(`[任务] 没 @ 她（也没引用她）⇒ 任务桥不接：${clip(clean, 40)}`);
+    if (!forHer && !isCmd && !inClarify && !inPending) {
+      log.info(`[任务] 没 @ 她 ⇒ 任务桥不接（群里任务必须 @ 她，引用/「继续」都不算）：${clip(clean, 40)}`);
       return false;
     }
   }

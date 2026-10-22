@@ -11,6 +11,11 @@ import { animeWorks } from './persona.js';
 // ⚠️ 2026-09-17 加：群友常**@着某人**问「介绍一下他」，而文本里**没有名字** ——
 //    得靠 at 段的 QQ 号反查出群名片，才能判断"这是在说资料里的某个人"。
 import * as names from './names.js';
+// ⚠️ 2026-10-22：短期共享记忆（QQ 聊天和 B站评论回复读的是同一份）
+import * as shortMemory from './short-memory.js';
+// ⚠️ 2026-10-22：**实时状态机** —— 用户要求「QQ 和 B站两边状态要一致」
+//    两边读的是**同一份** `state/bili-presence.json`（`bili-presence.js`）⇒ 天然一致 ✓
+import * as presence from './bili-presence.js';
 
 /** ⚠️ 走 `config.js` 的 `KNOWLEDGE_DIR`（测试可以用 `QQBOT_KNOWLEDGE_DIR` 整份搬走） */
 const DIR = KNOWLEDGE_DIR;
@@ -1289,6 +1294,31 @@ export function knowledgeText(opts = {}) {
         learned,
       ].join('\n'),
     );
+  }
+  /* ⚠️⚠️ 2026-10-22：**短期共享记忆**（用户要求）
+   *   「建立一个新短期记忆**共享**知识库：最近发了哪些视频、B站收到了什么评论回复、
+   *     QQ 这边最近发生了什么事；都标时间、都是总结、只留 48 小时」
+   *   ⇒ 挂在这里是因为 `knowledgeText()` 是**所有聊天提示词的唯一拼装点**，
+   *     而 B站评论回复那边（`tools/bili-comment-bot.mjs`）读的是**同一份**
+   *     `src/short-memory.js` ⇒ 这就是"共享" ✓
+   *   ⚠️ 空的就**什么都不加**（别塞"暂无"，模型会到处复述）
+   */
+  try {
+  /* ⚠️ 2026-10-22：**此刻的状态**（在干什么 / 精力 / 心情）
+   *   用户要求「QQ 和 B站两边状态要一致」⇒ 和 B站评论回复读同一份（bili-presence.js）
+   *   ⚠️ 人设里那张「你一天怎么过的」时间表是**大致规律**，这个是**此刻的真实状态** ——
+   *      冲突时以这个为准（比如时间表说"晚上在家"，但状态说"在弄晚饭" ⇒ 按后者说） */
+  try {
+    const pres = presence.block();
+    if (pres) parts.push(pres);
+  } catch (e) {
+    log.debug(`状态机拼进提示词失败（不影响聊天）：${e.message}`);
+  }
+
+    const sm = shortMemory.block({ maxChars: 900 });
+    if (sm) parts.push(sm);
+  } catch (e) {
+    log.debug(`短期记忆拼进提示词失败（不影响聊天）：${e.message}`);
   }
   return parts.join('\n\n---\n\n');
 }
