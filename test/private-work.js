@@ -59,6 +59,10 @@ process.env.QQBOT_PRIVATE_WORK_FILE = WFILE;
 //    （`FILE`，只存"当前在跑的那个"）⇒ 隔离没生效，测试记录**真的写进了主号那份**
 //    `state/agent-tasks.json`（实测攒了 90 条，用户面板上会看见）✗
 process.env.QQBOT_AGENT_TASKS_FILE = 'logs/__test-pw-agent.json';
+// ⚠️⚠️ 2026-11-09 加：**双通道（agent + bot 润色）在套件里一律关掉** ——
+//    它是真的去连 DSH 会话、一次十几秒，套件里跑十几次就挂半天，而且离线环境必超时 ✗
+//    （生产不设这个变量 ⇒ 照常走 ✓）
+process.env.QQBOT_DUAL_CHAT = 'off';
 
 let failures = 0;
 const check = (ok, label, extra = '') => {
@@ -125,11 +129,17 @@ console.log('\n【2】★ 是好友就放行 —— 好友列表本身就是白�
 console.log('\n【3】★ 关掉"好友回复"那条 → 退回只认 allowPrivateUsers 名单');
 {
   const before = config.trigger.allowFriendsPrivate;
+  // ⚠️⚠️ 2026-11-09 修（原来这一项对着**真 config.yml** 断言，而用户名单里就有这个号 ⇒
+  //    关掉 allowFriendsPrivate 之后反手被 `allowPrivateUsers` 放行 ⇒ 假红 ✗）：
+  //    ⇒ 断言期间把名单也清空，测完**原样恢复**（不是"改回默认"，开关是他的）✓
+  const beforeList = config.trigger.allowPrivateUsers;
   config.trigger.allowFriendsPrivate = false;
+  config.trigger.allowPrivateUsers = [];
   check(pw.isAllowedFriend(FRIEND) === false, '★ `allowFriendsPrivate:false`（不传）→ 连好友也拒');
   const b = new Bot();
   b.selfId = '10000001';
   check(b.privateAllowed(FRIEND) === false, '★ `bot.privateAllowed` 也跟着拒');
+  config.trigger.allowPrivateUsers = beforeList;
   config.trigger.allowFriendsPrivate = before;
   check(pw.isAllowedFriend(FRIEND) === true, '★ 改回来 → 又是放行（判据是现读的，不是缓存死的）');
 }
@@ -497,7 +507,8 @@ console.log('\n【17】★★★ 这些功能**只属于开了工作模式的号
 
   // 源码级：那几个入口都得先过 `enabled()`
   const src = readFileSync(join(ROOT, 'src', 'private-work.js'), 'utf8');
-  check(/export function noteFor\(event\) \{\n  if \(!enabled\(\)\) return '';/.test(src), '★★ `noteFor` 第一句就是 `if (!enabled())`');
+  // ⚠️ 2026-11-08 修：Windows 检出后是 **CRLF**，原来只认 `\n` ⇒ 这条会白红 ✗
+  check(/export function noteFor\(event\) \{\r?\n  if \(!enabled\(\)\) return '';/.test(src), '★★ `noteFor` 第一句就是 `if (!enabled())`');
   // ⚠️ 2026-10-16 改：`onPrivate` 里在 `enabled()` 之后**又加了一句"必须是私聊"**
   //    （群消息原来也会被当成私聊处理 ⇒ 群里有人 @ 别人也能触发私聊工作 ✗）
   //    ⇒ 断言跟着改成"先过 enabled、再过 message_type，然后才是 uid" ✓
@@ -1764,7 +1775,10 @@ console.log(
   writeFileSync(srcTxt, '这是接管那会儿漏下的文件', 'utf8');
   let hist = [
     { time: Math.floor(Date.now() / 1000), sender: { user_id: uid }, message: [{ type: 'file', data: { name: '漏下的.txt', file_id: 'bf1' } }] },
-    { time: Math.floor(Date.now() / 1000), sender: { user_id: '10000001' }, message: [{ type: 'file', data: { name: '我自己发的.txt', file_id: 'bf2' } }] },
+    // ⚠️⚠️ 2026-11-09 修：这里原来写死 `10000001`，而 `backfillFiles` 判"自己发的"用的是
+    //    **`config.botQQ`**（每个号启动时按自己注入）⇒ 桩里那个号它压根不认 ⇒ 自己的文件被下载 ✗
+    //    ⇒ 用本进程真实的 `config.botQQ`，"自己发的"才真是自己 ✓
+    { time: Math.floor(Date.now() / 1000), sender: { user_id: String(config.botQQ || '10000001') }, message: [{ type: 'file', data: { name: '我自己发的.txt', file_id: 'bf2' } }] },
   ];
   const bot = {
     call: async (a) => {

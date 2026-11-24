@@ -25,6 +25,9 @@ import { log } from './log.js';
 /* ⚠️ 2026-10-22 加：**BV / av 号都认**（B站搜索结果给的是 av 号，只认 BV 会全被过滤 ✗）
  *    `bilibili.js` 只依赖 config/log ⇒ 不会有循环依赖 ✓ */
 import { pickVideoKey } from './bilibili.js';
+/* ⚠️ 2026-10-24 加：`due()` 要同步读登录态（未登录就别白跑）
+ *    实测依赖安全：`bili-comments.js` 里**没有**反向 import 本文件 ✓ */
+import * as biliComments from './bili-comments.js';
 
 const SCRIPT = join(ROOT, 'tools', 'bili-proactive-comment.mjs');
 /** 历史留多少条（够界面回看就行） */
@@ -32,7 +35,7 @@ const KEEP = 60;
 
 export function settings() {
   const c = config.biliProactive || {};
-  /* ⚠️ 2026-10-21 用户问「**每天最多为什么还有上限20啊**」
+ /* ⚠️ 2026-10-21问「**每天最多为什么还有上限20啊**」
    *   原来上限写死 20（我随手定的），他要设更多就被卡住 ✗
    *   ⇒ 放宽到 **50**。⚠️ 但还是留个上限：一天几百条必被 B站 风控 ✓
    */
@@ -84,7 +87,7 @@ function load() {
       count: Number(o.count) || 0,
       target: Number(o.target) || 0,
       sent: Array.isArray(o.sent) ? o.sent : [],
-      /* ⚠️⚠️ 2026-10-21 用户：「**评论视频一定不要重复评论**」
+ /* ⚠️⚠️ 2026-10-21：「**评论视频一定不要重复评论**」
        *   `sent` 只留最近 60 条（界面回看用），**被挤掉之后就会重复评论同一个视频** ✗
        *   ⇒ 单独存一份**永久的 bvid 名单**（`visited`），**一条都不裁** ——
        *     一个 BV 号才 12 字节，攒到一万条也才 120KB，根本不占地方 ✓
@@ -151,6 +154,25 @@ export function due(now = new Date()) {
   if (blocked > Date.now()) {
     const left = Math.ceil((blocked - Date.now()) / 60000);
     return { ok: false, why: `被 B站风控了，还要等 ${left} 分钟（${st.blockedReason || '风控'}）` };
+  }
+  /* ⚠️ 2026-10-24 加：**未登录就别白跑**
+   *
+   *    现场：今天登录态 16:23 之后就失效了，主动评论还是照常跑 ——
+   *    19:34 ~ 21:54 一共 **8 轮，每轮都是**：
+   *      起 Chrome → 搜关键词 → 挑视频 → 打开视频页 →
+   *      「页面上找不到可见的评论输入框」→ 退出
+   *    每轮白烧 40~60 秒 + 一次 Chrome 启停，最后一条都没发出去 ✗
+   *
+   *    ⇒ `loginOk === false`（评论那边巡检确认失效）时直接不跑 ✓
+   *      ⚠️ `null` = **还没查过** ⇒ 不拦（第一次照常试，别因为"没查到"就不干活）✓
+   */
+  try {
+    const lr = biliComments.status();
+    if (lr && lr.loginOk === false) {
+      return { ok: false, why: 'B站 登录态失效（要重新扫码才发得出去）' };
+    }
+  } catch {
+    /* 拿不到状态就照常跑，别因为读状态失败就不干活 */
   }
   const h = now.getHours();
   // 跨零点的时段（比如 22~2）也要能用
@@ -221,8 +243,48 @@ export async function pickVideo() {
           : `[B站主动评论] 「${kw}」（${ord}）**搜到 0 条**（可能被限流了 / 这个词没结果），换下一个词`);
         continue;
       }
-      fresh.sort((a, b) => (Number(b.play) || 0) - (Number(a.play) || 0));
-      const v = fresh[0];
+      /* ⚠️⚠️ 2026-10-26 改（用户：「参考一下这个视频所说的如何让大肥鱼增加视频播放量」，
+       *     来源 BV1SHnH6FEsR + `dsh-bili-scroll` 作者的评论补充）：
+       *
+       *    「关键词和七天内只是把池子筛出来，**真正决定先看哪条的是「现在有几个人在看」**。
+       *      同一天、同关键词，先挑**正在看的多的**那条。」
+       *
+       *    ⇒ 原来这里按 `play`（累计播放量）降序挑第一条 —— 那大多是**几天前的老热门**，
+       *      评论区早没人看了，她那条评论发出去也没人看见 ✗
+       *    ⇒ 改成：先按播放量取前 3 个候选（保证不是冷门），再**逐个查在线人数**，
+       *      挑正在看的人最多的那条 ✓
+       *
+       *    ⚠️ 每次请求之间隔 800ms —— 作者特别提过：
+       *      「请求太密会撞 412，所以有间隔和并发上限」✓
+       */
+      const TOPN = 3;
+      const base = fresh
+        .slice()
+        .sort((a, b) => (Number(b.play) || 0) - (Number(a.play) || 0))
+        .slice(0, TOPN);
+      let pick = base[0];
+      let bestOnline = -1;
+      for (const cand of base) {
+        const key0 = bili.pickVideoKey(cand.url);
+        let online = 0;
+        try {
+          online = await bili.onlineTotal(key0);
+        } catch {
+          /* 查不到就当 0 */
+        }
+        log.info(
+          `[B站主动评论] 候选「${String(cand.title || '').slice(0, 22)}」在线 ${online} 人`,
+        );
+        if (online > bestOnline) {
+          bestOnline = online;
+          pick = cand;
+        }
+        await new Promise((r) => setTimeout(r, 800));
+      }
+      if (bestOnline > 0) {
+        log.info(`[B站主动评论] 按在线人数挑中「${bestOnline} 人在看」那条 ✓`);
+      }
+      const v = pick;
       const bvid = bili.pickVideoKey(v.url);
       if (!bvid) continue;
       return { bvid, url: `https://www.bilibili.com/video/${bvid}`, title: String(v.title || ''), up: String(v.up || ''), play: Number(v.play) || 0, keyword: kw };
@@ -296,11 +358,56 @@ export async function runOnce({ bvid = '', url = '', manual = false } = {}) {
     return { ok: false, err: `脚本没给回执：${tail.slice(0, 300)}` };
   }
 
+  /* ⚠️⚠️ 2026-11-08：**profile 被占 ≠ 失败** ——
+   *   原来抢不到 Chrome 就报"登录态失效（nav isLogin=false）"，然后写一条 ok:false 进 sent ✗
+   *   11-07 因此白记了 19 条"失败"、用户看到界面一片红，其实 cookie 一直是好的。
+   *   ⇒ 现在脚本拿不到锁会回 { busy:true }，这里直接提前返回：
+   *     不记 sent、不计失败次数、不触发风控暂停，下一轮再来 ✓ */
+  if (res.busy) {
+    log.info('[B站主动评论] Chrome profile 被占着（别的 B 站任务在用）⇒ 这一轮跳过，不算失败');
+    return { ok: false, why: 'busy', err: 'Chrome profile 被占用（等下一轮）' };
+  }
+
   // 记一笔（用户要的「显示出来发送的视频链接」就靠这个 sent 列表）
   // ⚠️ 2026-10-22：BV / av 都认（脚本回执里给的可能还是 av 号）
   const st = load();
   const bv = pickVideoKey(res.video) || pickVideoKey(bvid) || bvIn || '';
-  st.sent = [{ at: Date.now(), bvid: bv, url: String(res.video || ''), title: String(res.title || ''), text: String(res.comment || ''), ok: res.ok === true, manual: !!manual }, ...(st.sent || [])].slice(0, KEEP);
+  /* ⚠️⚠️ 2026-11-08：**同一个视频 5 分钟内不重复写记录**
+   *   实测 11-03 那天真发了 4 条，界面上却显示 8 条 —— 每条被写了两次
+   *   （成对出现、前后差 1 秒、其中一条没有 title）⇒ 看着像"超发"，
+   *   用户当场问「不是最多 4 条吗」。发是真没超，是账本重复 ✗ */
+  const _now = Date.now();
+  const _dup =
+    bv && (st.sent || []).some((x) => String(x.bvid || '') === bv && _now - Number(x.at || 0) < 5 * 60 * 1000);
+  if (_dup) {
+    log.info(`[B站主动评论] 这条刚记过（${bv}），不重复写记录`);
+  } else {
+  st.sent = [
+    {
+      at: _now,
+      bvid: bv,
+      url: String(res.video || ''),
+      title: String(res.title || ''),
+      text: String(res.comment || ''),
+      ok: res.ok === true,
+      manual: !!manual,
+      /* ⚠️ 2026-11-08：**失败也把原因存下来** ——
+       *   原来只有 ok:false，界面（和事后看记录的人）完全看不出是
+       *   「登录态失效」还是「风控」还是「没找到视频」✗ */
+      ...(res.ok === true ? {} : { why: String(res.err || res.why || '没发成').slice(0, 160) }),
+      /* ⚠️ 2026-10-26 加（照 `dsh-bili-scroll` 的 `lib/verify.mjs`）：
+       *   · `rpid` = B站 给这条评论的 id ⇒ 以后能**直接定位**它复核"公开可见没有"，
+       *     不用在几百条评论里按正文翻 ✓
+       *   · `visible` = 接口有没有标 `invisible`（`false` = 多半在审核）
+       *   ⚠️ 这两个字段**必须一起进 `load()` 的白名单**？——不用：`sent` 是整条数组原样读回来的
+       *      （见 `load()` 里 `Array.isArray(o.sent) ? o.sent : []`）✓ */
+      ...(Number(res.rpid) ? { rpid: Number(res.rpid) } : {}),
+      ...(res.invisible ? { invisible: true } : {}),
+      ...(res.blocked_by ? { blocked_by: String(res.blocked_by) } : {}),
+    },
+    ...(st.sent || []),
+  ].slice(0, KEEP);
+  }
   /* ⚠️ 只要**发成功**（或者脚本发现"页面上已经有我的评论了"），就把这个 BV 记进**永久名单**
    *   ⇒ 以后不管 sent 怎么裁，都不会再去同一个视频下发第二次 ✓
    * ⚠️ 2026-10-21 加 `uncertain`：脚本"点了发布但没核实到"时也记进名单 ——
@@ -353,17 +460,43 @@ export async function runOnce({ bvid = '', url = '', manual = false } = {}) {
 /* ── 定时调度 ───────────────────────────────────── */
 let running = false;
 let lastTryAt = 0;
+/** 上次打"为什么没跑"的日志（每 10 分钟最多一条，别刷屏） */
+let lastSkipLogAt = 0;
 
 /** 每 30 秒被 `index.js` 调一次 */
 export function tick() {
   const c = settings();
-  if (!c.enable) return;
-  if (running) return;
+  /* ⚠️⚠️ 2026-10-26 加诊断（用户：「**登录好之后先查主动评论**」）
+   *
+   *    现场：今天（10-26）主动评论**一次动作都没有**，可排查下来全都正常 ——
+   *      · 横幅说"已开启"（`enable=true`）
+   *      · `state/bili-proactive.json` 每 30 秒被写一次 ⇒ **tick 确实在跑**
+   *      · `status()` 报 `running=false` / `blocked=false` / `0/34`
+   *      · 我在**进程外**实测 `due()` 返回 `{ok:true}`
+   *    ⇒ 说明是 tick 里某一道 `return` 静默挡掉了，而它们**一条日志都不打**，
+   *      等于黑盒（和 2026-10-22 那次"让位闸不打日志"是同一个毛病）✗
+   *
+   *    ⇒ 把每一个提前 return 的原因都打出来（10 分钟限流一次）✓
+   */
+  const skip = (why) => {
+    if (Date.now() - lastSkipLogAt > 10 * 60 * 1000) {
+      lastSkipLogAt = Date.now();
+      log.info(`[B站主动评论] 这次跳过：${why}`);
+    }
+    return;
+  };
+  if (!c.enable) return skip('开关没开');
+  if (running) return skip('上一轮还没跑完（running=true）');
   const d = due();
-  if (!d.ok) return;
+  if (!d.ok) return skip(d.why || 'due() 说不该跑');
   // 别一直试：两次尝试之间至少隔 `intervalMinutes` 分钟（⚠️ 2026-10-22 从硬编码 20 分钟改成可配）
   //   搜不到视频、发失败了都算一次 ⇒ 避免疯狂重试把 B站 惹毛
-  if (Date.now() - lastTryAt < c.intervalMinutes * 60 * 1000) return;
+  if (Date.now() - lastTryAt < c.intervalMinutes * 60 * 1000) {
+    return skip(
+      `距上次尝试不到 ${c.intervalMinutes} 分钟（还有 ` +
+        `${Math.ceil((c.intervalMinutes * 60 * 1000 - (Date.now() - lastTryAt)) / 1000)} 秒）`,
+    );
+  }
   lastTryAt = Date.now();
   running = true;
   log.info('[B站主动评论] 到点了，去找个视频说两句…');
@@ -373,6 +506,8 @@ export function tick() {
     log.info(`[B站主动评论] 挑中《${v.title}》（${v.play} 播放，词：${v.keyword}）→ ${v.url}`);
     const r = await runOnce({ bvid: v.bvid });
     if (r.ok) log.info(`[B站主动评论] ✅ 发出去了：${r.video}｜「${String(r.comment || '').slice(0, 40)}」`);
+    else if (r.blocked_by === 'style') log.info(`[B站主动评论] 🚫 语感闸拦下（这轮没发）：${r.err || ''}`);
+    else if (r.why === 'busy') log.info('[B站主动评论] 这轮让给了别的 B 站任务（profile 在忙）⇒ 下轮再来');
     else if (r.uncertain) log.warn(`[B站主动评论] ⚠️ 点了发布但没核实到（${r.video}）—— 自己去 B站 看一眼有没有`);
     else log.warn(`[B站主动评论] ❌ 没发成：${r.err || ''}`);
   })()

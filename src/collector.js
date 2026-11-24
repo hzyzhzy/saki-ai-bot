@@ -54,9 +54,28 @@ export function initCollector(existingFaceFiles = []) {
     } catch {}
   }
   try {
-    pendingCount = readFileSync(join(PENDING, '_list.json'), 'utf8')
-      ? JSON.parse(readFileSync(join(PENDING, '_list.json'), 'utf8')).length
-      : 0;
+    const list = JSON.parse(readFileSync(join(PENDING, '_list.json'), 'utf8')) ?? [];
+    /* ⚠️⚠️ 2026-11-21 加：**只数真实存在的文件**。
+     *   现场：`_list.json` 登记了 200 条（2026-09-11~17 收的），
+     *   而 `library/_pending/` 里**一个图都没有**（文件早没了，`_list.json` 自己还在）⇒
+     *     ① 待审核界面显示 200 张，点"通过"必然失败（源文件不存在）✗
+     *     ② `pendingCount` 卡在 200 = `MAX_PENDING` ⇒ `collectFromEvent()` 第一道闸就 return
+     *        ⇒ **收集器从此拒收任何新表情包**（这才是真正坏掉的那个功能）✗✗
+     *   ⇒ 计数按对账后的真实条数算；`_list.json` 一条都不删（审核记录留着，用户自己决定清）
+     *   ⇒ 下次启动日志会变成「待审核 0 张」，收集恢复正常 ✓ */
+    const alive = Array.isArray(list)
+      ? list.filter((x) => {
+          const f = String(x?.file ?? x ?? '');
+          return !!f && existsSync(join(PENDING, f));
+        })
+      : [];
+    pendingCount = alive.length;
+    if (Array.isArray(list) && alive.length !== list.length) {
+      log.warn(
+        `待审核队列对账：登记 ${list.length} 条、实际只有 ${alive.length} 个文件 ` +
+          `（差的 ${list.length - alive.length} 条源文件已不存在 ⇒ 不计入额度，收集器照常收新的）`,
+      );
+    }
   } catch {
     pendingCount = 0;
   }
@@ -466,8 +485,14 @@ export async function collectFromEvent(event, getImage) {
 
 export function pendingInfo() {
   try {
-    const list = JSON.parse(readFileSync(join(PENDING, '_list.json'), 'utf8'));
-    return list;
+    const list = JSON.parse(readFileSync(join(PENDING, '_list.json'), 'utf8')) ?? [];
+    /* ⚠️ 2026-11-21：**只把"源文件还在"的条目标给界面** ——
+     *   否则界面显示 200 张待审核、点"通过"必然失败（那些图 2026-09 就没了）✗
+     *   ⚠️ `_list.json` 本身一个字不改（记录留着，要不要清由人决定）✓ */
+    return (Array.isArray(list) ? list : []).filter((x) => {
+      const f = String(x?.file ?? x ?? '');
+      return !!f && existsSync(join(PENDING, f));
+    });
   } catch {
     return [];
   }

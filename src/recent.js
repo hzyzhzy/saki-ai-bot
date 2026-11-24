@@ -17,7 +17,7 @@
  */
 import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync } from 'node:fs';
 import { join, basename } from 'node:path';
-import { config, ROOT, CONFIG_FILE, stateDir } from './config.js';
+import { config, ROOT, CONFIG_FILE, stateDir, peersFor } from './config.js';
 import { log } from './log.js';
 import * as persona from './persona.js';
 import { castRoleOf } from './knowledge.js';
@@ -141,7 +141,7 @@ export function reload() {
 /**
  * 语气记录：`group_id -> { challenges, at }`
  *
- * ⚠️⚠️ 为什么需要（2026-09-14 用户反馈：「和人交流的时候有时会出现这种
+ * ⚠️⚠️ 为什么需要（2026-09-14反馈：「和人交流的时候有时会出现这种
  *   **不断反驳**的情况…我希望机器人对人**更温柔**」）：
  *
  *   他看到的（某群友在说自己买的 OPPO Watch）——
@@ -254,7 +254,7 @@ const MAX_MSG_CHARS = 200;
 /**
  * 缓冲区最多留几条（**内部上限**，不是给模型的窗口）。
  *
- * ⚠️⚠️ 2026-09-13 用户反馈后从"按时间裁"改成"按条数留"：
+ * ⚠️⚠️ 2026-09-13反馈后从"按时间裁"改成"按条数留"：
  *
  *   真实踩的（截图）：群里先说「心上江渡轮站那个入口太像足球门了」，
  *   隔了几分钟 <主人> 问「准备改成什么球门」，机器人答「……什么球门，你要改哪个」
@@ -302,6 +302,14 @@ function bufferMaxAge(event = null) {
 }
 
 /**
+ * 「回执空壳句」判据 —— 实现搬到了 `src/echo-receipt.js`（`quest.js` 那边也要用同一份）。
+ * ⚠️ 为什么单独一个模块：`quest.js` 要 import 它，直接放这里会绕出
+ *    `quest → recent → knowledge` 这种可能成环的依赖。
+ */
+import { isEchoReceipt } from './echo-receipt.js';
+export { isEchoReceipt };
+
+/**
  * 记一条群消息。
  * @param {object} event OneBot 消息事件
  * @param {{text:string, isAtMe:boolean}} parsed
@@ -333,6 +341,37 @@ export function remember(event, parsed = {}) {
   if (!text && parsed.isAtMe) text = '（@了机器人）';
   // 纯图片消息也记一笔，让模型知道刚才有人发过图
   if (!text) text = '（发了一张图）';
+
+  /* ⚠️⚠️ 2026-10-26 加：**同类池那个号发的"执行回执"也不许进上下文**
+   *
+   *    用户截图：Anon 那边还能看到 Saki 的「行，就按这个来，等我一下（」，
+   *      然后就照着它接（「行，等你（」）⇒ 两个号在互相接机械回执 ✗
+   *
+   *    根源：我上一次**只改了 `rememberBot()`**（记**她自己**说的话）——
+   *      可这句在 Anon 这边是**对方号**说的 ⇒ 走的是 `remember()`（别人说的话）⇒ 漏了 ✗
+   *    ⇒ 在这里补上同一个判据：**发送者是同类池的号 + 短 + 像回执** ✓
+   */
+  if (mt === 'group') {
+    const t1 = String(text ?? '').trim();
+    const fromPeer = (() => {
+      try {
+        const gid = String(event?.group_id ?? '');
+        const uid = String(event?.user_id ?? '');
+        if (!gid || !uid) return false;
+        return peersFor(gid).map(String).includes(uid);
+      } catch {
+        return false;
+      }
+    })();
+    const receipt =
+      t1.length <= 30 &&
+      /按这个来|按这个做|等我一下|等我|等你|收到|明白了|知道了|开始了|这就去|这就改|搞定了|完事了|好了|我看看/.test(t1);
+    if (fromPeer && receipt) return; // 机械回执：不进上下文（群里照样看得到）
+    // ⚠️ 2026-10-26：**不管发送者是谁**，只要整句就是个"等你/等我"的空壳就不记。
+    //    为什么这条要独立于 `fromPeer`：她自己的话也会走这条路（回显 / 伪造 event 里
+    //    `user_id` 是她自己 ⇒ 不在同类池里 ⇒ `fromPeer=false`）⇒ 单靠上面那条拦不住 ✗
+    if (isEchoReceipt(t1)) return;
+  }
 
   // ⚠️⚠️ 2026-09-20 加（用户抓到的真实案例：**她把「白天」记到错的人头上**）：
   //
@@ -417,7 +456,7 @@ export function remember(event, parsed = {}) {
       : [],
   });
 
-  // ⚠️ 缓冲区**按条数**留（用户 2026-09-13：「只要是多少条范围内都得看进来」）。
+ // ⚠️ 缓冲区**按条数**留（2026-09-13：「只要是多少条范围内都得看进来」）。
   //    时间上限只做很宽兜底 —— 原来这里是 `config.context.maxAgeMs`（默认 30 分钟），
   //    那条「足球门」就是被它删掉的。
   const maxAge = bufferMaxAge(event);
@@ -541,10 +580,51 @@ export function rememberBot(event, text, messageId = '') {
   {
     const t1 = String(text ?? '').trim();
     const ownerUp = String(config.ownerQQ ?? '') === String(event?.user_id ?? '');
+    /* ⚠️⚠️ 2026-10-25 加：**同类池的号触发的回执，也不该进上下文**
+     *
+     *    用户：「**行，就往这个方向走，等我一下（ 这种自动回复不应该进上下文，
+     *    要不然 bot 会搞不明白**」
+     *
+     *    现场（截图）：两个号各自都能看见对方的回执 →
+     *      Anon：「（这段话怎么听着跟刚才那句一模一样……）」
+     *      —— 它把对方那句机械回执当成"台词"在读，当然觉得重复 ✗
+     *
+     *    根源：上面那条闸只判 `ownerUp`（**主人**触发的才算执行回执）。
+     *      可剧情里是**两个机器人互相触发**（同类池）⇒ `ownerUp=false` ⇒ 回执照样进上下文 ✗
+     *    ⇒ 把"同类池的号"也算成"上游是机器人"✓
+     */
+    const peerUp = (() => {
+      try {
+        const gid = String(event?.group_id ?? '');
+        if (!gid) return false;
+        const uid = String(event?.user_id ?? '');
+        if (!uid) return false;
+        return peersFor(gid).map(String).includes(uid);
+      } catch {
+        return false;
+      }
+    })();
     const receipt =
       t1.length <= 30 &&
-      /按这个来|按这个做|等我一下|等我|收到|明白了|知道了|开始了|这就去|这就改|搞定了|完事了|好了|我看看/.test(t1);
-    if (mt === 'group' && ownerUp && receipt) return;
+      /按这个来|按这个做|等我一下|等我|等你|收到|明白了|知道了|开始了|这就去|这就改|搞定了|完事了|好了|我看看/.test(t1);
+    /* ⚠️⚠️⚠️ 2026-10-26 改（用户：「**就是 bot 回复指令的固定句子进上下文而且还没修好**」）
+     *
+     *    ① `ownerUp || peerUp` 那道前置**留着**（2026-10-16 定的原行为，别动）；
+     *    ② **另加一条不看上游的窄判据** `isEchoReceipt()` —— 因为 `sendChatLike` 那条路
+     *       **伪造的 event** 里 `user_id` 往往是她自己 ⇒ 两条都不成立 ⇒ 判据形同虚设 ✗
+     *
+     *    实证（`state/recent.json`，群 1131801543）：
+     *      18:29:21 uid=__self__「行，那我等你（」← 从回执抄出来的镜像句，进上下文了
+     *      ⇒ 下一轮她又读到，继续"等你"，两个号一路互相接 ✗✗
+     *
+     *    ⚠️ 窄判据必须是**整句就是个"等你/等我"的空壳**（`isEchoReceipt` 里那几个形态）。
+     *      用宽正则不加前置会误杀她正常的短句 —— 实测（2026-10-26 我第一版就踩了）：
+     *        「这一遍也没白说，我不是躺好了嘛」「钥匙明天早上我等你，别迟到」
+     *        「她要是还盯着你，那就是在等你再往前一点」← 全是**正常剧情台词**，被删了 ✗
+     *    ⚠️ 消息**照常发出去**（群里看得见），只是**不写进上下文**。
+     */
+    if (mt === 'group' && (ownerUp || peerUp) && receipt) return;
+    if (mt === 'group' && isEchoReceipt(t1)) return;
   }
   // ⚠️⚠️ 2026-10-16 再加（用户截图：**剧情结算面板**发到了群里，旁边的爱音追问
   //    「你这条是什么东西啊。"好感度 +3"、"参与 2 人"……**你那边还带结算面板的？**」✗）——
@@ -571,7 +651,7 @@ export function rememberBot(event, text, messageId = '') {
   //    noteTone 里的 lastHuman() 要拿"刚被回答的那条"。
   noteTone(key, body);
 
-  // ⚠️ 昵称跟着自称走（2026-09-13 用户：「祥子的话遇到没看过 MyGO 的
+ // ⚠️ 昵称跟着自称走（2026-09-13：「祥子的话遇到没看过 MyGO 的
   //    很容易误认为骆驼祥子」）—— 自己在上下文里显示成「你（Saki）」，
   //    否则模型会照抄那个名字当自称。
   list.push({
@@ -631,7 +711,7 @@ function humanWhen(t, now = Date.now()) {
 /**
  * 拼成给模型看的上下文文本。
  *
- * ⚠️⚠️ 窗口是**按条数**的，**不按时间**（2026-09-13 用户要求）。
+ * ⚠️⚠️ 窗口是**按条数**的，**不按时间**（2026-09-13 要求）。
  *
  *    用户原话：「看上文不仅要看最近时间的消息，**只要是多少条范围内都得看进来**」。
  *
@@ -942,6 +1022,12 @@ export function contextText(groupId, excludeText = '', excludeIds = [], opts = {
       '  · 🚫 但**别做自我介绍**、别解释"你怎么会在群里" —— 就当它本来就在这儿；\n' +
       '  · 🚫 也别把它当成"跟着你的那个同类号"那种含糊说法 —— 它有名有姓。\n'
     : '';
+  /* ⚠️⚠️ 2026-11-24 加（用户：「**群历史聊天给模型参考的时候要有权重，从近到远**」）——
+   *   这里原来只有**顺序**（旧→新），没有任何"哪句是刚说的"标注 ⇒ 模型按篇幅平均看，
+   *   经常放着最近那句不接。现场（截图）：他先回了个「对」、紧接着只 @ 了她一下，
+   *   她回「啧，怎么又@我」，那个「对」完全没接 ✗
+   *   ⇒ 把**最后一行**（最新那句）显式标出来，和 lite 那条路的标记口径一致 ✓ */
+  if (lines.length) lines[lines.length - 1] += '　←（最近这一句，先接它）';
   return roleNote + peerNote + botNote + head + lines.join('\n');
 }
 
@@ -1019,6 +1105,34 @@ export function lastBotLines(groupId, { n = 6, uids = [] } = {}) {
   return arr
     .filter((m) => m?.self === true || set.has(String(m?.userId ?? '')))
     .slice(-Math.max(1, Number(n) || 6))
+    .map((m) => String(m?.text ?? '').trim())
+    .filter(Boolean);
+}
+
+/**
+ * ⚠️⚠️ 2026-11-06 加（用户：「**如果冷场的话应该去接同类的话，而不是自己新开话题**」）
+ *
+ * 拿**某个号**在窗口里最后说的 n 句。
+ *
+ * ⚠️ 为什么不复用 `lastBotLines`：那个函数的筛法是
+ *   `m?.self === true || set.has(userId)` —— **她自己说的话也会混进来** ✗
+ *   而这里要的正是"对方刚才说了什么"，混进自己的就成了自言自语。
+ *   ⇒ 这里精确按 `userId` 匹配，并且**排除 `self === true`**（自己发的旁白 / 回话）✓
+ *
+ * @param {string} groupId
+ * @param {string|number} uid 那个号的 QQ
+ * @param {number} [n] 最多取几句（时间正序返回）
+ * @returns {string[]}
+ */
+export function lastFromUid(groupId, uid, n = 3) {
+  const g = String(groupId ?? '');
+  const u = String(uid ?? '').trim();
+  if (!u) return [];
+  const arr = store.get(g);
+  if (!Array.isArray(arr) || !arr.length) return [];
+  return arr
+    .filter((m) => String(m?.userId ?? '') === u && m?.self !== true)
+    .slice(-Math.max(1, Number(n) || 3))
     .map((m) => String(m?.text ?? '').trim())
     .filter(Boolean);
 }
@@ -1134,7 +1248,7 @@ export function messagesSinceBotLast(groupId) {
 /**
  * 这个群**最后一条消息**是什么时候（毫秒时间戳）；没有记录返回 0。
  *
- * ⚠️ 用途（2026-09-13 用户要求）：工资余额抱怨要「**没人说话时**」才发 ——
+ * ⚠️ 用途（2026-09-13 要求）：工资余额抱怨要「**没人说话时**」才发 ——
  *    群里正聊得热闹的时候插一句"我工资没了"很突兀，
  *    而且会打断当前话题。所以在冷场时自言自语才自然。
  *

@@ -115,6 +115,33 @@ const REGISTRY = {
     license:
       '⚠️ 源码可见**非商业**许可（SnowLuma Source-Available Non-Commercial，不是 OSI 开源）：自用、私下改都可以；**商业使用、以及公开发布修改版/衍生版都要事先书面授权** ⇒ 不能打包进安装包，也不能放进公开仓库',
   },
+  // ⚠️⚠️ 2026-11-14 加（用户：「几个协议端都被制裁了」→ 上游 NapCat 发了 `Ending`、
+  //    SnowLuma 仓库 404 ⇒ SnowCat 是社区接力的那一个：NapCat + SnowLuma 融合）。
+  //
+  //    **路线与 SnowLuma 不同，风险也更高**：它是 V8 编译器通道注入
+  //    （`winmm.dll` 挂 `v8::ScriptCompiler`，把 napcat.mjs 塞进 **QQ 主进程内**）——
+  //    这正是腾讯风控最容易认的形态。换过去之前请先看完 docs/换协议端-清单.md。
+  //
+  //    ⚠️ **本地一次都没跑起来过**，所以除了 `launch` 一律 `false`：
+  //      宁可界面老实说"不支持、去它自己的界面"，也不要让它照着 SnowLuma 的猜法去点 ✗
+  snowcat: {
+    label: 'SnowCat（雪猫）',
+    defaultDir: () => 'C:\\SnowCat',
+    defaultLauncher: '',
+    defaultManageUrl: () => 'http://127.0.0.1:6099/webui/',
+    caps: {
+      status: false,
+      qrcode: false,
+      refreshQr: false,
+      restart: false,
+      quickLogin: false,
+      autoRecover: false,
+      launch: true,
+    },
+    how: 'SnowCat 是**注入 QQ 主进程**的第三方客户端（V8 通道）：OneBot v11 全动作 + MCP，还有 56 项独门的 QZone/群相册/打卡这类动作。登录、连接配置、日志都在它自己的 WebUI（默认 http://127.0.0.1:6099/webui/）。机器人这边只负责收发 —— 在线状态用 OneBot 的 get_status 照样准',
+    license: '✅ MIT（比 SnowLuma 那套非商业许可宽松得多，可以打包分发）——但**它强绑 QQ 9.9.37-54395 这一个版本**（offset 表驱动），QQ 一升版就得跟，维护压力在协议端那边',
+  },
+
   onebot: {
     label: '通用 OneBot 11 实现',
     defaultDir: () => '',

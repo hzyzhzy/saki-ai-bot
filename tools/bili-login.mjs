@@ -151,6 +151,42 @@ if (!who) {
 say(`✅ 登录成功：uid=${who.mid} 昵称=${who.uname} 等级=${who.level}`);
 setState({ state: 'ok', uid: Number(who.mid) || 0, uname: String(who.uname || ''), err: '' });
 
+/* ⚠️⚠️ 2026-10-26 加：**登录成功就顺手备份一份 cookie**（用户：「导出 cookie 长期复用可不可行」）
+ *
+ *    实测结论（当天验证过）：playwright 的 `storageState()` 给的是**已解密**的 cookie，
+ *      把它注入到**一个全新的空 profile** 照样能登录成功 ✓
+ *    ⇒ 以后这些情况都不用重新扫码，直接用 `tools/bili-cookie-restore.mjs` 灌回去：
+ *      · profile 被抢占 / 被强杀写坏（今天就是栽在这个上）
+ *      · 换机器、重装、profile 目录丢了
+ *    ⚠️ 但它**救不了服务端主动作废**的会话（那种注入了照样 -101）—— 到时候只能扫码 ✓
+ *    ⚠️ 备份里是**明文 SESSDATA = 账号控制权**，`state/` 已在 .gitignore，绝不外传 ✗
+ */
+try {
+  const outDir = join(ROOT, 'state', 'bili-cookie');
+  mkdirSync(outDir, { recursive: true });
+  const st = await ctx.storageState();
+  const acct = String(process.env.QQBOT_ACCOUNT || '').trim() || String(who.mid || '');
+  const file = join(outDir, `bili-${acct}.json`);
+  writeFileSync(
+    file,
+    JSON.stringify(
+      {
+        exportedAt: new Date().toISOString(),
+        uid: Number(who.mid) || 0,
+        uname: String(who.uname || ''),
+        storageState: st,
+      },
+      null,
+      2,
+    ),
+    'utf8',
+  );
+  const n = (st.cookies || []).filter((c) => String(c.domain).includes('bilibili')).length;
+  say(`✅ 登录态已备份（${n} 个 bilibili cookie）→ ${file}`);
+} catch (e) {
+  say(`⚠️ 备份登录态失败（不影响登录本身）：${e.message}`);
+}
+
 try {
   await ctx.close();
 } catch {}

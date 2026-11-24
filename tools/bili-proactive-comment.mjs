@@ -23,6 +23,7 @@
  *   · 评论区是**懒加载**：必须滚到底、滚几次、再等几秒才出内容
  */
 import { chromium } from 'playwright-core';
+import { spawn } from 'node:child_process';
 import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -36,6 +37,7 @@ import * as llm from '../src/llm.js';
 // ⚠️ 2026-10-22：统一在这里决定用哪个浏览器
 //    （系统 Chrome 优先 + 独立 profile；没有 Chrome 才用内置 Chromium）
 import { browserOpts , biliProfileDir } from './lib/browser.mjs';
+import { acquire, release } from './lib/bili-lock.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const argv = process.argv.slice(2);
@@ -166,11 +168,11 @@ const PSTAT = join(ROOT, 'state', 'bili-proactive.json');
 function readPState() {
   try { return JSON.parse(readFileSync(PSTAT, 'utf8')) || {}; } catch { return {}; }
 }
-function markVisited(reason) {
+function markVisited(reason, extra = {}) {
   try {
     const o = readPState();
     o.visited = [...new Set([...(o.visited || []), bvid])];
-    o.sent = [{ at: Date.now(), bvid, url: VIDEO_URL, ok: reason === 'ok', uncertain: reason === 'uncertain' }, ...(o.sent || [])].slice(0, 80);
+    o.sent = [{ at: Date.now(), bvid, url: VIDEO_URL, ok: reason === 'ok', uncertain: reason === 'uncertain', ...extra }, ...(o.sent || [])].slice(0, 80);
     writeFileSync(PSTAT, JSON.stringify(o, null, 2), 'utf8');
   } catch (e) {
     say('⚠️ 记 visited 失败：' + e.message);
@@ -201,6 +203,21 @@ mkdirSync(SHOT_DIR, { recursive: true });
  *    `runOnce()` 虽然先调了 `release()`，但 Chrome **退出要几秒**才放开互斥体 ⇒
  *    脚本立刻去起就撞上了 ⇒ 整个活白跑（还留一堆 Chrome 日志刷屏）✗
  *    ⇒ 起不来就**等几秒重试**，最多 4 次（总共约 12 秒），别一次失败就崩 ✓ */
+/* ⚠️⚠️ 2026-11-08：**起 Chrome 之前先抢 profile 锁**
+ *   Chrome 一个 user-data-dir 只能被一个实例占着（硬限制）；
+ *   抢不到的那个会拿到**空会话** ⇒ nav 回 isLogin=false ⇒ 被误判成"登录态失效" ✗
+ *   （11-07 那天白试 19 次、界面上一片"失败"，而 cookie 一直是好的）
+ *   ⇒ 现在抢不到就**干净退出**，让调用方跳过这一轮，别记成失败 ✓ */
+const _lock = acquire({ who: 'proactive', ttlMs: 8 * 60 * 1000, waitMs: 20000 });
+if (!_lock.ok) {
+  say(`profile 被 ${_lock.holder.who} 占着（已 ${Math.round(_lock.holder.ageMs / 1000)}s）⇒ 这轮跳过，不算失败`);
+  console.log(JSON.stringify({ ok: false, busy: true, err: `profile 被 ${_lock.holder.who} 占用` }));
+  process.exit(0);
+}
+process.on('exit', () => {
+  try { release('proactive'); } catch { /* ignore */ }
+});
+
 let ctx = null;
 for (let attempt = 1; attempt <= 4; attempt++) {
   try {
@@ -334,6 +351,63 @@ const sys = [
   '13. 🚫 别说「第几帧」「截图」「抽帧」「画面文字」这种**技术词** —— ' +
     '你就说「刚才那个」「中间那段」「最后那一下」，像人一样 ✓',
 ].filter(Boolean).join('\n');
+/* ⚠️⚠️ 2026-10-26 加：**先把视频转成文字**（参考 BV1SHnH6FEsR / dsh-bili-scroll 作者）
+ *
+ * 他原话：「**字幕不信官方轨**。ai-zh 轨不是每条都有……所以本地挂了**转写**，
+ *          硬字幕也能读。」
+ *
+ * 我们原来只喂「标题 + 简介 + 弹幕」—— 弹幕能反映一点内容，但**不是台词本身**。
+ * 挂上转写之后，模型是真的"听过这条视频"，评论才不会空泛 ✓
+ *
+ * ⚠️ 任何失败都返回空串、**绝不挡流程**（没转写就照常按标题+简介写）✓
+ * ⚠️ 超时 180 秒（下载 + 90 秒音频转写实测约 12 秒，留足余量）
+ */
+async function transcribeVideo(bvid) {
+  return new Promise((resolve) => {
+    try {
+      const py = 'C:\\IndexTTS\\.venv\\Scripts\\python.exe';
+      const p = spawn(py, [join(ROOT, 'tools', 'asr.py'), '--bvid', bvid, '--max-sec', '90'], {
+        windowsHide: true,
+      });
+      let out = '';
+      let done = false;
+      const finish = (v) => {
+        if (done) return;
+        done = true;
+        resolve(v);
+      };
+      p.stdout.on('data', (d) => {
+        out += String(d);
+      });
+      p.stderr.on('data', () => {});
+      p.on('close', () => {
+        try {
+          const line = out.trim().split(/\r?\n/).filter(Boolean).pop() || '{}';
+          const j = JSON.parse(line);
+          finish(j.ok ? String(j.text || '') : '');
+        } catch {
+          finish('');
+        }
+      });
+      p.on('error', () => finish(''));
+      setTimeout(() => {
+        try {
+          p.kill();
+        } catch {
+          /* ignore */
+        }
+        finish('');
+      }, 180000).unref?.();
+    } catch {
+      resolve('');
+    }
+  });
+}
+
+// ⚠️ 2026-10-26：先转写（失败给空串、照常往下走）
+const transcript = await transcribeVideo(bvid);
+if (transcript) say(`[转写] 拿到 ${transcript.length} 字视频内容 ✓`);
+
 const user = [
   `视频：《${extra.title || info.title}》`,
   `UP：${extra.up || info.up}`,
@@ -341,6 +415,10 @@ const user = [
   extra.parts.length > 1 ? `分P：${extra.parts.slice(0, 10).join(' / ')}` : '',
   extra.tags.length ? `标签：${extra.tags.join('、')}` : '',
   (extra.desc || info.desc) ? `简介：${(extra.desc || info.desc).slice(0, 600)}` : '',
+  /* ⚠️ 2026-10-26 加：**视频里到底说了什么**（本地转写，前 90 秒）
+   *    这是"真的看过这条视频"的唯一硬证据 —— 比标题/简介/弹幕都准 ✓
+   *    ⚠️ 提示词里已经写着"别把字幕原样念一遍"，这里只是**素材** ✓ */
+  transcript ? `\n【视频里在说什么】（本地转写，参考用，**别原样念**）\n${transcript.slice(0, 900)}` : '',
   '',
   // ⚠️ 弹幕是"画面里到底有什么"的最好来源（用户问的"真正读取视频内容"就靠它）
   extra.danmaku.length
@@ -365,13 +443,10 @@ const user = [
   info.tail,
 ].filter(Boolean).join('\n');
 
-say('让模型写评论…');
-let comment = '';
-try {
-  const ans = await llm.phrase({ system: sys, user, maxTokens: 400, timeoutMs: 40000, thinking: { type: 'disabled' } });
-  /* ⚠️ 2026-10-22 用户：「**每句都打了句号，语气词很少**」—— 评论回复那边已经修了，
-   *   主动评论这条**同一个毛病**，这里加一样的兜底（去句号 + 去破折号）✓ */
-  comment = String(ans ?? '')
+/* 模型吐出来的东西 → 干净的评论正文
+ * ⚠️ 2026-10-26 从下面那段内联里抽出来的（语感闸拦下之后要**重写一次**，清理逻辑得复用） */
+function cleanComment(raw) {
+  return String(raw ?? '')
     .replace(/^["'「『]|["'」』]$/g, '')
     .replace(/\s+/g, ' ')
     .trim()
@@ -381,6 +456,15 @@ try {
     .replace(/，{2,}/g, '，')
     .replace(/。+$/, '')
     .trim();
+}
+
+say('让模型写评论…');
+let comment = '';
+try {
+  const ans = await llm.phrase({ system: sys, user, maxTokens: 400, timeoutMs: 40000, thinking: { type: 'disabled' } });
+  /* ⚠️ 2026-10-22 用户：「**每句都打了句号，语气词很少**」—— 评论回复那边已经修了，
+   *   主动评论这条**同一个毛病**，这里加一样的兜底（去句号 + 去破折号）✓ */
+  comment = cleanComment(ans);
 } catch (e) {
   say('❌ 生成失败：' + e.message);
   try { await ctx.close(); } catch { /* ignore */ }
@@ -388,6 +472,66 @@ try {
 }
 if (!comment) { say('❌ 模型给了空评论'); try { await ctx.close(); } catch { /* ignore */ } process.exit(3); }
 say(`写好了：${comment}`);
+
+/* ── ②' 语感闸：撞八股 / 撞自己以前的 / 撞这条视频的热评 ⇒ 不发 ─────────
+ *
+ * ⚠️⚠️ 2026-10-26 加（用户：「dsh-bili-scroll 是怎么主动发评论的」→「**改**」）
+ *
+ *   抄自 `c1overzz/dsh-bili-scroll` 的 `_style_reason()`，作者的原话：
+ *     「章程里写"要有具体细节、别客套"，模型照样写"这条我认""值得一看"——
+ *      **禁令没有范例有效、自觉没有拦截可靠** ⇒ 在执行层做最后一道检查」
+ *
+ *   ⚠️ 撞了**不发**：先返回原因让它**重写一次**，再撞就这一轮不发（他那边也这么收）。
+ *   ⚠️ 三级判据在 `src/bili-voice-guard.js`（含阈值来源），这里只管流程 ✓
+ */
+{
+  const { styleReason } = await import('../src/bili-voice-guard.js');
+  const hist = (readPState().sent || [])
+    .map((x) => String(x.text || ''))
+    .filter(Boolean)
+    .slice(0, 30);
+  let why = styleReason(comment, { history: hist, hot: extra.hot });
+  if (!why) {
+    say('语感闸：通过 ✓');
+  } else {
+    say(`⛔ 语感闸拦了：${why.slice(0, 90)}`);
+    say('让它照这个原因重写一次…');
+    try {
+      const again = await llm.phrase({
+        system: sys,
+        user:
+          user +
+          `\n\n【上一版被拦下来了】\n你上一条写的是：「${comment}」\n` +
+          `不能发的理由：${why}\n` +
+          '**换一个开头、换一个关注点重写**（只输出评论正文，不要解释）。',
+        maxTokens: 400,
+        timeoutMs: 40000,
+        thinking: { type: 'disabled' },
+      });
+      const retry = cleanComment(again);
+      if (retry) comment = retry;
+    } catch (e) {
+      say('重写失败：' + e.message);
+    }
+    why = styleReason(comment, { history: hist, hot: extra.hot });
+    if (why) {
+      say(`⛔ 重写后还是不行：${why.slice(0, 90)} ⇒ **这一轮不发**`);
+      try { await ctx.close(); } catch { /* ignore */ }
+      console.log(
+        JSON.stringify({
+          ok: false,
+          blocked_by: 'style',
+          video: VIDEO_URL,
+          title: String(extra.title || info.title || ''),
+          comment,
+          err: `语感闸：${why}`,
+        }),
+      );
+      process.exit(0);
+    }
+    say(`重写后可以发：${comment}`);
+  }
+}
 
 if (DRY) {
   say(`（dry，没有发）视频链接：${VIDEO_URL}`);
@@ -398,244 +542,67 @@ if (DRY) {
 
 /* ── ③ 发出去 ───────────────────────────────────── */
 try {
-  /* ⚠️⚠️ 2026-10-22 真踩到（截图看出来的）：输入框里**一直是占位符**
-   *   「万水千山总是情，评论两句行不行」⇒ `keyboard.type()` **一个字都没打进去** ✗
-   *   于是「发布」按钮压根没出现 ⇒ `findPublishBtn()` 找到的是**页面别处的**按钮 ⇒ 点了没反应 ✗
+
+  /* ── ③' 用 API 发（2026-11-01 换掉浏览器点击）────────────────────────
    *
-   *   ⇒ 现在：**输完必须验证**（读 innerText 看有没有那段字），
-   *     不行就换 `fill()`（对 contenteditable 更可靠），再不行 `insertText`，
-   *     三种都不行就**直接报错**（绝不假装发了）✓
-   */
-  /* ⚠️⚠️ 2026-10-22 修（真 bug：`locator resolved to hidden <div class="brt-editor">`）——
-   *    页面上有**好几个** `.brt-editor`（页头一个隐藏的、评论区里一个真的），
-   *    `.first()` 挑中的是**隐藏的那个** ⇒ 等 15 秒超时 ⇒ 整个活白跑 ✗
-   *    ⇒ 遍历找**可见的**那个；一个都没有就先点一下「发一条友善的评论」把评论区展开 ✓ */
-  const pickEditor = async () => {
-    const eds = page.locator('.brt-editor');
-    const n = await eds.count().catch(() => 0);
-    for (let i = 0; i < n; i++) {
-      const e = eds.nth(i);
-      if (await e.isVisible().catch(() => false)) return e;
-    }
-    return null;
-  };
-  let editor = await pickEditor();
-  if (!editor) {
-    // 评论区没展开 ⇒ 点一下占位区（文字各家版本不太一样，用模糊匹配）
-    say('没找到可见的输入框 ⇒ 试着点开评论区');
-    for (const sel of ['.reply-box .brt-editor', '.comment-send .brt-editor', 'div[contenteditable="true"]']) {
-      const e = page.locator(sel).first();
-      if (await e.isVisible().catch(() => false)) { editor = e; break; }
-    }
-  }
-  if (!editor) {
-    await page.screenshot({ path: join(SHOT_DIR, 'noeditor.png') }).catch(() => {});
-    throw new Error('页面上找不到可见的评论输入框（截图 noeditor.png）');
-  }
-  await editor.waitFor({ state: 'visible', timeout: 15000 });
-  await editor.scrollIntoViewIfNeeded().catch(() => {});
-  await editor.click({ timeout: 15000 });
-  await new Promise((r) => setTimeout(r, 600));
-
-  const probe = comment.slice(0, 6).replace(/\s+/g, '');
-  /* ⚠️⚠️ 2026-10-22 修（真 bug，截图看出来的）：输入框里**同一条评论出现了两遍** ✗
-   *    真因：① `keyboard.type` 明明输进去了，但 `typedOk()` 判失败
-   *          （`.brt-editor` 的 innerText 有时候读不到 / 有细微差异）
-   *          ⇒ 兜底的 `fill()` 又执行一遍 ⇒ **变成两条** ⇒ 发出去就是重复评论 ✗
-   *    ⇒ 两处一起改：
-   *      ① `typedOk()` 除了"包含"，还要**只出现一次**（出现两次 = 兜底重复填了）；
-   *      ② 每次兜底**之前先清空**（全选 + 删除），别在原文后面追加 ✓
-   */
-  const readBox = async () => String(await editor.innerText().catch(() => '')).replace(/\s+/g, '');
-  const typedOk = async () => {
-    const t = await readBox();
-    if (!t.includes(probe)) return false;
-    return t.split(probe).length - 1 === 1;   // ⚠️ 出现两遍就算失败
-  };
-  const clearBox = async () => {
-    await editor.click({ timeout: 8000 }).catch(() => {});
-    await page.keyboard.press('Control+A').catch(() => {});
-    await page.keyboard.press('Delete').catch(() => {});
-    await new Promise((r) => setTimeout(r, 400));
-  };
-
-  // ① 键盘输入（最像真人）
-  await page.keyboard.type(comment, { delay: 25 });
-  await new Promise((r) => setTimeout(r, 900));
-  // ② fill（对 contenteditable 直接设内容，会触发 input 事件）
-  if (!(await typedOk())) {
-    say('键盘输入没进去（或重复了）⇒ 清空后用 fill()');
-    await clearBox();
-    await editor.fill(comment).catch(() => {});
-    await new Promise((r) => setTimeout(r, 900));
-  }
-  // ③ insertText（剪贴板式插入）
-  if (!(await typedOk())) {
-    say('fill 也没进去 ⇒ 清空后用 insertText');
-    await clearBox();
-    await page.keyboard.insertText(comment).catch(() => {});
-    await new Promise((r) => setTimeout(r, 900));
-  }
-  if (!(await typedOk())) {
-    await page.screenshot({ path: join(SHOT_DIR, 'noinput.png') }).catch(() => {});
-    throw new Error('内容输不进输入框（键盘/fill/insertText 三种都试了，截图 noinput.png）');
-  }
-  say('✅ 内容已进输入框');
-
-  // 发布按钮：文字是「发布」
-  /* ⚠️⚠️ 2026-10-21 真踩到（第一次真发就挂）：`page.locator('button:has-text("发布")').last()`
-   *   ⇒ `locator.click: Timeout 15000ms exceeded`，而截图里**评论已经填好了、右下角「发布」按钮就在那儿** ✗
-   *   真因：`button:has-text("发布")` 在整页能匹配到**好几个**（隐藏的/别处的），
-   *        `.last()` 挑中的那个不可见 ⇒ Playwright 等它可点击，等到超时 ✗
-   *   ⇒ 修法：**自己挑"可见 + 文字正好是发布"的那个**，并且三级兜底：
-   *     ① 正常 click ② force click ③ 拿 boundingBox 用鼠标点坐标
-   */
-  async function findPublishBtn() {
-    const cands = page.locator('button:has-text("发布"), [class*="submit"]:has-text("发布")');
-    const n = await cands.count();
-    for (let i = 0; i < n; i++) {
-      const b = cands.nth(i);
-      try {
-        if (!(await b.isVisible())) continue;
-        const t = (await b.innerText()).replace(/\s+/g, '').trim();
-        if (t === '发布' || t === '发表评论' || t === '发送') return b;
-      } catch { /* 这个不行，看下一个 */ }
-    }
-    return null;
-  }
-  const sendBtn = await findPublishBtn();
-  if (!sendBtn) {
-    await page.screenshot({ path: join(SHOT_DIR, 'nobtn.png') }).catch(() => {});
-    throw new Error('找不到可见的「发布」按钮（已截图 nobtn.png）');
-  }
-  /* ⚠️ 2026-10-22 加诊断：把**点的是哪个按钮**打出来
-   *   上一轮截图里输入框已经被清空了、而且下方根本没按钮 ⇒ 怀疑点到了页面别处的东西 ✗
-   *   ⇒ 记下文字 / class / 坐标，下次一眼能看出点错了 ✓ */
-  try {
-    const info = await sendBtn.evaluate((el) => ({
-      text: String(el.innerText || '').replace(/\s+/g, ''),
-      cls: String(el.className || '').slice(0, 60),
-      box: (() => { const r = el.getBoundingClientRect(); return [Math.round(r.x), Math.round(r.y), Math.round(r.width), Math.round(r.height)]; })(),
-    }));
-    say(`要点这个按钮：${JSON.stringify(info)}`);
-  } catch { /* 拿不到就算了 */ }
-
-  try {
-    await sendBtn.click({ timeout: 8000 });
-  } catch {
-    say('正常点击没成功，改用 force 点一次');
-    try {
-      await sendBtn.click({ timeout: 8000, force: true });
-    } catch {
-      say('force 也不行，改用坐标点');
-      const box = await sendBtn.boundingBox();
-      if (!box) throw new Error('按钮拿不到坐标');
-      await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
-    }
-  }
-  // ⚠️ 点完**立刻**截一张（上一版等 4 秒，结果内容已经被清空了，看不出当时什么样）
-  await new Promise((r) => setTimeout(r, 1200));
-  await page.screenshot({ path: join(SHOT_DIR, 'after-click.png') }).catch(() => {});
-  await new Promise((r) => setTimeout(r, 2800));
-  await page.screenshot({ path: join(SHOT_DIR, 'sent.png') }).catch(() => {});
-  /* ⚠️ 点完按钮**不等于发成功** —— 再核一遍
-   * ⚠️⚠️ 2026-10-22 实测：**页面文本验证会误报失败** ——
-   *   00:40 那条其实**发出去了**（接口查得到、页面上 2 分钟后才显示），
-   *   但脚本当时只看"页面上有没有这段字" ⇒ 判成"没核实到" ✗
-   *   ⇒ 现在**三重核实**（任何一重通过就算成功）：
-   *     ① 输入框被清空（最直接的信号）
-   *     ② 页面上出现了这段字（可能滞后）
-   *     ③ **调接口查最新评论**（最准，等最多 20 秒）
-   */
-  const leftInBox = async () => page.locator('.brt-editor').first().innerText()
-    .then((t) => String(t || '').replace(/\s+/g, '').includes(String(comment).replace(/\s+/g, '').slice(0, 10)))
-    .catch(() => false);
-
-  /* ⚠️⚠️ 2026-10-22 加：**明确识别"被风控"**（参考别人项目的做法）
+   * 用户：「**是不是发评论的方式不对**」→ 是。
    *
-   *   今天实测撞到的原文：**「受到神秘力量干扰，请稍后再试！」**（截图抓到的）
-   *   社区文档的说法（[v_voucher 验证](https://github.com/pskdje/bilibili-API-collect/blob/main/docs/misc/sign/v_voucher.md)）：
-   *     「当同一接口在**短时间内被同一用户/IP/UA 多次请求**或异常时，会触发风控」
-   *   ⇒ 这是**账号/IP 级的临时限制**，**继续撞只会延长**（别人的项目 BiliPai 是
-   *      「命中风控后**短期跳过**，避免无效重试」）✗
+   * 原来是无头 Chrome 点「发布」：没有鼠标轨迹、瞬间填字、`headless: true`
+   * 还有一堆指纹面 ⇒ B站 直接弹「受到神秘力量干扰」，
+   * **而且撞完登录态立刻失效**（nav -101，扫的码只活了 11 小时）✗
    *
-   *   ⇒ 这里把页面上的固定文案**认出来**，回执里带 `blocked: true`，
-   *     上层（`bili-proactive.js`）据此**全局暂停**，别让 20 分钟一次的定时任务一直撞 ✓
-   *   ⚠️ 只认**页面给的固定字面**（不是猜人话），符合 AGENTS 的"认协议"例外 ✓ */
-  const riskHit = await page.evaluate(() => {
-    const t = document.body.innerText || '';
-    const pats = [
-      '受到神秘力量干扰',
-      '请稍后再试',
-      '操作过于频繁',
-      '操作太频繁',
-      '评论功能已被限制',
-      '发送失败，请重试',
-    ];
-    const hit = pats.find((p) => t.includes(p));
-    return hit || '';
-  }).catch(() => '');
-  if (riskHit) say(`⚠️ 页面上出现风控提示：「${riskHit}」`);
+   * 实测（2026-11-01 15:45，同一个号、同一个视频）：
+   *   纯 API **441ms** 就 `code 0`、拿到 `rpid`、**零风控** ✓
+   *
+   * ⚠️ 浏览器**只读不写**：上面读标题 / 弹幕 / 画面字这些 API 拿不全，
+   *    继续用浏览器；但「点发布」这个动作**再也不做了** ✓
+   */
+  say('用 API 发（不经浏览器点按钮）…');
+  const apiMod = await import('./bili-comment-api.mjs');
+  const cookieFile = apiMod.defaultCookieFile(ROOT, process.env.QQBOT_ACCOUNT || '');
+  say(`cookie: ${cookieFile}`);
+  const tApi = Date.now();
+  const res = await apiMod.postComment({ bvid, text: comment, cookieFile });
+  say(`API 回执（${Date.now() - tApi}ms）：${JSON.stringify(res).slice(0, 220)}`);
 
-  let appeared = false;
-  for (let i = 0; i < 2 && !appeared; i++) {
-    if (i) await new Promise((r) => setTimeout(r, 3000));
-    appeared = await page.evaluate((txt) => {
-      const body = document.body.innerText || '';
-      return body.includes(String(txt).slice(0, 10));
-    }, comment).catch(() => false);
-  }
-
-  // ③ 接口核实（页面文本会滞后，这个最准）
-  let viaApi = false;
-  if (!appeared) {
-    say('页面没看到 ⇒ 调接口核实（最多等 20 秒）');
-    const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/203.0.113.10 Safari/537.36';
-    for (let i = 0; i < 5 && !viaApi; i++) {
-      await new Promise((r) => setTimeout(r, 4000));
-      try {
-        const v = await (await fetch(`https://api.bilibili.com/x/web-interface/view?bvid=${bvid}`, {
-          headers: { 'User-Agent': UA, Referer: 'https://www.bilibili.com/' }, signal: AbortSignal.timeout(12000),
-        })).json();
-        const aid = v?.data?.aid;
-        if (!aid) continue;
-        const rr = await (await fetch(`https://api.bilibili.com/x/v2/reply?type=1&oid=${aid}&pn=1&ps=20&sort=2`, {
-          headers: { 'User-Agent': UA, Referer: 'https://www.bilibili.com/' }, signal: AbortSignal.timeout(12000),
-        })).json();
-        const reps = rr?.data?.replies || [];
-        viaApi = reps.some((x) => String(x?.content?.message || '').replace(/\s+/g, '').includes(String(comment).replace(/\s+/g, '').slice(0, 12)));
-      } catch { /* 网络抖动，再试 */ }
-    }
-    say(viaApi ? '✅ 接口查到了这条评论' : '接口也没查到');
-  }
-
-  const boxLeft = await leftInBox();
-  if (appeared || viaApi || !boxLeft) {
-    say(appeared ? '✅ 页面上已经能看到这条评论了' : viaApi ? '✅ 接口核实：评论已发出' : '✅ 输入框被清空了 ⇒ 已提交');
+  if (res.ok) {
+    const rpid = Number(res.rpid) || 0;
+    say(`✅ 发出去了（rpid=${rpid}）`);
     shortMemory.add('bili-comment', `去别人的视频下发了一条评论（${String(info.title).slice(0, 24)}）：${comment.slice(0, 60)}`,
       { key: `proactive:${bvid}` });
-    markVisited('ok');
-    console.log(JSON.stringify({ ok: true, video: VIDEO_URL, title: info.title, comment, verified: appeared ? 'page' : viaApi ? 'api' : 'box' }));
-  } else {
-    /* ⚠️⚠️ 2026-10-22 真事故教训：这次报"没提交"，但**用户截图里它其实发出去了**（
-     *   00:40 那条报成功、00:43 那条报失败，两条都在页面上）✗
-     *   ⇒ `uncertain` 也**必须记 visited** —— 宁可少发一条，绝不重复发 ✓ */
-    say('❌ 输入框里还留着这段话、接口也查不到 ⇒ 真的没提交');
-    markVisited('uncertain');
+    markVisited('ok', { text: comment, rpid });
     console.log(JSON.stringify({
-      ok: false,
-      uncertain: true,
-      // ⚠️ 2026-10-22：**把"是不是风控"明确报上去** —— 上层据此全局暂停，别一直撞 ✓
-      blocked: !!riskHit,
-      blockedReason: riskHit || '',
+      ok: true,
       video: VIDEO_URL,
       title: info.title,
       comment,
-      err: riskHit
-        ? `被 B站风控拦了（页面提示「${riskHit}」）—— 这不是代码问题，是账号/IP 级临时限制`
-        : '点了发布但没提交（接口也查不到，可能被风控拦了）',
+      verified: 'api',
+      ...(rpid ? { rpid } : {}),
+    }));
+  } else {
+    /* ⚠️ 失败要分清「风控」和「别的错」：
+     *   · B站 自己说风控（-352 / 文案里有"风控/神秘/频繁/稍后"）⇒ 报 blocked，
+     *     上层据此**全局暂停**（别一直撞）✓
+     *   · 其他（未登录 / csrf 不对 / 视频不存在）⇒ 只报错，**不乱暂停** ✓
+     * ⚠️ API 给了明确的 code ≠ 0 ⇒ **确定没发出去** ⇒ 不记 visited
+     *    （记了就等于这个视频永远不再发，白丢一个机会）✓
+     */
+    const err = String(res.err || '');
+    const blocked = /-352|风控|神秘|干扰|频繁|稍后/.test(err);
+    say(`❌ 没发成：${err}`);
+    console.log(JSON.stringify({
+      ok: false,
+      blocked,
+      blockedReason: blocked ? err.slice(0, 60) : '',
+      video: VIDEO_URL,
+      title: info.title,
+      comment,
+      err: blocked
+        ? `被 B站 风控拦了（${err}）—— 账号级临时限制，不是代码问题`
+        : err,
     }));
   }
+
 } catch (e) {
   await page.screenshot({ path: join(SHOT_DIR, 'fail.png') }).catch(() => {});
   say(`❌ 发送失败：${e.message}（截图在 ${SHOT_DIR}）`);

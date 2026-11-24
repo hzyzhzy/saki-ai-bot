@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 工具化第三、四批：`记住` / `忘掉` / `提醒` / `引用`
  *
  * ⚠️ 这个套件**只测纯判据**，不去真写知识库、不真定提醒 ——
@@ -13,7 +13,9 @@
  */
 import assert from 'node:assert';
 import { Bot } from '../src/bot.js';
-import { parseToolCalls } from '../src/bot.js';
+// ⚠️ 2026-11-21：`parseToolCalls` 已删（暗号路径清掉），工具只走 function calling
+//    ⇒ 这一节改成覆盖 `normalizeCall()`（`tools-fc.js` 那条真路）
+import { normalizeCall } from '../src/tools-fc.js';
 // ⚠️ 2026-10-19：备选模型降档的纯函数（见文件末尾那几条断言）
 import { lowTiersOf } from '../src/bot.js';
 
@@ -125,33 +127,39 @@ check('⚠️ 已经过去很久的绝对时间 ⇒ 也返回 0（别定一条�
   assert.equal(bot.parseToolWhen('2020-01-01 00:00', NOW), 0);
 });
 
-// ── ③ 白名单认得这四个新工具 ──
-console.log('\n【3】暗号解析 —— 四个新工具都在白名单里');
+// ── ③ 工具入口：只有 function calling（`normalizeCall`）──
+//    ⚠️⚠️ 2026-11-21 改（「把暗号路径改干净」）——
+//    这一节原来测 `parseToolCalls()`（从正文里认 `[工具:x]` 和 `【调用工具】x（…）`）。
+//    那个函数**已经删了**：工具现在只有一个入口 —— 模型发起 `tool_calls`，
+//    由 `tools-fc.js` 的 `normalizeCall()` 翻成中文名 + 中文参数，再交给 `runReadTool()`。
+//    ⇒ 测试改成覆盖那条真路：英文工具名 → 中文名、英文参数键 → 中文键、白名单外的名字不认 ✓
+console.log('\n【3】工具入口 —— normalizeCall（function calling 那条路）');
 
-check('记住 / 忘掉 / 提醒 / 引用 都解析得出来', () => {
-  const r = parseToolCalls(
-    '[工具:记住 {"主题":"服务器","内容":"地址是 mc.example.com"}]\n' +
-      '[工具:忘掉]\n' +
-      '[工具:提醒 {"何时":"明天 08:00","说什么":"交作业"}]\n' +
-      '[工具:引用 {"引用谁":"张三"}]',
-  );
-  assert.deepEqual(
-    r.map((x) => x.name),
-    ['记住', '忘掉', '提醒', '引用'],
-  );
-  assert.equal(r[0].args.主题, '服务器');
-  assert.equal(r[2].args.何时, '明天 08:00');
-  assert.equal(r[3].args.引用谁, '张三');
+check('英文工具名 + 英文参数 ⇒ 翻成中文名 / 中文参数', () => {
+  const r = normalizeCall({ name: 'remember', arguments: { topic: '服务器', content: '地址是 mc.example.com' } });
+  assert.equal(r.ok, true);
+  assert.equal(r.cn, '记住');
+  assert.equal(r.args.主题, '服务器');
+  assert.equal(r.args.内容, '地址是 mc.example.com');
 });
 
-check('参数写成坏的 JSON ⇒ 不崩，args 空对象', () => {
-  const r = parseToolCalls('[工具:记住 {主题:服务器}]');
-  assert.equal(r.length, 1);
-  assert.deepEqual(r[0].args, {});
+check('中文名也认（模型偶尔直接写中文）', () => {
+  const r = normalizeCall({ name: '引用', arguments: { 引用谁: '张三' } });
+  assert.equal(r.ok, true);
+  assert.equal(r.cn, '引用');
+  assert.equal(r.args.引用谁, '张三');
 });
 
-check('不在白名单的名字照旧不认', () => {
-  assert.equal(parseToolCalls('[工具:发说说 {"内容":"x"}]').length, 0);
+check('不认识的工具名 ⇒ ok=false（不执行）', () => {
+  const r = normalizeCall({ name: 'send_qzone_msg', arguments: {} });
+  assert.equal(r.ok, false);
+});
+
+check('搜图的参数键是 query ⇒ 映射成「搜什么」', () => {
+  const r = normalizeCall({ name: 'image_search', arguments: { query: '长沙的照片' } });
+  assert.equal(r.ok, true);
+  assert.equal(r.cn, '搜图');
+  assert.equal(r.args.搜什么, '长沙的照片');
 });
 
 // ── ④ 引用：她点名了谁，就按名字挑，不再花模型调用 ──

@@ -323,7 +323,7 @@ console.log('\n【10】★★ 同类 / 已知机器人**不算"另一个真人"*
   const gid = G1;
   const HUMAN = '40001';
   const HUMAN2 = '40002';
-  const PEER = '10000012'; // 同类（爱音那个号）
+  const PEER = '10000013'; // 同类（爱音那个号）
   const KNOWN = '10000010'; // 已知机器人（otherBots 名单里那种）
   const mkev = (uid) => ({
     message_type: 'group',

@@ -1,5 +1,5 @@
 /**
- * 群聊里的**语音发言**（2026-10-22 用户要求；同日改成「共享 TTS daemon」）
+ * 群聊里的**语音发言**（2026-10-22 要求；同日改成「共享 TTS daemon」）
  *
  * ## 用户原话
  *   「现在可以把 bot 在群里的部分发言改成语音了，可以挑选语气词或情绪比较重的小部分消息
@@ -28,7 +28,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 // ⚠️ 2026-10-21：`config` 要用来读 `voice.ref`（**按号私有** ⇒ 每个 QQ 号能有自己的音色）
 import { ROOT, config } from './config.js';
@@ -44,8 +44,21 @@ const HTTP_PORT = Number(process.env.QQBOT_TTS_PORT || 9876);
 /** daemon 空闲多少秒退出 —— ⚠️ 给大了会一直占 7.6 GB（视频管线要抢），给小了频繁冷启动 */
 const IDLE_SEC = Number(process.env.QQBOT_TTS_IDLE || 1800);
 
-/** 单句合成超时 —— 实测正常：第一句 24 秒、之后每句 16 秒 ⇒ 60 秒有 2.5 倍余量 ✓ */
-const SYNTH_TIMEOUT_MS = 60 * 1000;
+/**
+ * 单句合成超时。
+ *
+ * ⚠️⚠️ 2026-11-07 改（用户：「**一条语音都没发出来啊**」）——
+ *    原来写死 **60 秒**，注释说「第一句 24 秒、之后 16 秒 ⇒ 2.5 倍余量」，
+ *    那是**daemon 已经热透之后**的数字。实测冷启动第一次是这样的：
+ *      · 模型加载 23~69 秒（`TTS daemon 就绪（69s，模型 23.6s）`）
+ *      · **然后第一次合还要做 torch 首次编译** —— 17:26:10 那次就在这儿卡满 60 秒
+ *        ⇒ 「合成失败：合成超时（60s）⇒ 改发文字」✗
+ *    ⇒ 第一次必然失败、退回文字；等 daemon 真热了，她已经按「一小时一两次」不再标语音了
+ *      ⇒ **一条语音都发不出来**。
+ *    现在：**默认 150 秒**（够冷启动 + 首次编译），可用 `QQBOT_TTS_TIMEOUT` 覆盖。
+ *    ⚠️ 别调小 —— 小了就是"每次都发文字、永远没有语音"。
+ */
+const SYNTH_TIMEOUT_MS = Math.max(30, Number(process.env.QQBOT_TTS_TIMEOUT || 150)) * 1000;
 
 /** 默认参考音色（和视频配音同一个，听起来才是同一个人） */
 const DEFAULT_VOICE_REF = join(ROOT, 'logs', 'bili', 'voice-ref', 'saki_ref_sakiko2.wav');
@@ -53,7 +66,7 @@ const DEFAULT_VOICE_REF = join(ROOT, 'logs', 'bili', 'voice-ref', 'saki_ref_saki
 export const VOICE_DIR = join(ROOT, 'logs', 'bili', 'voice-ref');
 
 /**
- * **现在该用哪个音色** —— 2026-10-21 用户：「**各个QQ账号可以选择用哪个语音**」
+ * **现在该用哪个音色** —— 2026-10-21：「**各个QQ账号可以选择用哪个语音**」
  *
  * ⚠️ 从 `config.voice.ref` 读（**按号私有** ⇒ 每个 QQ 号能有自己的音色）
  * ⚠️ 配置里写的是**文件名**（`saki_ref.wav` 这种），不是全路径 —— 界面上就是列文件名 ✓
@@ -128,6 +141,36 @@ function pythonExe() {
 
 let daemonReady = false;
 let starting = null;
+/** 上次因为"游戏让位中"打过日志的时间（限流用，免得每句语音都刷一行） */
+let lastPauseLogAt = 0;
+
+/** 游戏让位的标记文件（`tools/tts-serve.py` 写的，单位=秒级时间戳） */
+const PAUSE_FILE = join(ROOT, 'state', 'tts-paused.json');
+/** daemon 自己的 stdout/stderr 落这里（原来 `stdio: 'ignore'` ⇒ 它为什么退出**一点都看不到**） */
+const DAEMON_LOG = join(ROOT, 'logs', 'tts-daemon.log');
+
+/**
+ * 游戏让位还剩多少秒（0 = 没在让位）。
+ *
+ * ⚠️⚠️ 2026-10-26 加（用户：「**tts 一直在启动啊，我去任务管理器关了又能自己打开，
+ *     启动了游戏也不能自己关掉，而且我还看不到一条语音发出去**」）
+ *
+ *   真因两条，都是**机器人这边没读这个文件**造成的：
+ *     · `tts-serve.py` 一启动就 `detect_game()`，有游戏就 `set_pause()` + `sys.exit(0)` ✓
+ *     · 可 `group-voice.js` **从来不看 pause 文件** ⇒ 它以为 daemon 在加载，傻等 5 分钟
+ *       「没就绪 ⇒ 放弃」，下一条语音再来一遍 ⇒ **每 5 分钟白 spawn 一次** ✗✗
+ *       （日志实证：18:23 起→18:28 放弃、18:37 起→18:43 放弃、19:44 起→…）
+ *   ⇒ 现在启动前先读它：还在让位就**一个进程都不起**，只打一行日志 ✓
+ */
+function pauseLeftSec() {
+  try {
+    const j = JSON.parse(readFileSync(PAUSE_FILE, 'utf8'));
+    const untilMs = Number(j?.until || 0) * 1000; // python 写的是秒级浮点
+    return Math.max(0, (untilMs - Date.now()) / 1000);
+  } catch {
+    return 0;
+  }
+}
 
 /** 问一下 daemon 在不在（2.5 秒超时，别卡住回复流） */
 async function pingDaemon() {
@@ -147,6 +190,22 @@ async function pingDaemon() {
 function start() {
   if (starting) return starting;
   starting = (async () => {
+    // ⓪ **游戏在跑（让位中）⇒ 一个进程都不起**（见 `pauseLeftSec` 上面那段）
+    const left = pauseLeftSec();
+    if (left > 0) {
+      daemonReady = false;
+      starting = null;
+      // ⚠️ 日志限流：`synth()` 每次要发语音都会来调一次，每句都打一行会刷屏
+      if (Date.now() - lastPauseLogAt > 10 * 60 * 1000) {
+        lastPauseLogAt = Date.now();
+        log.info(
+          `[群语音] 游戏还在跑 → 这次**不启动** TTS（让位还有 ${Math.ceil(left / 60)} 分钟；` +
+            '这段时间语音全走文字，游戏关了就别再点它）',
+        );
+      }
+      return false;
+    }
+
     // ① 已经有人在跑（别的号起的 / 上一轮机器人留的）⇒ 直接复用，**省一次 90 秒冷启动** ✓
     const pong = await pingDaemon();
     if (pong) {
@@ -162,7 +221,20 @@ function start() {
       starting = null;
       return false;
     }
+    // ⚠️ 2026-10-26：**起来就死**的收尸变量（见下面 spawn 那段注释）
+    let earlyExit = null;
     try {
+      /* ⚠️⚠️ 2026-10-26：**把 daemon 自己的报错写到文件里**
+       *    原来 `stdio: 'ignore'` ⇒ 它为什么没起来（游戏让位 / 单例冲突 / import 失败）
+       *    **一个字都看不到**，机器人只会说「5 分钟没就绪 ⇒ 放弃」⇒ 白查一天 ✗
+       */
+      let errFd = null;
+      try {
+        mkdirSync(join(ROOT, 'logs'), { recursive: true });
+        errFd = openSync(DAEMON_LOG, 'a');
+      } catch {
+        /* 打不开就算了，别影响主流程 */
+      }
       const child = spawn(pythonExe(), [
         join(ROOT, 'tools', 'tts-serve.py'),
         '--http', String(HTTP_PORT),
@@ -173,8 +245,15 @@ function start() {
         cwd: IDX_ROOT,
         env: { ...process.env, PYTHONPATH: IDX_ROOT, HF_ENDPOINT: 'https://hf-mirror.com' },
         detached: true,          // ⚠️ 关键：脱离机器人进程，重启机器人不会带走它
-        stdio: 'ignore',
+        stdio: ['ignore', errFd ?? 'ignore', errFd ?? 'ignore'],
         windowsHide: true,
+      });
+      /* ⚠️ 2026-10-26：**盯着它有没有"起来就死"**
+       *    游戏让位 / 单例冲突时 python 是 `sys.exit(0)` —— 一闪就没，
+       *    可原来照样傻等 5 分钟 ✗ ⇒ 这里收尸，立刻判失败
+       */
+      child.on('exit', (code) => {
+        if (!daemonReady && earlyExit === null) earlyExit = code === null ? -1 : code;
       });
       child.unref();
       log.info(`[群语音] 起来了 TTS daemon（:${HTTP_PORT}，pid ${child.pid}）—— 模型加载约 60~120 秒`);
@@ -188,6 +267,25 @@ function start() {
     const t0 = Date.now();
     while (Date.now() - t0 < 300000) {
       await new Promise((r) => setTimeout(r, 1500));
+      /* ⚠️ 2026-10-26：**它已经死了 ⇒ 别等了**（原来会白等满 5 分钟）
+       *    退出码 0 + pause 文件变新 ⇒ 那 99% 是「检测到游戏在跑，让位退出」✓
+       */
+      if (earlyExit !== null) {
+        const leftNow = pauseLeftSec();
+        if (leftNow > 0) {
+          log.info(
+            `[群语音] TTS daemon 起来就退了 —— **游戏在跑，它主动让位**（还有 ${Math.ceil(leftNow / 60)} 分钟解禁）`,
+          );
+        } else {
+          log.warn(
+            `[群语音] TTS daemon 起来就退（code=${earlyExit}）⇒ 语音这次不可用；` +
+              `详细原因看 logs/tts-daemon.log`,
+          );
+        }
+        daemonReady = false;
+        starting = null;
+        return false;
+      }
       const j = await pingDaemon();
       if (j) {
         daemonReady = true;
@@ -210,6 +308,12 @@ function start() {
 export async function synth(text) {
   const t = String(text ?? '').trim();
   if (!t) return { ok: false, err: '空文本' };
+  /* ⚠️ 2026-10-26：**游戏在跑 ⇒ 直接说清楚**（原来统一报"还没热起来"，用户看不懂）
+   *    ⚠️ 这里只是"解释一句"，真正的闸在 `start()` 的 ⓪（读同一个文件）✓
+   */
+  if (pauseLeftSec() > 0) {
+    return { ok: false, err: '游戏在跑，语音暂时让位（照发文字）' };
+  }
   /* ⚠️⚠️ **没热起来时这一条先发文字**（不卡回复流）
    *    模型加载 60~130 秒，群里等两分钟才来一条语音，人早走了 ✗
    *    ⇒ 立刻返回失败（调用方发文字，用户马上看到内容），同时后台把它加载起来 ✓ */
@@ -220,7 +324,7 @@ export async function synth(text) {
   try { mkdirSync(OUT_DIR, { recursive: true }); } catch { /* ignore */ }
   const out = join(OUT_DIR, `g${Date.now()}.wav`);
 
-  /* ⚠️ 2026-10-22 用户：「**太抑扬顿挫了，和小学生读课文一样**」→ 实验选定「不传情感向量 + 情感强度 0.5」
+ /* ⚠️ 2026-10-22：「**太抑扬顿挫了，和小学生读课文一样**」→ 实验选定「不传情感向量 + 情感强度 0.5」
    *   ⚠️ 这些是**按号**的（爱音 0.5，主号保持老行为）✓ */
   const vs = voiceSettings();
   const body = { text: t.slice(0, 150), out, voice: voiceRef() };

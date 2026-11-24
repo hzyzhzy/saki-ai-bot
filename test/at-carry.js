@@ -44,7 +44,7 @@ const CFG_REL = 'logs/__test-at-carry.yml';
 
 const GROUP = '200000001';
 const BOT = '10000002'; // 机器人自己
-const PEER = '10000012'; // 同类机器人（爱音）
+const PEER = '10000013'; // 同类机器人（爱音）
 const OTHER = '10000003'; // 别的群友
 const OTHER2 = '10000004'; // 另一个群友（@ 的是他那种）
 

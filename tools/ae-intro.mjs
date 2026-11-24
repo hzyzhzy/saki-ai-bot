@@ -79,7 +79,19 @@ say(`文案：${LINE1} / ${LINE2}`);
 /* ② jsx 复制到 ASCII 临时目录（⚠️ 中文路径会把 ExtendScript 搞死） */
 const runDir = mkdtempSync(join(tmpdir(), 'ds1-ae-jsx-'));
 const jsxCopy = join(runDir, 'ae-intro.jsx');
-copyFileSync(join(ROOT, 'tools', 'ae-intro.jsx'), jsxCopy);
+/* ⚠️⚠️ 2026-11-08 根治（真事故，白等了好几次 420 秒）：
+ *   `tools/ae-intro.jsx` 第 10 行是**写死的**
+ *     var OUT = 'C:/Users/<用户名>/AppData/Local/Temp/ds1-ae-intro';
+ *   而这里的 `AE_OUT` 是 `join(tmpdir(), ...)` —— 这台机器的 tmpdir() 是 **C:\Temp**，
+ *   两者不是同一个目录 ⇒
+ *     ① jsx 读不到 `intro.txt` ⇒ 永远用内置文案「祥子 / Saki · 客服日常」✗
+ *     ② PNG 渲到 %LOCALAPPDATA% 那边，这里却去 C:\Temp 数 ⇒ pngFrames=0/30、
+ *        png0exists=false，看着像"AE 根本没渲"✗（其实图是有的）
+ *   ⇒ 复制 jsx 时**把 OUT 替换成这里真实的绝对路径**（正斜杠，ExtendScript 认）✓ */
+const jsxSrc = readFileSync(join(ROOT, 'tools', 'ae-intro.jsx'), 'utf8');
+const jsxPatched = jsxSrc.replace(/var OUT = '[^']*';/, `var OUT = '${AE_OUT.replace(/\\/g, '/')}';`);
+writeFileSync(jsxCopy, jsxPatched, 'utf8');
+if (jsxPatched === jsxSrc) say('⚠️ jsx 里的 OUT 没替换成功（模板可能改了），检查 tools/ae-intro.jsx');
 const doneFile = jsxCopy + '.done';
 
 /* ③ 交给 ae-run.mjs（它管启动 AE、等就绪、等 .done、收尾关掉） */

@@ -37,7 +37,7 @@
  */
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { ROOT, config, stateDir } from './config.js';
+import { ROOT, config, stateDir, KNOWLEDGE_DIR } from './config.js';
 import { log } from './log.js';
 
 const STATE_DIR = join(stateDir());
@@ -49,7 +49,7 @@ const FILE = process.env.QQBOT_AFFINITY_FILE
 /** 默认好感度（用户指定 50） */
 export const DEFAULT_AFFINITY = 50;
 export const MIN_AFFINITY = 0;
-// ⚠️⚠️ 2026-09-20 用户要求：「**把好感度上限修改为无限**」——
+// ⚠️⚠️ 2026-09-20 要求：「**把好感度上限修改为无限**」——
 //    原来封顶 100（到顶就是"满分"），现在**不设上限**：处得越久、参与剧情越多，可以一直涨。
 //    ⚠️ 保留这个常量名是为了不动调用方；值用 `Infinity`。
 //    ⚠️ 对外（`status().range` / 界面）**报 `null` 表示"无上限"** ——
@@ -154,6 +154,11 @@ export function reload() {
           v: clamp(n),
           at: Number(v?.at) || 0,
           note: v?.note ? String(v.note).slice(0, 60) : undefined,
+          // ⚠️ 2026-11-03 新增：剧情结局单独一个字段。
+          //    原来它被塞进 `note`（`quest.js` 的 `settle()` 写「主线剧情：好/坏结局」），
+          //    把 `note` 里本该放"这人是谁、聊过什么"的位置占掉了 ⇒
+          //    隔天再碰到同一个人，档案里只剩一句剧情标签，她认不出来。
+          ending: v?.ending === 'good' || v?.ending === 'bad' ? v.ending : undefined,
         });
       }
       return m;
@@ -260,13 +265,13 @@ export function get(userId, groupId = '') {
 }
 
 /**
- * ⚠️ 排行榜的**口径已经改了**（2026-09-18 用户拍板）：
+ * ⚠️ 排行榜的**口径已经改了**（2026-09-18 拍板）：
  *    原来是"先按最近变化取 10 个、再按分排"，现在改成**纯按分数从高到低**。
  *    实现见下面的 `top()` / `all()`（它们排在 `dailyLeft` **后面** ——
  *    因为 `dailyLeft` 是它们要用的，那个注释是后来插进来的，所以顺序看着有点乱）。
  */
 /**
- * 今天还能给他加多少分（2026-09-17 用户要求：
+ * 今天还能给他加多少分（2026-09-17 要求：
  * 「好感度排行加一个**分群友每日达到上限状态**的提示」）。
  *
  * ⚠️ 为什么需要 —— <主人> 问「**喵喵三三为什么在好感度排行找不到了**」：
@@ -293,7 +298,7 @@ export function dailyLeft(userId, groupId = '') {
 /**
  * 排行榜用：**这个群里分数从高到低的前 n 个**。
  *
- * ⚠️⚠️ 口径是用户 2026-09-18 改的：
+ * ⚠️⚠️ 口径是2026-09-18 改的：
  *   「还是把好感度排行改成**只按从高到低排序**吧，排前 10 个，
  *     再加个 `/全部好感度` 的指令，直接显示**全部好感度有变化过的**数据」
  *
@@ -328,7 +333,9 @@ export function all(groupId = '') {
       score: e.v,
       at: e.at,
       note: e.note,
-      // ⚠️ 今天还剩多少加分额度（0 = 满了）—— 榜单要标出来（2026-09-17 用户要求）
+      // ⚠️ 2026-11-03：剧情结局另存，界面上能和「印象」分开看（见 `setNote`）
+      ending: e.ending,
+ // ⚠️ 今天还剩多少加分额度（0 = 满了）—— 榜单要标出来（2026-09-17 要求）
       left: dailyLeft(userId, groupId),
     }))
     .sort((a, b2) => b2.score - a.score || a.at - b2.at);
@@ -385,10 +392,13 @@ export function adjust(userId, delta, opts = {}) {
 
   if (to !== from || opts.force) {
     const b = bucket(gid, true);
+    const prevE = b.users.get(id);
     b.users.set(id, {
       v: to,
       at: Date.now(),
-      note: opts.note ? String(opts.note).slice(0, 60) : b.users.get(id)?.note,
+      note: opts.note ? String(opts.note).slice(0, 60) : prevE?.note,
+      // ⚠️ 见 `readUsers` 里那段说明：剧情结局走 `ending`，不再写 `note` ✓
+      ending: opts.ending === 'good' || opts.ending === 'bad' ? opts.ending : prevE?.ending,
     });
     save();
   }
@@ -401,6 +411,161 @@ export function adjust(userId, delta, opts = {}) {
   const threshold = Number(config.affinity?.friendThreshold) || 90;
   const crossed = from < threshold && to >= threshold;
   return { ok: true, from, to, applied, crossed, groupId: gid };
+}
+
+/**
+ * 给某人写一句「你对他的印象」（**只动 note，不碰分数**）。
+ *
+ * ⚠️⚠️ 2026-11-03 新增，修「saki 记不住人」：
+ *    用户截图里群友 @ 她「还记得我不」，她只能答「你是哪个来着」。
+ *    查下来是三层：群聊原文只留 1 小时/300 条（跨天全没）、
+ *    好感度档案只有一个分数、`note` 又被剧情结局占着 ⇒
+ *    她手里关于这个人的信息是**空的**，那句「不记得」其实是诚实。
+ *
+ *    ⇒ 现在 `note` 专门放"这人是谁 / 聊过什么"这一句话，由
+ *      `bot.js` 的 `[工具:记住]` 在真的记下一件事时顺手写进来（不新开工具）。
+ *
+ * @param {string|number} userId
+ * @param {string} note 一句话（超 60 字截断）
+ * @param {string} [groupId]
+ * @returns {{ok:boolean, reason?:string}}
+ */
+/* ══════════════════════════════════════════════════════════════════════
+ * 「对某个人的印象」**合并进群资料库**（2026-11-06 定）
+ *
+ * 用户原话：「**印象不应该和群资料库的记忆方式一样吗**」
+ *          「**直接合在一起啊，本来记得东西就差不多**」
+ *
+ * 原来印象存在 `affinity.json` 的 `note` 字段里，三个毛病：
+ *   ① **只有 `[工具:记住]` 会写** ⇒ 平时基本是空的（实测 124 个群友、0 条印象）；
+ *   ② 界面上看不见也改不了（要翻 json）；
+ *   ③ 和群资料库（`knowledge/groups/<群号>.md`）是两套，两处维护。
+ *
+ * ⇒ 现在统一进群资料库的「## 群里的人」那节，格式和别的条目一样：
+ *     - **名字**（uid）：这个人是干嘛的 / 聊过什么
+ *   · knowledge 是**热重载**的，写完下一轮就能读到 ✓
+ *   · 提到某人时 `promptLine()` 从 md 里**抽他那一行**注入 ⇒ 精准度不丢 ✓
+ * ══════════════════════════════════════════════════════════════════════ */
+const GROUP_NOTE_HEADING = '## 群里的人';
+
+/** 群资料库路径（群号不合法 ⇒ 空串） */
+function groupMdPath(groupId) {
+  const gid = String(groupId ?? '').trim();
+  if (!/^\d+$/.test(gid)) return '';
+  return join(KNOWLEDGE_DIR, 'groups', `${gid}.md`);
+}
+
+/** 从群资料库里抽「这个人」那一行（没有 ⇒ 空串） */
+export function readNote(userId, name, groupId = '') {
+  const p = groupMdPath(groupId);
+  if (!p || !existsSync(p)) return '';
+  const nm = String(name ?? '').trim();
+  const uid = String(userId ?? '').trim();
+  if (!nm && !uid) return '';
+  try {
+    const lines = readFileSync(p, 'utf8').split(/\r?\n/);
+    const i = lines.findIndex((l) => l.trim() === GROUP_NOTE_HEADING);
+    if (i < 0) return '';
+    for (let k = i + 1; k < lines.length; k++) {
+      if (/^## /.test(lines[k])) break;
+      const l = lines[k];
+      if (!/^\s*[-*]\s/.test(l)) continue;
+      const hitName = nm && l.includes(`**${nm}**`);
+      const hitUid = uid && l.includes(`（${uid}）`);
+      if (hitName || hitUid) {
+        return l
+          .replace(/^\s*[-*]\s*/, '')
+          .replace(/^\*\*[^*]+\*\*\s*/, '')
+          .replace(/^（\d+）\s*/, '')
+          .replace(/^[:：]\s*/, '')
+          .trim();
+      }
+    }
+    return '';
+  } catch (e) {
+    log.debug(`读群资料库里的印象失败：${e.message}`);
+    return '';
+  }
+}
+
+/**
+ * 写「对某个人的印象」→ **写进群资料库**（不再写 affinity.json 的 note）。
+ *
+ * @param {string|number} userId
+ * @param {string} note 一句话（超 80 字截断）
+ * @param {string} [groupId]
+ * @param {string} [name] 显示名（不传就用 uid）
+ * @returns {{ok:boolean, file?:string, replaced?:boolean, reason?:string}}
+ */
+export function setNote(userId, note, groupId = '', name = '') {
+  const uid = String(userId ?? '').trim();
+  const t = String(note ?? '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 80);
+  if (!uid) return { ok: false, reason: '没有 userId' };
+  if (!t) return { ok: false, reason: '内容为空' };
+  const p = groupMdPath(groupId);
+  if (!p) return { ok: false, reason: '没有群号（印象只写进群资料库）' };
+  const nm = String(name ?? '').trim() || uid;
+  try {
+    mkdirSync(join(KNOWLEDGE_DIR, 'groups'), { recursive: true });
+    let lines = existsSync(p) ? readFileSync(p, 'utf8').split(/\r?\n/) : [];
+
+    // ① 新文件 ⇒ 起个头
+    if (!lines.length) {
+      lines = [`# 群 ${String(groupId)} 资料库`, '', '> 这个群自己的资料（只给这个群的对话用）。', '', GROUP_NOTE_HEADING, ''];
+    }
+
+    // ② 找「## 群里的人」节（没有就在文末开一节）
+    let h = lines.findIndex((l) => l.trim() === GROUP_NOTE_HEADING);
+    if (h < 0) {
+      while (lines.length && lines[lines.length - 1].trim() === '') lines.pop();
+      lines.push('', GROUP_NOTE_HEADING, '');
+      h = lines.length - 1;
+    }
+    let end = lines.length;
+    for (let k = h + 1; k < lines.length; k++) {
+      if (/^## /.test(lines[k])) {
+        end = k;
+        break;
+      }
+    }
+
+    // ③ 已有这人 ⇒ 替换那行；没有 ⇒ 加在节内最后一条之后
+    const row = `- **${nm}**（${uid}）：${t}`;
+    let replaced = false;
+    for (let k = h + 1; k < end; k++) {
+      if (!/^\s*[-*]\s/.test(lines[k])) continue;
+      if (lines[k].includes(`**${nm}**`) || lines[k].includes(`（${uid}）`)) {
+        lines[k] = row;
+        replaced = true;
+        break;
+      }
+    }
+    if (!replaced) {
+      let ins = h + 1;
+      for (let k = h + 1; k < end; k++) if (lines[k].trim()) ins = k + 1;
+      lines.splice(Math.min(ins, end), 0, row);
+    }
+
+    // ④ 原子写（knowledge 是热重载的，读到半截文件会崩）
+    const tmp = `${p}.tmp-${process.pid}`;
+    /* ⚠️ 标题和列表之间**必须有空行** —— 第一次实测就漏了（`## 群里的人` 紧贴 `- **…**`，
+     *    markdown 里那样列表不会被识别成列表）✓ */
+    const outText = lines
+      .join('\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .replace(new RegExp(`(${GROUP_NOTE_HEADING})\\n(?!\\n)`), '$1\n\n')
+      .trimEnd();
+    writeFileSync(tmp, outText + '\n', 'utf8');
+    renameSync(tmp, p);
+    log.info(`印象写进群资料库：群 ${groupId} · ${nm}（${replaced ? '更新' : '新增'}）`);
+    return { ok: true, file: `groups/${groupId}.md`, replaced };
+  } catch (e) {
+    log.warn(`写印象失败：${e.message}`);
+    return { ok: false, reason: e.message };
+  }
 }
 
 /**
@@ -442,11 +607,36 @@ export function promptLine(userId, opts = {}) {
               ? '有点不耐烦'
               : '很不想理';
 
+  // ⚠️⚠️ 2026-11-03 新增：把 `note`（这人对她的既有印象）也给她看。
+  //    原来这里**只给分数** —— 分数里没有任何"这人是谁"的信息 ⇒
+  //    她隔天再碰到同一个人，只剩「54 分，普通」，只能答「你是哪个来着」
+  //    （用户截图那次就是这么来的）。`note` 现在专放这件事（见 `setNote`）。
+  /* ⚠️ 2026-11-06 改：印象**从群资料库读**（`knowledge/groups/<群号>.md` 的「## 群里的人」），
+   *    不再读 affinity.json 的 `note` —— 两套合并成一套了（见 `setNote` 上面那段）。
+   *    ⚠️ 匹配靠名字：`opts.name` 是调用方从 `sender.card / nickname` 拿的真名 ✓
+   */
+  let note = '';
+  try {
+    note = readNote(id, opts.name, opts.groupId);
+  } catch {
+    note = '';
+  }
+
   return [
     '## 你对这个人的好感度（私人印象，**别说出来**）',
     '',
     `你对 **${name}** 的好感度：**${v}**（${band}）`,
     '',
+    // ⚠️ 有印象才插，没有就一个字都不多说（空 `note` 是常态 ——
+    //    只被 `[工具:记住]` 写过才有内容，别让模型以为"必须有印象"）
+    ...(note
+      ? [
+          `你对这个人的**既有印象**：${note}`,
+          '（这是你自己以前记下的。他要是问"还记得我不"、或者提到相关的事，',
+          '  **就照这个自然地接上**；但别念出来、别说"我记着你的档案"。）',
+          '',
+        ]
+      : []),
     '- ⚠️⚠️ **绝对不许说出数字、也不许提"好感度"这个词** ——',
     '  那是游戏面板，说出来一秒出戏。它只影响你的**语气松紧**：',
     '  · 高（≥65）→ 会主动接话、愿意多聊两句、开得起玩笑',
@@ -456,7 +646,7 @@ export function promptLine(userId, opts = {}) {
     '  **优先级高于好感度**。就算哪天他在这儿的分很低，你也还是那样跟他说话。',
     '- ⚠️ 别因为好感度低就不好好回答 —— 你是客服，**该给的答案要给**，',
     '  只是语气冷一点。',
-    // ⚠️ 2026-09-17 用户要求：「**当好感度到 90 以上，就不用推开宝宝这种称呼了**」。
+ // ⚠️ 2026-09-17 要求：「**当好感度到 90 以上，就不用推开宝宝这种称呼了**」。
     //    缘由（<主人> 截图）：群友引用她的话说「谁让你是我宝宝」，
     //    她回「……你少来这套。明天记得提醒我买药就行，别的不用记这么清（」——
     //    90 正是"加好友"那条线（`friendThreshold`），到这儿的已经是**自己人**了，

@@ -153,9 +153,26 @@ export async function tick() {
     if (Object.keys(state.since).length) {
       const at = state.lastSeenAt ?? Date.now();
       endAllSessions(at, `服务器关了/连不上（${why}）`);
-      state.lastOfflineAt = Date.now();
-      save();
     }
+    /* ⚠️⚠️ 2026-11-02 修（真 bug，会把「开服提醒」整条废掉）：
+     *
+     *    原来 `state.lastOfflineAt = Date.now()` **只写在上面那个 if 里面**
+     *    （条件是「之前有人在线过」）。
+     *    而 `server-watch`（开服 @ 人）的触发条件正是
+     *    「`lastOfflineAt` 有值 → 又查到在线」。
+     *
+     *    ⇒ 一台**从来没被查到过有人在线**的服（刚换域名、或者一直连不上），
+     *      即使确认了"离线 N 次"，**也不会记 lastOfflineAt**
+     *      ⇒ 等你修好、第一次连上的那一刻，**订阅不会触发** ✗✗
+     *      （现场：2026-11-01 换到 mc.example.com 之后全是超时；
+     *        而"淅雨霁月"那条「开了叫我」正挂在这上面 —— 修好了也不会 @ 他 ✗）
+     *
+     *    ⇒ **确认离线就记**，不管之前有没有人在线过 ✓
+     *    ⚠️ `lastOfflineAt` 的语义本来就是"上次发现它连不上的时间"，
+     *      跟"有没有人玩"无关 —— 原来那个条件是我当初写窄了。
+     */
+    if (!state.lastOfflineAt) state.lastOfflineAt = Date.now();
+    save();
     return { online: [] };
   }
   // 查到了 → 清零

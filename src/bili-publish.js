@@ -1,5 +1,5 @@
 /**
- * B站**全自动投稿**（2026-10-22 用户定，A 档 = 生成 + 直接发布）
+ * B站**全自动投稿**（2026-10-22 定，A 档 = 生成 + 直接发布）
  *
  * ## 用户原话（这一版就是照着这些改的）
  *   「A，设置一个时间段，每天随机在这段时间制作发送。**由 agent 来做视频、封面、简介全部 agent 完成**。
@@ -59,10 +59,25 @@ export function settings() {
   const c = config.biliPublish || {};
   return {
     enable: c.enable === true,
+    /** **发布**（上传到 B 站）的时间窗口 */
     windowStart: String(c.windowStart || '20:00'),
     windowEnd: String(c.windowEnd || '23:00'),
+    /* ⚠️⚠️ 2026-11-01 加（用户：「**制作视频的时候需要用到 GPU，所以是改做视频的时间**，
+     *    投稿视频的时间还是在 16:00~20:00 随机」）
+     *
+     *    ⇒ 把"做"和"发"拆成**两个时间窗口**：
+     *      · `makeStart~makeEnd`     —— **做视频**（选题+配音+录 Live2D+AE 合成，**吃 GPU**）
+     *      · `windowStart~windowEnd`  —— **上传+发布**（几乎不占 GPU）
+     *
+     *    ⚠️ 没配 `makeStart` ⇒ **老行为**（到点一条龙做完就发），不改老用户行为 ✓
+     */
+    makeStart: String(c.makeStart || ''),
+    makeEnd: String(c.makeEnd || ''),
     group: String(c.group || ''),
-    /** ⚠️ 题材**不是**清单，这里只是"她能聊的范围"（用户 2026-10-22 改口） */
+    /* 2026-11-08：两种片子彻底分开 —— 'self' = 完全自己做（画面用网上素材）；
+     * 'group' = 分享群聊（画面是聊天记录）。选哪个就只给它那一种的做法。 */
+    mode: c.mode === 'group' ? 'group' : 'self',
+ /** ⚠️ 题材**不是**清单，这里只是"她能聊的范围"（2026-10-22 改口） */
     scope: Array.isArray(c.scope) && c.scope.length
       ? c.scope.map(String).filter(Boolean)
       : ['AI', '二次元', '游戏服务器 / MC', '日常吐槽', '打工 / 兼职'],
@@ -84,15 +99,32 @@ export function loadState() {
     const j = JSON.parse(readFileSync(statePath(), 'utf8'));
     return {
       lastDay: '', nextAt: 0, streakGroup: 0, done: {}, history: [], usedTopics: [],
-      /** 指定某天直接发**现成文件**（用户 2026-10-22：「明天投稿的视频先定为今天做的桌面上那个」）
+      /* ⚠️ 2026-11-01 加：**做视频 / 上传发布 拆成两段**之后的时间与交接
+       *   · makeAt / publishAt —— 今天定好的两个时刻（`planFor` 写）
+       *   · madeAt             —— 视频**做完了**的时刻（0 = 还没做）
+       *   · madeWorkDir        —— 成片那个工作目录（上传阶段要去读它的 result.json）
+       *   · publishedAt        —— 上传发布完成的时刻
+       *   ⚠️ 这四个**必须一起加在 load() 白名单里** —— 少了任何一个，
+       *      写进去下次读回来就凭空消失（老坑，见 bili-proactive.js 那段注释）✗
+       */
+      makeAt: 0, publishAt: 0, madeAt: 0, madeWorkDir: '', publishedAt: 0,
+      /* ⚠️ 2026-11-04 加：**当天失败次数**（落盘 ⇒ 重启不忘，见 `bumpFail` 那段注释）
+       *   · failDay —— 这个计数是哪一天的
+       *   · failN   —— 那天失败了几次（满 `PUB_FAIL_MAX` 就今天不再试）
+       *   ⚠️ 这两个也必须加进白名单，不然写进去读不回来（同上面的老坑） */
+      failDay: '', failN: 0,
+ /** 指定某天直接发**现成文件**（2026-10-22：「明天投稿的视频先定为今天做的桌面上那个」）
        *  形如 `{ day: '2026-10-22', video: 'E:\\Desktop\\xxx.mp4', note: '' }` */
       queued: null,
+      /* ⚠️ 2026-10-23 加：**投稿审核通过后要转发到 1 档群**的那批
+       *    形如 `{ bvid, title, at, tries, done }` —— 由 `shareTick()` 轮询审核状态 ✓ */
+      pendingShare: [],
       running: false, ...j,
     };
   } catch {
     return {
       lastDay: '', nextAt: 0, streakGroup: 0, done: {}, history: [], usedTopics: [],
-      queued: null, running: false,
+      queued: null, pendingShare: [], running: false,
     };
   }
 }
@@ -140,7 +172,7 @@ async function grabBvid() {
   return null;
 }
 
-/* ── 每天 12:00 清视频缓存（2026-10-21 用户要求） ──
+/* ── 每天 12:00 清视频缓存（2026-10-21 要求） ──
  *
  * ## 用户原话（两次）
  *   ① 「**所有视频缓存要在12点清除**」
@@ -254,19 +286,73 @@ export function sweepTick() {
 
 function planFor(day) {
   const st = loadState();
-  if (st.nextAt && st.lastDay === day) return st.nextAt;
+  /* ⚠️⚠️ 2026-11-01 改成**两个时间点**（用户：「做视频要用 GPU ⇒ 改做视频的时间；
+   *    投稿还是在 16:00~20:00 随机」）
+   *   · `makeAt`    —— 开始做视频（吃 GPU）
+   *   · `publishAt` —— 开始上传+发布
+   * ⚠️ 老状态文件里只有 `nextAt` ⇒ 第一次跑会重算一遍（无害）✓
+   * ⚠️ **改了配置当天不重算**是原来就有的行为（`lastDay === day` 就复用）——
+   *    所以改完时间**当天不生效**，第二天才按新时间跑。要当天立刻生效就把
+   *    `state/bili-publish.json` 的 `lastDay` 清掉（下面 `planFor` 也认这个）✓
+   */
+  if (st.makeAt && st.publishAt && st.lastDay === day) {
+    return { makeAt: st.makeAt, publishAt: st.publishAt };
+  }
   const c = settings();
-  const a = hhmm(c.windowStart) ?? 1200; // 20:00
-  const b = hhmm(c.windowEnd) ?? 1380;   // 23:00
-  const lo = Math.min(a, b);
-  const hi = Math.max(a, b);
-  const at = lo + Math.floor(Math.random() * Math.max(1, hi - lo));
-  const d = new Date();
-  d.setHours(Math.floor(at / 60), at % 60, Math.floor(Math.random() * 60), 0);
-  const ts = d.getTime();
-  saveState({ ...st, lastDay: day, nextAt: ts });
-  log.info(`[B站投稿] 今天（${day}）的发布时间定在 ${d.toLocaleTimeString('zh-CN', { hour12: false })}`);
-  return ts;
+  const pick = (s, e, defA, defB) => {
+    const a = hhmm(s) ?? defA;
+    const b = hhmm(e) ?? defB;
+    const lo = Math.min(a, b);
+    const hi = Math.max(a, b);
+    const at = lo + Math.floor(Math.random() * Math.max(1, hi - lo));
+    const d = new Date();
+    d.setHours(Math.floor(at / 60), at % 60, Math.floor(Math.random() * 60), 0);
+    return d.getTime();
+  };
+  const publishAt = pick(c.windowStart, c.windowEnd, 1200, 1380); // 20:00~23:00
+  // ⚠️ 没配 makeStart ⇒ 老行为：做和发同一个时间点
+  /* ⚠️⚠️ 2026-11-01 改（用户：「**做视频不用随机**」）
+   *    ⇒ `makeStart` 配了就**固定那个时刻**（08:00 到点就开始），不再在
+   *      makeStart~makeEnd 之间随机。`makeEnd` 保留着当**界面上的窗口说明**，不参与计算 ✓
+   */
+  const makeAt = c.makeStart
+    ? (() => {
+        const m = hhmm(c.makeStart);
+        if (m == null) return publishAt; // 写错了就当没配
+        const d = new Date();
+        d.setHours(Math.floor(m / 60), m % 60, 0, 0);
+        return d.getTime();
+      })()
+    : publishAt;
+  /* ⚠️⚠️ 2026-11-03 修（真 bug，今天才具备触发条件）：
+   *    两阶段的交接字段 `madeAt / madeWorkDir / publishedAt` 是**全局单值、按天有效**的，
+   *    但原来跨天重排时**没清它们** ⇒ 第二天 tick 进来：
+   *      · 阶段① `if (!st.madeAt)` ⇒ 假（还留着昨天的）⇒ **跳过做视频**
+   *      · 阶段② `if (!st.publishedAt)` ⇒ 假（昨天的）⇒ **跳过上传**
+   *    ⇒ 一整天**静默什么都不做**，日志里一个字都不打 ✗（连"跳过"都不打，最难查的那种）
+   *    ∨ 之前几天没撞上，只是因为前几天都在失败、`madeAt` 压根没写进去；
+   *      2026-11-03 第一次真成功（madeAt + publishedAt 都写了）⇒ 2026-11-04 必炸
+   *    ⇒ 跨天重排时把它们清成 0/''（新的一天从零开始）✓
+   *    ⚠️ 当天中途重启**不会**走到这里（`lastDay === day` 直接 return 复用）⇒
+   *       早上做好的成片和 `madeWorkDir` 照样留着给 16 点上传用 ✓
+   */
+  saveState({
+    ...st,
+    lastDay: day,
+    makeAt,
+    publishAt,
+    nextAt: publishAt,
+    madeAt: 0,
+    madeWorkDir: '',
+    publishedAt: 0,
+  });
+  const fmt = (t) => new Date(t).toLocaleTimeString('zh-CN', { hour12: false });
+  log.info(
+    makeAt === publishAt
+      ? `[B站投稿] 今天（${day}）到点就做+发：${fmt(publishAt)}`
+      : `[B站投稿] 今天（${day}）：**做视频** ${fmt(makeAt)} ｜ **上传发布** ${fmt(publishAt)}`,
+  );
+  return { makeAt, publishAt };
 }
 
 /* ── 给主人发通知（全自动最怕"挂了没人知道"） ── */
@@ -310,7 +396,7 @@ const zoneListText = () => ZONE_LIST.join('、');
 /**
  * 她自己的「声音」—— **直接注入任务说明**，不指望 agent 自己翻人设翻到
  *
- * ⚠️⚠️ 2026-10-22 用户反馈：「台词导入了 saki 的人设吗？感觉**活人感还不够强**，
+ * ⚠️⚠️ 2026-10-22反馈：「台词导入了 saki 的人设吗？感觉**活人感还不够强**，
  *   **可以玩一些自己的梗，但是不要过于频繁**」
  *   上一版只是写了句"先读 personas/saki/persona.md"，等于让 agent 自己去 100KB 的人设里
  *   找语气 —— 实际挑出来的是"观点正确但谁都能说"的句子，活人感就是从这里漏的 ✗
@@ -368,8 +454,9 @@ export const SAKI_VOICE = [
   '· 你自己那半边生活**可以编**（住哪、这会儿在干什么、为什么去不了），越具体越像活人；',
   '  🚫 但已经被写死的事实（服务器数据、群里的名单、别人的真实身份）一个字都不许编。',
   '',
-  '【玩梗的规矩（用户 2026-10-22 定）】',
-  '· **可以玩，但要克制**：一条视频**最多 1~2 处**，而且必须**自然长在话里**。',
+ '【玩梗的规矩（2026-10-22 定）】',
+ '· **至少 1 处、最多 2 处**（2026-11-06：「视频内容要有梗」—— 一处都没有，这条片子就白做），',
+  '  而且必须**自然长在话里**。',
   '· 玩什么：上面"你自己的"那几样（能吃 / 力气 / 做饭 / 傲娇 / 名台词 / 黑祥），一次只碰一样。',
   '· 🚫 别把整条片子做成梗合集；🚫 **别解释梗**（一解释就不好笑了）；',
   '  🚫 别硬拐一个弯去玩梗（观众听得出你在凑）。',
@@ -386,12 +473,15 @@ export const SAKI_VOICE = [
  * 组这段任务说明 —— **这是这个文件里唯一"给内容定方向"的地方**，而且只给方向和边界，
  * 具体选什么题材、多长、发哪个分区、说什么话，全部由 agent 自己定 ✓
  */
-function buildPrompt({ workDir, topic, publish, streak, reuse }) {
+export function buildPrompt({ workDir, topic, publish, streak, reuse, makeOnly = false }) {
   const c = settings();
   const group = c.group || '200000001';
+  /* 2026-11-08：连续 groupMaxStreak 天没做自制 ⇒ **强制完全自己做**（原有机制，之前被我删没了） */
+  const forcedSelf = streak && streak.forced === true;
+  const MODE = forcedSelf ? 'self' : c.mode;
 
   /* ── ① 复用现成视频（用户指定"明天就发这条"）──────────────────────
-   * 用户 2026-10-22：「明天投稿的视频先定为今天做的桌面上那个」
+ * 2026-10-22：「明天投稿的视频先定为今天做的桌面上那个」
    * ⇒ 这种日子**不做出片**，只写标题/简介/封面/选分区 + 上传。
    *   ⚠️ 也别让它"顺手优化一下"（转码/裁剪会掉画质，而且用户要的就是这条）✗
    */
@@ -410,6 +500,15 @@ function buildPrompt({ workDir, topic, publish, streak, reuse }) {
       '   她是' + (persona.charName() || '这个角色') + '（自称 ' + (persona.selfName() || '我') + '），在一个 MC 服务器的 QQ 群里兼职当客服；短句、不客套、不客服腔',
       '   ⚠️ 简介**别写"这是旧视频 / 复用的"** 这种话，就当今天发的；',
       '   也别写成"XX 来了！关注我了解更多"那种营销腔 ✗',
+      /* ⚠️⚠️ 2026-10-26 加的标题硬规则（来源：BV1SHnH6FEsR 的旁白原话）
+       *    「他们不点开推荐。**他们只搜五个词**。五个词里我的标题一个都没有
+       *      ⇒ 不是没人喜欢，是**没人搜得到**」
+       *    ⇒ 标题里**至少要有一个别人会拿去搜的词**，否则这条视频等于没发 ✓ */
+      '   ⚠️⚠️ **标题硬规则：里面至少要有一个"别人会拿去搜的词"** ——',
+      '   比如具体的东西名（DeepSeek、MC、某个模组名、她要讲的那个软件 / 游戏 / 事件），',
+      '   或者一个具体的问题（"为什么会…"、"到底怎么…"）；',
+      '   🚫 但**不许硬凑**：真想不出一个能被人搜的词，**说明这个题材本来就不值得做** ——',
+      '     回去换个题材，别硬塞无关的热词 ✗',
       '   想更贴她的口气可以看下面这段（这条不用写台词，只用它来定语气）：',
       voiceBlock(),
       '',
@@ -454,104 +553,124 @@ function buildPrompt({ workDir, topic, publish, streak, reuse }) {
   return [
     '# 今天的活：做一条 B 站短视频并发上去（全自动，没人会在旁边盯）',
     '',
-    `⚠️⚠️ **先完整读一遍你的作业手册**：\`${MANUAL}\``,
-    '里面是全部流程、固定设定、六步管线、自检清单和踩过的坑。**照它做，别自己另发明一套**。',
+    `⚠️ 先读一遍作业手册：\`${MANUAL}\``,
+    '   ⚠️ **手册里关于题材 / 背景 / 标题 / 动作 / 时长 / 群聊挑选的那些规矩，今天不适用** —— 那些你自己定。',
     '',
-    '## 一、这条视频要满足的硬要求（用户定的，不可变通）',
-    '1. **必须有你的 Live2D 形象**（半身、会张嘴对口型、有手部/头部动作）—— 没有这条不算成品 ✗',
-    '2. **台词全部是你自己说的话**（第一人称），并且**配成真人语音**（IndexTTS），不是字幕、不是旁白',
-    '3. **竖屏 1080×1920**，字幕大、居中',
-    '4. **不碰政治、真人隐私、骂战、低俗**',
-    '5. ⚠️⚠️ **台词必须是她自己的人设**（用户 2026-10-22 特意补的）：',
+    '## 零、作业方式（⚠️⚠️ 违反这条，今天一定白做）',
+    '',
+    '**你是个会被"随进程结束"打断的 agent：任务丢到后台、自己把回合说完 ⇒',
+    '  那些后台进程会被一起带走。前面三次"没成片"全是这么死的。**',
+    '',
+    '- 🚫 **不许**用任何"不等它跑完"的方式起活：`run_in_background`、命令末尾 `&`、',
+    '  `start /b`、`nohup`、`spawn(..., {detached:true})`，',
+    '  以及「我先启动它，然后这边继续干别的」这种写法 ✗',
+    '- ✅ **一条一条前台跑**，等到它自己结束、拿到退出码为止；',
+    '  确实想并行（比如片头 + 配音），就**写一个 node 脚本内部并行**，再**整体前台等它** ✓',
+    '- ✅ 每一步跑完**先看退出码和产物**（文件在不在、多大）再进下一步：',
+    '  `video.mp4` 至少 **3MB**、`voice/v*.wav` **每句一个**、缺任何一个就算失败 ✓',
+    '- ⚠️ 跑得久是**正常的**（录 Live2D + 合成十几分钟）—— 就等它，**别嫌慢改成后台** ✗',
+    '',
+    '## 一、只有一条硬要求：**片子里必须有你自己**',
+    '',
+    '1. ✅ **必须有你的 Live2D 形象**（半身、会张嘴对口型、有手部/头部动作）—— 没有这条不算成品 ✗',
+    '2. ✅ **台词是你自己说的话**（第一人称），并且**配成真人语音**（IndexTTS），不是字幕、不是旁白',
+    '3. ✅ **竖屏 1080×1920**',
+    '4. 🚫 不碰政治、真人隐私、骂战、低俗',
+    '',
+    '**除了这四条，别的全部你自己定**：做什么题材、讲什么、多长、说什么、背景放什么、',
+    '用不用群里的东西、要不要片头、动作怎么排 —— 都随你。',
+    '⚠️ 没人给你列清单，也**别停下来问**（问了也没人答，这条是全自动的）。',
+    '',
+    ...(MODE === 'self'
+      ? [
+          '## 题材和画面（**完全自己做**）',
+          '',
+          `· **只在这几个方向里找**：${(c.scope || []).join(' / ')}`,
+          '  🚫 **不要拿群里的事当题材**（那种走另一条路）；',
+          '',
+          '· ⚠️⚠️ **动手前先问自己一句：这事值得专门做成一条视频吗？**',
+          '  视频是拿来**吸引人点开看**的 —— 只是「我今晚刷到一条视频」「我吃了顿饭」这种',
+          '  日常小事，发 QQ 空间就够了，不值得占一条视频 ✗',
+          '  ✅ 值得做的是这几种之一：',
+          '    · 有**信息量**（能教人点什么、说出别人不知道的）',
+          '    · 有**冲突或反差**（这事不对劲 / 跟大家以为的相反）',
+          '    · 有**你的观点**（你对它有话说，而且是别人说不出你这句话的那种）',
+          '    · 够**新奇**（大部分人没见过，看了会"啊这"）',
+          '  🚫 反面例子：出门买菜、刷到个视频、吃了顿饭、今天有点累、天气变了 —— 这些都不够，别做',
+          '',
+          '· **画面**：🚫 **不要聊天记录，也不要"一张死图配讲话"**（那太死板了）。',
+          '  要做成**分镜动画** —— 把台词拆成 3~5 个**要点**，每个要点一个画面，写进 `scenes.json`：',
+          '  ```json',
+          '  [',
+          '    {"type":"title","text":"大字","em":"要强调的词","sub":"下面一行小字","sec":3},',
+          '    {"type":"compare","left":"左边那句","right":"右边那句","cap":"底下一句","sec":3.5},',
+          '    {"type":"list","head":"标题","items":["第一条","第二条","第三条"],"sec":4},',
+          '    {"type":"bars","left":{"label":"A","pct":92},"right":{"label":"B","pct":14},"quote":"收尾一句","sec":3.5}',
+          '  ]',
+          '  ```',
+          '  ⚠️ **怎么挑类型**（这一步决定观众能不能看懂，别乱选）：',
+          '    · 有**对比**（A 和 B、它跟你、以前跟现在）⇒ `compare`',
+          '    · 要**列举**（三条、几种、一串东西）⇒ `list`',
+          '    · 有**大小 / 多少 / 长短**的差别 ⇒ `bars`（`pct` 是 0~100 的相对长度）',
+          '    · 只是抛一个观点、或者开场 ⇒ `title`',
+          '  ⚠️ 每段 `sec` 自己定（2~4 秒），**加起来和配音差不多长**；',
+          '  ⚠️ 画面上的字要**短**（大字十几字、列表每条十几个字）—— 别把整句台词搬上去；',
+          '  · 出分镜：`node tools/ae-scenes.mjs --scenes scenes.json --out <工作目录>/scenes --keep-open`',
+          '    它走 AE 渲染，出来的是一串 1080×1920 带透明的 PNG；',
+          '· ⚠️ result.json 里 source 写 "topic"。',
+        ]
+      : [
+          '## 题材和画面（**分享群聊**）',
+          '',
+          '· **题材**：讲群里今天真发生的一件事（谁在折腾什么、后来怎样），要能讲满 20 秒；',
+          '· **画面**：用群里的**聊天记录滚动**，命令**不要**加 --bg（不给它就是这种）；',
+          '  · 跟台词无关的聊天整条剔掉；条数少就加 --hold-ratio 0.8；',
+          '· ⚠️ result.json 里 source 写 "group"。',
+        ]),    '',
+    '',
+    '⚠️ 唯一别丢的一件事：**说话得像你自己**（台词按下面这段的口气来）：',
     voiceBlock(),
     '',
-    '   ⚠️ 下面是给你**深挖**用的资料（要更细的语气就去读，别指望全部塞进提示词）：',
-    `   \`personas/${personaId()}/persona.md\`（说话方式 / 名台词归属 / 活细节）、\`knowledge/memes.md\`（接梗用，`,
-    '   那是"听懂别人在玩什么梗"，**不等于你可以拿来当自己的梗**）。',
-    '   尤其**自制题材**那种最容易写成"科普 / 讲解 / 人生感悟"——那是任何人套上都能说的废话 ✗',
-    '',
-    '## 二、题材（用户 2026-10-22 改口，别做错）',
-    '⚠️ **题材不是定死的**。你只能在这个**范围**里选：',
-    ...c.scope.map((s) => `  · ${s}`),
-    '',
-    '怎么选：',
-    '- **自己去搜"当下在火什么"** —— B 站热门榜 / 搜索联想词 / 各方向的真实视频播放量',
-    '  （工具：`node "' + TOOLS + '\\bili.mjs" hot` 拿热门榜；`search 关键词` 搜视频；',
-    '   `tools/bili-upload.mjs` 旁边的 `src/search.js` 里也有接口，用现成命令最快）',
-    '- 从里面挑一个**跟你的身份对得上**的角度：你是在一个 MC 服务器 QQ 群里兼职当客服的祥子，',
-    '  平时帮人查东西、写东西，自己也做视频 —— 讲"这个话题你能讲、别人讲不出的东西"',
-    '- 🚫 别照抄别人的热门视频，别做新闻搬运',
-    '- 🚫 别跟你最近做过的重复（下面"最近做过"里列了）',
-    '',
-    '**唯一定死的题材是「分享群内趣事」**：',
-    `- 群号 \`${group}\`，消息在 \`${join(ROOT, 'state', 'recent.json')}\` 里`,
-    '- 群里真有事发生（谁在折腾什么、互相吐槽、聊了个好玩的东西）⇒ 就做这个，',
-    '  **用之前已经写好的那套流程**（群聊内容当画面底部滚动的背景），别重新发明',
-    /* ⚠️⚠️ 2026-10-21 用户明确要求：「**如果群里没有足够符合条件的聊天记录，
-     *   应该直接自己制作视频**」
-     *   ⇒ 这里给出**可执行的标准**（不是"感觉不够"），让 agent 一眼能判断：
-     *     条数不够 / 全是碎话 / 凑不出能讲 20 秒的事 ⇒ **直接转自制，别硬凑** ✗
-     *   ⚠️ 硬凑出来的视频一眼就是凑的（拿"在吗""哈哈哈"拼一条），比不发还伤号 ✓ */
-    '- ⚠️⚠️ **素材不够就直接做自制题材，别硬凑**（用户 2026-10-21 定的）：',
-    '  · 今天群消息**少于 30 条**，或者**全是**「在吗」「哈哈哈」「草」「+1」这种碎话 / 复读 / 表情；',
-    '  · 或者翻来翻去**凑不出一件能讲 20 秒以上的事**（谁在做什么、后来怎样了）；',
-    '  ⇒ 只要中一条，**立刻改走上面"自己找题材"**，别拿碎话硬拼一条出来 ✗',
-    '  （判据看内容本身，别只看条数 —— 30 条全是"草"也是不够）',
-    streak.forced
-      ? `- ⚠️⚠️ **今天必须做自制题材**（不是群聊）：已经连续 ${streak.group} 天用的是群聊内容，用户明确要求隔一天必须自制 ✗`
-      : (streak.group ? `- （目前连续 ${streak.group} 天用了群聊内容；到 ${c.groupMaxStreak} 天就必须改自制）` : ''),
-    '',
-    '## 三、时长和分区也由你自己定',
-    `- **时长**：按内容实际需要定，**20~${c.durationMax} 秒之间**。别为凑时长灌水，也别硬压。`,
-    '  ⚠️ 手册里那条「**先定时长，再压配音**」照旧 —— 定了多长，配音就用 `tools/fit-audio.mjs` 卡到多长',
-    '- **分区**：从下面这份清单里挑**最贴内容的那一个**（B站现在是平铺的一级分区，**没有二级**），名字要**一字不差**（上传脚本按名字点）：',
+    '**分区**：从下面清单里挑最贴内容的那一个（名字要一字不差，上传脚本按名字点）：',
     zoneListText(),
-    `  （拿不准就用「${c.zone}」）`,
-    '  ⚠️⚠️ **这份清单可能过时**（B站改过分区）——**以页面上真弹出来的分区为准**：',
-    '  清单里没有的名字，就用页面上最贴近的那个，并把它**真实的名字**写进 result.json 的 zone ✓',
-    '  （2026-10-22 实测：清单里的「生活/日常」已经没了，实际是 vlog）',
+    `   （拿不准就用「${c.zone}」；⚠️ 清单可能过时，**以页面上真弹出来的分区为准** ——`,
+    '   清单里没有的，就用页面上最贴近的那个，并把它**真实的名字**写进 result.json 的 zone ✓）',
     '',
-    '## 四、干活的顺序（一条龙，别中途停下等人）',
-    `1. 定题材 / 时长 / 分区（读下面"今天的状态"和最近做过的东西）`,
-    `2. 写台词 → \`${join(workDir, 'lines.json')}\`（格式照手册）`,
-    '3. 出片：一条命令，别一步步手搓（`--auto` 会让管线自己把动作表和群聊记录排出来）',
+    '## 二、出片（一条命令，别一步步手搓）',
+    '',
+    `1. 台词 → \`${join(workDir, 'lines.json')}\`（格式照手册）`,
+    '2. 出片：',
     '   ```',
     `   node "${join(TOOLS, 'bili-pipeline.mjs')}" --group ${group} --lines "${join(workDir, 'lines.json')}" \\`,
-    `     --voice "${join(workDir, 'voice')}" --duration <你定的秒数> --force-tts --auto \\`,
+    `     --voice "${join(workDir, 'voice')}" --duration <你自己定的秒数> --force-tts --auto \\`,
     `     --out "${join(workDir, 'video.mp4')}" --no-desktop`,
     '   ```',
-    '   ⚠️ 动作表和群聊挑选是**你来做**：跑完 `--auto` 那个草稿后，**自己读一遍**',
-    '   `logs/bili/actions.json` 和 `logs/bili/chat_picked.json`，不对就自己改（手册里有标准）',
-    '   ⚠️⚠️ **群聊内容只留和台词相关的**（用户 2026-10-22：「大部分不相关的剔除，只留最多的相关的」）：',
-    '   不相干的**整条删掉**，删到只剩真相关的（20 条也行、10 条也行）✗ 别为了凑时长留',
-    '   ⚠️ **条数少不会难看** —— 挑少了就在这条命令上加 `--hold-ratio 0.8`（0~1），',
-    '   画面滑到那个比例就**停住**，剩下的时间就停在最相关的那几句上（用户明确允许）✓',
-    `4. 封面：从录屏截一帧 + 标题字 → \`${join(workDir, 'cover.jpg')}\``,
+    '   · `--auto` 只会给你一份**动作表和背景的草稿**（`logs/bili/actions.json` / `logs/bili/chat_picked.json`）——',
+    '     **不满意就自己改**，改多少、改不改、用不用群聊记录，全你说了算 ✓',
+    '   · 想换背景、不要群聊记录、调人物大小：参数在 `bili-pipeline.mjs` / `bili-intro3.mjs` 里，自己看自己调',
+    `3. 封面：从成片里截一帧 + 标题字 → \`${join(workDir, 'cover.jpg')}\``,
+    '4. 自检：抽帧看**音画同步**、看**有没有张嘴**、看**片尾字幕有没有被裁**、看**人物有没有抽搐/跳帧**',
     '',
-    '   ⚠️⚠️ **自制题材（不是群内趣事）必须加 AE 片头**（用户 2026-10-22：',
-    '   「群里的趣事类不用变，**agent 自己搜集题材做的才要用上 ae**」）——',
-    '   群聊那条**不要**加（它是纪实感，加了反而假）：',
-    '   ```',
-    `   node "${join(TOOLS, 'ae-intro.mjs')}" --line1 "<大标题 10 字内>" --line2 "<副标题 18 字内>" \\`,
-    `     --out "${join(workDir, 'intro')}"`,
-    '   ```',
-    `   然后把 \`--intro "${join(workDir, 'intro')}"\` 传给**合成**那一步 —— 它会叠在**前 3 秒**，`,
-    '   时间轴一个字都不动（不要自己 concat，那样口型/字幕全要重算）✓',
-    '   ⚠️ AE 渲一次 1~3 分钟，也可能失败 ⇒ **别卡在这里**：失败就把原因写进 `result.json` 的 `note`，',
-    '   没有片头照样发（片头是加分项，不是硬要求）✓',
+    makeOnly
+      ? [
+          '5. 🚫🚫 **今天到此为止，不要上传**（这台机器白天做片、下午才发）',
+          '   - 成片就是 `video.mp4`，封面 `cover.jpg` —— 做到这儿就停；',
+          '   - 🚫 **绝对不要调用 `bili-upload.mjs`**（那一步会在 16~20 点由另一个流程做）；',
+          '   - ✅ 标题 / 简介 / 标签 / 分区**照常想好写进 result.json**（上传阶段直接用，不再问你）。',
+        ].join('\n')
+      : [
+          '5. 上传：',
+          '   ```',
+          `   node "${join(TOOLS, 'bili-upload.mjs')}" --video "${join(workDir, 'video.mp4')}" \\`,
+          '     --title "…" --desc "…" --zone "<分区名>" --tags "…" \\',
+          `     --cover "${join(workDir, 'cover.jpg')}"${publish ? ' --publish' : ''}`,
+          '   ```',
+          publish
+            ? '   （**--publish = 直接发出去**，今天这条是要真发的）'
+            : '   （今天是**手动试做**，别带 --publish，只把表单填好、别点发布）',
+        ].join('\n'),
     '',
-    '5. 自检**必须过**（手册"步骤 6"）：抽帧看音画同步、看有没有张嘴、看片尾字幕有没有被裁',
-    '6. 上传：',
-    '   ```',
-    `   node "${join(TOOLS, 'bili-upload.mjs')}" --video "${join(workDir, 'video.mp4')}" \\`,
-    '     --title "…" --desc "…" --zone "<分区名>" --tags "…" \\',
-    `     --cover "${join(workDir, 'cover.jpg')}"${publish ? ' --publish' : ''}`,
-    '   ```',
-    publish
-      ? '   （**--publish = 直接发出去**，今天这条是要真发的）'
-      : '   （今天是**手动试做**，别带 --publish，只把表单填好、别点发布）',
-    '',
-    '## 五、干完必须写这个文件（脚本靠它记账和校验，不写就当失败）',
+    '## 三、干完必须写这个文件（脚本靠它记账和校验，不写就当失败）',
     `\`${join(workDir, 'result.json')}\`：`,
     '```json',
     '{"ok":true,"source":"group|topic","topic":"今天这条讲什么","title":"B站标题",',
@@ -560,16 +679,19 @@ function buildPrompt({ workDir, topic, publish, streak, reuse }) {
     '```',
     '⚠️ 失败了也要写，把 `ok` 设成 false 并用 `note` 写清卡在哪一步（不要只在 stdout 里说）',
     '',
-    '## 六、禁止事项',
+    '## 四、禁止事项',
     '- 🚫 **不许往任何 QQ 群/私聊发消息**（这条是全自动的，你只在机器上干活）',
     '- 🚫 不许把中间产物散落在工作区之外',
     '- 🚫 不许跳过 Live2D、不许用静音/占位配音糊过去',
     '',
-    '## 七、今天的状态',
+    '## 五、今天的状态',
     `- 日期：${dayKey()}`,
     `- 你的工作目录（产物都放这儿）：\`${workDir}\``,
-    topic ? `- ⚠️ **用户指定了题材**：${topic}（就用它，不用自己找）` : '- 题材：按上面第二节自己定',
-    `- 最近做过的（别重复）：${(loadState().usedTopics || []).slice(-6).join(' / ') || '（还没有）'}`,
+    forcedSelf
+      ? `- 🚫 **今天必须完全自己做**：已经连续 ${streak.group} 天没做了（上限 ${c.groupMaxStreak} 天）`
+      : '',
+    topic ? `- ⚠️ **今天就做这个**：${topic}` : '',
+    `- 最近做过的（**只当参考，不用刻意避开**）：${(loadState().usedTopics || []).slice(-6).join(' / ') || '（还没有）'}`,
     '',
     '干完之后 stdout 只回一句人话：做了什么、多长、发没发出去。',
   ].join('\n');
@@ -584,7 +706,7 @@ export function isBusy() { return busy; }
  * 立刻做一条（定时到点 / 界面手动触发）。
  * @param {{topic?:string, publish?:boolean}} opt
  */
-export async function runOnce({ topic = '', publish = true } = {}) {
+export async function runOnce({ topic = '', publish = true, makeOnly = false } = {}) {
   if (busy) { log.warn('[B站投稿] 上一条还没跑完，跳过'); return { ok: false, why: 'busy' }; }
 
   // ⚠️ 做视频要跑十几分钟，会**独占** DSH agent（同时只跑一个活）。
@@ -603,7 +725,17 @@ export async function runOnce({ topic = '', publish = true } = {}) {
   const workDir = join(OUT_DIR, stamp);
   mkdirSync(workDir, { recursive: true });
 
-  const streak = { group: Number(st.streakGroup) || 0, forced: (Number(st.streakGroup) || 0) >= c.groupMaxStreak };
+  /* ⚠️ 2026-11-05 改：streak **从 history 现算**（失败也算"这天没自制"）——
+   *    老算法只在投稿成功时 +1，连续失败时永远是 0，强制自制那条规则从没生效 ✗ */
+  const streak = computeStreak(st, { max: c.groupMaxStreak, today: day });
+  // 顺手把算出来的值写回状态（界面「连续群聊 N/2 天」看的就是它）
+  if (Number(st.streakGroup) !== streak.group) {
+    try {
+      saveState({ ...loadState(), streakGroup: streak.group });
+    } catch {
+      /* ignore */
+    }
+  }
 
   /* 用户指定了"今天直接发这个现成文件"（2026-10-22：「明天投稿的视频先定为今天做的桌面上那个」）
    * ⚠️ 只认**当天**那条：`queued.day` 对不上就当没有（免得以后哪天又把它发一遍）✗ */
@@ -614,7 +746,7 @@ export async function runOnce({ topic = '', publish = true } = {}) {
   if (q && !reuse) log.info(`[B站投稿] 预设视频对不上今天（${q.day || '?'} / 文件${q.video ? '在' : '不在'}）⇒ 按平常做`);
 
   try {
-    const prompt = buildPrompt({ workDir, topic: String(topic || '').slice(0, 200), publish, streak, reuse });
+    const prompt = buildPrompt({ workDir, topic: String(topic || '').slice(0, 200), publish, streak, reuse, makeOnly });
     writeFileSync(join(workDir, 'task.txt'), prompt, 'utf8');
     log.info(`[B站投稿] 把活交给做视频的 agent（工作目录 ${workDir}）${topic ? '｜指定题材：' + topic : ''}`);
 
@@ -648,6 +780,23 @@ export async function runOnce({ topic = '', publish = true } = {}) {
     const said = String(res?.stdout || '').trim();
     log.info(`[B站投稿] agent 回来了（exit ${res?.code}）：${said.slice(0, 160) || '（没说话）'}`);
 
+    /* ⚠️⚠️ 2026-11-04 加（用户选了 C：查 agent 为什么 exit 1）
+     *    以前这里只记 stdout 的 160 字 ⇒ agent 中途退出（2026-10-30 / 11-01 / 11-04 三次
+     *    「没成片」）时**一点线索都没有**，只知道它最后说了句"现在写台词。" ✗
+     *    ⇒ 非 0 退出码时：完整 stderr 落进工作目录的 `agent-stderr.log`，
+     *      日志里再摘 800 字（够看出是崩了/被限流/还是被 kill）✓
+     *    ⚠️ stderr 是它自己的思考+报错，**不发群、不进 history**，只给排查用 ✓
+     */
+    if (res?.code !== 0) {
+      const errTail = String(res?.stderr || '').trim();
+      if (errTail) {
+        try { writeFileSync(join(workDir, 'agent-stderr.log'), errTail, 'utf8'); } catch { /* ignore */ }
+        log.warn(`[B站投稿] agent exit ${res.code}，stderr 尾部：${errTail.slice(-800).replace(/\s+/g, ' ')}`);
+      } else {
+        log.warn(`[B站投稿] agent exit ${res.code}，**stderr 也是空的**（像是被直接杀掉或静默退出）`);
+      }
+    }
+
     // ① 读它写的 result.json
     let r = {};
     try { r = JSON.parse(readFileSync(join(workDir, 'result.json'), 'utf8')); } catch { /* 下面按缺文件处理 */ }
@@ -674,8 +823,19 @@ export async function runOnce({ topic = '', publish = true } = {}) {
     /* ⚠️⚠️ 2026-10-21 真事故：**"只填表没点发布"被当成了成功** ✗
      *   那天 `result.json` 里明明写着 `"uploaded": false`，note 也说"按用户指示只填表、未点发布"，
      *   但校验只看了 mp4 大小和时长 ⇒ 判成功 ⇒ `done` 记上 ⇒ **一整天都不会再发** ✗✗
-     *   ⇒ 以后 `uploaded` 必须是 true 才算成功（`reuse` 那条路除外：那是直接调上传脚本，有返回值） */
-    if (!reuse && r.uploaded !== true) {
+     *   ⇒ 以后 `uploaded` 必须是 true 才算成功（`reuse` 那条路除外：那是直接调上传脚本，有返回值）
+     *
+     * ⚠️⚠️⚠️ 2026-11-03 修（真事故：**当天视频做好了却没发出去**）：
+     *   加了两阶段之后（`makeStart 08:00` 只做片 / `publishAt 16:02` 才上传），
+     *   做片那一轮 `runOnce({publish:false, makeOnly:true})` 的提示词**明确要求不上传**，
+     *   于是 agent 按规矩写 `"uploaded": false` —— 可这道校验**没排除 makeOnly** ⇒
+     *   把"做片成功"判成"失败：视频做好了但没真的上传" ✗
+     *   后果（11-03 实测）：`madeAt` 没记 ⇒ 16:02 的发布阶段拿不到工作目录 ⇒
+     *   **成片 08:22 就躺在盘上（10.65MB），当天一条都没发**，日志还写着"做视频失败：没成片"。
+     *   ⇒ `makeOnly` 这条路上"没上传"是**预期**，不是失败；真正的上传由阶段②的
+     *     `runUpload()` 负责，那边有返回值、不看 `uploaded` ✓
+     */
+    if (!reuse && !makeOnly && r.uploaded !== true) {
       throw new Error('失败：视频做好了但**没真的上传**（result.json 里 uploaded=' + String(r.uploaded) + '）' +
         (r.note ? '｜它自己说：' + String(r.note).slice(0, 200) : ''));
     }
@@ -732,9 +892,42 @@ export async function runOnce({ topic = '', publish = true } = {}) {
       st2.streakGroup = 0;
       if (r.topic) st2.usedTopics = [...new Set([...(st2.usedTopics || []), String(r.topic)])].slice(-10);
     }
-    st2.done = { ...(st2.done || {}), [day]: true };
+    /* ⚠️⚠️ 2026-11-06 修（**两阶段从来没自动发成功过，根子就在这一行**）
+     *
+     *   `tick()` 第一行就是 `if (st.done[day]) return` —— 而这段在**做视频成功**时
+     *   就把 `done` 写了 ⇒ 早上 8 点做完片之后，每一轮 tick 都在第一行直接 return
+     *   ⇒ **下午 publishAt 那个"上传发布"阶段永远走不到** ✗
+     *
+     *   实证：11-01 引入两阶段之后，11-02 / 11-04 / 11-05 的失败原因全是
+     *   「视频做好了但**没真的上传**」；唯一发出去的那次（11-03）是我手动补发的，
+     *   绕过了这段代码 ⇒ 这条流程一次都没自动跑通过。
+     *
+     *   ⇒ `done` 的语义收紧成「**今天这活彻底结束**」，只有真上传成功才写：
+     *     · makeOnly（只做片）⇒ **不写**，等到了发布时刻那轮去上传 ✓
+     *     · 真上传成功（`uploaded !== false`）⇒ 写 ✓
+     */
+    const finishedToday = !makeOnly && r.uploaded !== false;
+    if (finishedToday) {
+      st2.done = { ...(st2.done || {}), [day]: true };
+    } else {
+      log.info('[B站投稿] 这次只做了片、没上传 ⇒ **不写 done**，等发布时刻那轮再传');
+    }
     // 复用那条已经发掉了 ⇒ 清掉预设（否则哪天忘了，它会把这同一条又发一遍 ✗）
     if (reuse) st2.queued = null;
+    /* ⚠️⚠️ 2026-10-23 加（用户：「**加一个每次 Saki 视频审核通过之后自动向 1 档群转发视频链接，
+     *    和 b 站视频分享一样**」）
+     *
+     *    投稿成功 ≠ 能看：B站还要**审核**（刚投的稿件 `state` 是 0，通过才变 1）。
+     *    ⇒ 这里先**记一笔待转发**，由 `shareTick()` 轮询审核状态，
+     *      过了才把「【标题】 链接?share_source=copy_web」发到所有 1 档群 ✓
+     *    ⚠️ 样式照抄 `bili-share.js`（那是用户给过真实样例的：`【标题】 链接` + `share_source=copy_web`）✓
+     */
+    if (r.uploaded && String(bvid || '')) {
+      st2.pendingShare = [
+        ...(st2.pendingShare || []),
+        { bvid: String(bvid), title: String(r.title || ''), at: Date.now(), tries: 0, done: false },
+      ];
+    }
     saveState(st2);
 
     /* ⚠️ 2026-10-22：**写进短期共享记忆**（用户要求「最近发了哪些视频」也要在里面）
@@ -756,7 +949,7 @@ export async function runOnce({ topic = '', publish = true } = {}) {
       (r.uploaded ? '已发布' : '已填表未发布') +
       (r.note ? `\n备注：${String(r.note).slice(0, 200)}` : ''),
     );
-    return { ok: true, title: r.title || '', video, cover: r.cover || '' };
+    return { ok: true, title: r.title || '', video, cover: r.cover || '', workDir };
   } catch (e) {
     log.error(`[B站投稿] ${e.message}`);
     saveState({
@@ -787,9 +980,28 @@ export async function runOnce({ topic = '', publish = true } = {}) {
  *    ⇒ 加**当天失败上限**：同一天最多试 **2 次**，第 3 次直接跳过今天 ✓
  *      （失败原因通常是"没做出成片"，隔 30 秒再试一遍也不会变好；
  *        而且每次重试都要烧一次 agent 的钱 —— 今天 20:00-21:00 那 ¥11.74 里就有它）
- *    ⚠️ 这个计数只放内存：重启会清零（重启本身就是一次"重新试"，合理）✓
+ *    ⚠️⚠️ 2026-11-04 改（用户选了 B 方案）：**这个计数改成落盘**（`failDay` / `failN`）——
+ *      原来只放内存、理由是"重启本身就是一次重新试，合理"，但当天就栽了：
+ *      2026-11-04 08:06 那次失败后本该整天不再试，结果 17:13 我为了加载别的改动
+ *      重启了机器人 ⇒ 内存计数清零 ⇒ 17:13:34 又起来做了一遍视频（白烧 GPU + agent 钱）✗
+ *      ⇒ 现在**重启也不会忘**：同一天失败满 `PUB_FAIL_MAX` 次就真的今天不再试 ✓
+ *      （想强制重试：把状态文件里的 `failN` 改成 0，或删掉 `state/bili-publish.json` 的 failDay）
  */
 let pubFailToday = { day: '', n: 0 };
+
+/** 记一次失败（**落盘**，重启不忘） */
+function bumpFail(day) {
+  const n = (pubFailToday.day === day ? pubFailToday.n : 0) + 1;
+  pubFailToday = { day, n };
+  try { saveState({ ...loadState(), failDay: day, failN: n }); } catch { /* 写不进去也不挡住业务 */ }
+  return n;
+}
+
+/** 清零（今天成功了 / 手动放行） */
+function clearFail(day) {
+  pubFailToday = { day, n: 0 };
+  try { saveState({ ...loadState(), failDay: day, failN: 0 }); } catch { /* ignore */ }
+}
 /* ⚠️⚠️ 2026-10-22 改（用户：「**没做完不要拉起投稿，做完就立刻拉起就行了**」）
  *    从 2 收紧到 **1** —— 今天失败一次就**不再试**：
  *    · 失败原因通常是"没做出成片"（agent 真要能做完，第一次就做完了）
@@ -798,40 +1010,354 @@ let pubFailToday = { day: '', n: 0 };
  *      （`bili-upload.mjs` 在同一个 agent 会话里跑，不是等下一轮 tick） */
 const PUB_FAIL_MAX = 1;
 
+/**
+ * **连续几天没做出自制题材**（2026-11-05 新算法，用户选的方案 1）
+ *
+ * ⚠️⚠️ 老算法（`st.streakGroup`）只在**投稿成功**时才 +1（见 `runOnce` 尾部那种
+ *   `if (r.source === 'group') st.streakGroup += 1`）—— 失败不累加 ⇒
+ *   连续 7 天没发出视频，那个数**永远停在 0** ⇒ `forced` 永远 false ⇒
+ *   任务书里「连续 N 天群聊就必须自制」这条规则**从来没触发过** ✗
+ * （2026-11-05：「视频一直做的都是群里的事情，一次自己搜集的题材都没有」）
+ *
+ * ⇒ 改成**从 history 现算**，不依赖成功路径：
+ *   · 按天归并；某天只要有**一条成功且 `source:'topic'`**，就算那天做了自制 ✓
+ *   · 其余情况（失败 / 做的是群聊 / 没写 source）一律算"这天没有自制" ✓
+ *   · **今天**的记录不算（今天还没做完，不能拿它判断今天）
+ * ⚠️ 只数 history 里**有记录的日子**：中间完全没跑的日子不计入
+ *   （不然断网三天回来就永久强制自制了）
+ */
+export function computeStreak(st, { max = 2, today = '' } = {}) {
+  const list = Array.isArray(st?.history) ? st.history : [];
+  const byDay = new Map();
+  for (const h of list) {
+    const d = String(h?.day || '');
+    if (!d || d === today) continue;
+    const prev = byDay.get(d) || { madeTopic: false };
+    if (h.ok && String(h.source || '') === 'topic') prev.madeTopic = true;
+    byDay.set(d, prev);
+  }
+  const days = [...byDay.keys()].sort().reverse(); // 最近的在前
+  let n = 0;
+  for (const d of days) {
+    if (byDay.get(d).madeTopic) break;
+    n += 1;
+    if (n >= 30) break; // 保险丝
+  }
+  return { group: n, forced: n >= Math.max(1, Number(max) || 2) };
+}
+
+/**
+ * **只上传发布**（2026-11-01 加）
+ *
+ * 用户：「做视频用 GPU ⇒ 改做视频的时间；投稿还是 16:00~20:00 随机」
+ *   ⇒ 早上那一轮只做成片（不碰上传），到了下午这个函数负责把成片发出去。
+ *
+ * ⚠️ 不去重做视频、不重新配音 —— 它只是把早上做好的东西上传。
+ * ⚠️ 信息全从早上写好的 `result.json` 里读（title/desc/tags/zone/cover 都在）✓
+ * @param {string} workDir 早上的工作目录
+ */
+async function runUpload(workDir) {
+  try {
+    if (!workDir) return { ok: false, why: '没有成片目录（今天的"做视频"阶段没成功）' };
+    const rj = join(workDir, 'result.json');
+    if (!existsSync(rj)) return { ok: false, why: `成片目录里没有 result.json：${workDir}` };
+    let r = {};
+    try { r = JSON.parse(readFileSync(rj, 'utf8')); } catch (e) {
+      return { ok: false, why: `result.json 读不了：${e.message}` };
+    }
+    if (r.ok === false) return { ok: false, why: `早上那一轮就报失败了：${String(r.note || '').slice(0, 140)}` };
+    const video = String(r.video || join(workDir, 'video.mp4'));
+    if (!existsSync(video)) return { ok: false, why: `成片文件不见了：${video}` };
+    const cover = String(r.cover || join(workDir, 'cover.jpg'));
+    const c = settings();
+    const tags = Array.isArray(r.tags) && r.tags.length ? r.tags.join(',') : (c.tags || []).join(',');
+
+    // ⚠️ 上传要**独占** state/bili-profile，常驻浏览器先让位（同 runOnce 里那段）
+    try {
+      const bc = await import('./bili-comments.js');
+      await bc.release({ pauseMs: 4 * 60 * 1000 });
+      await new Promise((x) => setTimeout(x, 5000));
+    } catch { /* 没装/没起过都无所谓 */ }
+
+    const args = [
+      join(TOOLS, 'bili-upload.mjs'),
+      '--video', video,
+      '--title', String(r.title || '').slice(0, 80),
+      '--desc', String(r.desc || ''),
+      '--zone', String(r.zone || c.zone),
+      '--tags', tags,
+      '--cover', cover,
+      '--publish',
+    ];
+    log.info(`[B站投稿] 上传阶段：${String(r.title || '').slice(0, 40)}（成片 ${video}）`);
+    const out = await new Promise((resolve) => {
+      const p = spawn(process.execPath, args, { cwd: ROOT, windowsHide: true });
+      let so = '';
+      let se = '';
+      const timer = setTimeout(() => { try { p.kill(); } catch { /* ignore */ } }, 10 * 60 * 1000);
+      p.stdout.on('data', (d) => { so += String(d); });
+      p.stderr.on('data', (d) => { se += String(d); });
+      p.on('close', () => { clearTimeout(timer); resolve({ so, se }); });
+      p.on('error', (e) => { clearTimeout(timer); resolve({ so, se: se + e.message }); });
+    });
+
+    let up = null;
+    for (const line of String(out.so).trim().split(/\r?\n/).reverse()) {
+      const t = line.trim();
+      if (!t.startsWith('{')) continue;
+      try { up = JSON.parse(t); break; } catch { /* 不是回执 */ }
+    }
+    if (!up) {
+      const tail = (out.so + out.se).trim().split(/\r?\n/).slice(-3).join(' ｜ ');
+      return { ok: false, why: `上传脚本没给回执：${tail.slice(0, 240)}` };
+    }
+    if (up.ok !== true) return { ok: false, why: String(up.error || up.why || '上传失败').slice(0, 200) };
+
+    saveState({
+      ...loadState(),
+      history: [{
+        at: new Date().toISOString(), day: dayKey(), ok: true,
+        title: String(r.title || ''), video, cover,
+        why: `发布阶段上传成功${up.bvid ? ' ｜ ' + up.bvid : ''}`,
+      }, ...(loadState().history || [])].slice(0, 60),
+    });
+    try {
+      await notify(
+        `B站投稿完成 ✅（下午发布）\n标题：${r.title || '（没写）'}\n` +
+        `时长 ${r.duration || '?'}s · 分区 ${r.zone || '?'}` + (up.bvid ? `\n${up.bvid}` : ''),
+      );
+    } catch { /* 通知失败不影响 */ }
+    return { ok: true, title: String(r.title || ''), bvid: String(up.bvid || ''), video };
+  } catch (e) {
+    return { ok: false, why: e.message };
+  }
+}
+
 export function tick() {
   const c = settings();
   if (!c.enable) return;
   const day = dayKey();
   const st = loadState();
   if (st.done && st.done[day]) return;             // 今天已经做过了
-  if (pubFailToday.day !== day) pubFailToday = { day, n: 0 };
+  /* ⚠️ 2026-11-04：失败次数**从状态文件读回**（落盘了）⇒ 重启不会清零 ✓
+   *   同一天里取"内存和文件里较大的那个"，防两个写点互相盖掉。 */
+  const savedFail = st.failDay === day ? Number(st.failN) || 0 : 0;
+  if (pubFailToday.day !== day || pubFailToday.n < savedFail) {
+    pubFailToday = { day, n: savedFail };
+  }
   if (pubFailToday.n >= PUB_FAIL_MAX) return;      // ⚠️ 今天失败太多次 ⇒ 今天不再试
-  const at = planFor(day);
-  if (Date.now() < at) return;
+  /* ⚠️⚠️ 2026-11-01 改成**两阶段**（用户：「制作视频需要用到 GPU ⇒ 改**做视频**的时间，
+   *    投稿的时间还是在 16:00~20:00 随机」）
+   *
+   *   · `makeStart~makeEnd`（默认 08:00~09:00）→ **只做视频**（吃 GPU），成功记 `madeAt`
+   *   · `windowStart~windowEnd`（16:00~20:00 随机）→ **只上传发布**，读 `madeWorkDir`
+   *
+   * ⚠️ 没配 `makeStart` ⇒ `makeAt === publishAt` ⇒ **老行为**（到点一条龙做完就发）✓
+   * ⚠️ 两阶段之间靠 `state/bili-publish.json` 的 `madeAt / madeWorkDir / publishedAt` 交接；
+   *    重启不会丢（都落盘了）✓
+   */
+  const plan = planFor(day);
+  /* ⚠️ 2026-11-03 加：跨天那一刻 `planFor` 刚把 `madeAt / publishedAt` 清掉，
+   *    可上面那份 `st`（L1009 读的）还是**清之前**的快照 ⇒ 这一轮仍会按旧值跳过
+   *    （30 秒后的下一轮才正常）。重读一次，省掉那一次无意义的空转 ✓
+   */
+  Object.assign(st, loadState());
+  const now = Date.now();
   if (busy) return;
-  log.info(`[B站投稿] 到点了，开始今天的自动投稿（今天第 ${pubFailToday.n + 1} 次尝试）`);
-  void runOnce({ publish: true })
-    .then((r) => {
-      // ⚠️ `why: 'busy'` 不是失败（是"上一条还在跑，这次跳过"）⇒ 不能算进失败次数 ✗
-      if (r && (r.ok || r.why === 'busy' || r.why === 'agent-busy')) {
-        if (r.ok) pubFailToday = { day, n: 0 };
-        return;
+
+  // ── 老行为：做和发同一个时刻 ──
+  if (plan.makeAt === plan.publishAt) {
+    if (now < plan.makeAt) return;
+    log.info(`[B站投稿] 到点了，开始今天的自动投稿（今天第 ${pubFailToday.n + 1} 次尝试）`);
+    void runOnce({ publish: true })
+      .then((r) => {
+        if (r && (r.ok || r.why === 'busy' || r.why === 'agent-busy')) {
+          if (r.ok) clearFail(day);
+          return;
+        }
+        bumpFail(day);
+        log.warn(`[B站投稿] ⛔ 失败（今天第 ${pubFailToday.n} 次）：${(r && r.err) || '没成片'}`);
+      })
+      .catch((e) => { bumpFail(day); log.warn(`[B站投稿] 出错：${e.message}`); });
+    return;
+  }
+
+  // ── 阶段①：做视频（吃 GPU，**不上传**）──
+  if (!st.madeAt) {
+    if (now < plan.makeAt) return;
+    /* ⚠️⚠️ 2026-11-01 加（**改完之后当场踩到的**，23:48 那次）：
+     *    `makeAt` 是早上 8 点，但进程可能是**晚上**才重启的 ⇒ `now >= makeAt` 永远成立
+     *    ⇒ 它**半夜补做视频**：占 GPU 半小时，而且做完 publishAt(19:32) 早过了 ⇒ 立刻发 ✗
+     *    ⇒ **过了发布时刻就今天不做了**，等明天 ✓
+     *    （代价：开机太晚那天会少一条 —— 比半夜偷偷烧 GPU 强）
+     */
+    if (now >= plan.publishAt) {
+      const at = new Date(plan.publishAt).toLocaleTimeString('zh-CN', { hour12: false });
+      if (!tick._lateLogged || tick._lateLogged !== day) {
+        tick._lateLogged = day;
+        log.info(`[B站投稿] 今天已经过了发布时刻（${at}）⇒ **不再补做视频**（免得半夜占 GPU），等明天 ✓`);
       }
-      pubFailToday.n += 1;
-      if (pubFailToday.n >= PUB_FAIL_MAX) {
-        log.warn(
-          `[B站投稿] ⛔ 今天已经失败 ${pubFailToday.n} 次（${(r && r.err) || '没成片'}）⇒ **今天不再试**` +
-            `（别再每 30 秒起一次 agent/Chrome）`,
-        );
-      }
-    })
-    .catch((e) => {
-      pubFailToday.n += 1;
-      log.warn(`[B站投稿] 出错（今天第 ${pubFailToday.n} 次）：${e.message}`);
-    });
+      return;
+    }
+    log.info(`[B站投稿] 到点了，开始**做视频**（今天第 ${pubFailToday.n + 1} 次尝试）`);
+    void runOnce({ publish: false, makeOnly: true })
+      .then((r) => {
+        if (r && (r.ok || r.why === 'busy' || r.why === 'agent-busy')) {
+          if (r.ok) {
+            clearFail(day);
+            saveState({ ...loadState(), madeAt: Date.now(), madeWorkDir: String(r.workDir || '') });
+            const at = new Date(plan.publishAt).toLocaleTimeString('zh-CN', { hour12: false });
+            log.info(`[B站投稿] ✅ 视频做好了（${r.workDir || '?'}）⇒ 等 ${at} 上传发布`);
+          }
+          return;
+        }
+        bumpFail(day);
+        log.warn(`[B站投稿] ⛔ 做视频失败（今天第 ${pubFailToday.n} 次）：${(r && r.err) || '没成片'}`);
+      })
+      .catch((e) => { bumpFail(day); log.warn(`[B站投稿] 做视频出错：${e.message}`); });
+    return;
+  }
+
+  // ── 阶段②：上传发布（用早上做好的成片）──
+  if (!st.publishedAt) {
+    if (now < plan.publishAt) return;
+    log.info('[B站投稿] 到点了，开始**上传发布**（用早上做好的成片，不重做）');
+    void runUpload(st.madeWorkDir)
+      .then((r) => {
+        if (r && r.ok) {
+          saveState({
+            ...loadState(),
+            publishedAt: Date.now(),
+            done: { ...(loadState().done || {}), [day]: true },
+          });
+          log.info(`[B站投稿] ✅ 发布完成：${r.title || ''}${r.bvid ? ' ｜ ' + r.bvid : ''}`);
+          return;
+        }
+        bumpFail(day);
+        log.warn(`[B站投稿] ⛔ 上传发布失败（今天第 ${pubFailToday.n} 次）：${(r && r.why) || '?'}`);
+      })
+      .catch((e) => { bumpFail(day); log.warn(`[B站投稿] 上传发布出错：${e.message}`); });
+  }
 }
 
 /** 给界面看的当前状态 */
+/**
+ * **投稿审核通过之后，把视频链接转发到所有 1 档群**（2026-10-23 要求）
+ *
+ * 用户原话：「加一个每次 Saki 视频审核通过之后自动向 1 档群转发视频链接，和 b 站视频分享一样」
+ *
+ * ## 为什么要轮询，不能投完就发
+ *   B站投稿成功 ≠ 能看：刚投的稿件 `state` 是 **0（审核中）**，通过才变 **1**。
+ *   投完立刻发出去，群友点开看到的是「该视频正在审核中」✗
+ *   ⇒ 每 3 分钟查一次 `x/web-interface/view` 的 `state`，**等于 1 才发** ✓
+ *
+ * ## 样式（和 `bili-share.js` 一模一样）
+ *   `【标题】 https://www.bilibili.com/video/BV…/?share_source=copy_web`
+ *   ⚠️ 卡片那条路 QQ 已经封了（「发送者版本过低，无法展示内容」）⇒ 只发链接 + 标题 ✓
+ *   ⚠️ `vd_source` 不抄（那是每个人自己的分享追踪码）✓
+ *
+ * ## 发到哪些群
+ *   **1 档群**（`trigger.groupRespondTo[gid] === 1`，且在 `allowGroups` 里）——
+ *   跟 `life.isEventGroup()` 同一个判据，别另立标准 ✓
+ *
+ * ## 兜底
+ *   · 12 小时还没过审 ⇒ 放弃（记日志），别永远挂着
+ *   · 发过就 `done: true`，**不会重复发** ✓
+ */
+export async function shareTick(bot) {
+  if (!bot) return;
+  const st = loadState();
+  const list = Array.isArray(st.pendingShare) ? st.pendingShare : [];
+  const todo = list.filter((x) => x && !x.done && x.bvid);
+  if (!todo.length) return;
+
+  const lv = config.trigger?.groupRespondTo ?? {};
+  const allow = (config.trigger?.allowGroups ?? []).map(String);
+  const groups = Object.entries(lv)
+    .filter(([g, v]) => Number(v) === 1 && (!allow.length || allow.includes(String(g))))
+    .map(([g]) => String(g));
+  if (!groups.length) {
+    log.warn('[B站投稿] 有视频等着转发，可**一个 1 档群都没有** ⇒ 先跳过（去「群与触发」设档位）');
+    return;
+  }
+
+  const UA =
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/203.0.113.10 Safari/537.36';
+  let changed = false;
+
+  for (const item of todo) {
+    // 挂太久就放弃（12 小时还没过审，多半是没过 / 被退回）
+    if (Date.now() - Number(item.at || 0) > 12 * 3600 * 1000) {
+      item.done = true;
+      item.why = '等了 12 小时还没过审 ⇒ 放弃';
+      changed = true;
+      log.warn(`[B站投稿] ${item.bvid} 等了 12 小时还没过审 ⇒ 这次不转了`);
+      continue;
+    }
+    /* ⚠️⚠️ 2026-10-23 实测纠正：**别拿 `state === 1` 当"过审"的判据** ✗
+     *    现场：昨天 23:19 那条（`BV1kYnH6QELt`）今天还查到 `state=0`，
+     *    可它 `stat.view = 32` —— **已经有人在看了**，显然早就放出来了。
+     *    ⇒ 这个接口的 `state` 并不是"审核状态"（或者对非本人一律给 0）
+     *
+     *    真正可靠的信号是**这个视频能不能被公开访问**：
+     *      `code === 0` + `data.pages` 有内容 ⇒ 视频页能播 ✓
+     *      还在审的稿件，这个接口通常 `code` 是 `-404/-403`，`data` 为空 ✗
+     *
+     *    ⚠️ 再加一道**时间闸**：投稿后先等 **10 分钟**再开始查 ——
+     *      B站现在是"先发后审"，刚传上去就能查到，立刻转发可能在转码/审核窗口里 ✓
+     */
+    if (Date.now() - Number(item.at || 0) < 10 * 60 * 1000) continue;
+
+    let playable = false;
+    let seen = '';
+    try {
+      const r = await fetch(
+        `https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(item.bvid)}`,
+        { headers: { 'User-Agent': UA, Referer: 'https://www.bilibili.com/' }, signal: AbortSignal.timeout(15000) },
+      );
+      const j = await r.json();
+      const d = j?.data;
+      playable = Number(j?.code) === 0 && Array.isArray(d?.pages) && d.pages.length > 0;
+      seen = `code=${j?.code} pages=${Array.isArray(d?.pages) ? d.pages.length : '-'} view=${d?.stat?.view ?? '-'}`;
+    } catch (e) {
+      playable = false;
+      seen = `查询失败：${e.message}`;
+    }
+    item.tries = (Number(item.tries) || 0) + 1;
+    changed = true;
+
+    if (!playable) {
+      // ⚠️ 只在前几次和之后每 20 次打日志（不然每 3 分钟一条，日志会被刷满）
+      if (item.tries <= 3 || item.tries % 20 === 0) {
+        log.info(`[B站投稿] ${item.bvid} 还看不到（${seen}，第 ${item.tries} 次）⇒ 继续等`);
+      }
+      continue;
+    }
+
+    // ✅ 过审了 ⇒ 照 B站分享的样式发到每个 1 档群
+    const url = `https://www.bilibili.com/video/${item.bvid}/?share_source=copy_web`;
+    const msg = `【${item.title || '新视频'}】 ${url}`;
+    let sentAny = false;
+    for (const g of groups) {
+      try {
+        await bot.sendText({ message_type: 'group', group_id: g }, msg);
+        sentAny = true;
+        log.info(`[B站投稿] ✅ 审核通过 ⇒ 已转发到群 ${g}：${item.bvid}`);
+      } catch (e) {
+        log.warn(`[B站投稿] 转发到群 ${g} 失败：${e.message}`);
+      }
+      // ⚠️ 群之间隔一下，别一口气全发出去（看着像刷屏）
+      await new Promise((r) => setTimeout(r, 800 + Math.random() * 1200));
+    }
+    if (sentAny) {
+      item.done = true;
+      item.sharedAt = Date.now();
+    }
+  }
+
+  if (changed) saveState({ ...st, pendingShare: list });
+}
+
 export function status() {
   const c = settings();
   const st = loadState();

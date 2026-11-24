@@ -16,6 +16,9 @@ import * as shortMemory from './short-memory.js';
 // ⚠️ 2026-10-22：**实时状态机** —— 用户要求「QQ 和 B站两边状态要一致」
 //    两边读的是**同一份** `state/bili-presence.json`（`bili-presence.js`）⇒ 天然一致 ✓
 import * as presence from './bili-presence.js';
+/* ⚠️ 2026-11-07 加（用户：「bot 说话语气还是能看出来是 ai，能不能加一个学习系统，
+ *    不断学习人类的发言特征」）—— 纯统计的"这个群的人怎么说话"，零模型成本 ✓ */
+import * as speechStyle from './speech-style.js';
 
 /** ⚠️ 走 `config.js` 的 `KNOWLEDGE_DIR`（测试可以用 `QQBOT_KNOWLEDGE_DIR` 整份搬走） */
 const DIR = KNOWLEDGE_DIR;
@@ -167,7 +170,12 @@ function load() {
     if (existsSync(pdir)) {
       for (const n of readdirSync(pdir)) {
         if (!n.toLowerCase().endsWith('.md')) continue;
-        collected.push({ name: n, file: join(pdir, n), from: 'persona' });
+        // ⚠️⚠️ 2026-10-23 加（用户拍板「3」+「新建人设时格式要统一」）：
+        //    `persona-chat.md` 是**群聊专用**那一叠（对陌生人什么态度、群里别自言自语、
+        //    别拿反问开场、回复频率…）—— **剧情时不带** ⇒ 提示词从 7.8 万降到 6.5 万左右。
+        //    内容一个字没删，只是"群聊的规矩在群聊时才带" ✓
+        const chatOnly = n.toLowerCase() === 'persona-chat.md';
+        collected.push({ name: n, file: join(pdir, n), from: chatOnly ? 'persona-chat' : 'persona' });
       }
     } else {
       log.warn(`人设包目录不存在（${pdir}）—— 她将没有任何性格设定，去 personas/ 下建一个`);
@@ -426,7 +434,7 @@ export function castBands() {
 }
 
 /**
- * **按昵称认人**：这个昵称命中名册里的哪个角色？（2026-10-06 用户要求）
+ * **按昵称认人**：这个昵称命中名册里的哪个角色？（2026-10-06 要求）
  *
  * 用户原话：「到时候会把 QQ 昵称改成**素世**，只要满足**同类池** + 同时是**剧中人物名字**
  *   就自动识别为**同世界的人**、就**放行**并**识别角色**，一起聊天」。
@@ -588,7 +596,7 @@ export function mentionsAnyTerm(text, fileName) {
 }
 
 /**
- * **和我有关的 CP 名**（2026-10-15 用户要求）。
+ * **和我有关的 CP 名**（2026-10-15 要求）。
  *
  * 用户原话：「刚才 saki 发了一个**爱素**的视频，按道理应该算提到了爱音，应该要回的」。
  *
@@ -679,7 +687,7 @@ function mentionsSomeone(text, content) {
  * @returns {{names:string[], skipped:string[]}}
  */
 /**
- * 「他是谁」迷你摘要（2026-09-17 用户报的）。
+ * 「他是谁」迷你摘要（2026-09-17报的）。
  *
  * 用户原话：「刚才喵喵三三这个人在剧情也说了很多话，**不可能什么印象都没有吧**」。
  *
@@ -1002,7 +1010,17 @@ export function selectFor(text, opts = {}) {
     //    实测「怎么连接超时了，难道要加速器？」原来**一条都不命中** ✗
     //    → 服务器库没注入 → 她只能凭通用知识瞎答（那次的"回滚点"就是这么来的）。
     //    这类"连不上"的说法必须命中，不然最该看这份资料的问题反而看不到。
-    /服务器|整合包|模组|存档|白名单|启动器|客户端|报错|崩|进不去|进不了|连不上|超时|连接|加速器|登录|进服|开服|端口|延迟|卡顿|闪退|掉线|op\b|java|forge|neoforge|mtr|沉浸车辆|fcl|pcl|hmcl|光影|资源包|大足|安岛|首都|东心乡|中心铁路|爱发电|付费|购买|远程|内存|显卡|配置|任务|ftb|voxy|地平线|列车|地铁|高铁|线路|建设申请|管理员|腐竹/i.test(
+    // ⚠️⚠️ 2026-11-03 补：`上浮` —— 这是**服务器库自己定义的术语**
+    //    （`server-basic.md` 第 14 行：「「上浮」＝ 上服务器玩 MC 的别称」）。
+    //
+    //    现场（用户截图）：群里问「如何上浮」，她回「上浮那个是在问我？我又不是潜水艇」——
+    //    实测 `selectFor('如何上浮')` 返回空数组 ⇒ 一份数据库都没注入 ⇒
+    //    她手里没有这个定义，只能拿网络用语（冒泡/潜水的反义）去凑 ✗
+    //
+    //    ⚠️ 和 2026-09-15 那次「怎么连接超时了，难道要加速器？」是**同一个坑**：
+    //      知识库里写着的词，触发表里没有 ⇒ "最该看这份资料的问题反而看不到"。
+    //    ⚠️ 这不是新发明一套快判，只是把**术语表漏掉的一个词**补进已有的那张表 ✓
+    /服务器|整合包|模组|存档|白名单|启动器|客户端|报错|崩|进不去|进不了|连不上|超时|连接|加速器|登录|进服|上浮|开服|端口|延迟|卡顿|闪退|掉线|op\b|java|forge|neoforge|mtr|沉浸车辆|fcl|pcl|hmcl|光影|资源包|大足|安岛|首都|东心乡|中心铁路|爱发电|付费|购买|远程|内存|显卡|配置|任务|ftb|voxy|地平线|列车|地铁|高铁|线路|建设申请|管理员|腐竹/i.test(
       t,
     ) ||
     // 消息里有文件（多半是整合包/存档相关）
@@ -1120,7 +1138,7 @@ export function selectFor(text, opts = {}) {
     else skipped.push(lib.name);
   }
 
-  // ── `owner.md`：**只有跟主人说话时**才读（2026-09-17 用户定）──────────
+ // ── `owner.md`：**只有跟主人说话时**才读（2026-09-17 定）──────────
   //
   // 用户原话：「**owner.md 不用合并，在我私聊和在群和机器人对话时调用**」。
   //
@@ -1153,6 +1171,25 @@ export function selectFor(text, opts = {}) {
     mentionsAnyTerm(t, 'friends.md') || /朋友|熟人|老同学|初中同学|现实里/i.test(t);
   if (needFriends) picked.push('friends.md');
   else skipped.push('friends.md');
+
+  // ── `nicknames.md`：**名词 / 黑话对照**（2026-10-28 加）────────────────
+  //
+  // 用户原话：「**给 bot 的知识库完善一下，大肥鱼是 deepseek 的昵称。
+  //   以后提到的时候要能回答**」
+  //
+  // ⚠️ 为什么不塞进 `friends.md` / `server-people.md`：
+  //   那两份的判据都是"**在问某个人**"（是谁 / 谁啊 / 管理员…），
+  //   而「大肥鱼」问的是一个**词指什么** —— 塞进去要么永不带上（判据不命中），
+  //   要么把 3K 的熟人资料 / 名录一起背上 ✗
+  // ⚠️ 判据从宽：这些词一出现，答案就在这一份里；带错了最多多 600 字，
+  //   比"人家问大肥鱼她说不知道"便宜得多 ✓
+  // ⚠️ `mentionsAnyTerm` 扫的是文件里的加粗词（`**大肥鱼**` / `**豆包**`…）——
+  //   以后往那份里加新词条**自动生效**，不用回来再改这个正则 ✓
+  const needNick =
+    /大肥鱼|肥鱼|深度求索|deepseek|deep\s*seek|豆包|kimi|小克|claude/i.test(t) ||
+    mentionsAnyTerm(t, 'nicknames.md');
+  if (needNick) picked.push('nicknames.md');
+  else skipped.push('nicknames.md');
 
   // ── persona 的两份「按需分册」（2026-09-17 从 31.5K 的 persona.md 里切出来的）──
   //
@@ -1229,6 +1266,9 @@ export function knowledgeText(opts = {}) {
   const skipLearned = skip.some((s) => s.includes('learned'));
 
   const chosen = files.filter((f) => {
+    // ⚠️ 2026-10-23：群聊专用的那叠（`persona-chat.md`）**剧情时不带** ——
+    //    `opts.quest` 由 `bot.buildSystemPrompt` 按"这个群是不是正在演剧情"传进来 ✓
+    if (f.from === 'persona-chat') return opts.quest !== true;
     if (isPersona(f.name)) return true; // 人设永远读
     if (skipped(f.name)) return false; // ⚠️ 按号屏蔽（工作号不读服务器那套）
     if (only) return only.has(f.name);
@@ -1236,6 +1276,11 @@ export function knowledgeText(opts = {}) {
   });
 
   const parts = [];
+  /* ⚠️ 2026-11-07：`split` 模式下"每轮会变的那几段"进这个队（见文件末尾的说明）。
+   *   ⚠️ **必须声明在最前面** —— 后面"私聊记忆"那一段（`dm:` 那块）就用它了，
+   *      而 const 有暂时性死区，声明晚了会在运行时抛 ReferenceError ✗ */
+  const vol = [];
+  const pushTail = (x) => (opts.split ? vol : parts).push(x);
   if (chosen.length) {
     // ⚠️⚠️ 2026-09-30 加（实测踩到的现场）：
     //    **群聊记录里"过时的话"会压过知识库。**
@@ -1265,7 +1310,12 @@ export function knowledgeText(opts = {}) {
   //       不去重就是**同一份内容塞两遍**（探针抓到的就是这个）。
   const gf = groupFiles.get(gid);
   if (gf && !skipGroups && !chosen.some((f) => f.name === gf.name)) {
-    parts.push(['# 【这个群自己的资料】', '', gf.content].join('\n'));
+    /* 2026-11-08（用户：「不同群注入的内容能不能放后面」）：**挪到末尾**
+     *   原来走 parts.push ⇒ 进 main ⇒ **每个群的前缀都不一样** ⇒
+     *   主号在 6 个群之间来回说话时，每切一次群后面的缓存整段作废
+     *   （实测命中 0~1%、单次 10 万 tok 花 0.1 元）✗
+     *   ⇒ 交给 pushTail：内容一个字不少、照样永远注入，但落在最末尾 ✓ */
+    pushTail(['# 【这个群自己的资料】', '', gf.content].join('\n'));
   }
 
   // ★★ 2026-09-17（用户要求）：「**在群聊聊天时也调用正在对话的那个人的私聊库**」。
@@ -1277,14 +1327,42 @@ export function knowledgeText(opts = {}) {
   const dmKey = dmId ? `dm:${dmId}` : '';
   if (dmKey && dmKey !== gid && !skipGroups) {
     const dm = groupFiles.get(dmKey);
-    if (dm) parts.push(['# 【你跟这个人的私聊记忆】', '', dm.content].join('\n'));
+    /* ⚠️⚠️ 2026-11-07 挪到"会变的那一队"（用户：「刚才发了」之后实测的）——
+     *   **这段是跟着说话人变的**：同一个人在群里说 vs 下一个人说，带的是不同人的私聊记忆
+     *   （实测同一群 3 分钟里这块从 105045 字变成 112509 字，差 7464 字）。
+     *   而它原来排在 `chosen` 人设后面、又在"这个群自己的资料"之前 ⇒
+     *   一换人，后面那一大坨全跟着冷掉 ✗
+     *   ⇒ 交给 `pushTail`：`split` 模式下归到 `volatile`，由调用方放到提示词最末尾 ✓
+     *   ⚠️ 内容一个字没少 —— 说的还是"正在说话那个人"的私聊记忆 ✓ */
+    if (dm) {
+      (opts.split ? vol : parts).push(['# 【你跟这个人的私聊记忆】', '', dm.content].join('\n'));
+    }
   }
+
+  /* ⚠️⚠️⚠️ 2026-11-07 加（用户选了方案 B，并且追问了两次「不是说改了拼的顺序吗」）——
+   *
+   * ## 为什么要拆
+   *   这条提示词里**每轮都在变**的有四样：挑出来的知识库文件、`learned`（按当前
+   *   那句话挑条目）、`presence`（此刻在干什么/精力/心情）、`shortMemory`（48h 内的
+   *   新鲜事）。它们原来**全排在人设前面/中间** ⇒ 提示词前缀每轮都不一样 ⇒
+   *   DeepSeek 的上下文缓存整段作废（实测缓存命中只有 39~40%，而夜里能到 95%）。
+   *
+   * ## 拆法
+   *   `opts.split = true` 时返回 `{ main, volatile }`：
+   *     · `main`     = 资料主体（人设 + 挑出来的文件 + 这个群的资料 + 私聊记忆）
+   *                    —— 这些按群缓存后**稳定**，放**前面** ✓
+   *     · `volatile` = `learned` + `presence` + `shortMemory`
+   *                    —— 每轮都可能变，由调用方放到**提示词最末尾** ✓
+   *   ⚠️ 不传 `split` 时**行为和以前一字不差**（返回字符串）—— 别的调用方
+   *      （B站评论、界面预览）一个字都不用改 ✓
+   */
+  // ⚠️ `vol` / `pushTail` 已挪到函数开头声明（这个 const 有暂时性死区，不能放这儿）
 
   // ⚠️ 2026-09-17：`learnedText(text)` 现在**按需挑条目**（原来无条件全带 12.4K）。
   //    传 `opts.text` 才会挑；不传（界面预览那种）仍然全带。
   const learned = skipLearned ? '' : learnedText(opts.text ?? '');
   if (learned) {
-    parts.push(
+    pushTail(
       [
         '# 【最高优先级】群主后来补充/更正的知识',
         '',
@@ -1310,15 +1388,36 @@ export function knowledgeText(opts = {}) {
    *      冲突时以这个为准（比如时间表说"晚上在家"，但状态说"在弄晚饭" ⇒ 按后者说） */
   try {
     const pres = presence.block();
-    if (pres) parts.push(pres);
+    if (pres) pushTail(pres);
   } catch (e) {
     log.debug(`状态机拼进提示词失败（不影响聊天）：${e.message}`);
   }
 
     const sm = shortMemory.block({ maxChars: 900 });
-    if (sm) parts.push(sm);
+    if (sm) pushTail(sm);
   } catch (e) {
     log.debug(`短期记忆拼进提示词失败（不影响聊天）：${e.message}`);
+  }
+
+  /* ⚠️⚠️ 2026-11-07 加（用户：「现在 bot 说话语气还是能看出来是 ai，
+   *    能不能加一个学习系统，不断学习人类的发言特征」）——
+   *
+   *   这是**纯统计**的一段：算这个群最近 300 条**真人发言**的平均字数、
+   *   短句比例、带不带句号、语气词、图片占比，然后只把**数字**写成一句话给她。
+   *   🚫 一句群友原话都不给（给了她就会照着念 —— 违反"不许让她复读"那条铁律）✗
+   *   ⚠️ 放进 `pushTail`（= 提示词最末尾），因为它每 30 分钟会变，
+   *      放前面会把整个前缀缓存毁掉 ✓
+   *   ⚠️ 开关：`chat.speechStyle: false` 关掉 ✓
+   */
+  try {
+    const ss = speechStyle.block(gid);
+    if (ss) pushTail(ss);
+  } catch (e) {
+    log.debug(`说话特征拼进提示词失败（不影响聊天）：${e.message}`);
+  }
+  // ⚠️ 2026-11-07：`opts.split` ⇒ 拆成两段交给调用方（前面稳定的 / 末尾每轮变的）
+  if (opts.split) {
+    return { main: parts.join('\n\n---\n\n'), volatile: vol.join('\n\n---\n\n') };
   }
   return parts.join('\n\n---\n\n');
 }

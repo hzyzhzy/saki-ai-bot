@@ -149,7 +149,15 @@ if (Test-Port 3001) {
       if (-not @(Get-Process -Name QQ -ErrorAction SilentlyContinue).Count) {
         if (Test-Path $qqExe) {
           Write-Step '      拉起 QQ 客户端…（SnowLuma 注不进去就不会有 OneBot）'
-          Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', 'start', '', $qqExe -ErrorAction SilentlyContinue | Out-Null
+          # ⚠️⚠️ 2026-11-14 改（用户：「把现在启动机器人的那套都改好」）：
+          #    **加 `--force-renderer-accessibility`** —— 让 QQ（Electron）强制建 a11y 树，
+          #    这样 UIA 能直接读界面（不靠协议端、不靠截图）。
+          #    实测：裸启动的 Saki 进程 uitree 只读到 10 节点 / 2 条文字；
+          #          加了参数之后同一个窗口读到 **216 节点 / 133 条文字**（会话列表、按钮、头像全有）✓
+          #    ⚠️ 只影响渲染层的无障碍树，不改登录、不改数据 ✓
+          #    ⚠️ 用 cmd /c start 起（不是 Start-Process 直接起）：要让它落在用户桌面会话里、
+          #       不能被我这个进程的 Job 带走 ✓
+          Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', 'start', '', $qqExe, '--force-renderer-accessibility' -ErrorAction SilentlyContinue | Out-Null
         } else {
           Write-Host "      [警告] 找不到 QQ 客户端：$qqExe" -ForegroundColor Yellow
         }
@@ -247,6 +255,20 @@ if (Test-Port 3001) {
     exit 1
   }
   Write-Step '      NapCat 就绪。'
+}
+
+# ── 1.5 本地模型（2026-11-20 加）──────────────────
+# 用户：「本地模型要开机自启」——放在机器人**之前**起：
+#   · 它加载要几秒~几十秒（4B + 64k 上下文），先起着，机器人登录完正好能用
+#   · 幂等：已经在跑就直接跳过（不会起第二个抢显存）
+#   · 失败不拦机器人 —— 本地模型挂了，`llm` 那边会自动降级到云端 ✓
+Write-Host ''
+Write-Step '[1.5/3] 本地模型（llama-server）...'
+try {
+  $lmOut = & node (Join-Path $PSScriptRoot 'tools\local-model.mjs') start 2>&1
+  $lmOut | ForEach-Object { Write-Step "      $_" }
+} catch {
+  Write-Step "      ⚠️ 本地模型没起来：$($_.Exception.Message)（机器人会用云端，不影响）"
 }
 
 # ── 2. 机器人 ──────────────────────────────────────

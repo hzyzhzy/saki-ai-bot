@@ -294,6 +294,8 @@
   @media (max-width:820px){
     .wrap{grid-template-columns:1fr;padding:16px}
     nav{flex-direction:row;flex-wrap:wrap;position:static;grid-column:1}
+    /* ⚠️ 2026-11-14：窄屏侧栏是**横排**的，不需要内部滚动 ⇒ `.navin` 也跟着横排、别滚 */
+    nav .navin{flex-direction:row;flex-wrap:wrap;overflow:visible;gap:14px}
     nav button{text-align:center}
     section,#problems{grid-column:1}
   }
@@ -588,6 +590,12 @@
          ② 分组名字号 = `nav button`(15.5px) 的**两倍** = 31px（见下面 CSS）。
        ⚠️ `class="on"` 不许挪（默认页必须是 QQ登录）。 -->
   <nav>
+    <!-- ⚠️⚠️ 2026-11-14 加（用户反复报：「滑动侧栏之后、鼠标在下半部分，底部高光还是在中间」）——
+         把**滚动**从 `nav` 挪到里面这一层：
+         `nav::after` 那层折射高光是 `position:absolute;inset:0`，它**会跟着滚动内容一起走**，
+         还会被 `overflow` 裁掉 ⇒ 滚 420px 之后整层上移、只剩上半截 ⇒ 底部永远亮不起来 ✗
+         ⇒ 现在 `nav` 只当**外框**（不滚，高光层钉在框里），滚动交给 `.navin` ✓ -->
+    <div class="navin">
     <div class="navsec">
       <div class="navgrp">基础</div>
       <!-- ⚠️ 2026-10-07 加：**多 QQ 号**的「切换正在控制哪个号」（用户要求放在基础卡片里）。
@@ -623,6 +631,8 @@
       <button data-tab="workmode">工作模式</button>
       <!-- ⚠️ 2026-10-19 加：工具调用次数（长条卡片 + 累计/今日） -->
       <button data-tab="tools">工具调用</button>
+      <!-- ⚠️ 2026-11-11 加：思考链（每条消息一张卡片，实时逐行输出思考过程） -->
+      <button data-tab="think">思考链</button>
     </div>
     <div class="navsec">
       <div class="navgrp">运行</div>
@@ -643,6 +653,7 @@
       <div class="navgrp">关于</div>
       <button data-tab="about">作者信息</button>
     </div>
+    </div><!-- /.navin -->
   </nav>
 
   <!-- ⚠️ 2026-10-07 加（用户要求）：「我希望从一个应用端控制多个 QQ 号……
@@ -675,6 +686,24 @@
         <span class="hint" id="state-acc-workmode" style="margin-left:6px"></span>
       </div>
       <p class="hint">⚠️ 点一下就生效（不用再点别处）；右边那句会告诉你**服务端现在的真实状态**。</p>
+      <hr style="border:none;border-top:1px solid rgba(127,127,127,.25);margin:14px 0">
+      <!-- ⚠️⚠️⚠️ 2026-10-27 加（用户：「**再加一个私聊工作模式使用的模型的选项，和日常主模型隔离开，
+           但是只给出站点选择和模型选择，要先去读取已经保存过的 apikey 和站点，要不然界面会很乱**」）——
+           只给两个下拉（站点 / 模型），**key 和地址都沿用已经存过的**，不让人重新填 ✓ -->
+      <p class="hint">
+        <b>工作模式用的模型</b>：只影响<b>这个号的私聊工作模式</b>（agent 说话 / 干活那一侧），
+        跟日常聊天那个模型<b>分开</b>，互不影响。<br>
+        ⚠️ 站点和 key 直接用<b>已经存过的</b> —— 这里只要选「哪个站 + 哪个模型」；
+        不选就是<b>跟日常一样</b>。
+      </p>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <select id="pw-ai-station" style="min-width:210px" onchange="pwFillModels()"></select>
+        <select id="pw-ai-model" style="min-width:190px"></select>
+        <button class="act" onclick="pwSaveAi()">保存</button>
+        <button class="ghost" onclick="pwResetAi()">跟日常一样</button>
+        <span class="msg" id="msg-pw-ai"></span>
+      </div>
+      <p class="hint" id="pw-ai-now" style="margin-top:6px"></p>
       <hr style="border:none;border-top:1px solid rgba(127,127,127,.25);margin:14px 0">
       <p class="hint">
         <b>人工接管</b>：你要<b>自己上手用这个号</b>的时候打开它 —— 机器人从此<b>一条消息都不发</b>
@@ -760,6 +789,564 @@
             <div id="tools-list" style="display:flex;flex-direction:column;gap:8px;margin-top:12px"></div>
     </div>
   </section>
+  <!-- ⚠️ 2026-11-11 加（用户要求）：思考链 —— 每条消息一个卡片，越新的越上面 -->
+  <section id="tab-think" class="hidden">
+    <div class="card">
+      <h2>思考链</h2>
+      <div id="think-sum" style="font-weight:800;font-size:15px;margin:8px 0 2px">—</div>
+      <p class="hint">
+        每条消息一张卡片，从上到下依次是：<b>为什么回这条</b> → <b>消息原文</b> → <b>思考过程</b>（实时逐行输出）→ <b>回复</b>。
+        <br>⚠️ 只有<b>真的走了模型、而且模型吐了思考链</b>的回复才会出现在这里；越新的越在上面。
+        <br>⚠️ 数据在<b>这个号的进程内存</b>里 —— 切到别的号要重新点一下这个页面。
+      </p>
+      <div style="display:flex;gap:10px;align-items:center;margin:12px 0">
+        <button id="think-clear-btn" style="padding:7px 14px;border-radius:8px;border:1px solid #d7dce6;background:#fff;cursor:pointer;font-weight:700">清空</button>
+        <span class="hint" id="think-live">未连接</span>
+      </div>
+      <div id="think-list" style="display:flex;flex-direction:column;gap:12px"></div>
+    </div>
+  </section>
+  <style>
+    /* ⚠️ 2026-11-13 改（用户：「在黑暗模式全白色的卡片也很奇怪」）：
+       原来这一整套颜色是**写死**的（#fff / #f6f8fc / #222…），暗色主题下白得晃眼 ✗
+       ⇒ 全部换成主题变量（--card / --card2 / --line / --text / --dim / --accent / --ok / --err），
+         浅色/深色两套自动跟着走，和别的卡片是一套观感 ✓ */
+    .tc { border:1px solid var(--line); border-radius:var(--radius); background:var(--card2); overflow:hidden; }
+    .tc.live { border-color:var(--accent-line); box-shadow:0 0 0 3px var(--accent-soft); }
+    .tc-head { display:flex; gap:10px; align-items:center; padding:8px 12px; background:var(--card); font-size:12px; color:var(--dim); border-bottom:1px solid var(--line); }
+    .tc-stage { margin-left:auto; }
+    .tc-stage.ok { color:var(--ok); font-weight:700; }
+    .tc-stage.bad { color:var(--err); font-weight:700; }
+    .tc-r { padding:9px 12px; font-size:13px; color:var(--accent); background:var(--accent-soft); border-left:4px solid var(--accent); }
+    .tc-m { padding:10px 12px; font-size:14px; color:var(--text); white-space:pre-wrap; word-break:break-word; }
+    .tc-name { color:var(--warn); }
+    /* 连发合并：逐条列出被回复的原话（2026-11-15） */
+    .tc-qh { padding:6px 12px; font-size:12px; color:var(--muted); border-top:1px dashed var(--line); }
+    .tc-q { border-top:1px solid var(--line); display:flex; gap:8px; align-items:baseline; }
+    .tc-q .tc-qn { flex:0 0 auto; font-size:11px; color:var(--muted); min-width:1.2em; text-align:right; }
+    .tc-t { padding:0 12px 10px; }
+    .tc-lbl { font-size:12px; color:var(--dim2); margin-bottom:4px; font-weight:700; }
+    .tc-pre { margin:0; padding:10px 12px; background:var(--card); border:1px dashed var(--line); border-radius:8px; font-size:12.5px; line-height:1.65; white-space:pre-wrap; word-break:break-word; max-height:320px; overflow:auto; color:var(--text); font-family:inherit; }
+    /* ⚠️⚠️ 2026-11-19 加（用户：「**要能完全图形化切开每轮输出，和 dsh 一样，不能用字符切开**」）
+       —— 每一轮生成 = 一个独立的块（左边的竖色条 + 轮次圆徽标）；
+          工具调用 / 工具结果 = 各自的小卡片（chip），不再是正文里的一行字 ✓ */
+    /* ⚠️⚠️ 2026-11-20 改（用户：「**要能完整显示每一步，不是直接把所有步直接塞进卡片里
+       要滑下去，是把每一步超长行的用滚动隐藏起来**」）——
+       目标：**每一步 = 一个固定高度的小块**（自己内部滚动），整张卡片不再被撑得巨长
+       · `max-height` 给块的正文 → 超长就在**块内**滚
+       · 块头 sticky：滚到哪一步都看得见"这是第几轮"
+       · 整张卡片的 `tc-rounds` 总高也限一下，保证一屏能看到 2~3 步 ✓ */
+    /* ⚠️⚠️ 2026-11-21 修（「**显示还有问题**」）—— 真因是**父级 flex 把每一步压扁了**：
+       `.tc-rounds` 是 `display:flex; flex-direction:column` + `max-height:620px`，
+       而 `.tc-round` 原来**没写 `flex`** ⇒ 默认 `flex:0 1 auto`（可收缩）⇒
+       轮次一多（4 步以上）浏览器为了塞进 620px 就把每个块**压成一条缝**，
+       `.tc-round-b` 的 `max-height:220px` 根本没机会生效、外层滚动条也不出现
+       ⇒ 看着就是"内容被截断 / 挤在一起 / 读不了" ✗
+       ⇒ `flex:0 0 auto`（禁止压缩）+ 每块自己的 `max-height` 兜住高度 ✓ */
+    .tc-rounds { display:flex; flex-direction:column; gap:8px; max-height:620px; overflow:auto; padding:2px;
+                 overscroll-behavior:contain; }
+    .tc-round { flex:0 0 auto; display:flex; flex-direction:column; min-height:0;
+                max-height:264px; /* 块头 ~32 + 正文 220 + 余量 = 整块的上限 */
+                border-left:3px solid rgba(110,150,255,.5); padding:0; border-radius:0 8px 8px 0;
+                background:rgba(110,150,255,.05); overflow:hidden; }
+    .tc-round:nth-child(2) { border-left-color:rgba(255,175,90,.6); background:rgba(255,175,90,.05); }
+    .tc-round:nth-child(3) { border-left-color:rgba(120,220,150,.6); background:rgba(120,220,150,.05); }
+    .tc-round:nth-child(4) { border-left-color:rgba(220,130,220,.6); background:rgba(220,130,220,.05); }
+    /* 块头：`flex:0 0 auto` 不许被压扁（不然轮次一多它就没了）——
+       滚动发生在它下面那层 `.tc-round-b` 里，所以它**永远看得见**（比 sticky 更硬）；
+       `sticky` 留着是兜底（`.tc-round` 万一哪天改成自己滚，块头也咬得住顶部）✓ */
+    .tc-round-h { flex:0 0 auto; display:flex; align-items:center; gap:7px; font-weight:700; font-size:12px; color:var(--dim2);
+                  margin:0; padding:6px 10px 6px 12px; position:sticky; top:0; z-index:2;
+                  background:rgba(20,24,32,.92); backdrop-filter:blur(4px); }
+    .tc-badge { display:inline-flex; align-items:center; justify-content:center; width:18px; height:18px; border-radius:50%;
+                background:rgba(110,150,255,.28); color:var(--text); font-size:11px; font-weight:800; }
+    .tc-why { font-weight:400; opacity:.62; }
+    /* ⚠️ 每一步的正文：**最多 220px，超出在块内滚动**（这才是"用滚动隐藏超长行"） */
+    .tc-round-b { flex:0 1 auto; min-height:0; max-height:220px; overflow:auto;
+                  padding:0 10px 8px 12px; overscroll-behavior:contain; }
+    .tc-round-b .tc-pre { border:none; background:transparent; padding:0; max-height:none; overflow:visible; }
+    .tc-chip { display:flex; gap:7px; align-items:flex-start; margin:6px 0; padding:6px 10px; border-radius:7px;
+               font-size:12.5px; line-height:1.5; white-space:pre-wrap; word-break:break-word; }
+    .tc-chip.tool { background:rgba(90,160,255,.16); border:1px solid rgba(90,160,255,.34); }
+    .tc-chip.res { background:rgba(90,205,145,.13); border:1px solid rgba(90,205,145,.3); }
+    .tc-chip-i { flex:none; }
+    .tc-chip-t { flex:1 1 auto; }
+    /* 折叠按钮（点块头展开/收起这一步） */
+    .tc-round-h { cursor:pointer; user-select:none; }
+    .tc-round-h .tc-fold { margin-left:auto; font-weight:400; opacity:.55; font-size:11px; }
+    .tc-round.collapsed .tc-round-b { display:none; }
+    .tc-a { padding:0 12px 12px; }
+    .tc-reply { font-size:14px; color:var(--text); background:var(--card); border-left:4px solid var(--ok); padding:8px 10px; border-radius:6px; white-space:pre-wrap; word-break:break-word; min-height:20px; }
+    .tc-meta { font-size:12px; color:var(--dim); margin-left:10px; white-space:nowrap; }
+    .tc-meta b { color:var(--warn); }
+    .tc-reply:empty::after { content:"（还没开始写）"; color:#aab; font-size:12px; }
+    /* ⚠️ 2026-11-13：左侧导航原来没 overflow，加了两个按钮之后"思考链"就被裁在视口外、
+       永远点不到（用户截图里功能组最后只到"二级剧情"）。给它自己滚动。 */
+    /* ⚠️⚠️ 2026-11-14 改（用户：「滑动侧栏之后、鼠标在下半部分，底部高光还是在中间」）——
+       **滚动从 `nav` 挪到 `.navin`**：`nav::after` 那层折射高光是 `position:absolute;inset:0`，
+       它跟着滚动内容一起走、还被 `overflow` 裁掉 ⇒ 滚到下面就只剩上半截，底部永远不亮 ✗
+       ⇒ `nav` 只当外框（`overflow:hidden` + 高光层钉住），滚动交给里面那层 ✓ */
+    nav { max-height: calc(100vh - 92px); overflow: hidden; overscroll-behavior: contain; }
+    nav .navin {
+      flex: 1 1 auto; min-height: 0;
+      overflow-y: auto; overscroll-behavior: contain;
+      display: flex; flex-direction: column; gap: 14px;
+      /* ⚠️ 2026-11-14（用户：「新加的那个常驻的滚动条有点丑，能不能删掉」）——
+         **不画滚动条，但照样能滚**（滚轮 / 触控板 / 键盘都正常）✓ */
+      scrollbar-width: none;
+      -ms-overflow-style: none;
+    }
+    nav .navin::-webkit-scrollbar { width: 0; height: 0; display: none; }
+    .tc-meta { font-size:12px; color:#7a8a99; margin-left:10px; white-space:nowrap; }
+    .tc-meta b { color:#c47a2c; }
+  </style>
+  <script>
+  (() => {
+    let es = null;
+    let esAcc = ''; /* 这条 SSE 连的是哪个号 —— 切号时必须重建，见 connect() */
+    const $ = (id) => document.getElementById(id);
+    const esc = (s) => String(s ?? '').replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+    const cardOf = (id) => document.getElementById('tc-' + id);
+    const hhmmss = (t) => new Date(t).toLocaleTimeString('zh-CN', { hour12: false });
+
+    const STAGE_TEXT = { thinking: '思考中…', replying: '正在回复…', done: '完成', failed: '失败', cut: '中断（重启）' };
+
+    function markStage(d, stage) {
+      const el = d.querySelector('.tc-stage');
+      if (!el) return;
+      el.textContent = STAGE_TEXT[stage] || stage || '';
+      el.classList.toggle('ok', stage === 'done');
+      el.classList.toggle('bad', stage === 'failed' || stage === 'cut');
+    }
+
+    function makeCard(it) {
+      const box = $('think-list');
+      if (!box) return null;
+      const exist = cardOf(it.id);
+      if (exist) return exist;
+      const d = document.createElement('div');
+      d.className = 'tc';
+      d.id = 'tc-' + it.id;
+      d.innerHTML =
+        '<div class="tc-head">' +
+          '<span>' + esc(hhmmss(it.at)) + '</span>' +
+          '<span>' + esc(it.who || '') + '</span>' +
+          '<span>' + esc(it.gid ? ('群 ' + it.gid) : '私聊') + '</span>' +
+          '<span class="tc-meta"></span>' +
+          '<span class="tc-stage"></span>' +
+        '</div>' +
+        '<div class="tc-r"><b>为什么回这条</b>　' + esc(it.reason || '（未记录）') + '</div>' +
+        quotedHtml(it) +
+        '<div class="tc-t"><div class="tc-lbl">思考</div><div class="tc-rounds"></div></div>' +
+        '<div class="tc-a"><div class="tc-lbl">回复</div><div class="tc-reply"></div></div>';
+      box.prepend(d);
+      // ⚠️ 2026-11-19：思考内容按**轮**渲染成独立块（不再整段塞进一个 <pre>）
+      d._rounds = normalizeRounds(it);
+      renderRounds(d);
+      if (it.reply) d.querySelector('.tc-reply').textContent = it.reply;
+      markStage(d, it.stage);
+      paintMeta(d, it);
+      return d;
+    }
+
+    /* ⚠️⚠️ 2026-11-19 加（用户：「**要能完全图形化切开每轮输出，和 dsh 一样，不能用字符切开**」）
+     *
+     * 目标：**不用任何分隔线字符**，靠 DOM 结构把每一轮分开：
+     *   轮次块（竖色条 + 圆徽标「1」「2」）⊃ 思考正文
+     *                                      ⊃ 工具调用 chip（🔧 搜（词=…））
+     *                                      ⊃ 工具结果 chip（📄 搜「…」：9 条）
+     *
+     * ⚠️ 数据来源是后端的 `rounds[]`（`thinkLog.appendThink(id, chunk, round)` 攒的），
+     *    老卡片没有它就退化成"第 1 轮"整段（`think-log.all()` 已经补过）✓
+     * ⚠️ 流式时（SSE 的 `think` 事件）也是改 `d._rounds` 再整块重渲染 ——
+     *    内容最多两万字，重渲染比"精确 append 到某个节点"简单且不会错位 ✓ */
+    function normalizeRounds(it) {
+      let rs =
+        Array.isArray(it.rounds) && it.rounds.length
+          ? it.rounds.map((x, i) => ({ n: Number(x && x.n) || i + 1, think: String((x && x.think) || '') }))
+          : [{ n: 1, think: String(it.think || '') }];
+      /* ⚠️⚠️ 2026-11-19 修（用户截图：「**第二轮之后还是字符**」）——
+       *   那些卡是**改之前生成的**：`rounds` 只有一块，分隔线是**写在正文里**的字符
+       *   `──── 第 2 轮思考（看了工具结果之后）────` ⇒ 整段还是塞在第 1 块里显示 ✗
+       *   ⇒ 这里做一次**老数据迁移**：只要单块正文里还有这种分隔线，就**就地拆成多块** ✓ */
+      if (rs.length === 1 && /^[─\-—]{3,}\s*第\s*\d+\s*轮/m.test(rs[0].think)) {
+        rs = rs[0].think
+          .split(/^[─\-—]{3,}\s*第\s*\d+\s*轮[^\n]*\n?/m)
+          .map((t, i) => ({ n: i + 1, think: String(t).replace(/^\n+/, '').replace(/\n+$/, '') }));
+      }
+      /* ⚠️ 2026-11-19 修（用户：「**有一个不存在的第三轮**」）——
+       *   真实流程里最后一轮常常**没有思考内容**（模型直接吐正文），
+       *   但 `appendThink` 可能只写了个换行 ⇒ 页面上多出一个空的「第 3 轮」✗
+       *   ⇒ **空的轮一律不渲染**（全空时留一个占位块）✓ */
+      const kept = rs.filter((r) => r.think.trim() !== '');
+      return (kept.length ? kept : [{ n: 1, think: '' }]).map((r, i) => ({ n: i + 1, think: r.think }));
+    }
+
+    function chipEl(kind, text) {
+      const el = document.createElement('div');
+      el.className = 'tc-chip ' + kind;
+      const i = document.createElement('span');
+      i.className = 'tc-chip-i';
+      i.textContent = kind === 'tool' ? '🔧' : '📄';
+      const t = document.createElement('span');
+      t.className = 'tc-chip-t';
+      t.textContent = text;
+      el.appendChild(i);
+      el.appendChild(t);
+      return el;
+    }
+
+    /** 一轮的正文：普通思考 = <pre>，【调用工具】/【工具结果】那几行 = chip 卡片 */
+    function roundBody(text) {
+      const frag = document.createDocumentFragment();
+      const lines = String(text || '').split('\n');
+      let buf = [];
+      const flush = () => {
+        const t = buf.join('\n').replace(/^\s+|\s+$/g, '');
+        buf = [];
+        if (!t) return;
+        const p = document.createElement('pre');
+        p.className = 'tc-pre';
+        p.textContent = t;
+        frag.appendChild(p);
+      };
+      for (const line of lines) {
+        const L = line.trim();
+        // ⚠️ 残留的字符分隔线一律丢掉 —— 轮次已经由**块头**表达了（用户明确不要字符切开）
+        if (/^[─\-—]{3,}\s*第\s*\d+\s*轮/.test(L)) {
+          flush();
+          continue;
+        }
+        const mTool = /^【调用工具】(.+)$/.exec(L);
+        const mRes = /^【工具结果】(.+)$/.exec(L);
+        if (mTool) {
+          flush();
+          frag.appendChild(chipEl('tool', mTool[1]));
+        } else if (mRes) {
+          flush();
+          frag.appendChild(chipEl('res', mRes[1]));
+        } else {
+          buf.push(line);
+        }
+      }
+      flush();
+      return frag;
+    }
+
+    function roundEl(r, total) {
+      const wrap = document.createElement('div');
+      wrap.className = 'tc-round';
+      const head = document.createElement('div');
+      head.className = 'tc-round-h';
+      const badge = document.createElement('span');
+      badge.className = 'tc-badge';
+      badge.textContent = String(r.n);
+      head.appendChild(badge);
+      const label = document.createElement('span');
+      label.textContent = total > 1 ? '第 ' + r.n + ' 轮' : '思考';
+      head.appendChild(label);
+      if (total > 1 && r.n > 1) {
+        const why = document.createElement('span');
+        why.className = 'tc-why';
+        why.textContent = '看完工具结果重新想';
+        head.appendChild(why);
+      }
+      /* ⚠️ 2026-11-21 补：折叠的 CSS 早就写好了（`.tc-fold` / `.tc-round.collapsed`），
+         但 JS **从没生成过按钮、也没绑点击** ⇒ 块头有 `cursor:pointer` 却点了没反应（半个功能）✗
+         ⇒ 这里补上。折叠状态挂在 `r._fold` 上（它在 `d._rounds` 里，重渲染不会丢）✓ */
+      const fold = document.createElement('span');
+      fold.className = 'tc-fold';
+      const paintFold = () => {
+        const on = !!r._fold;
+        wrap.classList.toggle('collapsed', on);
+        fold.textContent = on ? '展开' : '收起';
+      };
+      paintFold();
+      head.appendChild(fold);
+      head.addEventListener('click', () => {
+        r._fold = !r._fold;
+        paintFold();
+      });
+      const body = document.createElement('div');
+      body.className = 'tc-round-b';
+      body.appendChild(roundBody(r.think || ''));
+      wrap.appendChild(head);
+      wrap.appendChild(body);
+      return wrap;
+    }
+
+    function renderRounds(d) {
+      const box = d && d.querySelector('.tc-rounds');
+      if (!box) return;
+      const rs = Array.isArray(d._rounds) && d._rounds.length ? d._rounds : [{ n: 1, think: '' }];
+      /* ⚠️⚠️ 2026-11-21 修（「**显示还有问题**」的另一半，在 JS 里）——
+       *   原来每次思考增量进来都 `innerHTML = ''` **全量重建**，两个后果：
+       *     ① 每个块的 `scrollTop` 归零 ⇒ 正往下读第 2 轮，来一个 token 就被弹回块顶 ✗
+       *     ② 最后无条件 `box.scrollTop = box.scrollHeight` ⇒ 整卡被强行拽到最底下 ✗
+       *   流式下这是每秒好几次，等于**根本没法滚动看** —— 于是"块内滚动"做了也白做。
+       *   ⇒ 重建前把各块的滚动位置记下来，重建后按**序号**接回去；
+       *     整卡只在"本来就贴着底"时才继续跟到底（用户往上翻了就别抢）✓ */
+      let keepBox = 0;
+      let atBottom = true;
+      const keepBody = [];
+      try {
+        keepBox = box.scrollTop;
+        atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 24;
+        for (const el of Array.prototype.slice.call(box.children)) {
+          const b = el.querySelector('.tc-round-b');
+          keepBody.push(b ? b.scrollTop : 0);
+        }
+      } catch {}
+      box.innerHTML = '';
+      rs.forEach((r, i) => {
+        const el = roundEl(r, rs.length);
+        box.appendChild(el);
+        try {
+          const b = el.querySelector('.tc-round-b');
+          if (b && keepBody[i]) b.scrollTop = keepBody[i];
+        } catch {}
+      });
+      try {
+        box.scrollTop = atBottom ? box.scrollHeight : keepBox;
+      } catch {}
+    }
+
+    // 「这条到底在回谁的哪几句」——2026-11-15 加（用户要求：
+    //   「这个卡片应该还要显示被回复的是什么消息，如果是合并回复的话都要显示出来」）。
+    //   · 单条：一行 `名字：原话`
+    //   · 连发合并：逐条列出（带序号），否则只看到"合并后的那一坨"，
+    //     分不清她是对哪一句说的 ✗
+    function quotedHtml(it) {
+      const q = Array.isArray(it.quoted) ? it.quoted.filter((x) => x && (x.text || x.name)) : [];
+      const one = (name, text) =>
+        '<div class="tc-m"><b class="tc-name">' + esc(name || '某人') + '</b>：' + esc(text || '（无文本）') + '</div>';
+      if (!q.length) return one(it.from, it.msgText);
+      if (q.length === 1) return one(q[0].name || it.from, q[0].text || it.msgText);
+      return (
+        '<div class="tc-qh">被回复的 ' + q.length + ' 条（连发合并）</div>' +
+        q
+          .map(
+            (x, i) =>
+              '<div class="tc-m tc-q"><span class="tc-qn">' + (i + 1) + '</span>' +
+              '<b class="tc-name">' + esc(x.name || '某人') + '</b>：' + esc(x.text || '（无文本）') + '</div>',
+          )
+          .join('')
+      );
+    }
+
+    // 「这条花了多少 token / 多少钱」——2026-11-13 加（用户要求）
+    function paintMeta(d, it) {
+      const el = d && d.querySelector(".tc-meta");
+      if (!el) return;
+      const pt = Number(it.pt) || 0;
+      const ct = Number(it.ct) || 0;
+      if (!pt && !ct && it.cost == null) { el.textContent = ""; return; }
+      const cached = Number(it.cached) || 0;
+      const rt = Number(it.rt) || 0;
+      const n = (x) => x.toLocaleString("en-US");
+      const money = it.cost == null ? "" : ("¥" + Number(it.cost).toFixed(4));
+      const cacheTxt = pt ? "（缓存 " + n(cached) + "，" + Math.round((cached / pt) * 100) + "%）" : "";
+      const rtTxt = rt ? "，其中思考 " + n(rt) : "";
+      el.innerHTML =
+        "输入 <b>" + n(pt) + "</b> tok" + cacheTxt +
+        "　输出 <b>" + n(ct) + "</b> tok" + rtTxt +
+        (money ? "　花费 <b>" + money + "</b>" : "");
+    }
+
+    function paintSum() {
+      const box = $('think-list');
+      const n = box ? box.querySelectorAll('.tc').length : 0;
+      const sum = $('think-sum');
+      if (sum) {
+      const bal = sum.dataset.balance ? ('　｜　余额 ' + sum.dataset.balance) : "";
+      const td = sum.dataset.today ? ('　｜　' + sum.dataset.today) : "";
+      sum.textContent = (n ? ('共 ' + n + ' 条') : '还没有记录 —— 让她回一句话就会出现在这里') + td + bal;
+    }
+    }
+
+    async function load() {
+      const box = $('think-list');
+      if (!box) return;
+      try {
+        /* ⚠️ 2026-11-19：**带上切号的账号头** —— 后端会把这个请求转到
+         *   那个号自己的进程（思考链是每进程内存）✓
+         *   不带的话在 3099 切到爱音，看到的还是主号的卡片 ✗ */
+        let curAcc = '';
+        try {
+          curAcc = localStorage.getItem('saki-account') || '';
+        } catch {}
+        const r = await fetch('/api/think', {
+          cache: 'no-store',
+          headers: curAcc ? { 'x-saki-account': curAcc } : {},
+        });
+        const j = await r.json();
+        box.innerHTML = '';
+        // ⚠️⚠️ 2026-11-14 修（用户：「思考链页面每个消息卡片的排序应该是按时间由最新到最老」）——
+        //    后端是**最新在前**，而 `makeCard()` 用的是 `prepend`（插到最前面）⇒
+        //    按后端顺序遍历时，**每插一条就把它顶到最上面** ⇒ 最后插进去的是**最旧**那条
+        //    ⇒ 整页变成"最旧在最上面"，跟要的正相反 ✗
+        //    ⇒ 先按时间**从旧到新**排一遍再插：旧的先垫底、最新的最后 prepend 到顶 ✓
+        //    ⚠️ 实时新增（SSE 的 `start`）走的是同一个 `makeCard` ⇒ 新卡片自然在最上面 ✓
+        const ins = (j.items || [])
+          .slice()
+          .sort((a, b) => (Number(a.at) || 0) - (Number(b.at) || 0));
+        for (const it of ins) makeCard(it);
+        // ⚠️ 2026-11-13：顶部那行带上"现在还剩多少"（卡片上的 ¥ 是这一条花的）
+        try {
+          const b = j.balance;
+          const sum0 = $("think-sum");
+          if (b && sum0) {
+            const cur = b.currency === "USD" ? "$" : "¥";
+            const at = b.at ? ("（" + new Date(b.at).toLocaleTimeString("zh-CN", { hour12: false }) + " 查的）") : "";
+            sum0.dataset.balance = cur + Number(b.balance).toFixed(2) + at;
+          }
+          // ⚠️ 2026-11-13：今日总花费（用户要求显示在页面顶端）
+          if (j.today && sum0) {
+            sum0.dataset.today =
+              "今日 ¥" + Number(j.today.cost).toFixed(3) +
+              "（" + j.today.calls + " 次调用 / " + (j.today.tokens / 10000).toFixed(1) + " 万 tok）";
+          }
+        } catch {}
+        paintSum();
+      } catch (e) {
+        box.innerHTML = '<div class="hint">读取失败：' + esc(e.message) + '</div>';
+      }
+    }
+
+    function connect() {
+      /* ⚠️⚠️ 2026-11-21 修（「**新消息还是要刷新才能显示出来**」）——
+       *   真因是**重连被自己挡住了**：原来第一行是 `if (es) return;`，
+       *   而 `es.onerror` 里只 `es.close()`、**没把 `es` 置回 null** ⇒
+       *   5 秒后那次 `connect()` 一进来就被挡回去；浏览器侧又被我们主动 `close()` 过，
+       *   它自己也不重连 ⇒ **断一次 = 永久断开**，只有刷新页面（整段脚本重跑）才接得回来 ✗
+       *   现在按 `readyState` 判：`2` = CLOSED ⇒ 旧的丢掉重建；
+       *   `0`/`1` = CONNECTING/OPEN 且**连的还是当前这个号** ⇒ 才算"已经连着"，不重复建 ✓ */
+      const live = () => $('think-live');
+      let curAcc = '';
+      try {
+        curAcc = localStorage.getItem('saki-account') || '';
+      } catch {}
+      if (es && es.readyState !== 2 && curAcc === esAcc) return;
+      if (es) {
+        try { es.close(); } catch {}
+      }
+      es = null;
+      /* 兜底看门狗：浏览器切后台 / 笔记本休眠时 `EventSource` 可能**不触发 onerror** 就躺平
+         ⇒ 每 20 秒看一眼 readyState，CLOSED 就自己接回来 ✓ */
+      if (!window.__tlWatch) {
+        window.__tlWatch = setInterval(() => {
+          try {
+            if (es && es.readyState === 2) connect();
+          } catch {}
+        }, 20000);
+      }
+      try {
+        /* ⚠️ 2026-11-20：带上 `?account=` —— EventSource 不能设自定义头，
+         *   后端靠这个 query 参数把 SSE **转发到那个号自己的进程** ⇒ 切号后实时流才对 ✓ */
+        let accQ = '';
+        if (/^\d{5,12}$/.test(curAcc)) accQ = '?account=' + curAcc;
+        esAcc = curAcc;
+        es = new EventSource('/api/think/events' + accQ);
+      } catch {
+        if (live()) live().textContent = '这个浏览器不支持实时推送';
+        return;
+      }
+      es.onopen = () => { if (live()) live().textContent = '实时连接中 ✓'; };
+      es.onerror = () => {
+        /* ⚠️ 2026-11-20 改（用户：「**思考链好像卡住了，消息明明成功发出来了，
+         *   但是显示消息还没生成**」）——
+         *   原来这里只改一行文字，靠浏览器自己重连：而我重启服务那几十秒里
+         *   `EventSource` 会连续失败好几次，**之后就不再重试了** ⇒ 页面永远停在
+         *   "连接断开"，卡片也就收不到 `end` ⇒ 一直显示"（还没开始写）" ✗
+         *   ⇒ 现在**主动关闭 + 5 秒后重建**，服务回来后一定接得上 ✓ */
+        if (live()) live().textContent = '连接断开，5 秒后自动重连…';
+        try {
+          es.close();
+        } catch {}
+        /* ⚠️⚠️ 2026-11-21：**必须置回 null**，否则 5 秒后那次 connect() 会被
+           `if (es && ...)` 挡回去 ⇒ 看着写着"5 秒后自动重连"，实际永远不连 ✗ */
+        es = null;
+        clearTimeout(window.__tlRetry);
+        window.__tlRetry = setTimeout(() => {
+          try {
+            connect();
+          } catch {}
+        }, 5000);
+      };
+
+      es.addEventListener('start', (ev) => {
+        let it;
+        try { it = JSON.parse(ev.data).item; } catch { return; }
+        if (!it) return;
+        makeCard(it);
+        paintSum();
+        if (live()) live().textContent = '实时：刚刚来了一条（' + hhmmss(Date.now()) + '）';
+      });
+
+      es.addEventListener('think', (ev) => {
+        let o; try { o = JSON.parse(ev.data); } catch { return; }
+        const d = cardOf(o.id);
+        if (!d) return;
+        // ⚠️ 2026-11-19：按**轮次**追加，然后整块重渲染（图形分块，不用分隔线字符）
+        if (!Array.isArray(d._rounds) || !d._rounds.length) d._rounds = [{ n: 1, think: '' }];
+        const n = Math.max(1, Number(o.round) || 1);
+        while (d._rounds.length < n) d._rounds.push({ n: d._rounds.length + 1, think: '' });
+        d._rounds[n - 1].think += o.chunk || '';
+        renderRounds(d);
+        d.classList.add('live');
+      });
+
+      es.addEventListener('reply', (ev) => {
+        let o; try { o = JSON.parse(ev.data); } catch { return; }
+        const d = cardOf(o.id);
+        if (!d) return;
+        const box = d.querySelector('.tc-reply');
+        /* ⚠️ 2026-11-20：`reset:true` = 这一轮重新开始写（上一版是草稿，被丢掉了）
+         *   ⇒ 先清空再重新逐字打，不然两版草稿会拼在一起 ✗ */
+        if (o.reset) {
+          if (box) box.textContent = '';
+          markStage(d, 'thinking');
+          return;
+        }
+        if (box) box.textContent += o.chunk || '';
+        markStage(d, 'replying');
+      });
+
+      es.addEventListener('end', (ev) => {
+        let o; try { o = JSON.parse(ev.data); } catch { return; }
+        const d = cardOf(o.id);
+        if (!d) return;
+        d.classList.remove('live');
+        if (o.reply !== undefined && o.reply !== '') d.querySelector('.tc-reply').textContent = o.reply;
+        markStage(d, o.stage);
+        paintMeta(d, o);
+      });
+
+      es.addEventListener('clear', () => {
+        const box = $('think-list');
+        if (box) box.innerHTML = '';
+        paintSum();
+      });
+    }
+
+    window.startThink = function () {
+      load();
+      connect();
+    };
+
+    document.addEventListener('click', (e) => {
+      if (!e.target || e.target.id !== 'think-clear-btn') return;
+      fetch('/api/think/clear', { method: 'POST' })
+        .then(() => {
+          const box = $('think-list');
+          if (box) box.innerHTML = '';
+          paintSum();
+        })
+        .catch(() => {});
+    });
+  })();
+  </script>
+
   <script>
     // 长条卡片：一行一个工具，右边两个数字
     async function renderTools() {
@@ -993,6 +1580,22 @@
       <div id="prov-fallback" style="display:none;padding:10px 12px;margin:10px 0;border-radius:8px;
            background:rgba(255,170,0,.12);border:1px solid rgba(255,170,0,.4)"></div>
       <div id="prov-list" style="margin:12px 0"></div>
+      <!-- ⚠️⚠️ 2026-10-29 加（用户：「加一个**是否自动降级提供商**的按钮防止降级到中转站，
+           等我和你说再把中转站 api 恢复出来」） -->
+      <div style="margin:10px 0;padding:10px 12px;border-radius:8px;
+           background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08)">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin:0">
+          <input type="checkbox" id="prov-autofallback" onchange="onAutoFallbackChange()" style="width:auto">
+          <b>自动降级提供商</b>
+        </label>
+        <p class="hint" style="margin:6px 0 0">
+          开着：主模型不可用时，按列表顺序<b>跨家</b>换下一家（原来那套）。<br>
+          ⚠️ <b>关掉 = 只认第 1 个</b>，列表里剩下的（包括中转站）<b>永远不会被调用</b>；
+          同一家的「备用模型」不受影响。<br>
+          <b>中转站有危险期间就把这个关掉。</b>
+        </p>
+        <span class="msg" id="msg-autofb"></span>
+      </div>
       <div class="btns">
         <button class="ghost" onclick="addProvider()">＋ 添加提供商</button>
         <button class="act" onclick="saveProviders()">保存列表</button>
@@ -1001,6 +1604,56 @@
       <p class="hint" style="margin-top:8px">
         ⚠️ 拖动卡片时<b>整张表按新顺序保存</b>；<b>顺序 = 优先级</b>，第一个不可用会自动降到第二个，
         10 分钟后自动回来重试。
+      </p>
+    </div>
+
+    <!-- ⚠️⚠️ 2026-11-20 加（用户：「**在模型页面加一个本地模型管理的卡片，要能实时看到本地模型的
+         所有状态和开关**」+「**还有本地模型占用本地资源的所有参数**」+「**要开机自启**」） -->
+    <div class="card">
+      <h2>本地模型（llama-server）
+        <span class="msg" id="lm-state" style="font-weight:700;margin-left:8px"></span>
+      </h2>
+      <p class="hint">
+        本机跑的 GGUF 模型。开机自启由 <code>start-all.ps1</code> 负责（先起它再起机器人）✓
+        <br>⚠️ 参数**都写在 <code>tools/local-model.mjs</code> 的 <code>CONFIG</code> 里**，改完点「重启」才生效。
+      </p>
+
+      <div id="lm-body" style="margin:10px 0"></div>
+
+      <div class="btns" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <button class="act" onclick="lmAct('start')">启动</button>
+        <button class="ghost" onclick="lmAct('restart')">重启</button>
+        <button class="ghost" style="color:#f85149" onclick="lmAct('stop')">停止</button>
+        <span class="hint" id="lm-msg" style="margin-left:6px"></span>
+        <label class="hint" style="margin-left:auto;display:flex;align-items:center;gap:5px;cursor:pointer">
+          <input type="checkbox" id="lm-auto" onchange="lmAutoToggle()" style="width:auto"> 自动刷新（2 秒）
+        </label>
+      </div>
+    </div>
+
+    <!-- ⚠️ 2026-11-19 加：**搜索服务**（用户问「搜索供应选择在哪里」——
+         原来只能改 config.yml 的 `search.provider`，界面上没有入口） -->
+    <div class="card">
+      <h2>搜索服务</h2>
+      <p class="hint">
+        她调「搜索」工具时问哪家要结果。<b>内置那套一直留着</b>：选「自动」时 DeepSeek 那边报错/没结果，
+        会自动回落到内置抓页，不会因为一家抽风就不搜了。
+      </p>
+      <div class="row" style="align-items:flex-end">
+        <div style="flex:2">
+          <label>用哪个</label>
+          <select id="search-provider" onchange="onSearchProviderChange()">
+            <option value="auto">自动（先问 DeepSeek 官方搜索，没结果回落内置抓页）</option>
+            <option value="deepseek">只走 DeepSeek 官方搜索 API</option>
+            <option value="builtin">只走内置抓页（Bing / 百度 / DDG / B站 / 萌娘）</option>
+          </select>
+        </div>
+        <span class="msg" id="msg-search-prov"></span>
+      </div>
+      <p class="hint" style="margin-top:8px">
+        码里的 key 取法：<code>search.deepseek.apiKey</code> 留空 ⇒ 自动用<b>官方那家提供商</b>的密钥
+        （不是本地小模型的，那个是 <code>local</code>，打过去会 401）。<br>
+        ⚠️ 官方账号欠费时这个接口会 402 —— 选「自动」就照旧用内置抓页，不影响她说话。
       </p>
     </div>
 
@@ -1790,10 +2443,26 @@
     <div style="display:flex;gap:12px;flex-wrap:wrap;margin:10px 0">
       <div style="flex:1;min-width:150px"><div class="d" style="display:block">总开关</div>
         <select id="bp-enable" style="width:100%"><option value="0">关闭</option><option value="1">开启（每天自动生成并发布）</option></select></div>
-      <div style="flex:1;min-width:120px"><div class="d" style="display:block">时间段 · 开始</div><input id="bp-ws" type="time" value="20:00" style="width:100%"></div>
-      <div style="flex:1;min-width:120px"><div class="d" style="display:block">时间段 · 结束</div><input id="bp-we" type="time" value="23:00" style="width:100%"></div>
     </div>
-    <div class="d" style="display:block">每天在这段时间里<b>随机</b>挑一个时刻做一次，一天只做一条。</div>
+    <!-- ⚠️⚠️ 2026-11-01 拆成两组时间（用户：「制作视频要用 GPU ⇒ 改**做视频**的时间；
+         投稿的时间还是在 16:00~20:00 随机」） -->
+    <div style="display:flex;gap:12px;flex-wrap:wrap;margin:10px 0;padding:9px 12px;border-radius:8px;background:rgba(255,170,0,.08);border-left:3px solid rgba(255,170,0,.5)">
+      <!-- ⚠️ 2026-11-01 用户：「**做视频不用随机**」⇒ 只留一个"几点开始"，到点就做 ✓ -->
+      <div style="flex:1;min-width:150px"><div class="d" style="display:block">🖥 做视频 · 几点开始（固定）</div>
+        <input id="bp-ms" type="time" value="08:00" style="width:100%"></div>
+      <div style="flex:2;min-width:220px"><div class="d" style="display:block">　</div>
+        <div class="d" style="display:block;margin:0">到点就做，<b>不随机</b>。这一段会<b>吃满 GPU</b>（配音 + 录 Live2D + AE 合成）—— 挑你不用电脑的时候。</div></div>
+    </div>
+    <div style="display:flex;gap:12px;flex-wrap:wrap;margin:10px 0">
+      <div style="flex:1;min-width:150px"><div class="d" style="display:block">📤 上传发布 · 开始</div>
+        <input id="bp-ws" type="time" value="16:00" style="width:100%"></div>
+      <div style="flex:1;min-width:150px"><div class="d" style="display:block">📤 上传发布 · 结束</div>
+        <input id="bp-we" type="time" value="20:00" style="width:100%"></div>
+    </div>
+    <div class="d" style="display:block">
+      两个时间段里各<b>随机</b>挑一个时刻：早上<b>只做视频</b>（不发布），下午/晚上再<b>把早上那条传上去</b>。
+      ⚠️ 做视频那组<b>留空</b> = 老行为（到点一条龙做完就发）。一天只做一条。
+    </div>
     <div style="display:flex;gap:12px;flex-wrap:wrap;margin:12px 0 0">
       <div style="flex:1;min-width:150px"><div class="d" style="display:block">群聊素材取哪个群</div><input id="bp-group" placeholder="群号" style="width:100%"></div>
       <div style="flex:1;min-width:110px"><div class="d" style="display:block">最长多少秒（上限）</div><input id="bp-durmax" type="number" min="25" max="120" value="60" style="width:100%"></div>
@@ -2550,6 +3219,10 @@ let STATE = null;
   const MAX = 0.16; // 离光标最近的那一项放大 16%（等比）
   let items = [];
 
+  /** 内层滚动容器的滚动量（侧栏的滚动在 `.navin` 上，不在 `nav` 上） */
+  const navInner = nav.querySelector('.navin');
+  const innerScroll = () => (navInner ? navInner.scrollTop : 0);
+
   function collect() {
     // 先清掉 transform 再量，免得量到缩放后的位置（虽然 offset* 不受影响，但求稳）
     for (const b of nav.querySelectorAll('button')) b.style.transform = '';
@@ -2568,18 +3241,38 @@ let STATE = null;
       // ⚠️ `sec` = 这个按钮属于哪块卡片。拆卡片之后**必须**带上它：
       //    放大范围 `RANGE`(110px) 比卡片间距(14px)大得多，不加限制就会
       //    跨到隔壁组去 ⇒ 又变成"多组一起放大" ✗
-      return { b, sec: b.closest('.navsec'), cy: r.top - navTop + r.height / 2 };
+      // ⚠️⚠️ 2026-11-14 修（用户：「放大动画还是和鼠标错位」）——
+      //    真相：滚动现在发生在**内层 `.navin`** 里，按钮的屏幕位置照样跟着内容变 ⇒
+      //    这里量到的 `r.top` 是"滚动后"的值，而 `update()` 用的是当前鼠标坐标，
+      //    两边差一个 `navin.scrollTop` ⇒ **放大落在鼠标上面/下面那一项**（就是用户看到的错位）✗
+      //    ⇒ 两边都加 `innerScroll()`，统一成"相对滚动内容"的坐标：滚多少都不影响 ✓
+      return { b, sec: b.closest('.navsec'), cy: r.top - navTop + innerScroll() + r.height / 2 };
     });
   }
 
-  function update(clientY, curSec) {
+  // ⚠️ 2026-11-14 加：滚动时**鼠标没动**，但内容相对指针移了 ⇒ 得按新的 scrollTop 重算一次
+  let lastX = null;
+  let lastY = null;
+  let lastSec = null;
+  let scrollTimer = null;
+
+  function update(clientY, curSec, clientX) {
+    lastY = clientY;
+    lastSec = curSec;
+    if (clientX != null) lastX = clientX;
     if (!items.length) collect();
-    const y = clientY - nav.getBoundingClientRect().top; // 换算成"相对侧栏"的 y
+    // ⚠️ 2026-11-14：加 `innerScroll()` —— 和 `collect()` 里那个 `cy` 保持同一套坐标
+    //    （滚动在 `.navin` 上，不加这个偏移就等于用滚动前的位置去配滚动后的鼠标 ✗）
+    const y = clientY - nav.getBoundingClientRect().top + innerScroll();
     for (const it of items) {
       // ⚠️⚠️ 2026-09-25：**只在鼠标所在的那块卡片里**放大。
       //    拆卡片之前整条侧栏是一列，`RANGE` 跨组无所谓；现在跨组就等于
       //    "三组一起放大"（用户报的正是这个）✗
-      if (curSec && it.sec !== curSec) { it.b.style.transform = ''; continue; }
+      // ⚠️⚠️ 2026-11-14 又修（用户截图：「往下滑动之后文字放大动画有问题」）——
+      //    原来写的是 `if (curSec && ...)` ⇒ **拿不到鼠标在哪块卡片时，所有组全参与计算**
+      //    ⇒ 滚动后（`:hover`/坐标算不出卡片）三块一起放大 ✗
+      //    ⇒ 现在改成"拿不到就**谁都不放大**"：宁可这一帧不动，也别整排乱跳 ✓
+      if (!curSec || it.sec !== curSec) { it.b.style.transform = ''; continue; }
       const d = Math.abs(y - it.cy);
       const t = Math.max(0, 1 - d / RANGE);
       const k = t * t; // 平方衰减：近的涨得快、远的掉得快
@@ -2593,7 +3286,29 @@ let STATE = null;
   }
 
   // ⚠️ 把「鼠标在哪块卡片里」一起传进去（closest 对 padding 区里的鼠标也有效）
-  nav.addEventListener('mousemove', (e) => update(e.clientY, e.target.closest && e.target.closest('.navsec')), { passive: true });
+  nav.addEventListener('mousemove', (e) => update(e.clientY, e.target.closest && e.target.closest('.navsec'), e.clientX), { passive: true });
+  // ⚠️ 2026-11-14 加：**侧栏自己滚动时也要重算** ——
+  //    滚的时候鼠标没动（没有 mousemove），可内容整个移了 ⇒ 不重算的话
+  //    放大还挂在旧位置（用户报的"往下滑之后动画不对"就是这个）✗
+  //    ⚠️ 2026-11-14：滚动**过程中**一律先不放大（`reset()`），停下 140ms 再按
+  //      鼠标现在压着的那一项重算 —— 边滚边算的话每滚一像素放大项就跳一次，
+  //      看着比"不放大"还乱 ✗
+  //    ⚠️ 2026-11-14：滚动现在发生在**内层 `.navin`** 上（`scroll` 不冒泡）⇒
+  //      监听器必须挂 `capture:true` 才收得到 ✓
+  nav.addEventListener('scroll', () => {
+    if (lastY == null) return;
+    reset();
+    clearTimeout(scrollTimer);
+    scrollTimer = setTimeout(() => {
+      let sec = lastSec;
+      if (lastX != null) {
+        const el = document.elementFromPoint(lastX, lastY);
+        const hit = el && el.closest ? el.closest('.navsec') : null;
+        if (hit && nav.contains(hit)) sec = hit;
+      }
+      update(lastY, sec, lastX);
+    }, 140);
+  }, { passive: true, capture: true });
   nav.addEventListener('mouseleave', reset, { passive: true });
   // 切页签时按钮会被重画 → 重新量一次
   new MutationObserver(() => collect()).observe(nav, { childList: true });
@@ -2750,7 +3465,15 @@ let STATE = null;
     glarePending = false;
     for (const el of document.querySelectorAll('.card, nav')) {
       const r = el.getBoundingClientRect();
-      if (!r.width || r.bottom < -120 || r.top > innerHeight + 120) continue;  // 看不见的跳过
+      // ⚠️⚠️ 2026-11-14 修（用户：「侧栏动画在往下滑动之后动画有点问题…包括边缘高光动画」）——
+      //    原来这里直接 `continue` 跳过看不见的卡片，**但没清掉它身上那条 `--glare`** ⇒
+      //    滚出视口的那张卡片还挂着上次算出来的高光（固定贴在旧位置），
+      //    滚回来/半露出来时就看着"高光不跟手、停在边上不动" ✗
+      //    ⇒ 跳过之前先把它清成 none ✓
+      if (!r.width || r.bottom < -120 || r.top > innerHeight + 120) {
+        if (el._glare !== 'none') { el._glare = 'none'; el.style.setProperty('--glare', 'none'); }
+        continue;
+      }
       const ux = (tx - (r.left + r.width / 2)) / (r.width / 2);
       const uy = (ty - (r.top + r.height / 2)) / (r.height / 2);
       // （② 那步"把点推到边框上"是径向渐变时代算的 gx/gy，换成线性渐变后不再需要）
@@ -2795,9 +3518,23 @@ let STATE = null;
       //
       //    ⚠️ 圆心在边框上、半径 300px，本来会铺进卡片内部（那是早期径向版被否的原因）；
       //       现在外面有 mask 兜着（只保留边缘 34px），所以这个老毛病不存在了。
-      const kk = 1 / Math.max(Math.abs(ux), Math.abs(uy), 1e-4); // 把这条线推到边框上
-      const gx = (50 + ux * kk * 50).toFixed(1);
-      const gy = (50 + uy * kk * 50).toFixed(1);
+      // ⚠️⚠️ 2026-11-14 修（用户：「高光位置还是不对」）——
+      //    下面这条"把圆心推到边框上"对**小卡片**没问题，但 `nav`（侧栏）有 **700+ px 高**：
+      //    鼠标停在侧栏中上部时，这一推会把光**推到整条侧栏的顶边**（离鼠标一两百像素）
+      //    ⇒ 看着就是"光不跟手、亮在半截那儿"✗
+      //    ⇒ 侧栏单独处理：**圆心就放在鼠标压着的位置**（不推边），
+      //      半径 300 足够铺到左右两条边 ⇒ 亮的是"鼠标旁边那一段边缘" ✓
+      const isNav = String(el.tagName || '').toUpperCase() === 'NAV';
+      let gx;
+      let gy;
+      if (isNav) {
+        gx = (((tx - r.left) / r.width) * 100).toFixed(1);
+        gy = (((ty - r.top) / r.height) * 100).toFixed(1);
+      } else {
+        const kk = 1 / Math.max(Math.abs(ux), Math.abs(uy), 1e-4); // 把这条线推到边框上
+        gx = (50 + ux * kk * 50).toFixed(1);
+        gy = (50 + uy * kk * 50).toFixed(1);
+      }
       const str = a < 0.02 ? 'none'
         : `radial-gradient(circle 300px at ${gx}% ${gy}%,`
           + `rgba(255,255,255,${a.toFixed(3)}) 0%,`                       // 正对鼠标那一点
@@ -3002,6 +3739,8 @@ async function initAccounts() {
 // ⚠️ 2026-10-14：工作模式那一页的读取（两个开关的状态走 /api/accounts，和 QQ 号页同一份）
 async function renderWorkMode() {
   await renderAccounts();
+  // ⚠️ 2026-10-27：把「工作模式用的模型」两个下拉填上（站点 + 模型，key 用已存的）✓
+  pwLoadAi().catch(() => {});
   // ⚠️⚠️ 2026-10-19 加（用户第三次报那两个开关）：那两个「当前：…」原来只靠
   //    `renderAccounts()` 顺带刷 —— 那一整套里任何一步抛异常就停在旧值 ⇒ 界面撒谎 ✗
   //    ⇒ 进这个页面时**再单独问一次**那个轻接口（只读内存、不探活），拿到啥就显示啥 ✓
@@ -3329,6 +4068,91 @@ async function saveWorkCfg() {
  *   ① 用 `GET /api/switches`（只读内存、不探活、不碰 DOM，秒回）；
  *   ② 回话**直接把服务端读到的那两个值说出来** —— 万一还对不上，一眼就知道卡在哪 ✓
  */
+/* ⚠️⚠️⚠️ 2026-10-27 加（用户：「**再加一个私聊工作模式使用的模型的选项，和日常主模型隔离开**」）——
+   只选「站点 + 模型」，**key 和地址都用已经存过的**，不让人重填 ✓ */
+let pwAiStations = [];
+
+async function pwLoadAi() {
+  const sel = $('pw-ai-station');
+  const now = $('pw-ai-now');
+  if (!sel) return;
+  const r = await api('/api/private-model').catch((e) => ({ ok: false, error: e.message }));
+  if (!r || !r.ok) {
+    if (now) now.textContent = '读不到可选模型：' + (r?.error || '看看日志');
+    return;
+  }
+  pwAiStations = Array.isArray(r.stations) ? r.stations : [];
+  sel.innerHTML =
+    '<option value="">（跟日常一样）</option>' +
+    pwAiStations
+      .map((s) => `<option value="${s.baseURL}">${s.label}</option>`)
+      .join('');
+  const cur = r.current;
+  if (cur && cur.baseURL) {
+    sel.value = cur.baseURL;
+    pwFillModels(cur.model);
+  } else {
+    pwFillModels('');
+  }
+  if (now) {
+    now.textContent =
+      cur && cur.model
+        ? `现在：${cur.model}（${cur.baseURL}）`
+        : `现在：跟日常一样（${r.defaultModel || '默认'}）`;
+  }
+}
+
+function pwFillModels(pick) {
+  const st = $('pw-ai-station');
+  const m = $('pw-ai-model');
+  if (!st || !m) return;
+  const s = pwAiStations.find((x) => x.baseURL === st.value);
+  if (!s) {
+    m.innerHTML = '<option value="">（跟日常一样）</option>';
+    return;
+  }
+  m.innerHTML = s.models.map((x) => `<option value="${x}">${x}</option>`).join('');
+  if (pick && s.models.includes(pick)) m.value = pick;
+}
+
+async function pwSaveAi() {
+  const el = $('msg-pw-ai');
+  const baseURL = $('pw-ai-station')?.value || '';
+  const model = $('pw-ai-model')?.value || '';
+  if (!baseURL || !model) {
+    flash(el, false, '两个都要选（不想设就点右边「跟日常一样」）');
+    return;
+  }
+  flash(el, true, '正在保存…');
+  const r = await api('/api/config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ privateWork: { ai: { baseURL, model } } }),
+  }).catch((e) => ({ ok: false, error: e.message }));
+  if (!r || !r.ok) {
+    flash(el, false, '没成功：' + (r?.error || '看看服务端日志'));
+    return;
+  }
+  flash(el, true, `已保存：${model}`);
+  await pwLoadAi();
+}
+
+async function pwResetAi() {
+  const el = $('msg-pw-ai');
+  flash(el, true, '正在清…');
+  const r = await api('/api/config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ privateWork: { ai: null } }),
+  }).catch((e) => ({ ok: false, error: e.message }));
+  if (!r || !r.ok) {
+    flash(el, false, '没成功：' + (r?.error || '看看服务端日志'));
+    return;
+  }
+  flash(el, true, '已改回「跟日常一样」');
+  await pwLoadAi();
+}
+
 async function accSetWorkMode(on) {
   const want = on === true;
   const el = $('msg-acc-workmode');
@@ -3907,7 +4731,7 @@ document.querySelectorAll('nav button').forEach(b => {
     //     2026-10-15 加「B站分享」时**又漏了一次** —— `bili` 没加进这个数组 ⇒
     //     点过去是一片空白（连卡片都不显示，因为它的 section 一直挂着 `hidden`）✗
     //     ⇒ 现在有一条套件断言**自动对账**（`test/webui.js`：每个 `data-tab` 都得在这个数组里）✓）
-    ['model','groups','faces','knowledge','persona','qzone','life','bili','biliPub','biliCmt','voice','quest','groupcfg','affinity','workmode','tools','qqlogin','status','about','accounts'].forEach(t => {
+    ['model','groups','faces','knowledge','persona','qzone','life','bili','biliPub','biliCmt','voice','quest','groupcfg','affinity','workmode','tools','think','qqlogin','status','about','accounts'].forEach(t => {
       const el = $('tab-' + t);
       if (el) el.classList.toggle('hidden', t !== b.dataset.tab);
     });
@@ -3937,6 +4761,8 @@ document.querySelectorAll('nav button').forEach(b => {
     // ⚠️ 2026-10-14：工作模式自己一页（两个开关也搬到它顶上了）
     if (b.dataset.tab === 'workmode') renderWorkMode();
     if (b.dataset.tab === 'tools') renderTools();
+    // ⚠️ 2026-11-11：思考链页 —— 进去才加载 + 连 SSE（不进去不占连接）
+    if (b.dataset.tab === 'think') window.startThink && window.startThink();
   };
 });
 
@@ -3944,6 +4770,17 @@ document.querySelectorAll('nav button').forEach(b => {
  * 切到某个标签页（界面上的按钮用的，比如「日常事件」页里那个「去按群设定」）。
  * ⚠️ 直接复用 nav 按钮自己的 onclick —— 免得两处逻辑各写一遍、以后改一处漏一处。
  */
+// ⚠️ 2026-11-13：支持 `?tab=think` 直接打开某一页 ——
+//    调试和"把链接发给别人"都用得上（我自己也要靠它截图验证渲染）。
+window.addEventListener("DOMContentLoaded", () => {
+  try {
+    const t = new URLSearchParams(location.search).get("tab");
+    if (!t) return;
+    const b = document.querySelector(`nav button[data-tab="${t}"]`);
+    if (b) b.click();
+  } catch {}
+});
+
 function showTab(name) {
   const b = document.querySelector(`nav button[data-tab="${name}"]`);
   if (b) b.click();
@@ -3972,9 +4809,15 @@ async function reloadAll() {
 
   // ⚠️ 2026-10-07 多 QQ 号：这行也标出"现在控制哪个号" ——
   //    侧栏按钮上虽然挂着，但那是要眯着眼找的；这一行一眼就能看见。
-  const meAcc = ACC_LIST.find((a) => a.qq === CUR_ACCOUNT);
+  // ⚠️⚠️ 2026-11-15 改：这一行显示的是**这个进程实际登录的号**，不是"上次在控制哪个号"。
+  //    原来用 `CUR_ACCOUNT`（前端记住的选择）⇒ 在 **Saki 的 3099 页面上会显示成「爱音」**，
+  //    因为 `config.botQQ` 主号的账号文件里是空的，退回前端记忆就串了 ✗
+  //    （用户截图：「没有分账号显示啊，所以这些都是 saki 的信息啊」）
+  //    ⇒ 后端新给 `selfQQ`（= `bot.selfId`，真实登录号），它最权威；没有才退回旧逻辑。
+  const meQq = String(c.selfQQ || '').trim() || String(CUR_ACCOUNT || '').trim();
+  const meAcc = ACC_LIST.find((a) => a.qq === meQq);
   $('hdr').textContent =
-    (CUR_ACCOUNT ? `【${meAcc?.name || CUR_ACCOUNT}】 ` : '') +
+    (meQq ? `【${meAcc?.name || meQq} ${meQq}】 ` : '') +
     `表情 ${r.stats.faces} · 学到 ${r.stats.learned} 条 · ${c.llm.model}`;
 
   // 身份（主人 / 机器人）—— 2026-09-15 用户要求：可编辑，而且「群主」改称「主人」
@@ -3997,7 +4840,17 @@ async function reloadAll() {
     FACES.map((f) => '<option value="' + esc(f.tag) + '">' + esc(f.tag) + '</option>').join('');
   // ⚠️ 2026-10-22 加：多提供商列表 + 存档 + 降级状态（用户要的三件）
   loadProviders();
+  // ⚠️ 2026-11-20：本地模型卡片（首次进入自动拉一次；自动刷新按上次的选择恢复）
+  try {
+    lmLoad();
+    const on = localStorage.getItem('saki-lm-auto') === '1';
+    if (on && $('lm-auto')) { $('lm-auto').checked = true; lmAutoToggle(); }
+  } catch {}
   // ⚠️ 2026-10-07：慢模型丢弃积压（**默认开** —— 只有明确写成 false 才算关）
+  // ⚠️ 2026-11-19：搜索服务选中值（`search.provider`，界面上那张「搜索服务」卡）
+  try {
+    $('search-provider').value = (c.search && c.search.provider) || 'auto';
+  } catch {}
   $('llm-slowDrop').checked = c.llm.slowQueueDrop !== false;
   // ⚠️ 2026-10-09：判据从"秒"改成"**条**"（用户：「改成超过 3 条消息的个数，
   //    时间还是没有精确对应到」）
@@ -4460,12 +5313,27 @@ async function saveLife() {
 //    不再重新抽（原来是重新抽，所以你看到的和发出去的不是同一句）。
 let lifePreviewed = null;
 
+/**
+ * 走向的彩色小标签（平 / 吉 / 凶 / 大凶 / 大吉）。
+ * 事件库改成「一件事 × 多个走向」之后，光看"抽到的事件"分不出这次顺不顺，
+ * 界面上得能一眼看出来。
+ */
+function tierBadge(t) {
+  const m = { '大吉': '#1a7f37', '吉': '#2ea043', '平': '#8b949e', '凶': '#d29922', '大凶': '#da3633' };
+  const c = m[String(t)] || '#8b949e';
+  return '<b style="color:' + c + '">' + esc(String(t)) + '</b>';
+}
+
 function renderLifePreview(p, extra) {
   const box = $('life-preview');
   if (!box || !p) return;
   box.innerHTML =
     kv('时段', esc(String(p.slot || '—'))) +
-    kv('抽到的事件', esc(String(p.event || '—'))) +
+    (p.tier ? kv('走向', tierBadge(p.tier)) : '') +
+    kv('抽到的是', esc(String(p.base || p.event || '—')) +
+      (p.tier && p.base && p.base !== p.event
+        ? '<br><span class="dim">↑ 这一句是「' + esc(p.tier) + '」那个走向</span>'
+        : '')) +
     kv('她会这么说', `<b>${esc(String(p.text || '—'))}</b>`) +
     // ⚠️ 2026-10-13：润色没成功时**真发的时候不发**（事件库原文是第三人称旁白，
     //    直发进群会读成"她在说别人"，用户截图报过）—— 界面上要说清，
@@ -5282,7 +6150,7 @@ async function fillGroupParams() {
     </div>
 
     <div class="btns" style="margin-top:10px">
-      <button class="act" onclick="saveGroupParams()">保存这个群的设置</button>
+      <button class="act" onclick="saveGroupParams(this)">保存这个群的设置</button>
       <button class="act" onclick="clearGroupParams()">恢复内置起点</button>
       <span class="msg" id="msg-gp"></span>
     </div>
@@ -5316,9 +6184,17 @@ async function peerChatNow(poke) {
   }
 }
 
-async function saveGroupParams() {
+async function saveGroupParams(el) {
   const gid = String($('gp-group')?.value || '').trim();
-  if (!gid) return;
+  /* ⚠️⚠️ 2026-10-23 修（用户：「**这个页面的机器人同类池点保存按钮保存不了**」）——
+   *    原来这里是 `if (!gid) return;` ⇒ **静默什么都不做**，
+   *    页面上一丁点反应都没有 ⇒ 看起来就是"保存按钮坏了" ✗
+   *    ⇒ 现在明确告诉他"先选群" ✓
+   */
+  if (!gid) {
+    flash($('msg-gp'), false, '先在页面上面**选一个群**，再点保存');
+    return;
+  }
   const numOrNull = (id) => {
     const v = String($(id)?.value ?? '').trim();
     return v === '' ? null : Number(v);
@@ -5375,22 +6251,43 @@ async function saveGroupParams() {
     // ⚠️ 2026-10-06 加：`answerServer`（**回不回服务器消息**，默认关，见 bot.js 的 `answerServerIn`）
     chat: { strictness: numOrNull('gp-chat-strict'), answerServer: boolOrNull('gp-chat-answerserver') },
   };
-  const btn = event?.target;
+  /* ⚠️⚠️ 2026-10-23 修（用户：「**还是点不了保存啊**」）——
+   *
+   *    原来这两行是：
+   *      `const btn = event?.target;`      ← 在 async 函数里用**全局 event**，
+   *                                           现代浏览器/严格模式下经常拿到 null 或错的元素
+   *      `if (btn) btn.disabled = true;`   ← 然后**没有 try/finally**
+   *    ⇒ 只要 `api()` 抛一次异常（超时 / 断网 / 后端 500），
+   *      `btn.disabled = true` **永远恢复不了** ⇒ **按钮永久变灰、点不了** ✗✗
+   *
+   *    ⇒ 现在：按钮由 `onclick="saveGroupParams(this)"` 传进来，
+   *      并且整段包在 `try { } finally { btn.disabled = false }` 里 ✓
+   */
+  const btn = el && el.disabled !== undefined ? el : null;
   if (btn) btn.disabled = true;
-  const r = await api('/api/group-params', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ groupId: gid, patch }),
-  });
-  if (btn) btn.disabled = false;
-  if (!r.ok) return alert('保存失败：' + (r.error || ''));
-  // ⚠️ 存完**立刻回读**（用户要求「能在 webui 上马上看到变化」）——
-  //    显示的灰字 = 现在真正生效的值，而不是我以为存进去的值
-  await fillGroupParams();
-  const m = $('msg-gp');
-  if (m) {
-    m.textContent = `已保存到群 ${gid}（界面显示的就是现在生效的值）`;
-    setTimeout(() => (m.textContent = ''), 4000);
+  try {
+    const r = await api('/api/group-params', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ groupId: gid, patch }),
+    });
+    if (!r.ok) {
+      flash($('msg-gp'), false, '保存失败：' + (r.error || ''));
+      return;
+    }
+    // ⚠️ 存完**立刻回读**（用户要求「能在 webui 上马上看到变化」）——
+    //    显示的灰字 = 现在真正生效的值，而不是我以为存进去的值
+    await fillGroupParams();
+    const m = $('msg-gp');
+    if (m) {
+      m.textContent = `已保存到群 ${gid}（界面显示的就是现在生效的值）`;
+      setTimeout(() => (m.textContent = ''), 4000);
+    }
+  } catch (e) {
+    flash($('msg-gp'), false, '保存出错：' + (e && e.message ? e.message : e));
+  } finally {
+    // ⚠️ **必须**恢复：抛异常也不许把按钮留在灰着的状态（用户就是因为这个才说"点不了"）
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -5690,6 +6587,20 @@ function provCardHtml(p, i) {
              oninput="PROV[${i}].fallbackModels=this.value.split(/[,，、\\n]/).map(s=>s.trim()).filter(Boolean)"
              placeholder="例：kimi-k2.8-preview,glm-5.3-flash" style="width:100%">
     </div>
+    <!-- ⚠️⚠️ 2026-11-17 加（用户：「在模型提供商卡片那里加一个使用极简提示词的选框，默认关闭」）——
+         勾上 ⇒ 这一家只喂**几百字**的极简提示词（人设/知识库/记忆/工具/剧情全都不拼）。
+         给**本地小模型 / 整活向兜底**用：正常那份提示词实测 6~13 万字，小模型吃不下 ✗
+         ⚠️ 默认**不勾**（= 正常那套），所以老配置一个字都不用改 ✓ -->
+    <div style="margin-top:8px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+        <input type="checkbox" ${p.lite === true ? 'checked' : ''}
+               onchange="PROV[${i}].lite=this.checked">
+        <span>使用<b>极简提示词</b></span>
+      </label>
+      <span class="d" style="display:inline">
+        勾上只喂几百字（不拼人设/知识库/工具）—— 给本地小模型或整活兜底用；不勾 = 正常那套
+      </span>
+    </div>
     <div style="display:flex;align-items:center;gap:10px;margin-top:8px">
       <button class="ghost" style="padding:4px 10px" onclick="provTest(${i})">测试连通性</button>
       <span class="msg" id="prov-msg-${i}"></span>
@@ -5816,6 +6727,205 @@ async function provTest(i) {
   }
 }
 
+/* ⚠️⚠️ 2026-10-29 加（用户：「加一个**是否自动降级提供商**的按钮防止降级到中转站」）
+ *
+ *   · 开着 ⇒ 主模型挂了按列表顺序**跨家**换下一家（原来那套）
+ *   · 关掉 ⇒ 后端 `providerChain()` **只返回第 1 个** ⇒ 列表里剩下的（含中转站）
+ *     永远不会被调用 ✓（同一家的「备用模型」不受影响）
+ *
+ *   ⚠️ 点一下**立刻生效**，不用点「保存列表」——
+ *     ⚠️ 所以请求里**只传 autoFallback、不传 providers**
+ *     （后端专门开了那个分支；传了 providers 会顺带重写整个列表）
+ */
+let PROV_AUTOFALLBACK = true;
+
+function renderAutoFallback() {
+  const el = $('prov-autofallback');
+  if (el) el.checked = PROV_AUTOFALLBACK !== false;
+}
+
+/* ⚠️ 2026-11-19 加：**搜索服务选择**（ds 官方 / 内置抓页 / 自动回落）
+ * 落到 `config.yml` 的 `search.provider`（`search` 在 SHARED_SECTIONS 里 ⇒ 写共用那份）
+ * ⚠️ 保存完 `saveConfig()` 会自己 `reloadConfig()` ⇒ 不用重启、不用再点"重载" ✓ */
+async function onSearchProviderChange() {
+  const el = $('search-provider');
+  const msg = $('msg-search-prov');
+  const want = String(el?.value || 'auto');
+  const label = { auto: '自动（ds 优先，失败回落内置）', deepseek: '只走 DeepSeek', builtin: '只走内置抓页' }[want] || want;
+  const r = await api('/api/config', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ search: { provider: want } }),
+  });
+  if (!r?.ok) {
+    flash(msg, false, '保存失败：' + (r?.error || ''));
+    return;
+  }
+  flash(msg, true, '已保存：' + label + ' ✓');
+}
+
+/* ⚠️⚠️ 2026-11-20 加：**本地模型卡片**（用户要求"所有状态 + 所有资源参数 + 开关"）
+ *
+ *   · 状态：在跑/没跑、PID、启动时间、/v1/models 里的模型名、GPU 显存
+ *   · 资源参数：ctx / ngl（GPU 层数）/ KV 量化 / 线程 / 思考预算 / 并发 —— 全读后端 CONFIG
+ *   · 开关：启动 / 重启 / 停止 + 2 秒自动刷新
+ *   ⚠️ 参数**不给界面改**：真改了必须重启 llama-server 才生效，界面上"改完立刻重启"
+ *      会把人搞迷糊（而且改错参数起不来就惨了）⇒ 卡片写清"改哪个文件的哪一段"✓
+ */
+let LM_TIMER = null;
+
+function lmRow(k, v, tip) {
+  return '<div style="display:flex;gap:10px;padding:3px 0;border-bottom:1px dashed rgba(255,255,255,.06)">' +
+    '<div style="flex:0 0 132px;color:var(--dim2);font-size:12.5px">' + esc(k) + '</div>' +
+    '<div style="flex:1 1 auto;font-size:12.5px;word-break:break-all">' + v +
+    (tip ? '<span class="hint" style="margin-left:6px">' + esc(tip) + '</span>' : '') +
+    '</div></div>';
+}
+
+async function lmLoad() {
+  const box = $('lm-body');
+  const st = $('lm-state');
+  if (!box) return;
+  try {
+    const r = await fetch('/api/local-model', { cache: 'no-store' });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error || '取不到状态');
+    const c = j.config || {};
+    const on = !!j.ok && j.ok !== false && j.pids && j.pids.length >= 0 && j.port;
+    const alive = !!j.models && j.models.length >= 0 && j.ok;
+    if (st) {
+      st.textContent = alive ? '● 在跑' : '○ 没跑';
+      st.style.color = alive ? 'var(--ok)' : '#f85149';
+    }
+    const g = j.gpu;
+    let html = '';
+    /* ⚠️⚠️ 2026-11-20 改（用户：「**启动之后状态显示明显是正常的，启动不正常一定要能显示和问题**」）——
+     *   `/health ok` 只说明 HTTP 服务在听，**不代表能推理**（内存被打满时会接受连接然后卡死）
+     *   ⇒ 这张卡必须分开显示两件事：
+     *     · 服务在听（ok）
+     *     · **真能推理**（infer，后端会真发一次 max_tokens:1 的请求）
+     *   任何一项不对，都要把**具体原因**摆出来，不能只说"正常" ✓ */
+    const listening = !!j.ok;
+    const inferOk = j.infer === true;
+    const healthy = listening && inferOk;
+    html += lmRow(
+      '健康',
+      healthy
+        ? '<b style="color:var(--ok)">正常</b>（服务在听 + 推理 ' + (j.inferMs ?? '?') + ' ms）'
+        : !listening
+          ? '<b style="color:#f85149">没在跑</b>'
+          : '<b style="color:#f85149">服务在听，但**推理不响应**</b>' +
+            (j.inferError ? '——' + esc(String(j.inferError).slice(0, 120)) : '') +
+            '<div class="hint">多半是内存/显存不够：关掉占内存大的程序（MC 服务端 / 浏览器）再重启</div>',
+    );
+    html += lmRow('进程', listening ? ('PID <b>' + (j.pids || []).join(',') + '</b>') : '<span style="color:#f85149">没有在跑</span>');
+    html += lmRow('端口', j.port + '　' + (listening ? '<span style="color:var(--ok)">/health ok</span>' : '<span style="color:#f85149">连不上</span>'));
+    /* ⚠️ 2026-11-20 加（用户：「**再显示一下 token 实时速度**」+「**百分之多少在 GPU 上也要显示出来**」）
+     *   速度 = `probe()` 真跑 24 token 测出来的 `predicted_per_second`（后端 30 秒缓存一次）
+     *   GPU 占比 = 解析 llama-server 日志的 `offloaded X/Y layers to GPU` ✓ */
+    if (listening) {
+      const tps = Number(j.tps) || 0;
+      const tpsColor = tps >= 30 ? 'var(--ok)' : tps >= 12 ? '#ffa500' : '#f85149';
+      html += lmRow(
+        '生成速度',
+        '<b style="color:' + tpsColor + ';font-size:14px">' + tps.toFixed(1) + ' tok/s</b>' +
+          '<span class="hint">（探活实测，30 秒更新一次）</span>' +
+          (tps > 0 && tps < 12 ? '<div class="hint" style="color:#ffa500">⚠️ 低于 12 tok/s 通常是笔记本在「节能/办公模式」：GPU 被限到 ~25W（满血 115W），一条回复要等十几秒</div>' : ''),
+      );
+      html += lmRow(
+        'prefill',
+        '<b>' + (Number(j.prefillMs) || 0) + ' ms</b>' +
+          '<span class="hint">（' + (Number(j.prefillMs) < 3000 ? '提示词缓存命中 ✓' : '没命中，首次或前缀变了') + '）</span>',
+      );
+      const gl = j.gpuLayers;
+      if (gl) {
+        const p = gl.percent;
+        const pc = p >= 99 ? 'var(--ok)' : p >= 50 ? '#ffa500' : '#f85149';
+        const bar =
+          '<div style="height:6px;border-radius:3px;background:rgba(255,255,255,.1);overflow:hidden;margin-top:4px">' +
+          '<div style="height:100%;width:' + p + '%;background:' + pc + '"></div></div>';
+        html += lmRow('GPU 层数', '<b style="color:' + pc + '">' + p + '%</b>（' + gl.offloaded + '/' + gl.total + ' 层）' + bar +
+          (p < 99 ? '<div class="hint" style="color:#ffa500">⚠️ 没全上 GPU，剩下的在 CPU 跑 ⇒ 慢</div>' : ''));
+      } else {
+        html += lmRow(
+          'GPU 层数',
+          '<b>' + (c.ngl >= 99 ? '请求全卸载（-ngl ' + c.ngl + '）' : '-ngl ' + c.ngl) + '</b>' +
+            '<span class="hint">读不到日志里的 offload 报告（不影响使用）</span>',
+        );
+      }
+    }
+    html += lmRow('模型', esc(j.modelName) + '　<b>' + j.modelGB + ' GB</b>');
+    html += lmRow('对外名字', '<code>' + esc(j.alias) + '</code>' + (j.models?.length ? '　模型列表：' + esc(j.models.join(', ')) : ''));
+    if (j.startedAt) html += lmRow('启动时间', esc(String(j.startedAt).replace(/^\/Date\((\d+)\)\/$/, (m, t) => new Date(Number(t)).toLocaleString('zh-CN', { hour12: false }))));
+    if (g) {
+      const pct = g.total ? Math.round((g.used / g.total) * 100) : 0;
+      const bar = '<div style="height:6px;border-radius:3px;background:rgba(255,255,255,.1);overflow:hidden;margin-top:4px">' +
+        '<div style="height:100%;width:' + pct + '%;background:' + (pct > 92 ? '#f85149' : pct > 78 ? '#ffa500' : 'var(--ok)') + '"></div></div>';
+      html += lmRow('显存', '<b>' + g.used + ' / ' + g.total + ' MiB</b>（空闲 ' + g.free + '）' + bar);
+    }
+    html += lmRow('上下文 <code>-c</code>', '<b>' + c.ctx + '</b> token　' + (c.ctx >= 60000 ? '<span class="hint">≈ 9 万字提示词</span>' : ''));
+    html += lmRow('GPU 层 <code>-ngl</code>', '<b>' + c.ngl + '</b>' + (c.ngl >= 99 ? '（全部卸载到显卡）' : '（部分在 CPU，会慢）'));
+    html += lmRow('KV 量化', '<code>' + esc(c.kvType) + '</code>　<span class="hint">省显存；q8 更准但装不下 64k</span>');
+    html += lmRow('线程 <code>-t</code>', String(c.threads));
+    html += lmRow('思考预算', '<b>' + c.reasoningBudget + '</b> token　<span class="hint">想 6 秒左右，剩下留给正文</span>');
+    html += lmRow('并发 slot', String(c.parallel));
+    if (j.active) {
+      html += lmRow('这个号在用', esc(j.active.name || '-') + ' / ' + esc(j.active.model || '-') +
+        (j.liteOn ? '　<b style="color:var(--ok)">极简模式</b>' : ''));
+    }
+    html += '<details style="margin-top:8px"><summary class="hint" style="cursor:pointer">完整命令行</summary>' +
+      '<pre class="tc-pre" style="margin-top:6px;max-height:120px">' + esc(j.cmd || '（没在跑）') + '</pre></details>';
+    box.innerHTML = html;
+  } catch (e) {
+    box.innerHTML = '<div style="color:#f85149;font-size:12.5px">取状态失败：' + esc(e.message) + '</div>';
+    if (st) { st.textContent = '● 状态未知'; st.style.color = '#f85149'; }
+  }
+}
+
+async function lmAct(action) {
+  const msg = $('lm-msg');
+  const label = { start: '启动', stop: '停止', restart: '重启' }[action] || action;
+  if (msg) { msg.textContent = label + '中…（最多等 2 分钟）'; msg.style.color = ''; }
+  try {
+    const r = await api('/api/local-model', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action }),
+    });
+    if (!r?.ok) throw new Error(r?.error || '失败');
+    if (msg) { msg.textContent = label + ' 完成 ✓'; msg.style.color = 'var(--ok)'; }
+  } catch (e) {
+    if (msg) { msg.textContent = label + ' 失败：' + e.message; msg.style.color = '#f85149'; }
+  }
+  lmLoad();
+}
+
+function lmAutoToggle() {
+  const on = !!$('lm-auto')?.checked;
+  if (LM_TIMER) { clearInterval(LM_TIMER); LM_TIMER = null; }
+  if (on) LM_TIMER = setInterval(lmLoad, 2000);
+  try { localStorage.setItem('saki-lm-auto', on ? '1' : '0'); } catch {}
+}
+
+async function onAutoFallbackChange() {
+  const el = $('prov-autofallback');
+  const msg = $('msg-autofb');
+  const want = !!el?.checked;
+  const r = await api('/api/llm-providers', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ autoFallback: want }),
+  });
+  if (!r.ok) {
+    if (el) el.checked = !want;   // 失败就弹回去
+    flash(msg, false, '保存失败：' + (r.error || ''));
+    return;
+  }
+  PROV_AUTOFALLBACK = want;
+  flash(msg, true, want
+    ? '已开：主模型不可用时会换下一家'
+    : '已关：只认第 1 个，列表里其余（中转站）永远不会被调用 ✓');
+  // 顺手刷一下降级状态条（关掉之后那条"正在降级"应该消失）
+  try { const j = await api('/api/llm-providers'); renderFallback(j.fallback); } catch { /* ignore */ }
+}
+
 async function saveProviders() {
   const m = $('msg-prov');
   /* ⚠️ 2026-10-22：**必须走 `api()`**（它会带 `x-saki-account` 头）——
@@ -5839,8 +6949,10 @@ async function loadProviders() {
     PROV = Array.isArray(j.providers) ? j.providers : [];
     PROV_ACTIVE = String(j.activeId || (PROV[0]?.id || ''));
     PF_LIST = Array.isArray(j.profiles) ? j.profiles : [];
+    PROV_AUTOFALLBACK = j.autoFallback !== false;
     renderProviders();
     renderProfiles();
+    renderAutoFallback();
     renderFallback(j.fallback);
   } catch { /* ignore */ }
 }
@@ -5851,6 +6963,19 @@ async function loadProviders() {
 function renderFallback(fo) {
   const box = $('prov-fallback');
   if (!box) return;
+  /* ⚠️ 2026-10-29 加：**关掉自动降级时要说一句** —— 不然界面上什么都不显示，
+   *    人会以为"降级那块坏了"或者"还在偷偷降" ✗ */
+  if (fo && fo.autoFallback === false && !fo.level && !fo.modelIdx) {
+    const others = Math.max(0, Number(fo.providerCountConfigured || 1) - 1);
+    box.style.display = 'block';
+    box.style.background = 'rgba(90,160,255,.12)';
+    box.style.borderColor = 'rgba(90,160,255,.4)';
+    box.innerHTML = `ℹ️ <b>自动降级提供商已关闭</b> ⇒ 只认第 1 个（<b>${esc(fo.mainName || '?')}</b>）；
+      列表里其余 <b>${others}</b> 家<b>不会被调用</b>（含中转站）。`;
+    return;
+  }
+  box.style.background = '';
+  box.style.borderColor = '';
   // ⚠️ 2026-10-22：**同家换模型也算降级中**（`sameVendor`）——
   //    用户要求「主模型被限流时先换相同供应商的正常模型」⇒ 界面上要能看出"没换家，只换了模型" ✓
   if (!fo || (!fo.level && !fo.modelIdx)) { box.style.display = 'none'; return; }
@@ -6916,6 +8041,9 @@ async function renderBiliPub() {
   $('bp-enable').value = c.enable ? '1' : '0';
   $('bp-ws').value = c.windowStart;
   $('bp-we').value = c.windowEnd;
+  // ⚠️ 2026-11-01：做视频那组（留空 = 老行为，一条龙做完就发）
+  if ($('bp-ms')) $('bp-ms').value = c.makeStart || '';
+  if ($('bp-me')) $('bp-me').value = c.makeEnd || '';
   $('bp-group').value = c.group || '';
   $('bp-durmax').value = c.durationMax;
   $('bp-zone').value = c.zone || '生活';
@@ -7030,6 +8158,9 @@ $('bp-save') && ($('bp-save').onclick = async function () {
       enable: bpPick('bp-enable', !!bpInit0.pub),
       windowStart: $('bp-ws').value,
       windowEnd: $('bp-we').value,
+      // ⚠️ 2026-11-01：做视频那组（留空 = 老行为）
+      makeStart: $('bp-ms') ? $('bp-ms').value : '',
+      makeEnd: $('bp-me') ? $('bp-me').value : '',
       group: $('bp-group').value,
       durationMax: Number($('bp-durmax').value),
       zone: $('bp-zone').value,

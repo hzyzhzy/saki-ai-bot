@@ -39,12 +39,24 @@ let cacheAt = 0;
 
 /** 读盘并解析 `memes.md`（失败/没有 → []） */
 function load() {
+  /* ⚠️⚠️ 2026-11-07 改（用户：「同时也可以不断增删改 meme.md 库，增加 bot 的玩梗技能」）——
+   *   现在读**两份**：
+   *     · `memes.md`       —— 人工维护的（**不自动改它**，里面的"什么意思 / 怎么接"是人写的）
+   *     · `memes-auto.md`  —— 由 `src/memes-auto.js` 从群聊里**自动发现**并维护的
+   *   两份格式一样，拼起来一起解析 ✓
+   *   ⚠️ 自动那份**强度一律 ★**（"只认得，默认按字面回，不主动玩"）——
+   *     因为它是统计出来的，没有人工确认过"到底什么意思"，
+   *     给高了就会见她乱用（把普通词当梗接）✗
+   */
   let raw = '';
-  try {
-    raw = readFileSync(join(KNOWLEDGE_DIR, 'memes.md'), 'utf8');
-  } catch {
-    return [];
+  for (const f of ['memes.md', 'memes-auto.md']) {
+    try {
+      raw += '\n' + readFileSync(join(KNOWLEDGE_DIR, f), 'utf8');
+    } catch {
+      /* 没有那份就算了 */
+    }
   }
+  if (!raw.trim()) return [];
   // 看的人用的说明（HTML 注释）解析时丢掉
   const text = raw.replace(/<!--[\s\S]*?-->/g, '');
   const items = [];

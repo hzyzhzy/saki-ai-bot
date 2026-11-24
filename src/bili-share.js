@@ -1,5 +1,5 @@
 /**
- * B 站视频分享（2026-10-15 用户要求）。
+ * B 站视频分享（2026-10-15 要求）。
  *
  * 用户原话：
  *   「这个插件可以让 bot 也能看到 b 站视频，或者能自己分享视频吗」
@@ -36,7 +36,7 @@
  * （会被限流的是 `space/arc` 那个）；它自带 `buvid3` 反风控 ✓
  * ⇒ 不需要额外做限流处理，但仍然**别太频**（每天 1 条的量 + 冷却）✓
  */
-import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, unlinkSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { config, paramsFor, ROOT, stateDir } from './config.js';
 import { log } from './log.js';
@@ -64,6 +64,110 @@ const STATE_FILE = process.env.QQBOT_BILI_SHARE_FILE
   ? join(ROOT, process.env.QQBOT_BILI_SHARE_FILE)
   : join(stateDir(), 'bili-share.json');
 
+/* ── 跨号「这个群刚有人发过」的共享时间闸（2026-11-04 定） ──
+ *
+ * 用户原话：「**我就是说发的时间不要同时发，又没说不让第二个 bot 发**」
+ *
+ * ⚠️⚠️ 背景（真事故，2026-11-04 17:06）：
+ *   `STATE_FILE` 是**按号分**的（主号 `state/bili-share.json`、爱音
+ *   `state/accounts/<QQ>/bili-share.json`）⇒ 上面 2026-10-20 加的 `reload()`
+ *   「重读共享状态」**根本没共享** ⇒ 两个号都以为自己今天还是 0/1 条 ⇒
+ *   同一轮 tick 各发一条：17:06:04.**073** 爱音发 LoveLive 翻跳、
+ *   17:06:04.**989** 主号发 LoveLive 合集，**相差 915 毫秒** ✗
+ *   （`staggerMs` 那个相位错峰给的偏移太小，两个号正好撞在同一秒里）
+ *
+ * ✅ 修法（**不合并配额** —— 用户明确说两个号都该能发，只要求**时间错开**）：
+ *   单独一个**跨号共用**的目录 `state/bili-share-gap/<群号>/`，只记一件事：
+ *   **这个群上一次"开闸发出去"是哪一刻、谁发的**。
+ *   · 距上次不足 `crossGapMs`（默认 10 分钟）⇒ 这次跳过，等下一轮（10 分钟后）再发 ✓
+ *   · 各号自己的 `fired / target / sent` 一律不动 ⇒ **两个号照样都能发** ✓
+ *
+ * ⚠️⚠️ 抢闸为什么不用「unlink 再 wx 建锁文件」：
+ *   两个进程同时醒来时，A 建好的锁可能被 B 的 `unlink` 删掉再重建
+ *   ⇒ **两边都以为抢到了** ✗（今天就死在"同一秒"上，不能再留这种窗口）
+ *   ⇒ 改成**插入后重读确认**：各自新建一个**唯一文件名**的记录（永不删别人的），
+ *      写完立刻重扫一遍，窗口内**时刻最早**（同时刻按文件名）的那条算赢；
+ *      输的那个删掉自己那条、当场让位 ✓
+ *   ⚠️ 两个进程用的是**同一个确定性比较规则** ⇒ 结论一致，不会互相认为自己是赢家 ✓
+ */
+const GAP_DIR = join(ROOT, 'state', 'bili-share-gap');
+const GAP_DEFAULT_MS = 10 * 60 * 1000;
+const GAP_KEEP_MS = 24 * 3600 * 1000;
+
+/** 读这个群的闸目录（按时刻升序；坏了/不存在的跳过） */
+function gapScan(gid) {
+  const dir = join(GAP_DIR, gid);
+  let files = [];
+  try { files = readdirSync(dir); } catch { return []; }
+  const out = [];
+  for (const f of files) {
+    try {
+      const j = JSON.parse(readFileSync(join(dir, f), 'utf8'));
+      out.push({ file: f, at: Number(j?.at) || 0, by: String(j?.by ?? '') });
+    } catch { /* 半截文件当没有 */ }
+  }
+  return out.sort((a, b) => a.at - b.at || (a.file < b.file ? -1 : 1));
+}
+
+/**
+ * 抢「这个群现在归我发」。
+ *
+ * @returns {{ok:boolean, why?:string}}
+ */
+export function claimGap(gid, selfId = '', gapMs = GAP_DEFAULT_MS) {
+  const g = String(gid ?? '').trim();
+  if (!g) return { ok: false, why: '没给群号' };
+  const dir = join(GAP_DIR, g);
+  try { mkdirSync(dir, { recursive: true }); } catch { /* 已存在 */ }
+  const now = Date.now();
+
+  // 顺手清掉一天前的老记录（只删老到没人可能还在判定的那些）
+  for (const x of gapScan(g)) {
+    if (x.at && now - x.at > GAP_KEEP_MS) { try { unlinkSync(join(dir, x.file)); } catch { /* ignore */ } }
+  }
+
+  // ① 窗口内已经有人发过 ⇒ 这次让位
+  const recent = gapScan(g).filter((x) => x.at && now - x.at < gapMs);
+  if (recent.length) {
+    const prev = recent[recent.length - 1];
+    const wait = gapMs - (now - prev.at);
+    const who = prev.by && prev.by !== String(selfId) ? `${prev.by} ` : '';
+    return { ok: false, why: `这个群 ${Math.ceil(wait / 60000)} 分钟内刚由${who}号发过（时间错开）` };
+  }
+
+  // ② 写自己那条（文件名唯一 ⇒ 永不覆盖别人）
+  const my = `${now}-${process.pid}-${Math.random().toString(36).slice(2, 8)}.json`;
+  try {
+    writeFileSync(join(dir, my), JSON.stringify({ at: now, by: String(selfId ?? '') }), 'utf8');
+  } catch (e) {
+    return { ok: false, why: `写闸失败：${e.message}` };
+  }
+
+  // ③ 重读确认：窗口内最早的那条才算赢（同时刻按文件名，两个进程算出同一个赢家）
+  const all = gapScan(g).filter((x) => now - x.at < gapMs);
+  if (all.length && all[0].file !== my) {
+    try { unlinkSync(join(dir, my)); } catch { /* ignore */ }
+    const w = all[0].by && all[0].by !== String(selfId) ? `${all[0].by} ` : '';
+    return { ok: false, why: `另一个号（${w}号）同一刻也抢到了，它先发 ⇒ 这次让位` };
+  }
+  return { ok: true };
+}
+
+/** 让给下次（挑不到视频 / 发送失败时把闸还回去，别白占 10 分钟）—— 只删**自己**那条 */
+export function releaseGap(gid, selfId = '') {
+  const g = String(gid ?? '').trim();
+  if (!g) return;
+  const dir = join(GAP_DIR, g);
+  const now = Date.now();
+  const list = gapScan(g);
+  const mine = list.filter(
+    (x) => x.at && now - x.at < 5 * 60 * 1000 && (!selfId || x.by === String(selfId)),
+  );
+  for (const x of mine) {
+    try { unlinkSync(join(dir, x.file)); } catch { /* ignore */ }
+  }
+}
+
 /**
  * 落盘的状态（重启不能忘）：
  *   · `by[群]` = { fired, target, lastAt } —— **按群**记今天几条 / 上次何时发的 ✓
@@ -76,7 +180,7 @@ const STATE_FILE = process.env.QQBOT_BILI_SHARE_FILE
 let st = { day: '', by: {}, sent: [], sentByGid: {}, recent: {}, nowKw: {} };
 
 const PER_GROUP_SENT_MAX = 800;
-/** ⚠️ 2026-10-16 用户：「**两个月清一次已发视频记录，要不然会无限堆**」⇒ 保留 60 天 ✓ */
+/** ⚠️ 2026-10-16：「**两个月清一次已发视频记录，要不然会无限堆**」⇒ 保留 60 天 ✓ */
 const SENT_KEEP_DAYS = 60;
 
 /**
@@ -292,7 +396,7 @@ async function pickReal(gid = '', kwsOverride = null) {
   const limit = Math.max(4, Math.min(20, Number(cfgFor(gid).maxResults ?? 8) || 8));
   const deny = cfgFor(gid).deny ? new RegExp(String(cfgFor(gid).deny)) : null;
 
-  // ⚠️⚠️ 2026-10-16 用户说清了两者的区别：
+ // ⚠️⚠️ 2026-10-16 说清了两者的区别：
   //   「和自动发送的框不同，那个是**每次发视频选一个关键词**，这个**是一次选多个关键词**」
   //   ⇒ · 自动那份：**随机挑一个**词搜，命中就拿（老逻辑 ✓）
   //      · 界面"立刻发送"那格填的：**这几个词一起搜**，
@@ -365,7 +469,7 @@ function bvidOf(url) {
 }
 
 /**
- * **她自己对这个视频想说的话**（2026-10-15 用户要求：「一半概率会触发」+「分条发送」）。
+ * **她自己对这个视频想说的话**（2026-10-15 要求：「一半概率会触发」+「分条发送」）。
  *
  * @returns {Promise<string>} 没触发 / 想不出来 ⇒ `''`（那就只发链接那一条）✓
  */
@@ -470,8 +574,28 @@ async function sendOne(bot, gid, { force = false, keywords = null, take = null }
   const d = force ? { due: true, why: '界面上手动点发' } : due(g);
   if (!d.due) return { sent: false, why: d.why, gid: g };
 
+ /* ── 跨号时间闸（2026-11-04：「发的时间不要同时发，又没说两个号不能都发」）──
+   *   · 手动点发：**优先**，把位子直接拿过来（它本来就不该被规则拦）
+   *   · 定时：抢不到就这次不发，等下一轮（10 分钟后）✓
+   *   ⚠️ 这里**不看、也不动**本号自己的 `fired/target` ⇒ 两个号照样都能发 ✓
+   */
+  const gapMs = Math.max(60000, Number(cfgFor(g).crossGapMs ?? GAP_DEFAULT_MS) || GAP_DEFAULT_MS);
+  if (force) {
+    // 手动点发：**只占位、不看闸**（用户点的那条就该发；后面定时的会被挡掉）
+    claimGap(g, bot?.selfId, 0);
+  } else {
+    const gap = claimGap(g, bot?.selfId, gapMs);
+    if (!gap.ok) {
+      log.info(`[B站分享] 群 ${g} 这次不发：${gap.why}`);
+      return { sent: false, why: gap.why, gid: g, gap: true };
+    }
+  }
+
   const v = await pick(g, keywords);
-  if (!v) return { sent: false, why: '没挑到能发的视频', gid: g };
+  if (!v) {
+    releaseGap(g, bot?.selfId); // 没挑到视频 ⇒ 把位子还回去，别白占 10 分钟
+    return { sent: false, why: '没挑到能发的视频', gid: g };
+  }
 
   // ⚠️⚠️ 2026-10-16 兜底一道（用户：「**注意同一个群发的视频不要有重复的**」）——
   //    `pickReal` 里已经按群过滤过一次，这里**再挡一道**：
@@ -480,12 +604,13 @@ async function sendOne(bot, gid, { force = false, keywords = null, take = null }
   //    ⚠️ **只挡同一个群** —— 同一个视频发到**另一个**群不算重复（本来就不算 ✓）
   if (isSent(g, v.bvid ?? bvidOf(v.url))) {
     log.info(`[B站分享] 群 ${g} 已经发过「${v.title}」⇒ 跳过（不重复发 ✓）`);
+    releaseGap(g, bot?.selfId); // 没真发出去 ⇒ 闸还回去
     return { sent: false, why: '这条在这个群发过了', gid: g, dup: true };
   }
 
   // ⚠️ 只发**链接 + 标题**（用户选的 A 方案 —— 卡片发不出去，见文件头那段实测）✗
   //
-  // ⚠️⚠️ 2026-10-15 用户给了**真实样例**（他自己复制的一条 B 站分享）：
+ // ⚠️⚠️ 2026-10-15给了**真实样例**（他自己复制的一条 B 站分享）：
   //    「【余承东:尊界…】 https://www.bilibili.com/video/BV1ropy6HEGw/?share_source=copy_web&vd_source=4cc0…」
   //    ⇒ 两处照抄：
   //      ① 「**【标题】 链接**」这个样式 ✓
@@ -515,6 +640,7 @@ async function sendOne(bot, gid, { force = false, keywords = null, take = null }
     await bot.sendText({ message_type: 'group', group_id: g }, text);
   } catch (e) {
     log.warn(`[B站分享] 发到群 ${g} 失败：${e.message}`);
+    releaseGap(g, bot?.selfId); // 没发成功 ⇒ 闸还回去（否则这个群白等 10 分钟）
     return { sent: false, why: `发送失败：${e.message}`, gid: g };
   }
   const s = slot(g) ?? { fired: 0, target: 0, lastAt: 0 };
@@ -656,7 +782,7 @@ export function staggerMs(selfId, every = 10 * 60 * 1000) {
 }
 
 /**
- * **她刚刚在这个群里分享过什么**（2026-10-15 用户要求）。
+ * **她刚刚在这个群里分享过什么**（2026-10-15 要求）。
  *
  * 用户原话：「**bot 要知道她自己在分享视频，也要知道视频大概讲了什么**」。
  * 起因：她在群里甩了条标着「爱祥」的链接，爱音跑来问「你发这个干嘛呀」，

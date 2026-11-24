@@ -522,7 +522,7 @@ console.log('\n【★】2026-10-13：日常事件不许发第三人称原文 + �
   );
   // ② 同一条 15 分钟内在同一个群出现两遍：回执超时 ≠ 没发到
   check(
-    /life\.noteFailed\(g, plan\.template\.text/.test(srcIndex),
+    /life\.noteFailed\(g, plan\.template\.baseText/.test(srcIndex),
     '★★ 发失败（含回执超时）→ 登记 `life.noteFailed`（重排不再抽同一条）',
   );
   check(/FAIL_COOLDOWN_MS = 45 \* 60 \* 1000/.test(srcLife), '★ 冷藏窗口 = 45 分钟');
@@ -535,9 +535,10 @@ console.log('\n【★】2026-10-13：日常事件不许发第三人称原文 + �
   const text = first.template?.text ?? '';
   check(!!text, '抽到的事件文本非空', text);
 
-  life.noteFailed('', text, at(12, 31));
+  const baseText = first.template?.baseText ?? text;
+  life.noteFailed('', baseText, at(12, 31));
   check(
-    readFileSync(join(ROOT, LIFE_REL), 'utf8').includes(text.slice(0, 10)),
+    readFileSync(join(ROOT, LIFE_REL), 'utf8').includes(baseText.slice(0, 10)),
     '★ 冷藏名单**落盘**（重启也不丢）',
   );
   arm(at(12, 36), { target: 5, fired: 1, lastFireAt: at(12, 0), nextAt: at(12, 36) });

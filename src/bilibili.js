@@ -166,7 +166,7 @@ function fallback(prev, error) {
 /**
  * 「我最近视频播放量怎么样」—— 给模型看的**事实**。
  *
- * 用户 2026-09-13：「以后还可以询问**我的视频播放量最近怎么样**之类的信息」。
+ * 2026-09-13：「以后还可以询问**我的视频播放量最近怎么样**之类的信息」。
  *
  * ⚠️ 数字全部由代码算好（总播放、中位数、最近几条），**不让模型算** ——
  *    它算这种一列数字必错。
@@ -177,7 +177,7 @@ function fallback(prev, error) {
 export async function ownerVideoFacts(opts = {}) {
   const r = await fetchUserVideos(undefined, opts);
   if (!r.ok) {
-    // ⚠️⚠️ **不要把 `HTTP 412` 这种内部错误码写进事实**（2026-09-14 用户反馈）。
+ // ⚠️⚠️ **不要把 `HTTP 412` 这种内部错误码写进事实**（2026-09-14反馈）。
     //     模型是照着事实文本说话的 —— 给了 `412` 它就念
     //     「B站接口412了，拉不出来」，群友完全看不懂这是什么。
     //     这里改成一句**人话**，并把"别编数字"的要求一起给它。
@@ -354,7 +354,7 @@ function topicOpts(keyword) {
  *   `{mode:'topic', keyword}`   —— 按题材（"最近 mc 有什么火的" → 搜「我的世界」）
  *   `{mode:'up', name}`         —— 按 UP 主（"籽岷最近有什么视频"）
  *
- * ⚠️ 用户 2026-09-15 追加要求：「可以问她最近 mc 或者籽岷有什么比较火的视频吗」。
+ * ⚠️ 2026-09-15 追加要求：「可以问她最近 mc 或者籽岷有什么比较火的视频吗」。
  * ⚠️ **不抢**"问他自己投稿"那种（`我的视频播放量`）—— 那是 `ownerVideoFacts` 的活。
  */
 /**
@@ -404,7 +404,7 @@ export function hotQuery(text) {
   const hotish = /热榜|热门|排行|火的|最火|比较火|最近火|炸裂|精彩|什么好看|有什么好看|好玩|播放(量)?高/.test(t);
   const videoNoun = /视频|投稿|作品/.test(t);
   const fresh = /最近|近期|新(的|出)?|这两天/.test(t);
-  // ⚠️ **「XX 有什么视频」也算**（2026-09-15 用户截图：
+ // ⚠️ **「XX 有什么视频」也算**（2026-09-15截图：
   //    「Luminiflux有什么视频」原来**没被认出来** → 走到网页搜索 → 她答
   //    「Luminiflux是谁啊，我去搜搜」＝**空头承诺**。用户要求「真的去做然后给回复」）。
   const asking = /有什么|有没有|发过|出过|的视频/.test(t);
@@ -540,12 +540,6 @@ async function biliSearch({ keyword, order = 'click', tids = 0, pubtime = 0, pag
         .replace(/\s+/g, ' ')
         .trim()
         .slice(0, 200),
-      /* ⚠️ 2026-10-22 加（用户：「**避开官方大号**」）：
-       *    搜索接口的每一项都带 `official_verify`（`type: 1` = 认证号，0 = 普通用户）。
-       *    实测踩过：挑到「明日方舟」官方号的视频（422 万播放），评论**被风控拦了**
-       *    （页面弹「受到神秘力量干扰，请稍后再试」）⇒ 官方号评论区审核严得多 ✗
-       *    ⇒ 主动评论那条路要能认出"这是认证号"，直接跳过 ✓ */
-      official: Number(v?.official_verify?.type) === 1,
       url: String(v.arcurl ?? (v.bvid ? `https://www.bilibili.com/video/${v.bvid}` : '')),
     }))
     .filter((v) => v.title);
@@ -558,36 +552,6 @@ async function biliSearch({ keyword, order = 'click', tids = 0, pubtime = 0, pag
  *    （实测直接回 `code=-799 请求过于频繁`，而且模块自己会把那个接口封 45 分钟）。
  *    搜索接口**稳定可用**。
  */
-/**
- * 从任意文本里抠出**视频标识**（BV 号 **或 av 号**）—— 2026-10-22 加
- *
- * ## ⚠️⚠️ 为什么必须同时认 av 号（真 bug，2026-10-22 查出来的）
- *
- *   主动评论一直报「**关键词都搜空了 / 都评论过了**」，今天下午两轮（16:11 / 16:31）
- *   9 个词全军覆没、一条都没发出去 ✗
- *   查下来根本不是"都评论过"（`visited` 名单里只有 **2 条**），而是：
- *
- *   **搜索接口返回的 `arcurl` 是 `av` 号格式**（`http://www.bilibili.com/video/av1174613828644`），
- *   而 `pickVideo()` 里的正则只认 `video/(BV[0-9A-Za-z]+)` ⇒ **20 条全被过滤掉** ⇒
- *   `fresh.length === 0` ⇒ 日志却写成"都评论过了"（那句话在当时那个判断分支里）✗
- *
- *   ⇒ 判据统一走这个函数：**BV / av 都认**，取到的那个就当作唯一标识
- *     （`state` 里的 `visited` 名单混着存没问题，两者都是唯一 id；
- *      `https://www.bilibili.com/video/<av号>` 这个 URL 一样能打开 ✓）
- *
- * @param {string} text 任意含链接的文本
- * @returns {string} `BV1xx411c7mD` 或 `av1174613828644`；都没有就空串
- */
-export function pickVideoKey(text) {
-  const s = String(text ?? '');
-  return (
-    (s.match(/video\/((?:BV[0-9A-Za-z]{10}|av\d+))/i) || [])[1] ||
-    (s.match(/\b(BV[0-9A-Za-z]{10})\b/) || [])[1] ||
-    (s.match(/\b(av\d+)\b/i) || [])[1] ||
-    ''
-  );
-}
-
 /**
  * 从一段文字里抠出所有 BV 号（2026-10-16 加）。
  * ⚠️ 只认标准的「BV + 10 位」—— 群里那些链接长这样：
@@ -602,6 +566,15 @@ export function pickVideoIds(text) {
   for (const m of s.matchAll(/\bav(\d{6,})/gi)) raw.push(`av${m[1]}`);
   const seen = new Set();
   return raw.filter((x) => (seen.has(x) ? false : (seen.add(x), true)));
+}
+
+/**
+ * 从 URL / BV / av / 一段文字里取**第一个**视频 key（BV 优先，其次 av）。
+ * ⚠️ 主动评论那条路拿它做去重（同一个视频不重复评论），只要一个就够 ——
+ *    认不出来返回空串，调用方都按 `|| ''` 兜底 ✓
+ */
+export function pickVideoKey(text) {
+  return pickVideoIds(text)[0] || '';
 }
 
 /** 按 BV 取过的视频信息（内存缓存，同一支视频别反复打接口） */
@@ -678,7 +651,7 @@ export async function searchVideos(keyword, { limit = 8, order = 'click', tids =
  *   ② 加分区过滤（`tids=17` 单机游戏）干净很多，但条数会变少
  *      （实测 30 条里只剩 6 条）→ 筛完不够 4 条就**放开分区再拿一遍**。
  */
-export async function topicVideos(keyword, { limit = 8, tids = 0, match = null, deny = null, order = 'totalrank' } = {}) {
+export async function topicVideos(keyword, { limit = 8, tids = 0, match = null, deny = null } = {}) {
   const kw = String(keyword ?? '').trim();
   const hit =
     typeof match === 'function'
@@ -689,15 +662,10 @@ export async function topicVideos(keyword, { limit = 8, tids = 0, match = null, 
   // ⚠️ `deny`：**蹭字的标题**（实测「我的世界」会搜出《这是我的世界》AI剧集、
   //    《世界上的另一个我》这种，光靠 match 拦不住，得点名排掉）
   const grab = async (useTids) =>
-    // ⚠️ 2026-10-15：`order` 默认 **`totalrank`（综合排序 = 按相关性）**，
+    // ⚠️ 2026-10-15：`order` 用 **`totalrank`（综合排序 = 按相关性）**，
     //    不是 `click`（按播放量）—— 后者会把「安岛」搜成「困孤岛」那类泛化热门 ✗
     //    （见 `SEARCH_ORDERS` 上面那段注释）
-    // ⚠️⚠️ 2026-10-22：**`order` 现在可以传进来了**（用户：「看看今天下午主动发评论成功没有」
-    //    ⇒ 查出来是"关键词都搜空了/都评论过了"）。
-    //    根因：综合排序的结果**是固定的** —— 同一个词永远搜回那前 N 条，
-    //    一旦都进过 `visited` 名单，这个词就**永远搜不出新的** ✗
-    //    ⇒ 调用方可以换排序（`pubdate` 按时间 = 每次都是新的那批）✓
-    (await biliSearch({ keyword: kw, order, tids: useTids ? tids : 0 })).filter(
+    (await biliSearch({ keyword: kw, order: 'totalrank', tids: useTids ? tids : 0 })).filter(
       (v) => hit(v.title) && !(deny && deny.test(v.title)),
     );
   let list = tids ? await grab(true) : await grab(false);
@@ -752,7 +720,7 @@ export async function upVideos(name, { limit = 8 } = {}) {
   let note = '';
   if (!list.length) {
     // ⚠️⚠️ 一条本人都没搜到 → **别硬答**（别拿"别人提到他的视频"冒充）。
-    //    2026-09-15 用户截图：「Luminiflux有什么视频」→ 她答「Luminiflux是谁啊，**我去搜搜**」
+ // 2026-09-15截图：「Luminiflux有什么视频」→ 她答「Luminiflux是谁啊，**我去搜搜**」
     //    ＝空头承诺。用户要求「**这种能不能真的去做这件事情然后给回复**」。
     //    所以这里把"没这个人"标出来，交给 `bot.js` **放行走正常搜索**（那才是真去查）。
     log.info(`[B站] 搜「${wanted}」没搜到本人的投稿 → 交给正常搜索`);
@@ -803,7 +771,7 @@ let hotCache = null;export async function hotVideos({ limit = 8, force = false }
 }
 
 /**
- * ⚠️ **记住上一次报的是什么**（2026-09-15 用户截图：
+ * ⚠️ **记住上一次报的是什么**（2026-09-15截图：
  *    「这个也没有接进上文」—— 他 @ 她问了籽岷，她答完，他紧接着问
  *    「**那**最近mc圈有什么炸裂的视频」，她答得像另起一题，没接上文）。
  *
@@ -902,7 +870,7 @@ export async function hotReply(p = {}) {
       // ⚠️ 实测它会把"日期"自己换算，把两天前的稿子说成「去年9月13号」（它的时间感是错的）
       '· ⚠️ 时间**只照抄那个日期**（"9月13号"），🚫 **别自己算**"去年/上个月/几天前/刚刚"这类相对说法',
       '· 🚫 别评价人家"冷清/数据不行"（那是人家自己的事）',
-      // ⚠️ 用户 2026-09-15：「这个也没有接进上文」—— 事实里带了"上一句"就必须接住
+ // ⚠️ 2026-09-15：「这个也没有接进上文」—— 事实里带了"上一句"就必须接住
       '· ⚠️ 如果事实里带了「他上一句问的是…」，说明这是**接着问的**：' +
         '**开头先用一句话接住上文**（例：「籽岷那边就这些，mc 这边我看了下…」），🚫 别答得像另起一题',
       // ⚠️ 按名字搜会搜出**别人做的、带他名字的视频**（看"UP："那一栏），别混为一谈

@@ -2042,11 +2042,14 @@ console.log(
   //    实测（14:48:37 同一条命令）：主号 `手动推进` ✓ / 爱音 `手动开始`+`手动开了一条` ✗
   const bsrc19 = readFileSync(join(ROOT, 'src', 'bot.js'), 'utf8');
   check(
-    /quest\.lineSeen\(gid\)[\s\S]{0,500}?让位/.test(bsrc19),
+    /quest\.lineSeen\(gid\)[\s\S]{0,900}?让位/.test(bsrc19),
     '★★★ 别人那条线**真的在演**（`lineSeen` = 我看过它的台词）⇒ **让位**、不开新线',
   );
+  // ⚠️ 2026-10-24：这里原来是 `{0,600}` —— 600 是当年随手写的上限，不是设计约束。
+  //    后来在 `lineSeen` 之后加了诊断日志和 staffQQs 豁免，代码变长到 660 就被判红 ✗
+  //    （行为没变：让位之后照样 `return true`）。放宽到 900，断言意图不变。
   check(
-    /lineSeen\(gid\)[\s\S]{0,600}?return true/.test(bsrc19),
+    /lineSeen\(gid\)[\s\S]{0,900}?return true/.test(bsrc19),
     '★★ 而且返回 `true`（当"受理了"）—— 返回 false 会掉进"开新剧情"那条路（正是要修的 bug）',
   );
   check(
@@ -2100,7 +2103,7 @@ console.log(
   // 关键一步：**只有本地记的那条线**、没有共享文件 —— 让位方就靠这个认出"在演"
   const { Bot: Bot20 } = await import('../src/bot.js');
   const b20 = new Bot20();
-  b20.selfId = '10000012'; // 假装我是让位方
+  b20.selfId = '10000013'; // 假装我是让位方
   check(!b20.questLive(G20), '★ 一开始：本地没剧情、也没记线 ⇒ 不在演');
   check(!q20.current(G20), '★ 而且 `quest.current` 确实是空的（让位方真实的处境）');
   q20.rememberLine(G20, { id: A, by: '10000001', premise: '门把手上有电，不能碰' });

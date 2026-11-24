@@ -291,10 +291,16 @@ function sendBinary(res, code, buf, type = 'application/octet-stream') {
 function safeKnowName(raw) {
   const s = String(raw ?? '').trim().replace(/\\/g, '/');
   if (s.includes('..')) return '';
-  const m = s.match(/^(?:groups\/)?([\w.\-]+\.md)$/);
+  // ⚠️⚠️ 2026-11-18 加 `prompt/` 这一层（用户：「**这几个 lite 库也要能在 webui 的知识库界面显示**」）——
+  //    极简提示词在 `personas/<id>/prompt/lite.md`，原来这条白名单只认
+  //    `groups/<群号>.md` 和**纯文件名** ⇒ `prompt/lite.md` 会被判"非法文件名"，
+  //    界面上就算列出来了也存不进去 ✗
+  const m = s.match(/^(?:(?:groups|prompt)\/)?([\w.\-]+\.md)$/);
   if (!m) return '';
   // 群资料库那层只允许 `groups/<群号>.md`（群号是数字）
   if (s.startsWith('groups/') && !/^groups\/\d+\.md$/.test(s)) return '';
+  // 人设包的 prompt 那层只允许字母数字点划线（和文件名同一条规则，防 `../`）
+  if (s.startsWith('prompt/') && !/^prompt\/[\w.\-]+\.md$/.test(s)) return '';
   return s;
 }
 
@@ -330,6 +336,16 @@ async function readJson(req) {
 function configForUi() {
   return {
     llm: { ...config.llm },
+    /* ⚠️ 2026-11-19 加：**搜索服务选择**（`config.yml` 的 `search.provider`）
+     *   · 界面「模型」页那张「搜索服务」卡读的就是这里；
+     *   · ⚠️ 只给 `provider` 和 `deepseek.enable` —— **key 不给**（界面上不需要看，
+     *     少一处能被打包走的密钥面 ✓）
+     *   ⚠️ 和 `saveConfig` 里 `put('search', …)` 是一对：只加一头就是
+     *     "存得进去、显示不出来"（这个坑上面 `chat` 那段备注写过）✓ */
+    search: {
+      provider: String(config.search?.provider ?? 'auto'),
+      deepseek: { enable: config.search?.deepseek?.enable !== false },
+    },
     // ⚠️ 和 saveConfig 里那行 `put('imagegen', …)` 是**一对**，别只加一个
     //    （这个文件里"存得进去、显示不出来"的坑踩过一次，见下面 `chat` 那段注释）。
     imagegen: { ...config.imagegen },
@@ -361,6 +377,14 @@ function configForUi() {
     ownerQQ: config.ownerQQ,
     /** 机器人自己的号（用来做快速登录、页面上显示） */
     botQQ: config.botQQ,
+    // ⚠️⚠️ 2026-11-15 加：**这个进程实际登录的号**（`bot.selfId`）。
+    //    为什么必须单独给一个字段：`botQQ` 是**配置项**，主号的账号文件里经常没写
+    //    （靠 `mainAccount` 兜底）⇒ 是空串。页面拿到空串就退回去用
+    //    `CUR_ACCOUNT`（前端记住的"上次在控制哪个号"）——
+    //    于是在 **Saki 的 3099 页面上会显示成「爱音」** ✗
+    //    （用户 2026-11-15 截图：「没有分账号显示啊，所以这些都是 saki 的信息啊」）
+    //    ⇒ 页面显示"我是谁"必须用**真实登录的号**，不能用配置、更不能用前端记忆。
+    selfQQ: bot?.selfId ? String(bot.selfId) : '',
     logLevel: config.logLevel,
   };
 }
@@ -592,6 +616,26 @@ function saveConfig(patch) {
    *   ⚠️ `voice` **不在** `SHARED_SECTIONS` 里 ⇒ 按号私有 ⇒ 写进 `accounts/<QQ>.yml`
    *      ⇒ **每个 QQ 号能有自己的音色** ✓（正是用户要的） */
   put('voice', patch.voice);
+  /* ⚠️⚠️⚠️ 2026-10-29 补（真踩到）：**`vision` 一直是"能读不能写"** ✗
+   *
+   *    现场：主模型从 `deepseek-flash` 切到 `deepseek-v4-pro`，
+   *      日志明明打了「识图模型跟着主模型一起换：→ deepseek-v4-pro」，
+   *      可 `config.yml` 里 `vision.model` **一个字都没变** ✗
+   *    真因：这段 `put()` 清单里**没有 `vision`** —— `splitPatch()` 把 patch 留下了，
+   *      但没有任何 `put('vision', …)` 去把它写进 yaml ⇒ **静默丢弃** ✗✗
+   *      （`SHARED_SECTIONS` 里有 vision，说明"它本该能写"，只是这一行漏了）
+   *
+   *    ⚠️ 以后往 `SHARED_SECTIONS` 加段，**这里必须同步加一行 `put()`** ——
+   *      否则界面上改完"看着保存成功了"，重读还是旧值（`webui.js` L333 那条注释也是这个意思）
+   */
+  put('vision', patch.vision);
+  /* ⚠️⚠️ 2026-11-19 加：**搜索服务选择**（`search.provider`，界面上「搜索服务」那张卡）
+   *
+   *   ⚠️ 漏这一行的后果**当场实测过**：界面点保存回 `{ok:true}`（走的是"patch 非空"那条路），
+   *      但 `config.yml` 一个字没变、`/api/state` 读回来还是旧值 ——
+   *      所谓"存得进去"完全是假的（和上面 `chat` 那段记的是同一类坑，方向相反 ✗）
+   *   ⚠️ 浅合并够用：只覆盖传进来的键（`provider`），同段的 `deepseek` / `engines` 原样留着 ✓ */
+  put('search', patch.search);
   // ⚠️ 2026-09-22 加：**谁在改人设**要留下痕迹。
   //    查"config.yml 被莫名改成别的人设"时，就是靠这行定位到是哪个套件干的。
   //    带上文件名一眼能看出改的是**真实配置**还是套件的临时配置。
@@ -625,6 +669,9 @@ function saveConfig(patch) {
     'biliComments', 'biliProactive',
     // ⚠️ 2026-10-21：语音（按号私有，走上面 put 那条路）
     'voice',
+    // ⚠️ 2026-11-22：识图（下面 L631 早就有 `put('vision', …)`，只是没登记在这里
+    //    ⇒ 每次在界面保存都会吵一句「白名单里没有它」的**虚警**）✗
+    'vision',
   ]);
   for (const k of Object.keys(patch ?? {})) {
     if (!HANDLED.has(k)) log.warn(`saveConfig 收到没处理的字段「${k}」—— 白名单里没有它，这次它**不会被写进 config.yml**`);
@@ -711,7 +758,7 @@ function facesWithMeta() {
 
 // ── 路由 ──────────────────────────────────────────────
 
-// ⚠️⚠️ 2026-09-15 用户报「刚点一下立即发送，抽到的事件马上就变了一个然后发出去了」——
+// ⚠️⚠️ 2026-09-15报「刚点一下立即发送，抽到的事件马上就变了一个然后发出去了」——
 //    查明了：**不是发送分支的 bug，是浏览器那一页还是旧页面**。
 //    这个界面**没有周期性轮询**，服务端的 webui.html 改了，已经开着的标签页不会知道；
 //    旧页面的 `lifeSendNow()` 不把预览一起传上来 → 服务端只好重新抽一条 →
@@ -865,7 +912,93 @@ const AGENT_TASKS_HTML = [
   '</script></body></html>',
 ].join('\n');
 
+/**
+ * ⚠️ 2026-11-20：GPU 显存的**缓存**（让卡片开自动刷新也不会每 2 秒跑一次 nvidia-smi）
+ *   见 `/api/local-model` 里那段注释：nvidia-smi 每次调用都会挂一个 conhost（黑窗）✗
+ */
+let webuiGpuCache = { at: 0, v: null };
+
 const routes = {
+  /* ⚠️⚠️ 2026-11-20 加（用户：「**在模型页面加一个本地模型管理的卡片，要能实时看到本地模型的
+   *   所有状态和开关**」+「**还有本地模型占用本地资源的所有参数**」+「**本地模型要开机自启**」）——
+   *
+   *   卡片的全部数据都从这一个接口来，**不再另存一份配置**：
+   *     · 进程状态（在跑/没跑、PID、启动时间、实际命令行）
+   *     · 模型文件（文件名、大小 GB）
+   *     · 资源参数（ctx / ngl / KV 量化 / 线程 / 思考预算 / 并发）—— 全是 `tools/local-model.mjs` 的 CONFIG
+   *     · GPU 显存（总量 / 已用 / 空闲）
+   *     · 当前这个号是不是在用本地模型（isLiteActive + active provider）
+   *   ⚠️ 参数**只读**：真改了要重启 llama-server 才生效，所以卡片上写清"改哪一行"
+   *      （`tools/local-model.mjs` 的 CONFIG），不做"界面上改完立刻重启"那种会把人搞迷糊的东西 ✓ */
+  'GET /api/local-model': async (_req, res) => {
+    try {
+      const lm = await import('../tools/local-model.mjs');
+      const st = await lm.status();
+      let gpu = null;
+      try {
+        const { execFileSync } = await import('node:child_process');
+        /* ⚠️⚠️ 2026-11-20 修（用户：「**还会定时弹黑窗**」+「**连续弹窗 打字**」）——
+         *
+         *   根因就是这一行：`nvidia-smi` 是**控制台程序**，每次 spawn 都挂一个 conhost
+         *   ⇒ **每调一次接口就闪一个黑窗**；而卡片是 2 秒自动刷新的 ⇒ 每 2 秒闪一个 ✗✗
+         *   （采样实证：`conhost.exe 父=nvidia-smi.exe` 一串，5 秒内 5 个）
+         *
+         *   ⇒ 三个保险：
+         *     ① `windowsHide: true`（对 node 直接 spawn 的 exe 有效）
+         *     ② **缓存 20 秒**：卡片怎么刷都只在 20 秒才真跑一次
+         *     ③ 拿不到就返回 `null`，卡片显示"读不到"，绝不重试刷屏 ✓ */
+        const now = Date.now();
+        if (webuiGpuCache.at && now - webuiGpuCache.at < 20000) {
+          gpu = webuiGpuCache.v;
+        } else {
+          try {
+            const out = execFileSync(
+              'nvidia-smi',
+              ['--query-gpu=memory.total,memory.used,memory.free', '--format=csv,noheader,nounits'],
+              { encoding: 'utf8', timeout: 8000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] },
+            ).trim();
+            const [total, used, free] = out.split(',').map((x) => Number(String(x).trim()));
+            gpu = [total, used, free].every((n) => Number.isFinite(n)) ? { total, used, free } : null;
+          } catch {
+            gpu = null;
+          }
+          webuiGpuCache = { at: now, v: gpu };
+        }
+      } catch {}
+      let active = null;
+      let liteOn = false;
+      try {
+        const L = await import('./llm.js');
+        const s = L.llmFallbackStatus();
+        active = { name: s.activeName, model: s.activeModel, level: s.level };
+        liteOn = L.isLiteActive();
+      } catch {}
+      send(res, 200, { ok: true, ...st, gpu, active, liteOn });
+    } catch (e) {
+      send(res, 500, { ok: false, error: String(e?.message ?? e) });
+    }
+  },
+
+  /** 起 / 停 / 重启本地模型（卡片上那三个按钮） */
+  'POST /api/local-model': async (req, res) => {
+    let body = {};
+    try {
+      body = JSON.parse((await readBody(req)).toString('utf8')) || {};
+    } catch {}
+    const action = String(body.action ?? '').trim();
+    if (!['start', 'stop', 'restart'].includes(action)) {
+      send(res, 400, { ok: false, error: 'action 只能是 start / stop / restart' });
+      return;
+    }
+    try {
+      const lm = await import('../tools/local-model.mjs');
+      const r = action === 'start' ? await lm.start() : action === 'stop' ? await lm.stop() : await lm.restart();
+      send(res, 200, { ok: true, action, result: r });
+    } catch (e) {
+      send(res, 500, { ok: false, error: String(e?.message ?? e) });
+    }
+  },
+
   /**
    * 「这个进程是谁」—— 多 QQ 号的地基接口（2026-10-07 加）。
    *
@@ -1044,6 +1177,85 @@ const routes = {
    *    好友名单（协议端拉回来的那份）+ 每个人现在的状态 + 他自己的设置 + 全局默认值。
    *    ⚠️ 它和 `affinity`（好感度那套好友设置）**没有半点关系**（用户特意说过）。
    */
+  /**
+   * ⚠️⚠️⚠️ 2026-10-27 加（用户：「**再加一个私聊工作模式使用的模型的选项，和日常主模型隔离开，
+   *    但是只给出站点选择和模型选择，要先去读取已经保存过的 apikey 和站点，要不然界面会很乱**」）——
+   *
+   * 给「私聊工作模式专用模型」用的**选项列表**：
+   *   · **站点**：只从**已经存过的** `llm.providers` 里去重（不让人重新填 baseURL、也不显示 key）✓
+   *   · **模型**：该站点下**已知**的模型（`providers` 里出现过的 + DSH `settings.yaml` 里配的）✓
+   *   · **当前值**：`privateWork.ai`（没设过就是 null ⇒ 跟着日常主模型走）✓
+   * ⚠️ 保存走现成的 `POST /api/config`（`privateWork` 是私有段 ⇒ 自动写进 `accounts/<QQ>.yml`）✓
+   */
+  'GET /api/private-model': async (_req, res) => {
+    try {
+      const llm = config.llm ?? {};
+      const ps = Array.isArray(llm.providers) ? llm.providers : [];
+      /** baseURL → { baseURL, label, models[] } */
+      const byUrl = new Map();
+      const addStation = (url, model) => {
+        const u = String(url ?? '').trim();
+        if (!u) return;
+        if (!byUrl.has(u)) {
+          byUrl.set(u, {
+            baseURL: u,
+            label: u.replace(/^https?:\/\//i, '').replace(/\/+[^/]*$/, ''),
+            models: [],
+          });
+        }
+        const st = byUrl.get(u);
+        const m = String(model ?? '').trim();
+        if (m && !st.models.includes(m)) st.models.push(m);
+      };
+      for (const p of ps) addStation(p?.baseURL, p?.model);
+      addStation(llm.baseURL, llm.model); // 扁平那套也算一个站点
+
+      // 再用 DSH 的 settings.yaml 把该站点**所有**可用模型补齐
+      try {
+        const home =
+          String(process.env.QQBOT_DSH_HOME ?? '').trim() ||
+          String(process.env.DSH_HOME ?? '').trim() ||
+          join(String(process.env.LOCALAPPDATA ?? ''), 'DeepSeekHarness', '.dsh');
+        const f = join(home, 'settings.yaml');
+        if (existsSync(f)) {
+          const y = yaml.load(String(readFileSync(f, 'utf8')).replace(/!!js[^\n]*/g, 'false')) ?? {};
+          // ⚠️⚠️ 2026-10-27 修（真踩到：读出来是空 ⇒ 界面上只有一个模型）——
+          //    `settings.yaml` 里 `providers:` 是**缩进在 `llm-pi-ai:` 下面**的（不是顶层）✗
+          //    ⇒ 两处都读一下（换 DSH 版本时结构可能又变）✓
+          const provs = y['llm-pi-ai']?.providers ?? y.providers ?? {};
+          const HOST2PROV = [
+            ['example', 'chihaya'],
+            ['generativelanguage', 'google'],
+            ['googleapis', 'google'],
+          ];
+          for (const st of byUrl.values()) {
+            const hit = HOST2PROV.find(([h]) => st.baseURL.toLowerCase().includes(h));
+            const list = hit ? provs?.[hit[1]]?.models : null;
+            if (Array.isArray(list)) {
+              for (const m of list) {
+                const id = String(m?.id ?? '').trim();
+                if (id && !st.models.includes(id)) st.models.push(id);
+              }
+            }
+          }
+        }
+      } catch (e) {
+        log.debug?.(`[界面] 读 DSH 模型清单失败（不影响选择）：${e.message}`);
+      }
+
+      const stations = [...byUrl.values()].filter((s) => s.models.length);
+      return send(res, 200, {
+        ok: true,
+        stations,
+        current: config.privateWork?.ai ?? null, // { baseURL, model } 或 null
+        defaultModel: String(llm.model ?? ''),
+        defaultBaseURL: String(llm.baseURL ?? ''),
+      });
+    } catch (e) {
+      send(res, 500, { ok: false, error: e.message });
+    }
+  },
+
   'GET /api/private-work': async (_req, res) => {
     try {
       const pw = await import('./private-work.js');
@@ -1080,7 +1292,7 @@ const routes = {
     }
   },
 
-  // ── B 站视频分享（2026-10-15 用户要求）──────────────────────
+ // ── B 站视频分享（2026-10-15 要求）──────────────────────
   // ⚠️⚠️ **按群**存的（用户：「b站分享也要分群调节」）——
   //    写 `accounts/<QQ>.yml` 的 `groupParams.<群>.biliShare` ✓
   //    （跟「按群设定」页同一套机制：`accounts.patch` 深合并 ⇒ 不冲掉别的段）✓
@@ -1093,7 +1305,7 @@ const routes = {
       send(res, 500, { ok: false, error: e.message });
     }
   },
-  // ⚠️ 「立刻发送」（2026-10-15 用户要求）—— 界面上点一下**马上**给选中的那个群发一条。
+ // ⚠️ 「立刻发送」（2026-10-15 要求）—— 界面上点一下**马上**给选中的那个群发一条。
   //    跳过时段/冷却判定（`force`），但仍然**排除发过的**、仍然记账（手动发的也算那个群今天一条）✓
   'POST /api/bili-share/send': async (req, res) => {
     let body = {};
@@ -1104,12 +1316,12 @@ const routes = {
       const bs = await import('./bili-share.js');
       const gid = String(body.groupId ?? '').trim();
       if (!gid) return send(res, 400, { ok: false, error: '先选个群' });
-      // ⚠️⚠️ 2026-10-15 用户要求：「**手动发一条视频不开自动发也要能发**」
+ // ⚠️⚠️ 2026-10-15 要求：「**手动发一条视频不开自动发也要能发**」
       //    ⇒ 这里**不再看那个群的开关** —— 那个开关管的是"**定时自动发**"，
       //      手动点一下是另一回事（原来把它一起拦了，用户点了会看到"开关还没打开"✗）
       //    ⚠️ 但"这个群有没有关键词"还得管 —— 没关键词压根搜不到东西，
       //      这种要**说清楚**（不然界面上只会显示"没挑到能发的视频"，看不出为什么）✓
-      // ⚠️⚠️ 2026-10-16 用户要求：「**把立即发送一条独立出来，单独给它加个关键词框，
+ // ⚠️⚠️ 2026-10-16 要求：「**把立即发送一条独立出来，单独给它加个关键词框，
       //    这样就不用动自动发送那里的设置了**」+「**再独立加一个是否配 bot 自己评论的选框**」——
       //    ⇒ 这两个只影响**这一次手动发送**，**不写进**群配置 ✓
       const tmpKw = (Array.isArray(body.keywords) ? body.keywords : String(body.keywords ?? '').split(/[\n,，、]/))
@@ -1361,7 +1573,7 @@ const routes = {
   },
 
   /**
-   * 「机器人池」手动同步一次（2026-10-07 用户要求）。
+ * 「机器人池」手动同步一次（2026-10-07 要求）。
    *
    * ⚠️ 这个接口**不跟着"当前号"转发**（它是"管所有号"的接口，见前端 `api()` 的白名单）。
    * ⚠️ `dryRun` 只算不改，界面上有个「先看看会改什么」——
@@ -1476,6 +1688,9 @@ const routes = {
       providers: list.length ? list : autoList,
       activeId: String(l.activeId || (list.length ? '' : 'p-main')),
       profiles: Array.isArray(l.profiles) ? l.profiles : [],
+      /* ⚠️ 2026-10-29 加（用户要的开关）：**自动降级提供商**开没开 ——
+       *    关着的时候 `providerChain()` 只返回第 1 个，列表里剩下的一家都不会被调用 ✓ */
+      autoFallback: l.autoFallback !== false,
       /* ⚠️ 2026-10-22：**降级状态**（用户：「优先级在前的模型不可用，兜底自动使用后一级的
        *   模型 10 分钟，10 分钟之后自动重试」）—— 界面上要能看见现在降到哪一级、还剩多久 ✓ */
       fallback: fo,
@@ -1487,6 +1702,16 @@ const routes = {
         temperature: Number(l.temperature ?? 1),
         maxTokens: Number(l.maxTokens ?? 8000),
         timeout: Number(l.timeout ?? 60000),
+      },
+      /* ⚠️ 2026-10-29 加（用户：「切换之后必须能把**所有用模型的地方**全部切换」）：
+       *    把"除了主模型之外，还有哪些地方各自在用哪个模型"一并报给界面，
+       *    这样换完之后一眼能看出谁跟着换了、谁没跟 ✓ */
+      modelUses: {
+        main: String(l.model || ''),
+        vision: String(config.vision?.model || ''),
+        visionFollowsMain: !config.vision?.model || String(config.vision.model) === String(l.model || ''),
+        privateWork: config.privateWork?.ai?.model ? String(config.privateWork.ai.model) : null,
+        planner: config.search?.plannerModel ? String(config.search.plannerModel) : null,
       },
     });
   },
@@ -1516,6 +1741,26 @@ const routes = {
   'POST /api/llm-providers': async (req, res) => {
     try {
       const b = JSON.parse((await readBody(req)).toString('utf8') || '{}');
+      /* ⚠️⚠️ 2026-10-29 加：**只改「自动降级」开关**（不传 providers 就走这条）
+       *    ⚠️ 为什么必须单开一个分支：下面 `clean` 是从 `b.providers` 算出来的，
+       *      不传就是空数组 ⇒ 会把整份提供商列表**清空** ✗✗
+       *      （界面上那个开关是"点一下立刻生效"的，不该顺带重写整个列表）
+       */
+      if (!Array.isArray(b.providers)) {
+        if (typeof b.autoFallback !== 'boolean') {
+          return send(res, 200, { ok: false, error: '没给 providers，也没给 autoFallback' });
+        }
+        saveConfig({ llm: { autoFallback: b.autoFallback } });
+        log.info(
+          `[模型] 自动降级提供商 = ${b.autoFallback ? '开（主模型挂了会换下一家）' : '关（只用主模型，永不跨家）'}`,
+        );
+        return send(res, 200, {
+          ok: true,
+          autoFallback: b.autoFallback,
+          providers: Array.isArray(config.llm?.providers) ? config.llm.providers : [],
+          activeId: String(config.llm?.activeId || ''),
+        });
+      }
       const num = (v, d) => (Number.isFinite(Number(v)) && v !== '' && v !== null ? Number(v) : d);
       const clean = (Array.isArray(b.providers) ? b.providers : []).slice(0, 20).map((p, i) => ({
         id: String(p?.id || `p${i + 1}`).slice(0, 40),
@@ -1537,6 +1782,11 @@ const routes = {
         temperature: Number.isFinite(Number(p?.temperature)) && p?.temperature !== '' ? Number(p.temperature) : null,
         maxTokens: Number.isFinite(Number(p?.maxTokens)) && p?.maxTokens !== '' ? Number(p.maxTokens) : null,
         timeout: Number.isFinite(Number(p?.timeout)) && p?.timeout !== '' ? Number(p.timeout) : null,
+        /* ⚠️⚠️ 2026-11-17 加（用户：「在模型提供商卡片那里加一个使用极简提示词的选框，默认关闭」）——
+         *    true ⇒ 这一家用**极简提示词**（几百字，只够说一句话）。
+         *    给本地小模型 / 整活向兜底用：正常那份 6~13 万字它吃不下 ✗
+         *    ⚠️ **默认 false**（不勾就是正常那套）⇒ 老配置一个字都不用改 ✓ */
+        lite: p?.lite === true,
       }));
       // ⚠️ id 不许重复（重复会让"启用"点到别人头上）
       const seen = new Set();
@@ -1553,6 +1803,11 @@ const routes = {
         }
       }
       const patch = { providers: clean };
+      /* ⚠️ 2026-10-29 加（用户要的开关）：界面传了 `autoFallback` 就一起存 ——
+       *    **关掉 = 永不跨家降级**（见 `llm.js` 的 `providerChain()`） */
+      if (typeof b.autoFallback === 'boolean') patch.autoFallback = b.autoFallback;
+      /* ⚠️ 保存前先记下**旧的主模型名** —— 下面要靠它判断"识图是不是一直跟着主模型走" */
+      const oldMain = String(cur.model || '');
       const first = clean[0];
       if (first) {
         if (!first.baseURL) return send(res, 200, { ok: false, error: `第 1 个（主模型）「${first.name}」没填 baseURL` });
@@ -1569,6 +1824,34 @@ const routes = {
         patch.activeId = '';
       }
       saveConfig({ llm: patch });
+      /* ⚠️⚠️⚠️ 2026-10-29 加（用户：「**切换之后必须能把所有用模型的地方全部切换，
+       *    除了备用模型设置过的**」）
+       *
+       *    背景：主模型换了之后，`config.llm.model` 会跟着变，而绝大多数调用点
+       *    （`extract.js` / `llm.js` / `search-plan.js` / `vision.js` 的 currentModel）
+       *    都是**现读** `config.llm.model` ⇒ 它们自动跟着换 ✓
+       *
+       *    但**识图**那一处用的是**独立字段** `config.vision.model` ⇒ 不跟着换 ✗
+       *    后果（2026-10-29 真踩到）：主模型早就不叫 `deepseek-v4.1-flash` 了，
+       *    识图还拿着那个**中转站的自定义模型名**去请求 ⇒ 每次 HTTP 400
+       *    「模型限制不允许 deepseek-flash」刷屏 ✗✗
+       *
+       *    ⇒ 判据：`vision.model` **等于旧的主模型名**（说明它一直跟着主模型走），
+       *      或者是空的 ⇒ 一起换成新主模型 ✓
+       *    ⚠️ 如果用户**单独**给识图设过别的模型（跟旧主模型不一样）⇒ **不动它** ✓
+       *      这就是用户说的"除了备用模型设置过的"。
+       */
+      try {
+        const vm = String(config.vision?.model || '');
+        if (first?.model && vm !== first.model && (!vm || vm === oldMain)) {
+          saveConfig({ vision: { model: first.model } });
+          log.info(`[模型] 识图模型跟着主模型一起换：${vm || '(空)'} → ${first.model}`);
+        } else if (first?.model && vm && vm !== first.model) {
+          log.info(`[模型] 识图模型是单独设过的（${vm}）⇒ 不动它`);
+        }
+      } catch (e) {
+        log.debug(`[模型] 同步识图模型失败（不影响保存）：${e.message}`);
+      }
       /* ⚠️⚠️ 2026-10-22 加（真 bug：改完顺序还在用旧的降级目标）：
        *    `FO.level` 是**内存里的序号**（第几级），而这里刚把数组**重新排过** ⇒
        *    原来的 level=1 可能从「第二个」变成了「第三个」，甚至变成刚修好的那个 ✗
@@ -1782,7 +2065,7 @@ const routes = {
   },
 
   /**
-   * 生图缓存：查占用 / 立即清理（2026-09-22 用户要求「图片越积越多，发出 1 天之后删掉」）。
+ * 生图缓存：查占用 / 立即清理（2026-09-22 要求「图片越积越多，发出 1 天之后删掉」）。
    *
    * ⚠️ `dryRun: true` = **只统计不删**（界面一进「模型」页就用它显示占用）。
    *    实现方式是拿一个"保留期无穷大"跑一遍 sweep —— 什么都不算过期，自然一张不删。
@@ -1953,7 +2236,47 @@ const routes = {
     mkdirSync(LIB, { recursive: true });
     writeFileSync(dest, buf);
     log.info(`管理界面上传表情: ${safe}（${(buf.length / 1024).toFixed(1)} KB）`);
-    send(res, 200, { ok: true, file: safe, bytes: buf.length });
+
+    // ⚠️⚠️ 2026-11-21 加**导入时自动转动图**（「需要每次导入表情时不是动图时都转换一次」）——
+    //    为什么：客户端方案没有 NapCat 那个 `sub_type: 1`（"这是表情不是图片"），
+    //    但**动图 GIF 在 QQ 里会按表情渲染** ⇒ 表情库里一律存动图 ✓
+    //    ⚠️ 已经是动图（n_frames > 1）⇒ **原样不动**（不重编码、不掉画质）✓
+    //    ⚠️ 转完文件名会从 `.png/.jpg` 变成 `.gif` ⇒ 返回给前端的 `file` 要用**新的**，
+    //      否则她写进索引的还是旧名、发的时候找不到文件 ✗
+    let outName = safe;
+    try {
+      const { execFile } = await import('node:child_process');
+      const { promisify } = await import('node:util');
+      const run = promisify(execFile);
+      const pyCandidates = [
+        'C:\\Users\\<主人>\\miniconda3\\python.exe',
+        'python',
+      ].filter(Boolean);
+      const script = join(ROOT, 'tools', 'qq-to-anim.py');
+      let conv = null;
+      for (const py of pyCandidates) {
+        try {
+          const { stdout } = await run(py, [script, '--file', dest], { timeout: 60000 });
+          const line = String(stdout || '').trim().split('\n').pop();
+          conv = JSON.parse(line);
+          break;
+        } catch {
+          /* 换下一个 python */
+        }
+      }
+      if (conv && conv.ok && conv.converted) {
+        outName = String(conv.file || outName);
+        log.info(`表情已转成动图：${safe} → ${outName}（${conv.bytes} 字节）✓`);
+      } else if (conv && conv.ok && conv.animated) {
+        log.debug(`表情本来就是动图，不动：${safe}`);
+      } else if (conv && !conv.ok) {
+        log.warn(`表情转动图失败（保持原文件）：${String(conv.error || '').slice(0, 80)}`);
+      }
+    } catch (e) {
+      log.warn(`表情转动图出错（保持原文件）：${String(e.message || e).slice(0, 80)}`);
+    }
+
+    send(res, 200, { ok: true, file: outName, bytes: buf.length });
   },
 
   /** 列出 knowledge/ 下的知识文件（界面动态生成下拉框，加文件不用改代码） */
@@ -2284,7 +2607,7 @@ const routes = {
   //    「立即发送」是**真的一条日常事件**，所以它会**算进今天那条配额**
   //    （`life.commit` 会 fired+1 并重排后面的时间）——
   //    不记账的话，你点三次就等于今天多发三条，排程还是照原样再来一遍。
-  // ⚠️⚠️ 2026-09-15 用户报「刚点一下立即发送，抽到的事件马上就变了一个然后发出去了」——
+ // ⚠️⚠️ 2026-09-15报「刚点一下立即发送，抽到的事件马上就变了一个然后发出去了」——
   //    查明了：**不是发送分支的 bug，是浏览器那一页还是旧页面**。
   //    这个界面**没有周期性轮询**，服务端的 webui.html 改了，已经开着的标签页不会知道；
   //    旧页面的 `lifeSendNow()` 不把预览一起传上来 → 服务端只好重新抽一条 →
@@ -2315,7 +2638,7 @@ const routes = {
     }
   },
 
-  // ── 自动清理（2026-10-06 用户要求）──────────────────
+ // ── 自动清理（2026-10-06 要求）──────────────────
   // 界面上看各处占用 + 待清项，以及"立刻清一次"。
   // ⚠️ POST **默认只演练**（`dryRun` 必须显式传 false 才真删）—— 这个接口会 rm 东西，
   //    默认不删比默认删安全得多。
@@ -2379,7 +2702,7 @@ const routes = {
     const all = life.targetGroups();
     if (!all.length) return send(res, 200, { ok: false, error: '没有 1 档群（只有 1 档群收日常事件）' });
 
-    // ⚠️⚠️ 2026-09-15 用户要求：「**这个预览和发送的建议合为一条**」。
+ // ⚠️⚠️ 2026-09-15 要求：「**这个预览和发送的建议合为一条**」。
     //
     //    原来这里是**重新抽一次再润色** —— 于是界面里预览看到的那句话，
     //    和真发出去的那句话**不是同一句**（还白花一次模型调用）。
@@ -2557,6 +2880,180 @@ const routes = {
     req.on('error', bye);
   },
 
+  /* ── 思考链页面（2026-11-11 加）─────────────────────────────
+   * 用户：「做一个思考链的页面放在功能模块下，展示近期所有有过思考链的消息
+   *   和它的思考过程…每一个消息是一个卡片…思考内容要逐行输出在页面上」
+   *
+   * · `GET  /api/think`        —— 最近这些条（最新在前）
+   * · `GET  /api/think/events` —— SSE：start / think / reply / end / clear
+   * · `POST /api/think/clear`  —— 清空
+   *
+   * ⚠️ 数据在**本进程内存**里（每个号的 webui 是独立进程）⇒ 天然按号隔离 ✓
+   * ⚠️ SSE 是长连接：必须把 socket 超时关掉，不然会被掐（照 `/agent-tasks/stream` 那套）
+   */
+  'GET /api/think': async (req, res) => {
+    /* ⚠️⚠️ 2026-11-19 加（用户：「**爱音的思考内容在思考链页面上看不到**」）——
+     *
+     *   思考链数据在**各自进程的内存里**（`think-log.js` 的 `list`），而这条路由原来
+     *   只读"当前进程"那一份 ⇒ 在 3099（主号）切到爱音，看到的还是主号的卡片、
+     *   或者一片空白（爱音的卡片在 3100 那个进程里）✗
+     *
+     *   ⇒ 带上 `x-saki-account` 且**不是我自己的号**时，把请求**原样转发**到那个号的端口 ✓
+     *     （端口取法见 `portOfAccount()`：主号用共用端口，副号读 `accounts/<QQ>.yml` 的 `webui.port`）
+     *   ⚠️ 转发失败就按本进程的返回 —— 页面至少不是白的，不会让人以为"她没想过" ✓ */
+    try {
+      const hdr = String(req?.headers?.['x-saki-account'] ?? '').trim();
+      if (hdr && /^\d{5,12}$/.test(hdr) && hdr !== String(displayId())) {
+        const port = portOfAccount(hdr);
+        if (port && port !== (Number(config.webui?.port) || 3099)) {
+          const r = await localFetch(`http://127.0.0.1:${port}/api/think`, {
+            signal: AbortSignal.timeout(4000),
+          });
+          if (r.ok) {
+            send(res, 200, await r.json());
+            return;
+          }
+        }
+      }
+    } catch {
+      /* 那个号没在跑 / 端口不通 ⇒ 落到下面的本进程逻辑 */
+    }
+    const tl = await import('./think-log.js');
+    // ⚠️ 2026-11-13（用户要求「显示每条花费的余额和 token」）：
+    //    卡片上的花费是"这一条花了多少"，这里是"现在还剩多少"，两个都给。
+    let bal = null;
+    try {
+      const b = await import('./balance.js');
+      const last = b.lastBalance();
+      if (last && Number.isFinite(Number(last.balance))) {
+        bal = { balance: Number(last.balance), currency: last.currency || "", at: last.at || 0 };
+      }
+    } catch {}
+    // ⚠️ 2026-11-13（用户：「页面顶端显示今日总花费」）
+    let today = null;
+    try {
+      const sp = await import('./spend.js');
+      const d = sp.dayStats();
+      today = {
+        cost: Number(d?.cost) || 0,
+        calls: Number(d?.calls) || 0,
+        tokens: (Number(d?.prompt) || 0) + (Number(d?.completion) || 0),
+      };
+    } catch {}
+    send(res, 200, { ok: true, items: tl.all(), stats: tl.stats(), balance: bal, today });
+  },
+
+  'POST /api/think/clear': async (req, res) => {
+    const tl = await import('./think-log.js');
+    tl.clear();
+    send(res, 200, { ok: true });
+  },
+
+  /* ⚠️ 2026-11-11：**验页面用** —— 造一条假的流式记录（不调模型、不记账、不发消息）。
+   * 没有余额的时候她不会说话，页面就没数据可看 ⇒ 留这个手动入口验证"逐行输出"。 */
+  'POST /api/think/demo': async (req, res) => {
+    const tl = await import('./think-log.js');
+    const id = await tl.demo();
+    send(res, 200, { ok: true, id });
+  },
+
+  'GET /api/think/events': async (req, res) => {
+    /* ⚠️⚠️ 2026-11-20 加（用户：「**为什么现在思考链不能实时显示了**」）——
+     *
+     *   上次只给 `/api/think`（拉列表）加了跨号转发，**这条 SSE 没加** ⇒
+     *   在 3099 切到爱音时，列表能拿到爱音的卡片（刷新有），但**实时流还是主号的** ⇒
+     *   生成过程中页面上什么都不动，看着就是"不实时" ✗
+     *
+     *   ⚠️ `EventSource` **不能带自定义头** ⇒ 只能用 `?account=<QQ>` 这个 query 参数传 ✓
+     *   ⚠️ 做法是把上游那个号的 SSE **原样 pipe** 过来（不解析、不重发，保持长连接语义）✓
+     *   ⚠️ 上游连不上就落到本进程（至少不是白屏）✓ */
+    const q = (() => {
+      try {
+        return new URL(String(req.url ?? ''), 'http://127.0.0.1');
+      } catch {
+        return null;
+      }
+    })();
+    const want = String(q?.searchParams?.get('account') ?? '').trim();
+    if (want && /^\d{5,12}$/.test(want) && want !== String(displayId())) {
+      const port = portOfAccount(want);
+      if (port && port !== (Number(config.webui?.port) || 3099)) {
+        try {
+          const up = await localFetch(`http://127.0.0.1:${port}/api/think/events`, {
+            headers: { accept: 'text/event-stream' },
+          });
+          if (up.ok && up.body) {
+            res.writeHead(200, {
+              'Content-Type': 'text/event-stream; charset=utf-8',
+              'Cache-Control': 'no-cache, no-transform',
+              Connection: 'keep-alive',
+              'X-Accel-Buffering': 'no',
+            });
+            try {
+              req.socket?.setTimeout?.(0);
+              res.socket?.setTimeout?.(0);
+            } catch {}
+            const reader = up.body.getReader();
+            const dec = new TextDecoder();
+            let closed = false;
+            req.on('close', () => {
+              closed = true;
+              try {
+                reader.cancel();
+              } catch {}
+            });
+            (async () => {
+              for (;;) {
+                const { done, value } = await reader.read();
+                if (done || closed) break;
+                try {
+                  res.write(dec.decode(value, { stream: true }));
+                } catch {
+                  break;
+                }
+              }
+              try {
+                res.end();
+              } catch {}
+            })().catch(() => {});
+            return;
+          }
+        } catch {
+          /* 那个号没在跑 ⇒ 落到本进程 */
+        }
+      }
+    }
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+    try {
+      req.socket?.setTimeout?.(0);
+      res.socket?.setTimeout?.(0);
+    } catch {}
+    res.write(': connected\n\n');
+    const tl = await import('./think-log.js');
+    const off = tl.subscribe((ev) => {
+      try {
+        res.write(`event: ${ev.type}\ndata: ${JSON.stringify(ev)}\n\n`);
+      } catch {}
+    });
+    const hb = setInterval(() => {
+      try {
+        res.write(': ping\n\n');
+      } catch {}
+    }, 25000);
+    const bye = () => {
+      clearInterval(hb);
+      try { off(); } catch {}
+      try { res.end(); } catch {}
+    };
+    req.on('close', bye);
+    req.on('error', bye);
+  },
+
   /* ── B站全自动投稿（2026-10-22 加）─────────────────────────
    * 用户：「在功能卡片里新增一个 B站投稿设置页，所有设置都放在里面」
    *      +「不要新建一个页面，和其他的功能页面一样在同一个页面」
@@ -2679,8 +3176,14 @@ const routes = {
       if (typeof c.enable === 'boolean') clean.enable = c.enable;
       if (c.windowStart) clean.windowStart = String(c.windowStart).slice(0, 5);
       if (c.windowEnd) clean.windowEnd = String(c.windowEnd).slice(0, 5);
+      /* ⚠️⚠️ 2026-11-01 加（用户：「制作视频要用 GPU ⇒ 改**做视频**的时间；
+       *    投稿还是 16:00~20:00 随机」）
+       *   做视频那组**允许空**（空 = 老行为：到点一条龙做完就发）——
+       *   所以这里用 `!== undefined` 判断，**不能**用 `if (c.makeStart)`（空串会被跳过 ✗） */
+      if (c.makeStart !== undefined) clean.makeStart = String(c.makeStart || '').slice(0, 5);
+      if (c.makeEnd !== undefined) clean.makeEnd = String(c.makeEnd || '').slice(0, 5);
       if (c.group !== undefined) clean.group = String(c.group).replace(/\D/g, '');
-      // ⚠️ 2026-10-22 用户改口：**题材不是清单，是"范围"**（跟 b 站分享的关键词一个用法）
+ // ⚠️ 2026-10-22 改口：**题材不是清单，是"范围"**（跟 b 站分享的关键词一个用法）
       //    「输入和 b 站分享的那些标签一样划定范围就可以了」⇒ 一行/逗号一个方向
       if (c.scope !== undefined) {
         clean.scope = (Array.isArray(c.scope) ? c.scope : String(c.scope).split(/[,，、\n]/))
@@ -2717,7 +3220,7 @@ const routes = {
           cclean.checkEveryMinutes = Math.max(1, Math.min(120, Number(cm.checkEveryMinutes) || 5));
         }
         if (cm.maxPerRun !== undefined) cclean.maxPerRun = Math.max(1, Math.min(6, Number(cm.maxPerRun) || 3));
-        // ⚠️ 用户 2026-10-22：「取消每天最少和最多，间隔也删掉」⇒ 老字段顺手清掉
+ // ⚠️ 2026-10-22：「取消每天最少和最多，间隔也删掉」⇒ 老字段顺手清掉
         for (const dead of ["minPerDay", "maxPerDay", "startHour", "endHour", "cooldownMs", "keywords", "everyMinutes"]) {
           if (dead in (config.biliComments || {})) cclean[dead] = null;
         }
@@ -2804,7 +3307,7 @@ const routes = {
       const bpr = await import('./bili-proactive.js');
       const bvid = String(body?.bvid || '').trim();
       const url = String(body?.url || '').trim();
-      /* ⚠️ 2026-10-21 用户：「**评论视频一定不要重复评论**」
+ /* ⚠️ 2026-10-21：「**评论视频一定不要重复评论**」
        *   ⇒ 手动发之前**先同步查一次**：这个 BV 已经在永久名单里就当场回绝，
        *     别等异步跑完、日志里才看见（界面上要能立刻看到原因）✓ */
       if ((bvid || url) && bpr.alreadyCommented(bvid || url)) {
@@ -2934,14 +3437,38 @@ const routes = {
       //    它是"这个群要不要回服务器消息"（她怎么说话），2/3 档群一样需要它 ——
       //    而这一页的其它字段（life / quest）确实只有 1 档群才有意义。
       //    ⇒ 只有**事件类**字段（life/quest）才卡 1 档；纯 chat 的改动放行。
-      const onlyChat = b.patch && Object.keys(b.patch).every((k) => k === 'chat');
-      if (!onlyChat) {
+      //
+      /* ⚠️⚠️⚠️ 2026-10-23 修（用户：「**这个页面的机器人同类池点保存按钮保存不了**」）
+       *
+       *    真因：这道闸只看 "patch 里有没有非 chat 的键"，而**界面上那个保存按钮一次提交全部字段**
+       *    （`life` / `quest` / `peers` / `otherBots` 一起）⇒ 永远不是 `onlyChat` ⇒
+       *    **永远被拒** ⇒ 用户填了同类池点保存，一点反应都没有 ✗
+       *
+       *    而 `peers` / `otherBots`（同类池 / 不同类池）**跟日常事件、剧情一点关系都没有** ——
+       *    它们只是"哪些号当同类机器人、哪些当没看见"。把它卡在 1 档上毫无道理
+       *    （和上面 `answerServer` 那个修法是同一个道理）✓
+       *
+       *    ⇒ 改成：**只有 `life` / `quest` 里的值真的变了，才要求 1 档**。
+       *      只动同类池（其他字段没变）⇒ 照常保存 ✓
+       *      真去改事件/剧情参数 ⇒ 还是拒绝并提示去改档位 ✓
+       */
+      const fieldsChanged = (kind) => {
+        const cur = config.groupParams?.[gid]?.[kind] ?? {};
+        const next = b.patch?.[kind] ?? {};
+        return Object.entries(next).some(([k, v]) => {
+          if (v === null) return k in cur;
+          return v !== undefined && v !== cur[k];
+        });
+      };
+      const needEventGroup = fieldsChanged('life') || fieldsChanged('quest');
+      if (needEventGroup) {
         const lv = config.trigger?.groupRespondTo?.[gid];
         return send(res, 200, {
           ok: false,
           error:
             `群 ${gid} 不是 1 档群（当前档位 ${lv ?? '没配'}）→ **不进事件系统**，` +
-            '设了也不会生效。想让它收日常事件/跑剧情，先去「群与触发」把档位改成 1。',
+            '设了也不会生效。想让它收日常事件/跑剧情，先去「群与触发」把档位改成 1。' +
+            '（只改「机器人同类池 / 不同类池 / 收紧度」不受这个限制，重试一次就行）',
         });
       }
     }
@@ -2966,8 +3493,13 @@ const routes = {
         peers.push(id);
         if (peers.length >= 10) break;
       }
-      if (peers.length) cur.peers = peers;
-      else delete cur.peers;
+      /* ⚠️⚠️⚠️ 2026-10-23 修（用户：「**这个号根本没在这个群里，你先把这个同类 QQ 号移除了**」）——
+       *    原来是 `if (peers.length) cur.peers = peers; else delete cur.peers;` ⇒
+       *    **清空（空数组）走的是 `delete`**，而落盘走 `accounts.patch()` 的**深合并**，
+       *    深合并**不会因为"没有这个键"而删除旧值** ⇒ **号永远删不掉** ✗✗
+       *    实测：提交 `peers: []` 后回读还是 `["10000013"]`，磁盘也没变 ✓（真踩到）
+       *    ⇒ 现在**空数组也照写**（`deepMerge` 对数组是**整体替换**，写 `[]` 就能清空）✓ */
+      cur.peers = peers;
     }
     // ⚠️ 2026-10-06 加（用户要求）：「不同类机器人池」—— 和同类池**正好相反**：
     //    填进去的号她**完全不回应**（连 @ 她都不回，也不进剧情/好感度）。
@@ -2982,8 +3514,8 @@ const routes = {
         otherBots.push(id);
         if (otherBots.length >= 10) break;
       }
-      if (otherBots.length) cur.otherBots = otherBots;
-      else delete cur.otherBots;
+      /* ⚠️ 2026-10-23：同上 —— **空数组也照写**，否则「不同类机器人池」里的号也删不掉 ✗ */
+      cur.otherBots = otherBots;
     }
     for (const [kind, fields] of Object.entries(b.patch ?? {})) {
       // ⚠️ `chat` = 收紧度这类"她怎么说话"的参数（2026-09-15 晚加）
@@ -3125,7 +3657,7 @@ const routes = {
     if (r.done) {
       try {
         settled = quest.settle(q, r.ending, (uid, d, o) => affinity.adjust(uid, d, { ...o, groupId: q.groupId }));
-        // ⚠️ 手动推进也要播报（2026-09-17 用户要的"结局展示"是**群里**看到的那条，
+ // ⚠️ 手动推进也要播报（2026-09-17要的"结局展示"是**群里**看到的那条，
         //    不是面板里的）。这一段刚刚已经用 `sendChatLike` 发到群了，
         //    所以同样隔 1 秒，和自动那些走一样的手感。
         const report = quest.endingReport(settled, (uid) => names.label(uid, q.groupId));
@@ -3761,6 +4293,38 @@ const routes = {
           files.push(mk(pdir, n, 'persona'));
         }
       }
+      // ⚠️⚠️ 2026-11-18 加（用户：「**这几个 lite 库也要能在 webui 的知识库界面显示**」）——
+      //    `personas/<id>/prompt/*.md` 这一层原来**完全没被列出来** ⇒
+      //    极简提示词（`prompt/lite.md`）在界面上看不见、也改不了 ✗
+      //    ⇒ 一并列出（下划线开头的照旧隐藏，`_shared/prompt/adult-*.md` 那批不会冒出来）✓
+      try {
+        const prdir = join(pdir, 'prompt');
+        if (existsSync(prdir)) {
+          const PROMPT_DESC = {
+            'lite.md': '极简提示词 · **勾了「使用极简提示词」的模型才用它**（本地小模型/整活兜底）。建议 300~600 字，别超过 1000',
+            'system.md': '整段覆盖系统提示词（写了就不再用 config 里那份）',
+            'bili-comment.md': 'B 站评论的写作要求',
+            'qzone-guide.md': 'QQ 空间说说的写法',
+          };
+          for (const n of readdirSync(prdir)) {
+            if (!n.endsWith('.md')) continue;
+            if (/^[_.]/.test(n)) continue; // 下划线开头的不列（成人提示词那批）
+            files.push({
+              name: `prompt/${n}`,
+              desc: (PROMPT_DESC[n] ?? '人设包里的一段提示词') + '　📌 **人设包里的**（换人设时会一起换）',
+              from: 'persona',
+              readonly: false,
+              size: (() => {
+                try {
+                  return readFileSync(join(prdir, n), 'utf8').length;
+                } catch {
+                  return 0;
+                }
+              })(),
+            });
+          }
+        }
+      } catch {}
       for (const n of readdirSync(KNOW)) {
         if (!n.endsWith('.md')) continue;
         if (/^[_.]/.test(n)) continue; // 同上
@@ -3877,7 +4441,7 @@ const routes = {
       } catch {}
     }
 
-    // ⚠️⚠️ `learned.md` **可以改了**（2026-09-14 用户要求：
+ // ⚠️⚠️ `learned.md` **可以改了**（2026-09-14 要求：
     //    「在群里一句一句修改还是有点麻烦」），但它**必须过格式校验** ——
     //    这个文件是**代码在解析和维护**的（条目要 `## 主题`，还要 BEGIN/END 标记），
     //    改坏了 `learn()` / `forget()` 会**静默失效**：
@@ -4041,7 +4605,7 @@ const routes = {
 
   // ── 人设（2026-09-21 加，P2）────────────────────────────────
   //
-  // ⚠️ 这里的"保存"**不重启机器人**（用户 2026-09-21 定）：
+ // ⚠️ 这里的"保存"**不重启机器人**（2026-09-21 定）：
   //    人设包和知识库都是**热重载**的（`persona.reload()` + `reloadKnowledge()`），
   //    存完立刻生效。重启 = 一次 QQ 登录，而这个号是风险设备，能省则省。
   'GET /api/persona/list': async (_req, res) => {
@@ -4117,7 +4681,7 @@ const routes = {
       const knowledge = reloadKnowledge();
       life.reload();
       log.info(`管理界面切换人设 → 「${id}」（热重载，没重启机器人）`);
-      // ⚠️ 切完**自动**把 QQ 昵称 / 头像换成这个人设的（用户 2026-09-21 定）。
+ // ⚠️ 切完**自动**把 QQ 昵称 / 头像换成这个人设的（2026-09-21 定）。
       //    失败**不影响切换本身** —— 人设已经换好了，昵称头像单独报给界面。
       const qqApply = await applyPersonaQQ(id);
       if (qqApply.nickname || qqApply.avatar) {
@@ -4228,7 +4792,7 @@ const routes = {
 
   // ── QQ 昵称 / 头像（2026-09-21 加）──────────────────────────
   //
-  // ⚠️ 这两样**不跟人设绑定**（用户 2026-09-21 定：「祥子的昵称和头像直接取当前的就行了」）——
+ // ⚠️ 这两样**不跟人设绑定**（2026-09-21 定：「祥子的昵称和头像直接取当前的就行了」）——
   //    换人设**不会**自动改它们，这里只是"看当前是什么 + 想改的时候有个地方改"。
   // ⚠️ 改的是**QQ 上真实的昵称/头像**（所有群、所有好友都看得见），不是机器人内部的设置。
   // ⚠️ 走 OneBot 标准 action，**协议端不支持就如实报错**（`provider.unsupported` 那套精神：
@@ -4521,7 +5085,15 @@ export function startWebUI(botInstance = null) {
       //      转给自己会导致请求永远不返回（表现为界面一直转圈）。
       const want = String(req.headers['x-saki-account'] ?? '').trim();
       const minePort = Number(config.webui?.port) || 3099;
-      if (want && want !== ACCOUNT.id && url.pathname.startsWith('/api/')) {
+      /* ⚠️⚠️ 2026-11-21：**排除 SSE 路径**（子代理排查时提的真隐患）——
+     *   `proxyToAccount()` 内部是 `await up.arrayBuffer()`（等上游整个响应**结束**才转发），
+     *   而 `/api/think/events` 是 **SSE 长连接、永远不结束** ⇒ 一旦走到这条分支，
+     *   **响应头都回不来、页面永久转圈** ✗
+     *   ⚠️ 前端 SSE 用的是 `?account=` query（不是这个头），暂时踩不到；
+     *     但只要哪天有人拿头去连它就会原地卡死 ⇒ 这里明确排除 ✓
+     *   （那条路由自己在 `'GET /api/think/events'` 里按 query 转发，走 pipe）✓ */
+    const isSsePath = url.pathname === '/api/think/events';
+    if (want && want !== ACCOUNT.id && url.pathname.startsWith('/api/') && !isSsePath) {
         const tp = portOfAccount(want);
         if (tp && tp !== minePort) return await proxyToAccount(want, req, res, url);
         if (!tp) {

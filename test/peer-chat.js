@@ -78,7 +78,16 @@ console.log('\n【2】冷却与每日上限');
     '★ 刚找过（1 分钟后）→ 还在冷却',
     pc.shouldPing(now + 60000, G, idleOk).reason,
   );
-  check(pc.shouldPing(now + 31 * 60 * 1000, G, idleOk).ok === true, '★ 过了 30 分钟 → 又能找');
+  // ⚠️ 2026-11-08：这条必须**先把每日上限放宽** —— 上限是按收紧度打折的
+  //    （这个群算下来只允许 1 次/天），已经用掉 1 次之后"过了冷却又能找"根本不可能成立 ⇒
+  //    那测的就不是冷却了 ✗（这条一直在红，红的原因也不是冷却坏了）
+  const keepCap = config.peerChat.maxPerDay;
+  config.peerChat.maxPerDay = 10;
+  check(
+    pc.shouldPing(now + 31 * 60 * 1000, G, idleOk).ok === true,
+    '★ 过了 30 分钟（上限放宽后）→ 又能找',
+  );
+  config.peerChat.maxPerDay = keepCap;
 
   pc.reset();
   for (let i = 0; i < 4; i++) pc.note(G, '1001', now + i * 40 * 60 * 1000);
@@ -212,7 +221,12 @@ console.log('\n【6】★★ 可以**自己起个头**（用户：互相 @ 不�
   const reply = await pc.compose(G, '1001', 20 * 60 * 1000, 1000, { rng: () => 0.99, phrase: fake });
   void reply;
   const p2 = cap.at(-1) ?? '';
-  check(/接着上面那些话/.test(p2), '★★ 另一半概率走原来那套（承接群里的话题）');
+  // ⚠️ 2026-11-08：源码里那句早就是「接着群里刚才那些话说」（不是「接着上面那些话」），
+  //    这条断言一直红着 —— 改成认**实际那句** ✓
+  check(
+    /接着群里刚才那些话说/.test(p2),
+    '★★ 另一半概率走原来那套（承接群里的话题）',
+  );
   check(!/不用接群里刚才的话题/.test(p2), '★ 承接那套里不出现「不用接话题」');
   check(!/别自己编一件不相干的事/.test(p2), '★★ 原来那句「别自己编一件不相干的事」已经删掉（正是它压住了自发话题）');
 
@@ -242,7 +256,10 @@ console.log('\n【6】★★ 可以**自己起个头**（用户：互相 @ 不�
     return '行，那说好了';
   };
   await pc.compose(G, '1001', 20 * 60 * 1000, 1000, { rng: () => 0, phrase: fake2 });
-  check(/接着上面那些话/.test(cap2.at(-1) ?? ''), '★ selfTopicChance=0 → 永远是承接（可回退）');
+  check(
+    /接着群里刚才那些话说/.test(cap2.at(-1) ?? ''),
+    '★ selfTopicChance=0 → 永远是承接（可回退）',
+  );
   // ⚠️ 2026-10-15 加（用户报：「**看看为什么就发一个点**」）——
   //    生成不出成句的东西（比如「（.）」）：先换方向**重试一次**，还不行**这次不搭话** ✓
   const cap3 = [];

@@ -18,6 +18,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, writeFileSync } from 'node:fs';
 import { resolve, basename } from 'node:path';
+import { tmpdir } from 'node:os';
 
 const AE = 'C:\\Program Files\\Adobe\\Adobe After Effects 2025\\Support Files\\AfterFX.exe';
 
@@ -68,7 +69,19 @@ function closeDialogs() {
 // ── ① AE 就绪（没开就启动） ─────────────────────────────────────────────
 let st = aeState();
 if (st === 'none') {
-  spawn(AE, [], { detached: true, stdio: 'ignore' }).unref();
+  /* ⚠️⚠️ 2026-11-08 根治（真事故，白等了两次 420 秒）：
+   *   这个 Node 进程的 `TEMP` 是 **C:\Temp**，而 AfterFX.exe 启动时继承的是
+   *   **%LOCALAPPDATA%\Temp** ⇒ jsx 去 `%LOCALAPPDATA%\Temp\ds1-ae-intro` 读 intro.txt / 写 PNG，
+   *   而 `ae-intro.mjs` 在 `C:\Temp\ds1-ae-intro` 读写 ⇒
+   *     ① 文案读不到 ⇒ 永远用内置的「祥子 / Saki · 客服日常」✗
+   *     ② PNG 渲在另一个目录 ⇒ 回执 `pngFrames=0/30`，看着像"根本没渲"✗
+   *   ⇒ **启动 AE 时把 TEMP/TMP 显式钉成 Node 的 tmpdir**，两边必然是同一个地方 ✓ */
+  const sameTmp = tmpdir();
+  spawn(AE, [], {
+    detached: true,
+    stdio: 'ignore',
+    env: { ...process.env, TEMP: sameTmp, TMP: sameTmp },
+  }).unref();
   const t0 = Date.now();
   while (Date.now() - t0 < 240000) {
     await new Promise((r) => setTimeout(r, 3000));

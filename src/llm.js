@@ -1,5 +1,6 @@
 import { config } from './config.js';
 import { log } from './log.js';
+import * as outbound from './outbound.js';
 import * as spend from './spend.js';
 // ⚠️ 2026-09-21：人设文案从 `personas/<id>/identity.json` 来（见 src/persona.js）。
 //    这里原来写死「Saki（丰川祥子）」—— 换人设时它不会跟着变，等于换了个名字还在演小祥。
@@ -14,6 +15,19 @@ import * as persona from './persona.js';
 //    ⇒ 统一成 undici 自己的 fetch（agent / dispatcher / 全局设置全都同源 ✓）
 import { Agent, ProxyAgent, setGlobalDispatcher, fetch as undiciFetch } from 'undici';
 import net from 'node:net';
+import { createHash } from 'node:crypto';
+/* ⚠️⚠️ 2026-11-14 脱敏层（见 `src/privacy.js` 顶部那段说明）：
+ *    发给模型的提示词里带着群号 / 群名 / 群友 QQ 号与昵称 / 服务器地址 / 偶尔的 apiKey，
+ *    而请求要过第三方中转（`providers[].baseURL`），链路上是明文可见的。
+ *    ⇒ 发出去之前换成 `@U1@` / `@G1@` …，收到回复再换回来。
+ *    ⚠️ 只在**本文件的四个出网入口**接入（streamChat / quickAck / phrase / ping），
+ *      别的模块都是调它们，所以没有"绕过去"的第二条路 ✓
+ *    ⚠️ `withFallback` 不用单独改：它重试时调的是传进来的那个 `fn()`，
+ *      而 `fn` 内部就是这四个入口 ⇒ 每一次重试都会重新脱敏一遍 ✓ */
+import * as privacy from './privacy.js';
+/* ⚠️ 2026-11-19：工具名/参数的中文化（只为了**把它写进思考链**给人看，
+ *   执行路径仍在 `bot.js` 的 `runReadTool`，这里不碰任何业务）✓ */
+import { normalizeCall } from './tools-fc.js';
 
 // ⚠️⚠️ 2026-09-16 深夜：**运行中自动切换网络出口**（用户要求：
 //    「要能自动切换网络，比如关掉代理」）。
@@ -204,7 +218,100 @@ function stripLoneSurrogates(body) {
   return s;
 }
 
+/* ⚠️⚠️⚠️ 2026-11-23 加：**本地端点互斥 + 主聊天优先 + 锁覆盖到"流读完"**。
+ *
+ *   为什么要有锁：llama.cpp `--parallel 1` **只有一个 KV 槽**，而 bot 侧是真并发
+ *   ⇒ 主请求到达时槽被辅助请求占着 ⇒ `selected slot by LRU` ⇒ 主请求全量重算（0%、14 秒）。
+ *
+ *   ⚠️⚠️ 第一版的坑（实测首字 7.5 秒）：`__serializeLocal` 只包住 `llmFetchCore`，
+ *   而它返回的是**流式响应对象** —— 锁在"响应头到了"就释放了，**流还在读**。
+ *   结果：既没真正串行（后来者以为槽空了），又让后来者排队等一个早已"释放"的锁 ✗
+ *   ⇒ 现在：**流式请求的锁要等调用方把流读完再放**（返回的 res 上挂 `__release`，
+ *      由 `streamChat` 在 `finally` 里调用）；非流式请求照旧"fetch 完就放"✓
+ *
+ *   优先级：主聊天 `high:true` 插队，辅助请求让路（否则主请求排在一堆辅助后面）。 */
+const __lock = {
+  q: [],
+  running: false,
+  acquire(high = false) {
+    return new Promise((resolve) => {
+      this.q.push({ resolve, high });
+      if (high) {
+        // high 插到所有 low 前面（保持同优先级内的先后顺序）
+        const idx = this.q.findIndex((x) => !x.high);
+        if (idx >= 0 && idx < this.q.length - 1) {
+          const item = this.q.pop();
+          this.q.splice(idx, 0, item);
+        }
+      }
+      this.pump();
+    });
+  },
+  release() {
+    this.running = false;
+    this.pump();
+  },
+  pump() {
+    if (this.running) return;
+    const next = this.q.shift();
+    if (!next) return;
+    this.running = true;
+    next.resolve();
+  },
+};
+
 export async function llmFetch(url, opts = {}) {
+  if (!/127\.0\.0\.1|localhost|0\.0\.0\.0/i.test(String(url))) {
+    return llmFetchCore(url, opts); // 云端：真并发，不排队
+  }
+  const high = opts?.high === true;
+  let streaming = false;
+  try {
+    streaming = JSON.parse(String(opts.body ?? '{}')).stream === true;
+  } catch {}
+  await __lock.acquire(high);
+  if (!streaming) {
+    try {
+      return await llmFetchCore(url, opts);
+    } finally {
+      __lock.release();
+    }
+  }
+  /* 流式：锁交给调用方，等它把流读完再放。
+   * ⚠️ 用 `pipeThrough` + `flush` **自动**释放 —— 这样不用去改 streamChat 里那七八个
+   *   return / throw 分支（漏一个就是死锁）。流读完 / 被 cancel 都会触发 ✓ */
+  try {
+    const res = await llmFetchCore(url, opts);
+    let done = false;
+    const rel = () => {
+      if (done) return;
+      done = true;
+      __lock.release();
+    };
+    try {
+      res.__release = rel;
+      if (res.body && typeof TransformStream === 'function') {
+        Object.defineProperty(res, 'body', {
+          configurable: true,
+          value: res.body.pipeThrough(
+            new TransformStream({
+              flush: rel,
+              cancel: rel,
+            }),
+          ),
+        });
+      }
+    } catch {
+      /* 包不上就退回"调用方手动 release"（`res.__release`） */
+    }
+    return res;
+  } catch (e) {
+    __lock.release();
+    throw e;
+  }
+}
+
+async function llmFetchCore(url, opts = {}) {
   /* ⚠️⚠️ 2026-10-22 加（用户：「**402/401 立即停，不再重试整轮**」）——
    *    **死锁期间直接抛错、一个字节都不发** ✓
    *    今天实测：DeepSeek 余额不足（402）之后，每条消息还是完整地发请求、
@@ -234,7 +341,12 @@ export async function llmFetch(url, opts = {}) {
     }
   })();
   const needProxy = /(^|\.)(googleapis\.com|google\.com|openai\.com|anthropic\.com)$/.test(host);
-  if (egress === 'unknown') applyEgress((await proxyAlive()) ? 'proxy' : 'direct');
+  // ⚠️ 2026-10-25 加：允许强制直连（QQBOT_EGRESS=direct）——
+//    实测代理端口在听、但请求报 ECONNRESET 时，靠"代理活着"这个判据会一直选中坏出口 ✗
+if (egress === 'unknown')
+  applyEgress(
+    process.env.QQBOT_EGRESS === 'direct' ? 'direct' : (await proxyAlive()) ? 'proxy' : 'direct',
+  );
   const first = needProxy && (await proxyAlive()) ? 'proxy' : egress;
   try {
     return await rawFetch(url, opts, first);
@@ -321,7 +433,7 @@ const FO = {
   fails: 0,
 };
 
-/** 降级保持多久（2026-10-22 用户：「**改成 2 分钟重试**」—— 原来是 10 分钟，太久了：
+/** 降级保持多久（2026-10-22：「**改成 2 分钟重试**」—— 原来是 10 分钟，太久了：
  *  主模型只是偶发抖动时，10 分钟内全都用不上它 ✗） */
 const FALLBACK_HOLD_MS = 2 * 60 * 1000;
 
@@ -353,16 +465,141 @@ function providerChain() {
       temperature: Number.isFinite(p.temperature) ? p.temperature : null,
       maxTokens: Number.isFinite(p.maxTokens) ? p.maxTokens : null,
       timeout: Number.isFinite(p.timeout) ? p.timeout : null,
+      /* ⚠️⚠️⚠️ 2026-11-18 修（真 bug：「极简提示词勾了但完全没生效」）——
+       *    这个 `map` 是**手工重建对象**（只挑上面那几个字段），原来**没带 `lite`** ⇒
+       *    `llmCfg()._lite = p.lite === true` 永远是 `undefined === true` = **false**
+       *    ⇒ `isLiteActive()` 恒为 false ⇒ `buildSystemPrompt()` 照旧拼 9.9 万字的普通提示词
+       *      发给本地 0.5B（上下文 32K）⇒ 400 / 超时 / 群里说"卡了一下" ✗✗
+       *    ⇒ 这里补上；以后往 provider 加字段**必须同时加到这儿**（不然又是一次静默失效）✓ */
+      lite: p.lite === true,
     }));
   // ⚠️ 列表为空 ⇒ 只有一份（扁平字段），不存在降级
-  return list;
+  /* ⚠️⚠️⚠️ 2026-10-29 加（用户：「加一个**是否自动降级提供商**的按钮防止降级到中转站，
+   *    等我和你说再把中转站 api 恢复出来」）
+   *
+   *    · `autoFallback !== false`（默认）⇒ 就是原来那套：同家换备用模型 → 跨家降级
+   *    · `autoFallback === false` ⇒ **只留第一个** ⇒ 永远不跨家 ✗
+   *      这样就算以后有人把中转站又加回列表里（当备用），只要这个开关关着，
+   *      **它一辈子都不会被调用到** ✓
+   *    ⚠️ 同家的 `fallbackModels` **仍然可用** —— 那是同一个 baseURL + 同一个 key，
+   *      不换家、不会连到别的地方去 ✓
+   */
+  /* ⚠️⚠️⚠️ 2026-11-21 加（用户：「**当本地模型关闭时应该立刻降级到第二个模型，
+   *   开启时马上恢复。要主动取本地模型运行情况来调整，不是撞到关闭再降级或者恢复**」）——
+   *   **本地探活挂了 ⇒ 把它从链里剔掉**（不管它排第几），自动落到下一家 ✓
+   *   本地恢复 ⇒ 探活把 `LOCAL.down` 清掉 ⇒ 下一句自动回本地 ✓
+   *   ⚠️ 用户的 `autoFallback` 开关值一个字不动 —— 这是内存里的临时行为 ✓
+   *   ⚠️ 剔除是"只去本地"，不是"放行第二家" —— 因为现在顺序是「官方→本地→中转站」，
+   *      本地挂了应该落到**它后面那家**，而不是机械地取前两个 ✗ */
+  let out = list;
+  if (LOCAL.down) {
+    const filtered = list.filter((x) => !/127\.0\.0\.1|localhost|0\.0\.0\.0/i.test(String(x.baseURL ?? '')));
+    if (filtered.length) out = filtered; // 全剔完就还是用原来的（别把链弄空）
+  }
+  if (l.autoFallback === false) return out.slice(0, 1);
+  return out;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * ⚠️⚠️⚠️ 2026-11-21 加：**主动探活本地模型 → 挂了立刻降级、活了立刻恢复**
+ *
+ *   用户原话：「**当本地模型关闭时应该立刻降级到第二个模型，开启时马上恢复。
+ *              要主动取本地模型运行情况来调整，不是撞到关闭再降级或者恢复**」
+ *
+ *   为什么要主动探：现在的机制是**撞到失败才降**（`FO.level` 靠请求报错推进）——
+ *   本地 llama-server 停掉之后，**第一条消息会白等十几秒超时**才发现 ✗
+ *   而且它是"降级 10 分钟再重试"，本地起来了也要等那 10 分钟才回来 ✗
+ *
+ *   ⇒ 做法：
+ *     · 每 **15 秒** ping 一次本地 `/health`（llama-server 有这个端点，很轻）
+ *     · 探到**挂了** ⇒ 置 `LOCAL.down = true` ⇒ `providerChain()` **临时允许降级到第二家** ✓
+ *     · 探到**活了** ⇒ 立刻 `LOCAL.down = false` + **顺手把降级状态清掉**（马上回本地）✓
+ *   ⚠️ **不动 `config.llm.autoFallback`**（那是用户的开关，见 AGENTS 铁律）——
+ *      只在内存里临时放行，用户那边看到的开关值一个字都没变 ✓
+ *   ⚠️ 第一个 provider 不是本地（127.0.0.1）⇒ 这套**完全不生效**（照旧走原逻辑）✓
+ *   ⚠️ 探活失败 3 次才算挂（防抖：单次超时不代表死了）✓
+ * ══════════════════════════════════════════════════════════════════════════ */
+const LOCAL = { down: false, fails: 0, timer: null, lastOkAt: 0 };
+
+/** 本地端点在**原始配置**里的下标（没有就 -1）—— ⚠️ **不假设它排第一**（现在顺序是官方→本地→中转站） */
+function localIdx() {
+  try {
+    const list = Array.isArray(config.llm?.providers) ? config.llm.providers : [];
+    for (let i = 0; i < list.length; i++) {
+      if (/127\.0\.0\.1|localhost|0\.0\.0\.0/i.test(String(list[i]?.baseURL ?? ''))) return i;
+    }
+    return -1;
+  } catch {
+    return -1;
+  }
+}
+
+/** 本地端点的 base（去掉 /v1，用来拼 /health） */
+function localBase() {
+  try {
+    const i = localIdx();
+    if (i < 0) return '';
+    return String(config.llm.providers[i].baseURL ?? '').replace(/\/v1\/?$/, '');
+  } catch {
+    return '';
+  }
+}
+
+/** 探一次本地健康（llama-server 的 /health 很轻，200 = 活着） */
+async function probeLocalOnce() {
+  try {
+    const base = localBase();
+    if (!base) return;
+    const ac = new AbortController();
+    const t = setTimeout(() => ac.abort(), 2500);
+    const r = await fetch(`${base}/health`, { signal: ac.signal });
+    clearTimeout(t);
+    if (r.ok) {
+      LOCAL.fails = 0;
+      LOCAL.lastOkAt = Date.now();
+      if (LOCAL.down) {
+        LOCAL.down = false;
+        // 立刻回本地：把降级状态清掉（否则还要等那个 10 分钟窗口）
+        FO.level = 0;
+        FO.modelIdx = 0;
+        FO.until = 0;
+        FO.fails = 0;
+        log.info('[本地模型] **恢复在线** ⇒ 立刻切回本地 ✓');
+      }
+    } else {
+      throw new Error(`health ${r.status}`);
+    }
+  } catch (e) {
+    LOCAL.fails += 1;
+    if (!LOCAL.down && LOCAL.fails >= 3) {
+      LOCAL.down = true;
+      log.warn(`[本地模型] 连续 ${LOCAL.fails} 次探活失败（${e.message}）⇒ **立刻降级到第二家** ✓`);
+    }
+  }
+}
+
+/** 启动探活（幂等；由 index.js 或第一次 llmCfg 调一次） */
+export function startLocalWatch(intervalMs = 15000) {
+  if (LOCAL.timer) return;
+  if (localIdx() < 0) return; // 列表里没有本地端点 ⇒ 不启
+  LOCAL.timer = setInterval(() => {
+    probeLocalOnce().catch(() => {});
+  }, intervalMs);
+  LOCAL.timer.unref?.(); // 别拦着进程退出
+  probeLocalOnce().catch(() => {}); // 立刻探一次
+  log.info(`[本地模型] 已启动探活（每 ${Math.round(intervalMs / 1000)} 秒一次）`);
+}
+
+/** 现在本地是不是挂了（给别处查） */
+export function localIsDown() {
+  return LOCAL.down;
 }
 
 /**
  * **现在该用哪套配置**
  * @returns {object} 形如 `{ baseURL, apiKey, model, temperature, maxTokens, timeout, ... }`
  */
-function llmCfg() {
+function llmCfg(opts = {}) {
   const l = config.llm || {};
   const chain = providerChain();
 
@@ -381,7 +618,23 @@ function llmCfg() {
   if (!chain.length) return l;
 
   const idx = Math.min(FO.level, chain.length - 1);
-  const p = chain[idx];
+  let p = chain[idx];
+  // ⚠️⚠️ 2026-11-18 加（用户：「**加，用中转站或者官方还是要调**」）——
+  //    **判断类 / 长活**必须走云端那家，不能落到本地小模型：
+  //      · 实测（22:48）：本地 0.5B 把「洗车店距离我家 50 米，你建议我开车去还是走路去？」
+  //        判成了「派活」⇒ agent 桥白起一个 25 秒的活 ✗（那只是问意见）
+  //      · 同一段日志里还有 `[归属核对] 出错（JSON 坏了）` —— 0.5B 连输出合法 JSON 都不稳
+  //      · 空间摘要 / 日常润色那些提示词本身就有 8 万 token，本地 32K 上下文直接 400 ✗
+  //    ⇒ 这些调用传 `noLite: true`：**跳过勾了"极简提示词"的那家**，换第一个云端的 ✓
+  //    （主聊天正文照旧用它 —— 那份提示词走极简模式，本地能秒回）
+  let pickedIdx = idx;
+  if (opts.noLite && p.lite) {
+    const ci = chain.findIndex((x) => !x.lite);
+    if (ci >= 0) {
+      pickedIdx = ci;
+      p = chain[ci];
+    }
+  }
   /* ⚠️ 2026-10-22：**同家备用模型**（限流时换的那个）。
    *    `FO.modelIdx` = 0 表示用主模型名；1 表示 fallbackModels[0]，以此类推 ✓ */
   const fb = p.fallbackModels || [];
@@ -396,9 +649,41 @@ function llmCfg() {
     maxTokens: p.maxTokens ?? l.maxTokens,
     timeout: p.timeout ?? l.timeout,
     _provider: p.name || p.id,
-    _level: idx,
+    _level: pickedIdx,
     _modelIdx: FO.modelIdx,
+    // ⚠️⚠️ 2026-11-17 加（用户：「在模型提供商卡片那里加一个使用极简提示词的选框」）——
+    //    这一家勾了「极简提示词」⇒ `bot.js` 拼提示词时只给几百字（本地小模型用）✓
+    _lite: p.lite === true,
   };
+}
+
+/**
+ * 现在用的这家提供商，是不是勾了「使用极简提示词」？
+ *
+ * ⚠️ `bot.js` 拼提示词之前调一次：true ⇒ 整份人设/知识库/记忆/工具都不拼，
+ *    改用 `prompt-lite.js` 那几百字（本地小模型吃不下 6 万字的普通提示词 ✗）
+ * ⚠️ 走的是 `llmCfg()` 那一套（含降级后的"当前是哪家"）⇒ 降级到本地兜底时
+ *    它会自动变成 true，不用额外判 ✓
+ */
+export function isLiteActive() {
+  /* ⚠️⚠️ 2026-11-20 加全局开关（用户：「**极简提示词开关应该直接全部账号生效吧，
+   *   提示词超量才导致的话题偏吧**」）——
+   *
+   *   原来只按**当前 provider 的 `lite` 标志**判 ⇒ 主模型一降级
+   *   （本地 4B 挂了 / 超时 / 429 ⇒ 激活的变成"中转站"，它的 lite=false）
+   *   ⇒ `isLiteActive()` 立刻 false ⇒ 提示词从 3 万字**暴涨到 8 万字**
+   *   （几万字服务器知识库全塞进去）⇒ 她开始答非所问、把任何话题都往服务器上拐 ✗✗
+   *   （实测：问「QQ 机器人项目网上最近有什么进展」她答「Java 21 / 进服 / 地图传送」）
+   *
+   *   ⇒ `config.llm.lite.forceAll !== false`（**默认开**）：不管走哪家 provider，
+   *     一律用极简提示词 ✓ 想回云端全量就把这个开关设成 false。
+   */
+  try {
+    if (config.llm?.lite?.forceAll !== false) return true;
+    return llmCfg()._lite === true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -435,6 +720,15 @@ export function noteLlmFailure(why = '', kind = 'other') {
    *      期间 `llmFetch` 直接抛错，**一个字节都不发** ✓
    *      （欠费了本来就说不了话，快速失败比反复撞省钱得多） */
   if (kind === 'credits' || kind === 'auth') {
+    // ⚠️⚠️ 2026-11-10：**撞到就闭麦**，不等连续 3 次 ——
+    //    实测欠费那晚（20:17 起 402）她一直在靠"切备选模型"接着说话，
+    //    群里照常收到回复，用户根本看不出余额已经没了 ✗
+    //    闭麦由 `outbound` 统一管，`sendText()` 会拦下所有外发。
+    if (outbound.markExhausted(kind === 'credits' ? '余额不足（402）' : '凭据失效（401）')) {
+      try {
+        log.error('[闭麦] 模型接口报 402/401 ⇒ **从现在起不再往任何地方发消息**（充值后自动恢复）');
+      } catch { /* ignore */ }
+    }
     FO.deadStrikes = (Number(FO.deadStrikes) || 0) + 1;
     if (FO.deadStrikes >= 3) {
       FO.deadUntil = Date.now() + DEAD_HOLD_MS;
@@ -528,6 +822,12 @@ export function llmFallbackStatus() {
     level: FO.level,
     modelIdx: FO.modelIdx,
     total: chain.length,
+    /* ⚠️ 2026-10-29 加（用户要的开关）：**自动降级提供商 是开还是关** ——
+     *    关着的时候 `providerChain()` 只返回第一个，所以 `total` 恒为 1，
+     *    界面靠这个字段显示"已关闭自动降级（只用主模型）" ✓ */
+    autoFallback: config.llm?.autoFallback !== false,
+    /** 列表里还剩几家（关着自动降级时是 1；这个数是"实际可用"的，不是配置里的） */
+    providerCountConfigured: Array.isArray(config.llm?.providers) ? config.llm.providers.length : 0,
     /* ⚠️ 2026-10-22 加：**死锁状态**（402/401 连续 3 次 ⇒ 暂停 10 分钟）
      *    界面上要能一眼看出"不是坏了，是欠费了在等" ✓ */
     dead: FO.deadUntil > Date.now(),
@@ -664,13 +964,59 @@ const _llmCfgCompat = llmCfg;
  *        会**并发**调这个函数，全局变量会被别的那次冲掉。
  * @returns {AsyncGenerator<string>}
  */
+/**
+ * ⚠️ 2026-11-19：把一次工具调用写成**人话**（思考链页面上给人看的）。
+ *
+ *   `web_search` + `{"query":"今天金价"}` ⇒ `搜（词=今天金价）`
+ *
+ * ⚠️ 只用 `normalizeCall()` 做名字/参数的翻译，**不执行**、也不判对错：
+ *   不认识的工具名原样显示（这样反常情况在页面上看得见，不会被静默吞掉）✓
+ */
+function toolLine(name, argsJson) {
+  const nm = String(name ?? '').trim();
+  let args = {};
+  try {
+    args = typeof argsJson === 'string' ? (argsJson.trim() ? JSON.parse(argsJson) : {}) : argsJson || {};
+  } catch {
+    return nm; // 参数还没拼完 / 不合法 ⇒ 只显示名字
+  }
+  const r = normalizeCall({ name: nm, arguments: args });
+  const cn = r?.cn || nm;
+  const kv = Object.entries(r?.args ?? {})
+    .filter(([, v]) => v !== undefined && v !== null && String(v).trim() !== '')
+    .map(([k, v]) => `${k}=${String(v).slice(0, 60)}`);
+  // ⚠️⚠️ 2026-11-21 改（原来返回 `搜图（搜什么=…）`，前面拼 `【调用工具】`）——
+  //    那个形状**会被模型当成"可调用的格式"照抄**：
+  //    实测 4B 在思考正文里写 `【调用工具】搜（词=16万二手车推荐）`，
+  //    然后**不发起真正的 tool_call**（它以为写出来就算调了）⇒ 代码什么都没做 ✗
+  //    当时是去 `parseToolCalls` 里**认**这种写法来兜（等于把病当成功能）✗
+  //    ⇒ 现在改成**明显是给人看的展示样式**：前缀一个图标、参数用 `·` 分隔、
+  //      不带"调用工具"四个字、也不带那种像函数调用的括号 ✓
+  return kv.length ? `${cn} · ${kv.join(' / ')}` : cn;
+}
+
 export async function* streamChat(messages, outerSignal, opts = {}) {
-  const llm = llmCfg();
+  // ⚠️ 2026-11-18：`opts.noLite` 往下透传 —— 空间摘要 / 日常润色那种长活要传 true ✓
+  const llm = llmCfg({ noLite: !!opts?.noLite });
 
   // ⚠️ 解题模式要更大的 max_tokens（2026-09-12）：
   //    flash 的**思考链也计入 completion_tokens** —— 一道折叠最值题想清楚了
   //    可能就烧掉几千 token，正文没写几句就被截断（表现是"空回复"或"说到一半没了"）。
-  const maxTokens = Number(opts.maxTokens) > 0 ? Number(opts.maxTokens) : llm.maxTokens;
+  let maxTokens = Number(opts.maxTokens) > 0 ? Number(opts.maxTokens) : llm.maxTokens;
+
+  /* ⚠️⚠️ 2026-11-23 加：**本地模型 + lite 模式 ⇒ 输出预算压到 2000**。
+   *
+   *   为什么非压不可：`-c 40960` 是**硬上限**，而 llama.cpp 发现
+   *   `prompt + max_tokens > n_ctx` 时，它是**从前面把 prompt 截掉**的 ✗
+   *   ⇒ system 的前缀当场全变 ⇒ KV 缓存归零 ⇒ 那一轮 14 秒全量重算
+   *   （WebUI 上就是「缓存 0，0%」，今晚 22:13 那次 400 也是同一个病）
+   *
+   *   现在的账：system 3.2 万（<主人> 轮）+ 历史最多 ~6 千 + 输出 = 不能超 40,960
+   *   ⇒ 输出给 2000 就稳（她本来就只回几十个字，思考预算 200）✓ */
+  try {
+    const isLocal = /127\.0\.0\.1|localhost|0\.0\.0\.0/i.test(String(llm.baseURL ?? ''));
+    if (isLocal && isLiteActive()) maxTokens = Math.min(maxTokens, 2000);
+  } catch {}
 
   // ⚠️⚠️ 2026-09-13 修：**超时要跟着 token 预算放大**。
   //
@@ -730,8 +1076,121 @@ export async function* streamChat(messages, outerSignal, opts = {}) {
   //    上一次写过的工具暗号会被**执行两遍** ✗
   if (opts.report) opts.report.reasoning = '';
 
+  /* ══════════════════════════════════════════════════════════════════
+   * ⚠️⚠️ 2026-11-14 脱敏层接入点（1/2）：**请求体拼好、真正发 HTTP 之前**
+   *
+   * 位置就是这样选的：太靠上（在调用方那边）要改十几个调用点，必漏；
+   * 太靠下（在 `llmFetch` 里对 JSON 字符串做替换）会碰到 JSON 结构本身，
+   * 而且在那一层没法把"这次用了哪些占位符"干净地传回来做 unmask。
+   * ⇒ 落在 `streamChat` 里、`body` 拼装之前：此时 `messages` 还是干净的数组。
+   *
+   * ⚠️ 出错时**不能让请求挂掉**：脱敏只是隐私增强，挂了就退回明文发
+   *    （宁可漏脱敏一次，也不能让群里那句话说不出来）。
+   * ══════════════════════════════════════════════════════════════════ */
+  let pv = null;
+  let sendMessages = messages;
+  let unmasker = null; // 正文（yield 出去的那部分）边收边换
+  let reasonUnmasker = null; // 思考链的流式回调（webui 那个逐行输出的页面）
+  try {
+    /* ⚠️⚠️⚠️ 2026-11-21 加"本地不脱敏"（子代理实测出来的**真凶**）——
+     *   脱敏走的是 `maskMessages()`：它把提示词里的**人名、数字**替换成占位符。
+     *   而它作用在**整个 messages 上**（包括那 23.6k 的固定前缀）⇒
+     *   每次替换出来的占位符**可能不一样**（序号/顺序会变）⇒
+     *   **固定前缀的内容变了 ⇒ llama.cpp 的前缀缓存全部失效** ✗✗
+     *   实测（子代理复现 4 次）：**脱敏 ON ⇒ 命中稳定 0%；OFF ⇒ 稳定 83.1%**
+     *   而命中时 prefill 只要 0.09~0.16 秒、首字 0.20 秒（不命中要 14~24 秒）✗
+     *
+     *   ⇒ **本地端点（127.0.0.1 / localhost）不脱敏**：
+     *     数据不出这台机器，脱敏零收益，却把缓存全废了 ✓
+     *   ⚠️ **云端（中转站 / 官方）照旧脱敏** —— 那边是真外发，隐私必须留 ✓
+     *   ⚠️ 判据用**这次实际要用的 base**（`useBase`），不是配置里的主 base ——
+     *      因为降级到中转站时也要脱敏 ✓ */
+    const _isLocalEndpoint = /127\.0\.0\.1|localhost|0\.0\.0\.0/i.test(String(useBase ?? ''));
+    if (privacy.enabled() && !_isLocalEndpoint) {
+      pv = privacy.maskMessages(messages);
+      sendMessages = pv.messages;
+      unmasker = privacy.createStreamUnmasker(pv.map);
+      reasonUnmasker = privacy.createStreamUnmasker(pv.map);
+    }
+  } catch (e) {
+    log.warn(`[脱敏] 准备阶段出错，本次按明文发送：${e.message}`);
+    pv = null;
+    sendMessages = messages;
+    unmasker = null;
+    reasonUnmasker = null;
+  }
+
+  /* ⚠️ 2026-11-23 留着当巡检用：本地端点每轮打一行"前缀指纹"。
+   *   用途：以后有人报「缓存又掉下去了」，把相邻两轮这两行一对比 ——
+   *   哪个档的 md5 先变，分叉点就在那一档（比落盘 4 万字提示词再 diff 轻得多）。
+   *   实测健康值（连续三轮）：16000~34000 全同 ⇒ 命中 96.3~96.6%。 */
+  try {
+    if (/127\.0\.0\.1|localhost/i.test(String(useBase ?? ''))) {
+      const sysMsg = Array.isArray(sendMessages) ? sendMessages.find((m) => m?.role === 'system') : null;
+      if (sysMsg) {
+        const sc = String(sysMsg.content ?? '');
+        /* ⚠️ 只 hash **不同长度的前缀** —— 全文 md5 必然每轮不同（动态段一定变），没用。
+         *   前缀 hash 相同 ⇒ 那一段完全一致；第一个不同的档就是分叉点 ✓ */
+        const marks = [2000, 4000, 6000, 8000, 12000, 16000, 20000, 24000, 28000, 32000, 36000];
+        const fps = marks
+          .filter((n) => n < sc.length)
+          .map((n) => `${n}=${createHash('md5').update(sc.slice(0, n)).digest('hex').slice(0, 8)}`);
+        /* ⚠️ 临时用 info（定位完这个 0% 就改回 debug）*/
+        log.info(`[缓存指纹] system ${sc.length} 字 | ${fps.join(' ')}`);
+      }
+    }
+  } catch {}
+
+  /* ⚠️ 2026-11-23 临时诊断（定位"bot 0% / 我的脚本 99.9%"这个矛盾，用完删）：
+   *   把**这次请求的非 messages 部分**打出来 —— tools 有没有、thinking 有没有、
+   *   chat_template_kwargs 有没有、几条历史、max_tokens 多少。
+   *   我脚本能命中、bot 不能，差别只可能在这些参数里。 */
+  try {
+    if (/127\.0\.0\.1|localhost|0\.0\.0\.0/i.test(String(useBase ?? ''))) {
+      const optKeys = Object.keys(opts ?? {}).join(',') || '(无)';
+      const tCount = Array.isArray(opts?.tools) ? opts.tools.length : 0;
+      const th = opts?.thinking ? String(opts.thinking?.type ?? 'object') : '(无)';
+      log.info(
+        `[请求诊断] msgs=${sendMessages.length}｜max_tokens=${maxTokens}｜` +
+          `tools=${tCount}｜thinking=${th}｜opts=${optKeys}`,
+      );
+      /* ⚠️ 把**实际要发的请求**整份落盘（只在"主聊天"那种大请求时写，避免被辅助请求覆盖）。
+       *   我脚本能命中、bot 不能 ⇒ 差别只可能在"实际发的"和"dump 的"不是同一份。
+       *   落盘之后我直接拿它复跑，就能定死了。 */
+      try {
+        if (Array.isArray(sendMessages) && sendMessages.length >= 6 && tCount > 0) {
+          const { writeFileSync } = await import('node:fs');
+          const { join } = await import('node:path');
+          writeFileSync(
+            join(process.cwd(), 'logs', '_sentreq.json'),
+            JSON.stringify({
+              model: useModel,
+              messages: sendMessages,
+              tools: opts?.tools ?? null,
+              tool_choice: 'auto',
+              max_tokens: maxTokens,
+              temperature: Number.isFinite(Number(opts?.temperature)) ? Number(opts.temperature) : llm.temperature,
+              stream: true,
+              stream_options: { include_usage: true },
+              ...(opts?.thinking ? { thinking: opts.thinking } : {}),
+            }),
+            'utf8',
+          );
+        }
+      } catch {}
+    }
+  } catch {}
+
+  /* ⚠️ 2026-11-23 纯测量：请求发出时刻（用来算"首字延迟"） */
+  const __reqT0 = Date.now();
+
   try {
     const res = await llmFetch(`${useBase.replace(/\/+$/, '')}/chat/completions`, {
+      /* ⚠️ 2026-11-23：**主聊天走 high 优先队列**（本地端点串行时它插队，辅助请求让路）——
+       *   否则主请求会排在一堆辅助请求后面，实测首字从 1 秒变成 20 秒 ✗ */
+      high: true,
+      /* ⚠️ 纯测量用（见上面 `__firstByteAt`） */
+      __t0: __reqT0,
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -739,7 +1198,7 @@ export async function* streamChat(messages, outerSignal, opts = {}) {
       },
       body: JSON.stringify({
         model: useModel,
-        messages,
+        messages: sendMessages, // ⚠️ 脱敏后的那份（原 `messages` 只在这里用到）
         // ⚠️ 2026-10-20 加（用户：「**把备用模型也加个模型温度的调整框吧**」）：
         //    备选模型（Gemini 那类）可以有自己的温度 —— `opts.temperature` 有值就用它，
         //    没有就照旧用主模型那个（**老配置一个字都不变**）✓
@@ -770,7 +1229,25 @@ export async function* streamChat(messages, outerSignal, opts = {}) {
         ...(!usingMainBase
           ? {}
           : opts.thinking
-            ? { thinking: opts.thinking }
+            ? {
+                thinking: opts.thinking,
+                /* ⚠️⚠️⚠️ 2026-11-21 加（子代理实测出来的硬结论）——
+                 *   `thinking: { type: 'disabled' }` 是 **DeepSeek / Anthropic 的形状**，
+                 *   **llama-server 压根不认** ⇒ 思考照旧开着：
+                 *     实测 8/8 次请求都带 `reasoning_content`（212~237 字），
+                 *     `max_tokens: 64` 被思考**全部吃光** ⇒ `content` 一个字不剩
+                 *     ⇒ judge 拿不到 JSON ⇒ 走兜底 ⇒ 收紧度>2 的群"这句不接"（静默失败）✗
+                 *
+                 *   ⇒ 本地端点必须**额外**给 llama.cpp 认的那个参数：
+                 *     `chat_template_kwargs: { enable_thinking: false }`
+                 *     实测效果：**8/8 可解析、平均 0.99 秒**（最慢 1.29）✓
+                 *   ⚠️ 只在**显式要求关思考**时才加 —— 主聊天那条路（`type:'enabled'`）不受影响 ✓
+                 *   ⚠️ 云端不认这个字段，所以只在 `usingMainBase` 且 base 是本地时加 ✓ */
+                ...(opts.thinking?.type === 'disabled' &&
+                /127\.0\.0\.1|localhost|0\.0\.0\.0/i.test(String(useBase ?? ''))
+                  ? { chat_template_kwargs: { enable_thinking: false } }
+                  : {}),
+              }
             : (() => {
               // ⚠️⚠️ 2026-10-07：**试过默认关掉，用户要求调回**（原话：「直接调回思考链」）——
               //    实测数据：生成耗时一直在 8~20 秒（那次 52 秒是异常尖峰），
@@ -780,6 +1257,20 @@ export async function* streamChat(messages, outerSignal, opts = {}) {
               const b = Number(config.llm?.thinkingBudget ?? 3000);
               return Number.isFinite(b) && b > 0 ? { thinking: { type: 'enabled', budget_tokens: b } } : {};
             })()),
+        /* ⚠️⚠️ 2026-11-19 加：**标准 function calling**（不再让她写 `[工具:xxx]` 暗号）
+         *
+         * 为什么（用户原话：「**就算是云端模型写暗号一样会有问题，还是 function calling 更好**」）：
+         *   暗号是"现学一种协议" —— 写正文里、名字错、括号错、参数名错，全都**静默失败**，
+         *   而且失败的样子和"她没想调"一模一样 ⇒ 只能靠猜。工具调用是模型**原生训练过**的：
+         *   名字/参数由 schema 约束，调没调、调了什么是结构化的 ⇒ 准确率高一个档 ✓
+         *
+         * ⚠️ 只有调用方显式给 `opts.tools` 才带上 —— 所有辅助请求（判定/润色/抽取…）
+         *    一个字段都不变，行为零影响 ✓
+         * ⚠️ 不支持的实现会不会报 400？给 `tools` 的实现有三种：认（正常）、忽略（等于没给）、
+         *    400（请求体不认识）。所以**调用方要自己兜**（`bot.js` 里那层 `_fcBroken` 就是干这个的）✓ */
+        ...(Array.isArray(opts.tools) && opts.tools.length
+          ? { tools: opts.tools, tool_choice: opts.toolChoice ?? 'auto' }
+          : {}),
         stream: true,
         // ⚠️⚠️ 2026-10-15 加（用户：黑祥那台用的是**中转站**的同款模型）——
         //    **中转站不认 DeepSeek 的 `thinking:{type:`disabled`}`** ⇒ 它照样思考，
@@ -809,6 +1300,12 @@ export async function* streamChat(messages, outerSignal, opts = {}) {
         //    其余（含 **402 余额不足**）照旧跨家 —— 欠费了换哪个模型都一样欠 ✗
         noteLlmFailure(`HTTP ${res.status}`, res.status === 429 ? 'rate' : 'other');
       }
+      // ⚠️ 2026-10-24 临时诊断（排查 gemini 兼容层 400）：把完整 body 打到 stderr
+      if (res.status >= 400) {
+        try {
+          console.error(`__BODY_DEBUG ${res.status} :: ${String(body).slice(0, 900)}`);
+        } catch {}
+      }
       throw new Error(`LLM 接口返回 ${res.status} ${res.statusText}${body ? ` :: ${body.slice(0, 400)}` : ''}`);
     }
     if (!res.body) throw new Error('LLM 接口没有返回响应体');
@@ -816,10 +1313,23 @@ export async function* streamChat(messages, outerSignal, opts = {}) {
     const decoder = new TextDecoder('utf-8');
     let buffer = '';
     let sawAny = false;
+    /* ⚠️ 2026-11-23 只加测量、不改行为（用户要求：「只查收到信息到思考链首字之间的时间，其他绝对不要插」）
+     *   记录**第一个 token 到达的时刻** —— 和请求发出时刻相减，就是"首字延迟"的模型侧部分。 */
+    let __firstByteAt = 0;
     /** 有没有产出过思考链 —— 用来判断「正文为空」是不是被思考吃光了 token */
     let sawReasoning = false;
+    /* ⚠️ 2026-11-19：**工具调用**也要攒（结构见 OpenAI 的 `delta.tool_calls`：
+     *   一条调用会被切成很多片，每片只带 index / id / name / arguments 的一部分，
+     *   必须按 index 累加才能拼回完整的一次调用）✓ */
+    let sawToolCalls = false;
+    const toolAcc = new Map(); // index → { id, name, args }
 
-    for await (const chunk of res.body) {
+    /* ⚠️ 2026-11-14 脱敏层：这个 `sseLoop:` 标签是为 `[DONE]` 那条分支加的 ——
+     *   原来那里写的是 `return`，会**直接跳过**流结束后的 unmask flush
+     *   ⇒ 被扣在缓冲里的最后几个字就永远发不出去（极端情况是整段最后一个词）。
+     *   改成 `break sseLoop` 之后，控制流会继续走到下面的 flush ✓
+     *   （`break` 出 `for await` 同样会调用响应体的 `return()` 关掉连接，和 return 一样。）*/
+    sseLoop: for await (const chunk of res.body) {
       buffer += decoder.decode(chunk, { stream: true });
 
       // SSE 以空行分隔事件
@@ -834,7 +1344,7 @@ export async function* streamChat(messages, outerSignal, opts = {}) {
           if (!line.startsWith('data:')) continue;
 
           const payload = line.slice(5).trim();
-          if (payload === '[DONE]') return;
+          if (payload === '[DONE]') break sseLoop; // ⚠️ 别用 return（见上面 `sseLoop:` 那段）
 
           let json;
           try {
@@ -845,6 +1355,15 @@ export async function* streamChat(messages, outerSignal, opts = {}) {
           if (json.error) {
             throw new Error(`LLM 返回错误: ${json.error.message ?? JSON.stringify(json.error)}`);
           }
+          /* ⚠️ 2026-11-23 纯测量：**第一个 token** 到达时刻 − 请求发出时刻（只打本地端点） */
+          if (!__firstByteAt) {
+            __firstByteAt = Date.now();
+            try {
+              if (/127\.0\.0\.1|localhost/i.test(String(useBase ?? ''))) {
+                log.info(`[首字] 请求发出 → 首个token ${__firstByteAt - __reqT0}ms`);
+              }
+            } catch {}
+          }
 
           // ⚠️⚠️ **先抓 usage，再判 delta**（2026-09-13）。
           //    DeepSeek 把用量放在**最后一块**，而那一块 `choices` 是**空数组** ——
@@ -852,6 +1371,15 @@ export async function* streamChat(messages, outerSignal, opts = {}) {
           //    否则永远拿不到用量（记账就全空了）。
           //    （请求里要带 `stream_options:{include_usage:true}`，见下面 body。）
           if (json.usage) usage = json.usage;
+    /* ⚠️ 2026-11-21：llama.cpp 的缓存命中在 timings.cache_n，usage 里那两个字段恒为 0 ——
+     *   于是 webui 卡片上的「缓存 X%」永远是 0%（用户报的"一直显示 0% 看不到"）✗
+     *   ⇒ 在这里搬过来，下游（think-log.js / 卡片）不用改就能读到真数 ✓ */
+    if (json.timings && usage) {
+      usage.prompt_tokens_details = {
+        ...(usage.prompt_tokens_details ?? {}),
+        cached_tokens: Number(json.timings.cache_n) || 0,
+      };
+    }
 
           // ⚠️ 收尾原因也要抓（这一块常常没有 delta，所以要放在下面 `continue` 之前）
           const fr = json.choices?.[0]?.finish_reason;
@@ -859,6 +1387,32 @@ export async function* streamChat(messages, outerSignal, opts = {}) {
 
           const delta = json.choices?.[0]?.delta;
           if (!delta) continue;
+
+          /* ⚠️⚠️ 2026-11-19：**标准 function calling 的返回值**（`delta.tool_calls`）
+           *   · 分片规则：同一次调用会被拆成 N 片，`index` 相同 ⇒ 按 index 累积；
+           *   · `arguments` 是**逐字拼**的 JSON 字符串（中文按 UTF-8 分片也在这里拼回去）✓
+           *   · 首片带 `id` 和 `name`，后面几片只有 `arguments` —— 缺哪个就留空，别覆盖 ✓
+           *   ⚠️ 调用方（`bot.js`）拿到的 `report.toolCalls[].arguments` 是**拼好的完整字符串**，
+           *      JSON 解析放在 `tools-fc.normalizeCall()` 里做（那边认得中文参数名映射）✓ */
+          if (Array.isArray(delta.tool_calls) && delta.tool_calls.length) {
+            sawToolCalls = true;
+            for (const f of delta.tool_calls) {
+              const idx = Number(f?.index ?? 0);
+              const cur = toolAcc.get(idx) ?? { id: '', name: '', arguments: '' };
+              if (f?.id) cur.id = String(f.id);
+              if (f?.function?.name) cur.name = String(f.function.name);
+              if (typeof f?.function?.arguments === 'string' && f.function.arguments) {
+                cur.arguments += f.function.arguments;
+              }
+              toolAcc.set(idx, cur);
+              /* ⚠️⚠️ 2026-11-19 改：**这里不再写思考链那一行** ——
+               *   原来在"名字第一次确定"时就写 `【调用工具】搜`，等参数拼完再补一行
+               *   `【调用工具】搜（词=…）` ⇒ 同一个调用在页面上出现**两行**（实测很吵）✗
+               *   ⇒ 现在只在流结束时写**一行完整的**（见下面 `toolAcc.size` 那段）；
+               *     工具调用的参数通常就在流末尾拼完，晚不到一秒，不影响"实时"的感觉 ✓ */
+              void idx;
+            }
+          }
           // 推理模型的思维链单独放在 reasoning_content 里，不发给用户。
           // ⚠️ 但要记一下「有没有思考过」—— 用来判断正文为空是不是被思考吃光了。
           if (typeof delta.reasoning_content === 'string' && delta.reasoning_content) {
@@ -874,18 +1428,89 @@ export async function* streamChat(messages, outerSignal, opts = {}) {
             if (opts.report) {
               const r = String(opts.report.reasoning ?? '') + delta.reasoning_content;
               opts.report.reasoning = r.length > 20000 ? r.slice(-20000) : r;
+              // ⚠️ 2026-11-11：**流式回调** —— webui 的思考链页面要"逐行输出"，
+              //    只能在这里把**每一块增量**交出去，等结束后再拿全文就晚了 ✗
+              // ⚠️ 2026-11-14 脱敏：`report.reasoning` 里攒的是**占位符形态**
+              //    （最后在 `finally` 里统一换回真名，见那里 —— 每条都整段 unmask
+              //     是 O(n²)，20000 字会明显拖慢），但**给页面看的这块必须先换回来**，
+              //    不然界面上显示的是一堆 `@U1@`。
+              try {
+                if (typeof opts.report.onReasoning === 'function') {
+                  const piece = reasonUnmasker ? reasonUnmasker.feed(delta.reasoning_content) : delta.reasoning_content;
+                  if (piece) opts.report.onReasoning(piece);
+                }
+              } catch { /* 页面那边出错绝不能影响生成 */ }
             }
           }
           const text = delta.content;
           if (typeof text === 'string' && text) {
-            sawAny = true;
-            yield text;
+            /* ⚠️ 2026-11-14 脱敏：**边收边换**（不是攒完再换）。
+             *    理由和"为什么能边收边换"写在 `privacy.createStreamUnmasker` 上：
+             *    它会扣住块尾"可能是半个占位符"的那十几个字符，等下一块到了再判断，
+             *    所以 SSE 把 `@U1@` 切成 `"@U"` + `"1@"` 也不会漏。
+             *    ⚠️ `feed` 返回空串是正常的（整块被扣住等下文），别当失败。 */
+            if (unmasker) {
+              const out = unmasker.feed(text);
+              if (out) {
+                sawAny = true;
+                yield out;
+              }
+            } else {
+              sawAny = true;
+              yield text;
+            }
           }
         }
       }
     }
 
-    if (!sawAny) {
+    /* ⚠️ 2026-11-14 脱敏层：流结束了，把缓冲里扣着的最后几个字吐出去
+     *   （正常情况下这里是空的；只有"模型恰好在占位符中间被截断"时才有内容）。
+     *   ⚠️ 这一句**必须在 `for await` 外面** —— 放里面的话 `break sseLoop` 就跳过了。*/
+    if (unmasker) {
+      const tail = unmasker.flush();
+      if (tail) {
+        sawAny = true;
+        yield tail;
+      }
+    }
+
+    /* ⚠️⚠️ 2026-11-19：**把拼好的工具调用交给调用方**（`report.toolCalls`）——
+     *   这是 function calling 的下半段：`bot.js` 拿它去 `runReadTool()` 真执行，
+     *   再把结果当 `role:'tool'` 回填、重新生成一次 ✓
+     *
+     *   ⚠️ 顺序：必须在 `if (!sawAny)` **之前** —— 有工具调用时正文本来就是空的，
+     *      那不是故障，不能按"空回复"报警/重试（否则每次都白烧一次关思考的重试）✗ */
+    if (toolAcc.size) {
+      const calls = [...toolAcc.entries()]
+        .sort((a, b) => a[0] - b[0])
+        .map(([i, v]) => ({
+          id: v.id || `call_${i}`,
+          name: v.name,
+          arguments: v.arguments || '{}',
+        }))
+        .filter((c) => c.name);
+      if (opts.report) opts.report.toolCalls = calls;
+      /* 思考链写一行**完整的**（含参数）—— 现在这是唯一一行（流里不再写半截版本）✓ */
+      try {
+        if (opts.report && typeof opts.report.onReasoning === 'function') {
+          for (const c of calls) {
+            // ⚠️⚠️ 2026-11-21 重写这行（见 `toolLine()` 上面那段说明）——
+            //    原来拼的是 `【调用工具】搜图（搜什么=…）` ⇒ **模型会照抄这个形状**
+            //    却不发起真正的 tool_call（它以为写出来就算调了）✗
+            //    当时反过来去 `parseToolCalls` 里认它 —— 那是把病当功能 ✗
+            //    ⇒ 现在用纯展示样式（🔧 + `·` 分隔），不带"调用工具"四个字、
+            //      也不带像函数调用的括号；并且 `parseToolCalls` 那边**已经不再认它** ✓
+            const line = `🔧 ${toolLine(c.name, c.arguments)}\n`;
+            const shown = pv ? privacy.unmask(line, pv.map) : line;
+            opts.report.onReasoning(shown);
+            opts.report.reasoning = String(opts.report.reasoning ?? '') + shown;
+          }
+        }
+      } catch { /* 页面出错不影响生成 */ }
+    }
+
+    if (!sawAny && !sawToolCalls) {
       // ⚠️ 这里**不能只用 debug** —— 正文为空是个很容易被忽略的故障：
       //    表现是「群里只回一句莫名其妙的空话」，而日志里什么都看不到。
       //    真实踩过三次（vision / extract / 教学回执），都是同一个原因：
@@ -905,6 +1530,38 @@ export async function* streamChat(messages, outerSignal, opts = {}) {
   } finally {
     clearTimeout(timer);
     outerSignal?.removeEventListener('abort', onAbort);
+
+    /* ══════════════════════════════════════════════════════════════════
+     * ⚠️⚠️ 2026-11-14 脱敏层接入点（2/2）：**收尾时把两处占位符换回真名**
+     *
+     * ① 思考链的流式回调：`reasonUnmasker` 里还扣着半块，得吐出去
+     *    （不吐的话 webui 那个页面上会少最后几个字）。
+     * ② `report.reasoning` 全文：它在流式过程中是**按块累积的占位符形态**
+     *    （每条都整段 unmask 是 O(n²)，20000 字会明显拖慢），到这里统一换一次。
+     *    ⚠️ 必须换 —— 调用方（`bot.js` 的 `parseToolCalls`）会从这里面读
+     *      `[工具:名字 {"参数":"值"}]`，参数里可能就是 QQ 号 / 群号；
+     *      不换的话工具拿到的是 `@U1@`，一调就失败（这是真实会踩的坑）。
+     * ③ 正文看的是 `unmasker`，它在流里已经吐完了（`for await` 后面那个 flush 负责收尾）。
+     *
+     * ⚠️ 全部包在 try/catch 里：收尾出问题**绝不能**盖掉原本的异常
+     *    （原本那个才是调用方要看的，比如 402 / 超时）。
+     * ══════════════════════════════════════════════════════════════════ */
+    try {
+      if (reasonUnmasker) {
+        const last = reasonUnmasker.flush();
+        if (last && opts.report && typeof opts.report.onReasoning === 'function') {
+          try {
+            opts.report.onReasoning(last);
+          } catch { /* 页面那边出错不影响生成 */ }
+        }
+      }
+      if (pv && opts.report && typeof opts.report.reasoning === 'string' && opts.report.reasoning) {
+        opts.report.reasoning = privacy.unmask(opts.report.reasoning, pv.map);
+      }
+    } catch (e) {
+      log.debug(`[脱敏] 收尾还原失败（不影响本次回复）：${e.message}`);
+    }
+
     // ⚠️ **记账**（2026-09-13）：把这次的 token 用量记下来
     //    （用户要"问它今天花了多少钱 / 这个月用了多少 token"）。
     //    放在 finally：**报错也要记** —— 失败的调用同样烧 token。
@@ -924,8 +1581,23 @@ export async function* streamChat(messages, outerSignal, opts = {}) {
     }
 
     if (usage) {
+      // ⚠️ 2026-11-13 加：把这次用量/花费交给调用方（webui 思考链页面要显示"这条花了多少")
+      if (opts.report) {
+        try {
+          opts.report.usage = usage;
+          opts.report.cost = spend.costOf({
+            model: useModel,
+            promptTokens: Number(usage.prompt_tokens) || 0,
+            completionTokens: Number(usage.completion_tokens) || 0,
+            cachedTokens:
+              Number(usage.prompt_cache_hit_tokens ?? usage.prompt_tokens_details?.cached_tokens ?? 0) || 0,
+            at: new Date(),
+          });
+        } catch { /* 只是展示用，算不出来就算了 */ }
+      }
       try {
-        spend.record({ model: useModel, usage });
+        /* ⚠️ 2026-11-08：调用方可以显式给 `opts.tag`（模拟器这种调用栈里看不出是谁的场景） */
+        spend.record({ model: useModel, usage, tag: opts?.tag });
       } catch (e) {
         // ⚠️ 这里**必须用 warn 而不是 debug** —— 我第一次就是把
         //    `spend` 的 import 漏了，`ReferenceError` 被 debug 吞掉，
@@ -961,7 +1633,8 @@ export async function* streamChat(messages, outerSignal, opts = {}) {
  * @returns {Promise<string>} 一句话；失败就返回空串（调用方会退回兜底话术）
  */
 export async function quickAck(p = {}) {
-  const llm = llmCfg();
+  // ⚠️ 2026-11-18：轻活**永远走云端**（本地小模型判不清、也不该浪费它）✓
+  const llm = llmCfg({ noLite: true });
   const who = String(p.name ?? '').trim() || '群友';
   const asked = String(p.text ?? '').trim().slice(0, 60);
   const extra = String(p.extra ?? '').trim();
@@ -977,7 +1650,7 @@ export async function quickAck(p = {}) {
     '· **只回一句话**，不超过 15 字',
     '· 自然、像随手打的，**别客套**（不要「请稍等」「正在为您处理」这种客服腔）',
     '· ⚠️ **先别回答他问的问题** —— 你只是在说"我看看"，答案等下再说',
-    // ⚠️⚠️ 2026-09-16 用户截图报的：「问动画的信息，说**翻翻**有点奇怪」——
+ // ⚠️⚠️ 2026-09-16截图报的：「问动画的信息，说**翻翻**有点奇怪」——
     //    她答的是「嗯…等我翻翻」。问题在于：**她是本人，手边没有资料库**，
     //    "翻翻/查查/搜搜"这种话说出来就成了"客服台在翻档案"，一秒露馅。
     //    所以这里把两件事分开：
@@ -988,13 +1661,13 @@ export async function quickAck(p = {}) {
     '  问**你自己的事、你的回忆、你的想法**（「你还记得…」「月之森有没有…」）→',
     '  说「我想想」「让我回忆一下」「嗯…」这种就行；',
     '  真的在**上网查**（别人的歌 / 新出的东西 / 游戏数值）→ 才可以用「我去查查」「等我搜一下」',
-    // ⚠️ 2026-09-13 用户反馈「**吵死了**这个有点不好听」——
+ // ⚠️ 2026-09-13反馈「**吵死了**这个有点不好听」——
     //    它本意是"我看看"，但说成"吵死了"就是在训人。
     //    这句话的功能是**安抚**（让人知道我在处理），语气不能反着来。
     '· ⚠️ **语气要是"别急、我在看"，不是在训人** ——',
     '  不要说「吵死了」「别催」「烦不烦」「催什么催」这种**嫌弃对方**的话；',
     '  也不要反问、不要抱怨。你是随口应一声，不是被打扰了在发火',
-    // ⚠️⚠️ 2026-09-17 用户截图报的（原话：「**等等机制的文案不对**」）：
+ // ⚠️⚠️ 2026-09-17截图报的（原话：「**等等机制的文案不对**」）：
     //    群友发的是一张**几何题图**，题面清清楚楚写着「求 △DEF 周长的最小值？」，
     //    而过渡话说的是「**喊我五遍有什么用，题呢，打字发过来**」——
     //    **断言了"图里没有题面"**，可她根本还没看完那张图（正文里答案是发出来了的）。
@@ -1017,6 +1690,21 @@ export async function quickAck(p = {}) {
   const user = [`${who}：${asked || '（发了个东西）'}`];
   if (extra) user.push(`（${extra}）`);
 
+  /* ⚠️ 2026-11-14 脱敏（非流式入口）：`who` 是群友昵称、`asked` 是他的原话，
+   *    两者都可能带 QQ 号 / 群名 ⇒ 发出去之前先换掉。
+   *    ⚠️ 它和 `streamChat` 是**两条独立的出网路**，只在主聊天那条加等于漏一半。 */
+  let pv = null;
+  const ackMsgs = [
+    {role: 'system', content: sys},
+    {role: 'user', content: user.join('\n')},
+  ];
+  try {
+    if (privacy.enabled()) pv = privacy.maskMessages(ackMsgs);
+  } catch (e) {
+    log.debug(`[脱敏] 过渡话准备失败，按明文发：${e.message}`);
+    pv = null;
+  }
+
   try {
     const res = await llmFetch(`${llm.baseURL.replace(/\/+$/, '')}/chat/completions`, {
       method: 'POST',
@@ -1026,10 +1714,7 @@ export async function quickAck(p = {}) {
       },
       body: JSON.stringify({
         model: llm.model,
-        messages: [
-          { role: 'system', content: sys },
-          { role: 'user', content: user.join('\n') },
-        ],
+        messages: pv ? pv.messages : ackMsgs,
         temperature: 1.0,
         max_tokens: 200,
         thinking: { type: 'disabled' },
@@ -1049,7 +1734,9 @@ export async function quickAck(p = {}) {
         spend.record({ model: llm.model, usage: json.usage });
       } catch {}
     }
-    const t = String(json.choices?.[0]?.message?.content ?? '')
+    /* ⚠️ 2026-11-14 脱敏：**先还原、再截断**。
+     *    反过来的话（先截 30 字）可能正好切在 `@U1@` 中间 ⇒ 半截占位符发进群里。 */
+    const t = privacy.unmask(String(json.choices?.[0]?.message?.content ?? ''), pv?.map)
       .trim()
       .replace(/^["'「『]|["'」』]$/g, '')
       .replace(/\s*\n+\s*/g, ' ')
@@ -1083,7 +1770,7 @@ export async function quickAck(p = {}) {
  *    表现就是"人换了、开场白还是旧的"，而且查起来很难想到是常量求值时机的问题。
  *    内容搬到了 `personas/<id>/identity.json` 的 `prompt.personaLine`。
  *
- *    历史（为什么自称不用「祥子」）：2026-09-13 用户说「祥子的话遇到没看过 MyGO 的
+ * 历史（为什么自称不用「祥子」）：2026-09-13 说「祥子的话遇到没看过 MyGO 的
  *    很容易误认为骆驼祥子」—— 中文里「祥子」第一反应是老舍那个人力车夫。
  *    这条现在写在 identity.json 的那句里，不再由代码保证。
  */
@@ -1094,7 +1781,7 @@ export function personaLine() {
 /**
  * 「把一段事实用她的口吻说出来」—— 一次**非流式、关思考**的短调用。
  *
- * ⚠️ 用途（2026-09-13 用户要求）：「回复的话不要太死板，也可以经过 llm」——
+ * ⚠️ 用途（2026-09-13 要求）：「回复的话不要太死板，也可以经过 llm」——
  *    典型场景是报账（`spend.js` 的 `spendReply`）和月末工资单
  *    （`monthly-report.js`）：数字必须准，但**说法不能像念报表**，
  *    所以把数字交给模型润色。
@@ -1109,12 +1796,32 @@ export function personaLine() {
  * @returns {Promise<string>}
  */
 export async function phrase(p = {}) {
-  const llm = llmCfg();
+  // ⚠️⚠️ 2026-11-18（用户：「加，用中转站或者官方还是要调」）——
+  //    `phrase()` 是所有"轻判断/轻改写"的入口（`judgeIntent` 判要不要干活、说话判断、
+  //    归属核对、日常事件润色、字数统计……全走它）⇒ **一律走云端** ✓
+  //    实测：本地 0.5B 当主模型后，它把这些判得乱七八糟（把问意见判成派活、JSON 也写坏）✗
+  const llm = llmCfg({ noLite: true });
   const sys = String(p.system ?? '').trim();
   const user = String(p.user ?? '').trim();
   if (!sys || !user) return '';
   const maxTokens = Math.max(60, Math.min(900, Number(p.maxTokens) || 220));
   const timeoutMs = Math.max(3000, Number(p.timeoutMs) || Number(llm.phraseTimeoutMs) || 15000);
+
+  /* ⚠️ 2026-11-14 脱敏（非流式入口）：润色/说话判断/抽取都走这里，
+   *    `user` 里经常是整段群聊上下文 ⇒ 必须过一遍。
+   *    ⚠️ 它在 `withFallback` 里被重试时**每次都会重新脱敏**（`fn()` 重跑整个函数），
+   *      所以不存在"降级那次用了明文"的漏洞 ✓ */
+  let pv = null;
+  const msgs = [
+    {role: 'system', content: sys},
+    {role: 'user', content: user},
+  ];
+  try {
+    if (privacy.enabled()) pv = privacy.maskMessages(msgs);
+  } catch (e) {
+    log.debug(`[脱敏] 润色准备失败，按明文发：${e.message}`);
+    pv = null;
+  }
 
   try {
     const res = await llmFetch(`${llm.baseURL.replace(/\/+$/, '')}/chat/completions`, {
@@ -1122,11 +1829,11 @@ export async function phrase(p = {}) {
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${llm.apiKey}` },
       body: JSON.stringify({
         model: llm.model,
-        messages: [
-          { role: 'system', content: sys },
-          { role: 'user', content: user },
-        ],
-        temperature: 1.0,
+        messages: pv ? pv.messages : msgs,
+        // ⚠️ 2026-11-18：**认 `p.temperature`**（原来写死 1.0）——
+        //    判断类调用要 `temperature: 0`（同一句话每次判成同一类；
+        //    而 1.5 那家会忽判"任务"忽判"无"，还爱先解释一遍 ✗）
+        temperature: Number.isFinite(p.temperature) ? Number(p.temperature) : 1.0,
         max_tokens: maxTokens,
         thinking: { type: 'disabled' },
         stream: false,
@@ -1151,7 +1858,10 @@ export async function phrase(p = {}) {
         spend.record({ model: llm.model, usage: json.usage });
       } catch {}
     }
-    const t = String(json.choices?.[0]?.message?.content ?? '')
+    /* ⚠️ 2026-11-14 脱敏：先还原，再剥 markdown / 去引号。
+     *    ⚠️ 顺序不能反 —— 还原出来的是真名，可能含 ``` 或引号（极端情况），
+     *      先剥再还原的话那一步就白做了。 */
+    const t = privacy.unmask(String(json.choices?.[0]?.message?.content ?? ''), pv?.map)
       .replace(/```[a-z]*\n?/gi, '')
       .replace(/\*\*/g, '')
       .replace(/^["'「『]|["'」』]$/g, '')
@@ -1194,13 +1904,13 @@ export async function phraseMoney(p = {}) {
     '· ⚠️ 系统没给的数字**不要编**（比如余额、单价、汇率）',
     '· ⚠️ **不要解释算式**（别说"成本乘一百"这种）—— 就当是你自己挣的钱',
     '· ⚠️ **绝对不要说「净赚」「利润」这两个词** —— 用「工资」',
-    // ⚠️⚠️ 方向问题（2026-09-13 用户截图）：<主人> 问「你现在工资多少钱」，
+ // ⚠️⚠️ 方向问题（2026-09-13截图）：<主人> 问「你现在工资多少钱」，
     //    她答「1876，就这点，**别嫌少了**」——「别嫌少」是**发钱的人**说的话，
     //    一句话就把自己摆到老板位置上，人设整个翻掉。
     //    这条必须放进**每一个报钱路径**（不能只写在余额那段，报账/月结也要有）。
     '· ⚠️⚠️ **你是领工资的那个，<主人> 是发工资的**（他雇你）—— 别说发钱方的台词：',
     '  不说「别嫌少」「将就一下」「这个月就发这么多」「省着点用」—— 那是老板口吻。',
-    // ⚠️⚠️ 这里**故意不给领钱方的示例台词**（2026-09-14 用户反馈）。
+ // ⚠️⚠️ 这里**故意不给领钱方的示例台词**（2026-09-14反馈）。
     //
     //    原来这条写的是：
     //      '  要说也只能是领钱方的：「就这么点」「还不够花」「你还没发呢」'
@@ -1248,7 +1958,7 @@ export async function phraseMoney(p = {}) {
   if (/烧了|烧掉|消耗了\s*\d|花掉了\s*\d/.test(t)) return '';
   // 把自己当发工资的那方（踩过：「别嫌少了」）
   if (/别嫌少|将就一下|这个月就发这么多|省着点用/.test(t)) return '';
-  // ⚠️ 自称别用「祥子」（2026-09-13 用户：「祥子的话遇到没看过 MyGO 的
+ // ⚠️ 自称别用「祥子」（2026-09-13：「祥子的话遇到没看过 MyGO 的
   //    很容易误认为骆驼祥子」）。人设里的示例台词大量用「小祥」，
   //    模型很容易顺手写「我祥子可没说过」——「小祥」没问题，「祥子」要拦。
   //
@@ -1264,7 +1974,7 @@ export async function phraseMoney(p = {}) {
     )
       return '';
   }
-  // ⚠️⚠️ 她**不该去管别人怎么叫她**（用户 2026-09-13：「别人叫她所有外号都应该
+ // ⚠️⚠️ 她**不该去管别人怎么叫她**（2026-09-13：「别人叫她所有外号都应该
   //    没关系，正常回应」）。纠正称呼 = 答非所问，而且显得在意外号。
   //    只有对方**认真问"该怎么称呼"**时才该答，那种情况下面这些形状也不会出现。
   {
@@ -1275,7 +1985,7 @@ export async function phraseMoney(p = {}) {
     if (prefer && new RegExp(`叫我\\s*${prefer}\\s*就(?:行|好)|请叫我\\s*${prefer}`).test(t)) return '';
   }
   // ⚠️⚠️ 168 亿 **不是她的债、她没有偿还义务** —— 但**也不能因此撇清**
-  //    （用户 2026-09-13：「**反正也不是我要还的**感觉也有点 OOC 了，
+ // （2026-09-13：「**反正也不是我要还的**感觉也有点 OOC 了，
   //      她之前努力打工也有一部分努力在这里」）。
   //
   //    三种口气要分清（前两种对，第三种 OOC）：
@@ -1386,6 +2096,9 @@ export function cjkNum(num) {
  */
 export async function ping(over = null) {
   const llm = over ? { ...llmCfg(), ...over } : llmCfg();
+  /* ⚠️ 2026-11-14：**这里故意不加脱敏** —— 提示词是写死的一句「回复 ok」，
+   *    一个身份标识都没有；`over` 里的 baseURL/apiKey 走的是 header，不进正文。
+   *    在"零收益"的地方加一层只会多一处可能出错的东西。 */
   const res = await llmFetch(`${llm.baseURL.replace(/\/+$/, '')}/chat/completions`, {
     method: 'POST',
     headers: {

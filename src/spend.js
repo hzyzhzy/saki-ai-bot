@@ -1,7 +1,7 @@
 /**
  * 记账：**今天花了多少钱 / 这个月用了多少 token**。
  *
- * ⚠️ 需求来源（用户 2026-09-13）：
+ * ⚠️ 需求来源（2026-09-13）：
  *   「再加一个查询今天已花多少钱、多少 token 的功能 ——
  *    当问机器人比如『今天你花了多少钱』『你这个月花了多少 token』，可以回复数据」
  *
@@ -19,7 +19,7 @@
  *      其余时段**半价**。所以同一个模型算钱要按调用时刻选单价。
  *   ⚠️ 价格可能变。变了改这里，或看 `spendStatus()` 对不上的话再核。
  */
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync, appendFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { config, ROOT, stateDir } from './config.js';
 import { log } from './log.js';
@@ -84,7 +84,7 @@ let state = { days: {} };
 /**
  * 「账本从哪天开始有效」—— 早于这天的记录一律当脏数据丢掉。
  *
- * ⚠️ 为什么要这道闸（2026-09-13 用户发现）：
+ * ⚠️ 为什么要这道闸（2026-09-13发现）：
  *    「每月的数据不对啊，**机器人九月才创建**」——
  *    我测试时往 `state/spend.json` 里**手工塞了 7 月/8 月的假数据**
  *    （为了验证"往月账单"功能），结果它们显示在账单里，
@@ -139,7 +139,7 @@ function isAncient(k) {
 /**
  * 「起始账」—— 账本诞生之前、但那一个月里**确实已经花掉**的钱。
  *
- * ⚠️ 为什么需要它（2026-09-13 用户）：
+ * ⚠️ 为什么需要它（2026-09-13）：
  *    「**还是说 9 月才 0.03 元，要加上 9 月 1 号到现在所有的**」
  *    账本是 9/13 才有的（在那之前 bot 没记账），所以 9 月 1–12 号的花费
  *    在本地**根本不存在** —— DeepSeek 官方也只有余额接口，没有历史账单接口，
@@ -163,7 +163,7 @@ try {
 /**
  * 起始账「每天摊多少」—— **唯一的实现**（`dayStats` 和 `monthStats` 都走它）。
  *
- * ## 怎么推的（2026-09-13 用户拍板「摊」；我第一版推错过，被测试抓出来）
+ * ## 怎么推的（2026-09-13 拍板「摊」；我第一版推错过，被测试抓出来）
  *
  * 设：
  *   · `T`   = 用量页面上的**本月累计**（含今天）
@@ -214,14 +214,63 @@ function addUp(a, b) {
   return r;
 }
 
+/**
+ * 本进程还没落盘的那部分增量。
+ *
+ * ⚠️⚠️ 为什么需要它（2026-11-10 修的真 bug）：
+ *   三个号是**三个独立进程**，但都写同一个 state/spend.json。
+ *   原来的 save() 是"把内存里整份账刷过去" ⇒ **后写的直接把先写的覆盖掉**。
+ *   实测：今天 335 次调用只记成 75 次，少了 77%，账本上的钱只有真实的一半不到 ✗
+ *   ⇒ 现在写盘改成「先把文件读进来，再把本进程的增量加上去」，
+ *     加完再把内存刷新成合并结果（这样查询看到的也是全部号的合计）✓
+ */
+let pending = null;
+const blankDay = () => ({ calls: 0, prompt: 0, completion: 0, cached: 0, cost: 0 });
+
+/** 把 delta 累加进 days[k] */
+function addInto(days, k, delta) {
+  const d = (days[k] ??= blankDay());
+  d.calls += delta.calls || 0;
+  d.prompt += delta.prompt || 0;
+  d.completion += delta.completion || 0;
+  d.cached += delta.cached || 0;
+  d.cost += delta.cost || 0;
+  return d;
+}
+
+/** 记一笔：既更新内存，也记进"待落盘增量" */
+function bump(k, delta) {
+  pending ??= {};
+  addInto(state.days, k, delta);
+  addInto(pending, k, delta);
+}
+
 function save() {
   try {
     mkdirSync(dirname(FILE), { recursive: true });
-    const tmp = `${FILE}.tmp`;
-    writeFileSync(tmp, JSON.stringify(state, null, 2), 'utf8');
+    // ① 先读文件（别的进程写的、以及自己上一次写进去的）
+    const days = {};
+    try {
+      if (existsSync(FILE)) {
+        const j = JSON.parse(readFileSync(FILE, 'utf8'));
+        for (const [k, v] of Object.entries(j.days ?? {})) {
+          if (v && typeof v === "object") addInto(days, k, v);
+        }
+      }
+    } catch (e) {
+      log.debug("读旧账本失败（按空的算）：" + e.message);
+    }
+    // ② 只加本进程"还没写过"的那部分，避免重复计数
+    for (const [k, v] of Object.entries(pending ?? {})) addInto(days, k, v);
+    // ③ 写回
+    const tmp = FILE + ".tmp";
+    writeFileSync(tmp, JSON.stringify({ days }, null, 2), "utf8");
     renameSync(tmp, FILE);
+    // ④ 内存刷新成合并后的结果 —— 之后统计看到的就是全部号的合计
+    state = { days };
+    pending = null;
   } catch (e) {
-    log.debug(`保存账本失败：${e.message}`);
+    log.debug("保存账本失败：" + e.message);
   }
 }
 
@@ -241,6 +290,30 @@ function dayKey(at = new Date()) {
  *   `force` = **测试专用**：绕过"启用日闸门"，用来造"上个月也花过钱"这种历史，
  *            好验证月末工资单的"相比上月变化"。正常调用**绝不要**传它。
  */
+/**
+ * 猜这次调用是"谁发起的"（只看**文件名**，不猜功能）。
+ *
+ * ⚠️ 局限：跨 `await` 之后调用栈会丢，猜不到就返回空串 —— **别指望它一定准**，
+ *    它的价值是"同栈调用"（判定、B站、私聊这些同步发起的最常见）能标出来 ✓
+ */
+function guessTag() {
+  try {
+    const s = new Error().stack || '';
+    for (const line of s.split('\n').slice(1)) {
+      /* ⚠️ 2026-11-08 修：原来只认 `.js` ⇒ `tools/*.mjs`（剧情模拟器等）匹配不上，
+       *   一律记成空 tag ⇒ 账单上一整晚 114 次、7 块钱像凭空冒出来的 ✗ */
+      const m = line.match(/([\\/][\w.\-]+\.m?js):\d+:\d+/);
+      if (!m) continue;
+      const base = m[1].split(/[\\/]/).pop();
+      if (base === 'llm.js' || base === 'spend.js') continue;
+      return base.replace(/\.js$/, '');
+    }
+  } catch {
+    /* ignore */
+  }
+  return '';
+}
+
 export function record(p = {}) {
   const u = p.usage ?? {};
   const pt = Number(u.prompt_tokens ?? 0) || 0;
@@ -263,13 +336,58 @@ export function record(p = {}) {
   });
 
   const k = dayKey(at);
-  const day = (state.days[k] ??= { calls: 0, prompt: 0, completion: 0, cached: 0, cost: 0 });
-  day.calls += 1;
-  day.prompt += pt;
-  day.completion += ct;
-  day.cached += cached;
-  day.cost += cost;
+  // ⚠️ 用 bump()：既更新内存，也记进"待落盘增量"（三个号共用一个文件，见 save()）
+  bump(k, { calls: 1, prompt: pt, completion: ct, cached, cost });
   save();
+  /* ⚠️⚠️ 2026-11-06 加（用户：「**9 点到 11 点在干什么？为什么花了这么多**」
+   *    「加明细」）——
+   *
+   *    原来只有**按天聚合**四个数，查不了"某个小时为什么贵"：
+   *    11-06 那两小时消息量只占全天 12%，花费却占 33%，光看日均账根本解释不了 ✗
+   *    ⇒ 每次调用追加一行明细，落到 `state/spend-detail.ndjson`：
+   *      { t: ISO时间, h: 小时, model, pt, ct, cached, cost, tag }
+   *    这样能按小时聚合、看单次输入分布、揪出"某几次调用特别大"✓
+   *
+   *    ⚠️ 明细**绝不能影响主流程**（写失败就算了）—— 账本那份才是权威 ✓
+   */
+  try {
+    appendDetail({
+      t: at.toISOString(),
+      h: at.getHours(),
+      model: String(p.model ?? config.llm?.model ?? ''),
+      pt,
+      ct,
+      cached,
+      cost: Number(cost.toFixed(6)),
+      tag: String(p.tag ?? guessTag()),
+    });
+  } catch {
+    /* ignore */
+  }
+}
+
+/** 明细文件（和账本同一个 state 目录；测试可用 QQBOT_SPEND_DETAIL 覆盖） */
+function detailPath() {
+  const env = process.env.QQBOT_SPEND_DETAIL;
+  return env ? join(ROOT, env) : join(stateDir(), 'spend-detail.ndjson');
+}
+
+const DETAIL_MAX_BYTES = 8 * 1024 * 1024;
+
+/** 追加一行明细；文件太大就先滚掉（按大小滚，不按天，省事） */
+function appendDetail(rec) {
+  const p = detailPath();
+  try {
+    mkdirSync(dirname(p), { recursive: true });
+    if (existsSync(p) && statSync(p).size > DETAIL_MAX_BYTES) {
+      // 保留后面一半：老的明细价值低，但不要全删（最近几小时还在里面）
+      const all = readFileSync(p, 'utf8');
+      writeFileSync(p, all.slice(Math.floor(all.length / 2)), 'utf8');
+    }
+    appendFileSync(p, JSON.stringify(rec) + '\n', 'utf8');
+  } catch {
+    /* 明细写不进去不影响记账 ✓ */
+  }
 }
 
 /** 汇总某一天的账 */
@@ -348,6 +466,8 @@ const n = (x) => Number(x ?? 0).toLocaleString('en-US');
  * 测试脚本也一样 —— 它要能验证"文件被改脏了会怎样"，就得能重读。
  */
 export function reload() {
+  // ⚠️ 重读之后 pending 必须清掉 —— 文件里已经包含它了，留着会重复计数
+  pending = null;
   try {
     if (existsSync(FILE)) {
       const j = JSON.parse(readFileSync(FILE, 'utf8'));
@@ -412,11 +532,11 @@ export function spendText(scope = 'day', opts = {}) {
     lines.push(`  （其中前面 ${stat.baseDays} 天是账本建好之前补记的 ${moneyBig(stat.baseCost)}）`);
   }
   if (withSalary) {
-    // ⚠️ 只说「工资」，**别说「净赚」**（用户 2026-09-13：「不要说净赚」）
+ // ⚠️ 只说「工资」，**别说「净赚」**（2026-09-13：「不要说净赚」）
     lines.push('', `· 工资 ${moneyBig(s.earned)}`);
   }
 
-  // ⚠️ 「往月账单」（2026-09-13 用户要求「能加上这个月之前的账单吗」）。
+ // ⚠️ 「往月账单」（2026-09-13 要求「能加上这个月之前的账单吗」）。
   //    只在**有历史月份**时才加 —— 只有本月的话不加，免得啰嗦。
   if (opts.withHistory !== false && scope === 'month') {
     const months = monthlyStats({ limit: 6 }).filter((m) => m.month !== label);
@@ -433,7 +553,7 @@ export function spendText(scope = 'day', opts = {}) {
 /**
  * 回「你这个月挣了多少」—— 带**物价参照**和**她自己的感想**。
  *
- * ⚠️ 用户 2026-09-13 要求：
+ * ⚠️ 2026-09-13 要求：
  *    ① 「修好之后**把问工资的回复也加上物价参照和感想**」
  *       —— 以前只丢一个数字（截图里就是「1876，就这点，别嫌少了。」）
  *    ② 同时修方向：「**她又把自己当成发工资的一方了**」——
@@ -469,7 +589,7 @@ export async function earnReply(p = {}) {
   // ⚠️⚠️ 「168 亿」这次到底给没给，要看 `livingContext` 的骰子
   //    （它 1/4 概率才把那条拼进来）—— **不能在这里假设它给了**。
   //
-  //    2026-09-14 用户反馈：「**168 亿这个结构出现的频率还是太高了**」。
+ // 2026-09-14反馈：「**168 亿这个结构出现的频率还是太高了**」。
   //    实测 8 次里 2 次提（骰子是 1/4，本来不该那么高）——
   //    根因是这里的 `extraRules` **无条件**写了 168 亿那一整段，
   //    等于"事实里没给、提示词里还是提了"，骰子那道闸被绕过去了。
@@ -508,7 +628,7 @@ export async function earnReply(p = {}) {
       `· ⚠️ 可以用上面的物价参照算一算（"够买 X 杯奶茶"），**别自己另编物价**`,
       '· ⚠️ 别把参照**全列出来** —— 挑一两条顺口的就行，列清单就成报表了',
       '· ⚠️ **绝不可以说「别嫌少」「将就一下」这种发钱方的话**（你才是领钱的）',
-      // ⚠️⚠️ 「别每次都提同一件事」（2026-09-14 用户反馈：
+ // ⚠️⚠️ 「别每次都提同一件事」（2026-09-14反馈：
       //    「第一段话和第三段话**同质化**有点严重」「房租这个结构出现频率太高」）。
       //    实测 4/4 次都提房租、4/4 次都提"第一份工资单"—— 因为那两样在**事实里
       //    是固定的**，模型就每次都拿它们凑感想。
@@ -534,7 +654,7 @@ export function earnText(scope = 'day') {
   const label = scope === 'month' ? dayKey().slice(0, 7) : dayKey();
   const lines = [
     scope === 'month' ? `【本月工资】${label}` : `【今天工资】${label}`,
-    // ⚠️ 只说工资，**不提「净赚」**（用户 2026-09-13）
+ // ⚠️ 只说工资，**不提「净赚」**（2026-09-13）
     `· 工资进账 ${moneyBig(s.earned)}`,
   ];
   if (scope === 'month') {
@@ -551,7 +671,7 @@ export function earnText(scope = 'day') {
 /**
  * 「跟上个月比，变化多少」—— 报账和月末工资单共用这一段。
  *
- * ⚠️ 用户 2026-09-13 要求月末工资单里要有「**相比上月变化如何**」。
+ * ⚠️ 2026-09-13 要求月末工资单里要有「**相比上月变化如何**」。
  *    三种情况都得说清楚（不然模型会自己编）：
  *      · 上月没账（这是第一个月）→ 直说"上月没记录"
  *      · 上月有账但**工资为 0**（花了钱没进账）→ 不能说"多了 100%"
@@ -574,7 +694,7 @@ export function comparePrev(month) {
     // ⚠️ `prev` 照样要返回（调用方需要知道"上个月是哪个月"），
     //    只是 `delta`/`pct` 为 null —— 早期版本这里连 `prev` 都给 null，被测试抓出来了
     //
-    // ⚠️⚠️ 这句话**故意不带任何可复用的说法**（2026-09-14 用户反馈：
+ // ⚠️⚠️ 这句话**故意不带任何可复用的说法**（2026-09-14反馈：
     //    「**第一份工资单**…这两个词汇都反复出现了」，实测 4/4 次都提）。
     //    原来写的是「上月（…）还没有账本，**这是第一份工资单**」——
     //    后半句是**叙事**，模型就把"第一份工资单"当成情绪素材每次都说，
@@ -603,7 +723,7 @@ export function comparePrev(month) {
 /**
  * 物价参照池 —— 「这点钱够干什么」。
  *
- * ⚠️ 为什么要在代码里算（2026-09-13 用户：「再更多的结合一下**当今中国工资的现状**
+ * ⚠️ 为什么要在代码里算（2026-09-13：「再更多的结合一下**当今中国工资的现状**
  *    还有祥子自身设定和经济情况，我觉得**乘100 之后很符合现实工资了**」）：
  *    · 乘 100 之后落在「一两千到四五千」这段 —— **这正好是真实存在的一档月薪**
  *      （兼职、实习起薪、三四线普通岗），不是个玩笑数字
@@ -663,7 +783,7 @@ const LIVING_REFS = [
 
 /**
  * 「168 亿」那个梗 —— **单独一类参照**，进随机池，**概率 1/4**
- * （用户 2026-09-13 定的：一开始我给到 2/3，用户说「改成 1/4 吧，要不然会太频繁了也不好」）。
+ * （2026-09-13 定的：一开始我给到 2/3，用户说「改成 1/4 吧，要不然会太频繁了也不好」）。
  *
  * ⚠️ 事实别写错（查证过，见 `knowledge/anime.md` 一点六）：
  *    168 亿是**损失（損失）**，是她爸给丰川集团造成的，**不是她欠的债**；
@@ -727,7 +847,7 @@ export function livingContext(yuan, opts = {}) {
   const lines = pick.map((r) => `· 约 ${Math.floor(v / r.p)} ${r.u}${r.n}（单价 ${r.p} 元）`);
   // ③ 「这点钱办不成大事」的那条 —— **说法轮换**。
   //
-  //    ⚠️⚠️ 2026-09-14 用户反馈：「第一段话和第三段话**同质化**有点严重」。
+ // ⚠️⚠️ 2026-09-14反馈：「第一段话和第三段话**同质化**有点严重」。
   //      实测 8 次提问里成功回 4 条，**4/4 都提了房租**。
   //
   //      根因是**事实里那句房租是固定文本**，模型每次看到就把"不够交房租"
@@ -748,7 +868,7 @@ export function livingContext(yuan, opts = {}) {
   lines.push(BIG_LINES[Math.floor(rand() * BIG_LINES.length)] ?? BIG_LINES[0]);
   // ④ 「168 亿」那条**掷骰子**决定这次给不给。
   //
-  //    ⚠️ 概率 = **1/4**（2026-09-13 用户：「改成 1/4 吧，要不然会太频繁了也不好」）。
+ // ⚠️ 概率 = **1/4**（2026-09-13：「改成 1/4 吧，要不然会太频繁了也不好」）。
   //      一开始我设成 2/3，用户觉得太频繁 —— 这个梗的力气在**偶尔出现**；
   //      每次都提就成了新口头禅（人设里专门有一条反对固定句式）。
   //
@@ -779,7 +899,7 @@ export function monthlyReportFacts(month = dayKey().slice(0, 7)) {
   const s = salaryOf(stat);
   const cmp = comparePrev(month);
   const m = Number(month.slice(5, 7));
-  // ⚠️ 不写「${month} 月结」那种抬头（用户 2026-09-13：
+ // ⚠️ 不写「${month} 月结」那种抬头（2026-09-13：
   //    「**年月信息大家都知道，不用重复**」）——
   //    而且抬头会**教模型也照着加一个日期前缀**，写出来像公告。
   //    事实里只保留「几月」这种对不上就说不清的信息（"比上月"要有个参照）。
@@ -806,7 +926,7 @@ export function monthlyReportFacts(month = dayKey().slice(0, 7)) {
  *    · 工资整元时写成中文数字（「一千八百三十四」而不是「1834 元」）——
  *      后者一眼就是机器打印的
  *    · **不要抬头**（原来第一行是「9 月工资单」），直接说事 ——
- *      用户 2026-09-13：「年月信息大家都知道，不用重复」
+ * 2026-09-13：「年月信息大家都知道，不用重复」
  *
  * ⚠️ 兜底版**没有感想**（那是模型才写得出来的东西）。
  *    真发出去几乎不会走到这里 —— 只有模型挂了才会。
@@ -897,14 +1017,14 @@ export async function monthlyReportReply(month = dayKey().slice(0, 7)) {
     maxLines: 4,
     maxTokens: 400,
     extraRules: [
-      // ── 用户 2026-09-13 反馈：现在太像公文 ──
+ // ── 2026-09-13 反馈：现在太像公文 ──
       '· ⚠️ **不要任何抬头/标题**：不要「X 月工资单」「月末总结」「本月结算」这种',
       '  ——年月谁都知道，直接说事就行',
       '· ⚠️ **一定要有你自己的感想**（这条最重要）：',
       '  对这个数你是怎么想的？觉得多、觉得少、觉得白干了、觉得还行、想拿它干嘛……',
       '  可以有点小情绪、小算盘、小得意，或者顺口吐槽两句',
       '  ⚠️ 但别有情绪到像在闹、在威胁、在哭穷 —— 就是随口一句感慨',
-      // ── 用户 2026-09-13：「再更多的结合一下当今中国工资的现状还有祥子自身设定和经济情况」──
+ // ── 2026-09-13：「再更多的结合一下当今中国工资的现状还有祥子自身设定和经济情况」──
       '· ⚠️ **把它当成一份真的月薪来反应** —— 一两千、两三千在国内是**真实存在**的一档工资',
       '  （兼职、实习起薪、三四线普通岗）。别当成"系统给的几个零花钱"',
       '  可以自然地比一比："这点钱在市里连房租都不够""比最低工资还低啊"',
@@ -929,7 +1049,7 @@ export async function monthlyReportReply(month = dayKey().slice(0, 7)) {
 
 /** 该不该把这条消息当成"问花销 / 问工资"，以及问的是哪个。
  *
- * ⚠️ 2026-09-13 用户要求（分两批）：
+ * ⚠️ 2026-09-13 要求（分两批）：
  *   ① 「**问他花了多少钱和赚了多少钱应该分开回答**」——
  *      以前只判断"是不是问钱"，然后一律把整张账单（花销 + 工资 + token + 往月）糊出去，
  *      问"赚了多少"也甩一堆花费明细，很啰嗦。
@@ -985,7 +1105,7 @@ export function looksLikeSpendQuestion(text) {
   const ask = /(多少|几|查|统计|报|说|告诉|今天|昨天|本月|这个月|这周|上周)/.test(t);
   if (!ask) return null;
 
-  // ⚠️ 默认「这个月」（用户 2026-09-13：「没说范围，默认回答是这个月」）
+ // ⚠️ 默认「这个月」（2026-09-13：「没说范围，默认回答是这个月」）
   const dayish = /(今天|今日|昨天|昨日|当天|刚刚)/.test(t);
   const monthish = /(这个月|本月|这月|当月|上个月|上月)/.test(t);
   const scope = monthish ? 'month' : dayish ? 'day' : 'month';
@@ -997,7 +1117,7 @@ export function looksLikeSpendQuestion(text) {
 /**
  * 把账目整理成**给模型看的事实**（它只负责语气，数字不能改）。
  *
- * ⚠️ 2026-09-13 用户拍板：**群友问工资也照报**——
+ * ⚠️ 2026-09-13 拍板：**群友问工资也照报**——
  *    「其实群友问也行，我觉得更真实」。
  *    所以这里不再按身份遮数字（我一度加过"只给服主看"的隔离，被否了）。
  *    理由也站得住：工资是她挣的钱，报出来更像"真有个客服在这上班"，
@@ -1020,7 +1140,7 @@ export function spendFacts(scope, type) {
     }
   }
   if (type !== 'spend') {
-    // ⚠️ 只说「工资进账」，**不给「净赚」**（用户 2026-09-13：「不要说净赚」）
+ // ⚠️ 只说「工资进账」，**不给「净赚」**（2026-09-13：「不要说净赚」）
     out.push(`· 工资进账：${moneyBig(s.earned)}`);
   }
   // 往月只在问"本月"且有历史时带上（问今天带往月纯属啰嗦）
@@ -1076,7 +1196,7 @@ export async function spendReply(p = {}) {
 /**
  * 「工资」—— 用户发给 Saki 的钱（= 成本 ×100）。
  *
- * ⚠️ 设定来源（用户 2026-09-13）：
+ * ⚠️ 设定来源（2026-09-13）：
  *   「可以设定为**花了多少钱是成本**，而**赚了多少钱就是我给祥子每个月发的工资**，
  *    工资设定为成本也就是 **API 消耗余额 ×100**，
  *    这样就能自圆其说了，**能看到花了多少钱余额也不像 ai 机器人花费**」
@@ -1084,7 +1204,7 @@ export async function spendReply(p = {}) {
  * 对外话术：
  *   · 成本（她花掉的）= API 消耗 ×1
  *   · 工资（她赚到的）= API 消耗 **×100**  ← 用户付给她的
- *   · 差额**不对外说**（用户 2026-09-13：「不要说净赚」）
+ * · 差额**不对外说**（2026-09-13：「不要说净赚」）
  *
  * 这样她抱怨"工资不够"就是**她自己赚的钱不够花**，
  * 而不是"系统没钱了" —— 后者一眼就是 AI。
@@ -1094,7 +1214,7 @@ export const SALARY_MULTIPLIER = 100;
 /**
  * 算某段时间的「工资」收支。
  *
- * ⚠️ 2026-09-13 用户：「**不要说净赚**」——
+ * ⚠️ 2026-09-13：「**不要说净赚**」——
  *    「净赚」是账本/生意人的词，客服小祥说出来像在念报表。
  *    所以这里**只产出 cost 和 earned 两个数**，
  *    差额（earned − cost）内部算得出来，但**不往外给**，免得哪天又漏出去。
@@ -1239,7 +1359,7 @@ export function salaryNote() {
     '· 有人问「今天/这个月花了多少」「赚了多少」→ 照上面的数字说（**别算错**）',
     '· ⚠️ 只说「**工资**」——**绝对不要说「净赚」**（那是账房先生的词，不是人话）',
     '· ⚠️ **别解释算式**（别说"成本乘一百"这种话）—— 就当是你自己挣的钱',
-    // ⚠️ 2026-09-13 用户纠正：**「账户余额」和「工资」是两件事**，别混着说。
+ // ⚠️ 2026-09-13纠正：**「账户余额」和「工资」是两件事**，别混着说。
     //    余额低 = 该他去充值（问题在他）；工资 = 你挣多少/够不够花。
     //    原来这里教它说「这个月花得有点凶」—— 那是把**他该做的事说成你的检讨**，
     //    结果该动手的人看不到提醒（用户截图反馈过）。

@@ -5,14 +5,17 @@ import { execFileSync } from 'node:child_process';
 import { config, validate, ROOT, DEFAULT_LIFE, DEFAULT_QUEST, paramsFor, stateDir, isMainAccount, watchConfigFile } from './config.js';
 // ⚠️ 协议端适配层：启动横幅要报它、管理能力也由它决定（换协议端只改 config.yml）
 import * as provider from './provider.js';
+import { startLocalWatch } from './llm.js';
 import { log } from './log.js';
 import { Bot } from './bot.js';
 import { startWebUI } from './webui.js';
 import * as observe from './observe.js';
-// ⚠️ 「他的资料」自动更新（2026-10-03 用户要求）：他私聊里聊到生活变化 → 自动改 owner.md
+// ⚠️ 「他的资料」自动更新（2026-10-03 要求）：他私聊里聊到生活变化 → 自动改 owner.md
 import * as ownerUpdate from './owner-update.js';
 // ⚠️ 2026-10-17 加：**主人最近的近况**短时记忆（48 小时滚动）—— 攒够就总结、定期清过期的 ✓
 import * as ownerRecent from './owner-recent.js';
+/* ⚠️ 2026-11-06 加：日常事件那一格要判"冷场多久 + 同类刚说过什么"（见「日常事件接同类的话」那段） */
+import * as recentStore from './recent.js';
 import * as life from './life.js';
 // ⚠️ 2026-10-15 加：B 站视频分享（只发链接、只发 1 档群、默认关）
 import * as biliShare from './bili-share.js';
@@ -25,6 +28,9 @@ import * as biliProactive from './bili-proactive.js';
 import * as qqDigest from './qq-digest.js';
 // ⚠️ 2026-10-05 加：同类机器人主动搭话（群里冷场时 @ 它 / 戳它一下）
 import * as peerChat from './peer-chat.js';
+/* ⚠️ 2026-11-07 加：服务器状态后台预取（见 `status.startPrefetch` 那段注释）——
+ *    那个查询原来挂在回复的关键路径上，一卡就是 12 秒超时 ⇒ 她答不出服务器状态 */
+import * as status from './status.js';
 import * as storyline from './storyline.js';
 import * as quest from './quest.js';
 import * as affinity from './affinity.js';
@@ -35,7 +41,7 @@ import * as friend from './friend.js';
 //    「是好友就回他」那条判据靠它（默认开，见 config 的 trigger.allowFriendsPrivate）
 import * as privateWork from './private-work.js';
 import * as remind from './remind.js';
-// ⚠️ 待发箱（2026-09-15 用户要求：没发出去的，通道正常之后自动补发）
+// ⚠️ 待发箱（2026-09-15 要求：没发出去的，通道正常之后自动补发）
 import * as outbox from './outbox.js';
 import { streamChat } from './llm.js';
 import { faceTags, faceFiles } from './faces.js';
@@ -558,7 +564,17 @@ function connectForward() {
   async function checkRecvHealth() {
     if (recvBusy || stopping || ws.readyState !== WebSocket.OPEN) return;
     if (Date.now() - lastRecvRescueAt < RECV_COOLDOWN_MS) return;
-    const groups = (config.trigger?.allowGroups ?? []).map(String).filter(Boolean);
+    let groups = (config.trigger?.allowGroups ?? []).map(String).filter(Boolean);
+    // ⚠️⚠️⚠️ 2026-11-16（用户：「怎么现在两种又都不回了啊」—— 排查到这一条）：
+    //    客户端协议端（`tools/qq-onebot.mjs`，6700）的 `get_group_msg_history`
+    //    **要走 `anode exec`（3~5 秒一次）**。这里原来遍历**全部 allowGroups**（实测 7 个群）
+    //    ⇒ 一轮三十多秒把执行队列占满 ⇒ `pollOnce` 抢不到 ⇒ **轮询整个饿死**
+    //    ⇒ 表现就是"收不到消息"。
+    //    更糟的是：这个自检的判据是「历史里有必须回的、我这边没见过」——
+    //    队列被它自己占满时**必然成立** ⇒ 它会不停判死、不停重连，**越查越收不到** ✗
+    //    ⇒ 客户端适配器下只查 1 个群（够判死），把队列留给轮询。
+    const isClientAdapter = /:(\d+)/.test(String(config.onebot?.url || '')) && String(config.onebot?.url || '').includes(':6700');
+    if (isClientAdapter && groups.length > 1) groups = [groups[0]];
     if (!groups.length || !bot.selfId) return;
     recvBusy = true;
     try {
@@ -755,9 +771,14 @@ if (config.onebot.mode === 'forward') {
 initCollector(faceFiles());
 
 // 管理界面（本地）
+/* ⚠️ 2026-11-21（用户：「**当本地模型关闭时应该立刻降级到第二个模型，开启时马上恢复。
+ *   要主动取本地模型运行情况来调整，不是撞到关闭再降级或者恢复**」）——
+ *   每 15 秒 ping 一次本地 /health：挂了立刻放行到第二家、活了立刻切回来 ✓
+ *   ⚠️ 用户的 `autoFallback` 开关值一个字不动，这是内存里的临时行为 ✓ */
+startLocalWatch();
 startWebUI(bot);
 
-// ⚠️ 2026-09-17 用户要求：「启动机器人就自动打开 webui」（三道闸见 `open-webui.js`）
+// ⚠️ 2026-09-17 要求：「启动机器人就自动打开 webui」（三道闸见 `open-webui.js`）
 (await import('./open-webui.js')).maybeOpenWebUI();
 
 // ⚠️⚠️ 2026-09-16 深夜加：**开机就报一次"大模型从哪儿出去"**。
@@ -778,6 +799,41 @@ bot.startQzoneScheduler();
 // ⚠️ 2026-10-05 加：同类机器人搭话的定时器（群里冷场时才动，见 src/peer-chat.js）
 try {
   peerChat.start(bot);
+  /* ⚠️ 2026-11-07 加（用户：「那为什么 Saki 不知道服务器的状态」→「继续」）——
+   *    服务器状态改成**后台每 60 秒预取**，回复时直接读缓存。
+   *    原来它挂在回复的关键路径上：今天 9 次全部 `超过 12 秒` 超时，
+   *    而且每次都和一次生成撞在同一秒 ⇒ 她手上没数据，只能说"我不知道" ✗
+   *    ⚠️ 独立进程测同一个函数只要 207 ms ⇒ 卡的确实是"和生成抢事件循环" ✓ */
+  try {
+    status.startPrefetch();
+  } catch (e) {
+    console.error(`[状态预取] 启动失败（不影响其它功能）：${e.message}`);
+  }
+  /* ⚠️⚠️ 2026-11-07 加（用户：「同时也可以不断增删改 meme.md 库，增加 bot 的玩梗技能」）——
+   *   从群聊里**自动发现**"经常出现、而且跨好几个人说过"的短语，写进
+   *   `knowledge/memes-auto.md`（**绝不动人工维护的 memes.md**）。
+   *   每 6 小时跑一次；每个群单独算；零模型成本（纯统计）✓
+   *   ⚠️ 自动收录的强度**一律 ★**（只认得、默认按字面回、不主动玩）——
+   *      没人确认过"这词到底什么意思"，给高了就会把普通词当梗乱接 ✗
+   */
+  try {
+    const memesAuto = await import('./memes-auto.js');
+    const groups = (config.trigger?.allowGroups ?? []).map(String).filter(Boolean);
+    const run = () => {
+      for (const g of groups) {
+        try {
+          memesAuto.refresh(g);
+        } catch (e) {
+          console.warn(`[梗库] 群 ${g} 自动维护失败：${e.message}`);
+        }
+      }
+    };
+    setTimeout(run, 3 * 60 * 1000).unref?.();
+    setInterval(run, 6 * 3600 * 1000).unref?.();
+    console.log(`[梗库] 自动维护已启动：每 6 小时扫一次（${groups.length} 个群）`);
+  } catch (e) {
+    console.error(`[梗库] 自动维护启动失败（不影响其它功能）：${e.message}`);
+  }
 } catch (e) {
   console.error(`[同类] 启动失败（不影响其它功能）：${e.message}`);
 }
@@ -791,7 +847,7 @@ try {
   console.error(`[私聊工作] 启动失败（不影响其它功能）：${e.message}`);
 }
 
-// ⚠️ API 余额 = 小祥的「工资」（2026-09-13 用户要求）：
+// ⚠️ API 余额 = 小祥的「工资」（2026-09-13 要求）：
 //    低于 5 元抱怨一次、低于 2 元再抱怨一次；402 也走这套话术。
 try {
   bot.startBalanceWatch();
@@ -799,7 +855,7 @@ try {
   log.debug(`工资余额监控启动失败（不影响其他功能）：${e.message}`);
 }
 
-// 月末工资单（2026-09-13 用户要求）：每月最后一天 21 点发到所有 1 档群 + QQ空间
+// 月末工资单（2026-09-13 要求）：每月最后一天 21 点发到所有 1 档群 + QQ空间
 try {
   bot.startMonthlyReport();
 } catch (e) {
@@ -877,7 +933,7 @@ if (config.observe?.enable !== false && !privateWork.noLearn()) {
   log.info('群友观察：**工作模式禁止学习** ⇒ 这个号不跑（攒下来的也不总结）');
 }
 
-// ── 协议端自愈（2026-10-06 用户要求）──
+// ── 协议端自愈（2026-10-06 要求）──
 // 实测：SnowLuma 跑约 2 小时后短暂抖过 1 分钟（3001 没人听、进程却还在），
 // 那段时间机器人只能 ECONNREFUSED 反复重连 —— 用户看到的就是"她不回话"。
 // ⚠️ 只探端口 + 只启动，**绝不杀任何进程**（要"找出哪个是协议端"就得按命令行匹配，
@@ -888,7 +944,7 @@ try {
   log.debug(`协议端自愈启动失败（不影响其他功能）：${e.message}`);
 }
 
-// ── 自动清理临时产物（2026-10-06 用户要求）──
+// ── 自动清理临时产物（2026-10-06 要求）──
 // 用户原话：「机器人自己 QQ 的聊天文件缓存占多少？我觉得可以加个自动清理的功能了，
 //   因为对机器人没用」。
 // ⚠️ 只删**临时产物**（群友发来的文件缓存 / 测试临时目录 / 按天日志 / 待审表情）——
@@ -918,7 +974,7 @@ if (config.cleanup?.enable !== false) {
   );
 }
 
-// ── 「他的资料」自动更新（2026-10-03 用户要求）──
+// ── 「他的资料」自动更新（2026-10-03 要求）──
 // 用户原话：「我和她聊到**我的生活有什么变化**时，**我的资料库里面的对应的信息应该要自动更新**，
 //   比如**毕业了**」+「**不用分区，直接修改**」「我可以去检查来修正错误」「**完全后台**」。
 // ⚠️ 这里只管"定期问一句该不该核对"，判断和写入都在 `ownerUpdate.maybeUpdate()` 里。
@@ -946,7 +1002,7 @@ if (config.ownerUpdate?.enable !== false && !privateWork.noLearn()) {
   log.info('他的资料自动更新：**工作模式禁止学习** ⇒ 这个号不跑');
 }
 
-// ── 「主人最近的近况」短时记忆（2026-10-17 用户要求）──
+// ── 「主人最近的近况」短时记忆（2026-10-17 要求）──
 // 用户原话：「加一个对主人的**短时记忆区**，同样计入 `owner.md`，**到 48 小时**前的数据就清除，
 //   主要用于**跨群和私聊**的记忆，所以**只用总结记忆**即可……而且要**记下时间**以便调用和删除。
 //   机器人可以在**没事的时候提一下**里面的东西，但是**不能老是提**」。
@@ -974,7 +1030,45 @@ if (config.ownerRecent?.enable !== false) {
   log.info('主人近况（短时记忆）：每 10 分钟看要不要总结，超过 48 小时自动清掉 ✓');
 }
 
-// ── 群记忆的「按时间压缩」（2026-09-14 用户要求）──
+/* ⚠️⚠️ 2026-11-23 加：**定时重启本地模型**（用户：「做」）——
+ *
+ *   实测三段的对比（同一个 prompt、同一份配置）：
+ *     · 02:25 刚重启十几分钟 → 命中 **96.5%**
+ *     · 03:20 跑满一小时、几百个请求之后 → **0%**（llama-server 打印
+ *       `selected slot by LRU`，说明相似度匹配已经找不到锚点了）
+ *     · 03:34 `local-model.mjs restart` → 立刻回到 **96.5%**
+ *   ⇒ 结论：**不是小请求"打断"某一次**（那个我测过，不会），而是它们的存在
+ *     把 KV checkpoint 一个个挤掉，跑久了集体失效。
+ *
+ *   ⇒ 每 90 分钟自动 restart 一次，**只重启模型、不碰 bot**（bot 会自己重连）。
+ *   ⚠️ 代价比想象中小：`warmup()` 现在拿**真实 system dump** 预热
+ *      ⇒ 重启后第一轮就有 **93%**（实测），不是"重启就吃一次 15 秒冷启动" ✓
+ *   ⚠️ **只让主号干**：三个号各一个进程，都挂就会互相 kill 模型 ✗
+ *   ⚠️ 关掉：`config.yml` 里写 `localModel: { autoRestart: false }` ✓ */
+if (config.localModel?.autoRestart !== false && String(config.botQQ ?? '') === '10000002') {
+  const everyMin = Math.max(30, Number(config.localModel?.restartEveryMin) || 90);
+  log.info(`[模型] 定时重启：每 ${everyMin} 分钟一次（防 KV checkpoint 退化，只重启模型不碰 bot）`);
+  setInterval(async () => {
+    try {
+      const lm = await import('../tools/local-model.mjs');
+      const st = await lm.status().catch(() => null);
+      if (!st?.alive) return; // 模型没在跑（比如切了云端）⇒ 什么都不做
+      log.info('[模型] 定时重启开始（防 checkpoint 退化）…');
+      const r = await lm.restart();
+      const w = r?.warmup;
+      log.info(
+        `[模型] 定时重启完成：pid=${r?.pid ?? '?'}｜` +
+          (w?.ok
+            ? `预热 ${Math.round((w.ms || 0) / 1000)} 秒（用 ${w.source ?? '?'}）`
+            : `⚠️ 预热失败：${w?.error ?? '未知'}`),
+      );
+    } catch (e) {
+      log.warn(`[模型] 定时重启失败：${e.message}`);
+    }
+  }, everyMin * 60 * 1000).unref?.();
+}
+
+// ── 群记忆的「按时间压缩」（2026-09-14 要求）──
 // 用户原话：「再加一个**按时间压缩**的功能，**压缩不重要的事情**，
 //   但是**性格要不断细化，不能删除**，**好感度也不能修改**」。
 // ⚠️ 这里只负责定期问一句"该压了吗"，判断在 observe.compress() 里
@@ -1105,6 +1199,77 @@ if (true) {
         //
         //   ⇒ 现在：**润色没出文本就这条不发**（不记账 ⇒ 今天顺延重排，条数不会少）。
         //     宁可这一格空着，也不让第三人称原文进群。
+        /* ⚠️⚠️ 2026-11-06 加（用户：「**日常事件有概率接同类的话，如果完全冷场就接，
+         *    如果群里很热就正常日常事件**」）
+         *
+         *   为什么插在这儿：日常事件是"到点了自己冒一句"，跟同类在说什么**完全无关** ——
+         *   现场 15:02 冒出一句「放学出来在校门口站了会儿…」，而那会儿群里刚在聊别的，
+         *   看着就是各说各的 ✗
+         *   ⇒ 冷场时把这一格让给"接同类那句话"，群里热闹才照常发日常 ✓
+         *
+         *   三档（`recent.lastAt` 距现在多久）：
+         *     · ≥ `lifeRelayColdMs`（默认 20 分钟）⇒ **完全冷场 ⇒ 必接**
+         *     · ≥ `lifeRelayWarmMs`（默认 5 分钟） ⇒ **有概率接**（`lifeRelayChance`，默认 0.5）
+         *     · 比这更热                            ⇒ **群里很热 ⇒ 正常日常事件**（不接）
+         *   ⚠️ 同类最近**没说话** ⇒ 一律正常发日常（没话可接，别硬凑）✓
+         *   ⚠️ 接话**不记账**（不 `commit` / 不 `markSent`）—— 那一格本来该发日常事件，
+         *      这格让出去了，下一格照样会排 ✓
+         */
+        if (config.chat?.lifeRelay !== false) {
+          const nowMs = Date.now();
+          const idle = nowMs - (Number(recentStore.lastAt(g)) || 0);
+          const cold = Math.max(0, Number(config.chat?.lifeRelayColdMs) || 20 * 60 * 1000);
+          const warm = Math.max(0, Number(config.chat?.lifeRelayWarmMs) || 5 * 60 * 1000);
+          // ⚠️ 别用 `Number(x) ?? 0.5` —— `Number(undefined)` 是 **NaN 不是 undefined**，
+          //    `??` 兜不住 ⇒ chance 变 NaN ⇒ 永远判 false ⇒ 接话一次都不会发生 ✗
+          const rawChance = Number(config.chat?.lifeRelayChance);
+          const chance = Math.min(1, Math.max(0, Number.isFinite(rawChance) ? rawChance : 0.5));
+          if (idle >= warm) {
+            let peers = [];
+            try {
+              peers = peerChat.peersOf(g);
+            } catch {
+              peers = [];
+            }
+            let speaker = '';
+            for (const p of peers) {
+              try {
+                if (recentStore.lastFromUid(g, p, 1).length) {
+                  speaker = String(p);
+                  break;
+                }
+              } catch {
+                /* 拿不到就当它没说话 */
+              }
+            }
+            const take = speaker && (idle >= cold || Math.random() < chance);
+            if (take) {
+              let said = '';
+              try {
+                said = await peerChat.compose(g, speaker, idle);
+              } catch (e) {
+                log.warn(`[日常] 群 ${g} 接同类的话生成失败（退回发日常事件）：${e.message}`);
+                said = '';
+              }
+              if (said) {
+                try {
+                  await bot.sendToGroup(g, said, {
+                    at: speaker,
+                    atName: names.of(speaker, g) || '',
+                  });
+                  log.info(
+                    `[日常] 群 ${g} 冷场 ${Math.round(idle / 60000)} 分钟 + ${speaker} 刚说过话` +
+                      ` ⇒ 这一格**接它的话**（不发日常事件）：「${said}」`,
+                  );
+                  continue;
+                } catch (e) {
+                  log.warn(`[日常] 群 ${g} 接同类的话没发出去（退回发日常事件）：${e.message}`);
+                }
+              }
+            }
+          }
+        }
+
         const text = await life.compose(plan);
         if (!text) {
           log.warn(
@@ -1140,7 +1305,12 @@ if (true) {
           //    用户截图里那句话就在群里，而系统这里判了失败 ⇒ 顺延重排又抽到同一条 ⇒ 群里看两遍 ✗
           //    ⇒ 这条文本在这个群冷藏 45 分钟（`life.noteFailed`），重排就抽别的事 ✓
           //    ⚠️ 它**不记账**（`fired` 不加），所以"今天该发几条"一点也不少。
-          life.noteFailed(g, plan.template.text, Date.now());
+          //    ⚠️⚠️ 2026-11-24 修：冷藏要用 **`baseText`（那件事）**，不能用 `text`（那一次的走向）——
+          //      `triedRecently()` 查的是事情标题（`t.text`），而这里原来写的是分支文本
+          //      ⇒ 两边对不上 ⇒ **冷藏从来没生效过** ✗
+          //      分支系统下同一个事情有 4 个走向，换一个走向就是另一段文字，
+          //      用户看到的就是"水电费又来了" ✗✗
+          life.noteFailed(g, plan.template.baseText ?? plan.template.text, Date.now());
           continue;
         }
         // ⚠️ 只给这个群记账、只写这个群的故事线（分群之后各算各的）
@@ -1170,7 +1340,7 @@ if (true) {
   );
 }
 
-// ── B 站视频分享（2026-10-15 用户要求）────────────────────────
+// ── B 站视频分享（2026-10-15 要求）────────────────────────
 //
 // 用户原话：「这个插件可以让 bot 也能看到 b 站视频，或者能自己分享视频吗」
 //   → 选「**只发链接**」（卡片被 QQ 挡了：`json`/`share` 段都回
@@ -1219,7 +1389,7 @@ if (biliShare.anyEnabled(biliGroups)) {
 }
 
 /**
- * 「**这个号要不要跑 B站 那一套**」—— 2026-10-21 用户：
+ * 「**这个号要不要跑 B站 那一套**」—— 2026-10-21：
  *   「**b站那一套也要分QQ账号**，以后也许会加一个b站账号给其他QQ号」
  *
  * ⚠️ 为什么不能只靠 `isMainAccount()`：
@@ -1227,8 +1397,8 @@ if (biliShare.anyEnabled(biliGroups)) {
  *   但 `config.yml` 顶层那份仍然是"默认值" ⇒ **三个号都会读到 `enable: true`**
  *   ⇒ 不点名的话三个号会各投一条、各回一遍 ✗
  * ⇒ 判据：**主号一律跑**；别的号必须在那个段的 `accounts: [QQ, ...]` 里**被点名**才跑 ✓
- *   （以后给爱音接一个 B站 号：`accounts/10000012.yml` 里写 `biliPublish.enable: true`
- *     + `accounts: ['10000012']` 就行 —— 登录态那边 profile 已经按号分开了）
+ *   （以后给爱音接一个 B站 号：`accounts/10000013.yml` 里写 `biliPublish.enable: true`
+ *     + `accounts: ['10000013']` 就行 —— 登录态那边 profile 已经按号分开了）
  */
 function biliWanted(section) {
   const c = config[section] || {};
@@ -1244,7 +1414,7 @@ function biliWanted(section) {
 // ⚠️ 默认只在**主号**上跑（别的号要在 `accounts` 里点名）：三个号都读同一份默认配置 ⇒
 //    不加这道闸会三个号各做一条、发三条 ✗
 if (biliWanted('biliPublish')) {
-  // ⚠️ 2026-10-21 用户：「**所有视频缓存要在12点清除**」
+ // ⚠️ 2026-10-21：「**所有视频缓存要在12点清除**」
   //    每 10 分钟看一次，12 点之后当天第一次跑（`sweepTick` 自己按天去重）
   setInterval(() => {
     try { biliPublish.sweepTick(); } catch (e) { log.warn(`[B站投稿] 清缓存 tick 出错：${e.message}`); }
@@ -1253,6 +1423,15 @@ if (biliWanted('biliPublish')) {
   setInterval(() => {
     try { biliPublish.tick(); } catch (e) { log.warn(`[B站投稿] tick 出错：${e.message}`); }
   }, everyPub).unref();
+  /* ⚠️ 2026-10-23 加（用户：「**加一个每次 Saki 视频审核通过之后自动向 1 档群转发视频链接，
+   *    和 b 站视频分享一样**」）
+   *    投稿成功只是"传上去了"，还要**等 B站审核通过**（`state` 从 0 变 1）才有得看。
+   *    ⇒ 每 3 分钟查一次，过审了就把「【标题】 链接?share_source=copy_web」发到所有 1 档群 ✓
+   *    ⚠️ 只在主号跑（和投稿同一个闸）—— 别的号既没有登录态，也不该替主号转发 ✗
+   */
+  setInterval(() => {
+    void biliPublish.shareTick(bot).catch((e) => log.warn(`[B站投稿] 转发审核结果出错：${e.message}`));
+  }, 3 * 60 * 1000).unref();
   const st = biliPublish.status();
   log.info(`B站投稿：已开启（每天在 ${st.window} 里随机挑一个时刻，自动生成并发布）；` +
     `今天是 ${st.todayDone ? '已经做过了' : st.nextAt}；连续群聊 ${st.streakGroup}/${st.groupMaxStreak} 天`);
@@ -1269,7 +1448,7 @@ if (biliWanted('biliComments')) {
   setInterval(() => {
     try { biliComments.tick(); } catch (e) { log.warn(`[B站评论] tick 出错：${e.message}`); }
   }, 30 * 1000).unref();
-  // ⚠️ 2026-10-22 用户：「每次启动机器人时都启动一个最大化节省资源的浏览器实例，一直运行」
+ // ⚠️ 2026-10-22：「每次启动机器人时都启动一个最大化节省资源的浏览器实例，一直运行」
   //    ⇒ 开机就把常驻浏览器拉起来（之后每次检查只要 goto 一下，2~3 秒）
   try { biliComments.warmup(); } catch (e) { log.warn(`[B站评论] 预热浏览器失败：${e.message}`); }
   const cs = biliComments.status();
@@ -1303,7 +1482,12 @@ if (biliWanted('biliProactive')) {
  *     之后她一调 `[工具:语音]` 就是真的语音 ✓
  *   ⚠️ 只在 `voice.enable` 开着时预热（关了就别占显存）
  */
-if (config.voice?.enable === true) {
+// ⚠️ 2026-11-13（用户：「把语音预热关掉」）：
+//   预热是为了"第一条语音不是文字"，但它会在**每次重启**时白占一次显存
+//   （IndexTTS 单进程就吃 7.6GB，两个号都预热直接 93% ⇒ 两个都超时退回文字）
+//   ⇒ 加 `voice.warmup: false` 开关：关掉之后**不再开机预热**，
+//     真要用语音时再按需拉起（第一条会慢一些 / 可能退回文字，这是明知的取舍）
+if (config.voice?.enable === true && config.voice?.warmup !== false) {
   setTimeout(() => {
     import('./group-voice.js')
       .then((gv) => gv.warmup())
@@ -1462,7 +1646,7 @@ startPendingArtsTick();
   };
 
   /**
-   * 结局播报（2026-09-17 用户要求）。
+ * 结局播报（2026-09-17 要求）。
    *
    * 用户原话：「加一个二级剧情结局展示，**跟在机器人发的剧情最后一句话之后
    *   一秒钟发送**，内容首先展示本次剧情结束，这次是好/坏结局，
@@ -1492,6 +1676,25 @@ startPendingArtsTick();
     // ⚠️ 剧情结局的加减分**记在这个剧情所在的群**（好感度 2026-09-15 晚起按群）
     const r = quest.settle(q, ending, (uid, d, o) => affinity.adjust(uid, d, { ...o, groupId: q.groupId }));
     if (r.cast.length) log.info(`[剧情] ${ending === 'good' ? '好' : '坏'}结局，给 ${r.cast.length} 人各 +${r.delta} 好感度`);
+    // ⚠️⚠️⚠️ 2026-11-08 修（用户：「**为什么一直在发剧情结束啊**」）：
+    //    `quest.settle()` **只算好感度、不改状态** —— 真正"这条线结束了"是下面这个
+    //    `quest.finish()`：它才设 `endedAt`、把桶里的 `current` 清成 null，并撤掉
+    //    共享起因 / 线 id。这里原来**一次都没调**（全项目都没有调用点），于是：
+    //      结算 → `current` 还在、`endedAt` 还是 0
+    //      ⇒ 下一分钟 `questTickOne` 又判 `overdue()` 成立
+    //      ⇒ 再强制收尾（模型挂了就"直接结算"）→ 再结算 → 再播报…
+    //      ⇒ 群里**每分钟一条「【本次剧情结束】」**，停不下来 ✗
+    //    ⇒ 结算必须**配一次收尾**，这条线才算真的结束。
+    //    ⚠️ `advance()` 自己收尾成功那条路已经 `finish()` 过了（`reason=forced-*`
+    //      / `hard-cap` / `llm`），`endedAt` 不为 0 ⇒ 这里**别再来一次**，
+    //      否则故事线写两条、`recent` 塞两份。
+    if (!q.endedAt) {
+      try {
+        quest.finish(q, ending, 'settle');
+      } catch (e) {
+        log.warn(`[剧情] 收尾没写成（群 ${q.groupId}）：${e.message}`);
+      }
+    }
     reportEnding(q, r);
     return r;
   };
@@ -1624,7 +1827,7 @@ startPendingArtsTick();
   };
 }
 
-// ── 好友：每天白天按概率主动私聊**一个**（2026-09-15 用户要求）──
+// ── 好友：每天白天按概率主动私聊**一个**（2026-09-15 要求）──
 //
 // 用户原话：「通过之后**每天有几率主动发一次消息**，时间要在**白天**，
 //   要注意**一定是好感度达到 90 才能发**，**一定不是所有好友都会发**，
@@ -1731,7 +1934,7 @@ if (config.storyline?.enable !== false && config.storyline?.compress?.enable !==
   );
 }
 
-// ⏰ **定时提醒**（2026-09-18 用户要求）—— 每分钟看一次有没有到点的。
+// ⏰ **定时提醒**（2026-09-18 要求）—— 每分钟看一次有没有到点的。
 // ⚠️ 到点就发，**不判断"晚了多久"**：如果他定的时候机器人正好掉线，
 //    登录后时间已经过了 —— 这时候**照样要发**（他等的是这个提醒，
 //    晚几分钟发出来远比不发有用；`sendChatLike` 那边"补看"逻辑也是这个取向）。

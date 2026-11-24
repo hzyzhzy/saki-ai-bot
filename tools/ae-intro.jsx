@@ -7,7 +7,7 @@
 //
 // ⚠️ 必须最后写 <本脚本>.done —— ae-run.mjs 靠它判完成
 (function () {
-  var OUT = 'C:/Users/hzy/AppData/Local/Temp/ds1-ae-intro';
+  var OUT = 'C:/Users/<主人>/AppData/Local/Temp/ds1-ae-intro';
   var f = new Folder(OUT);
   if (!f.exists) f.create();
 

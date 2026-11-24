@@ -115,46 +115,102 @@ async function ps(cmd, timeout = 12000) {
 
 const gb = (n) => Number((n / 1024 ** 3).toFixed(1));
 
+/* ⚠️⚠️⚠️ 2026-11-20 大改（用户：「**那个黑窗是弹出来马上闪退的**」+「**还有蓝窗在弹，间隔很久**」）——
+ *
+ *   实测采样：每 30 秒一轮 **3 条 PowerShell**（CPU / 电池 / 显卡），
+ *   而 `windowsHide: true` 在这台机器上**对 powershell 5.1 不生效**（照样起 conhost + 闪窗）✗
+ *   ⇒ 只能从根上**不起子进程**：
+ *     · **CPU**：改用 node 原生 `os.cpus()` 两次采样算差值（零子进程、几乎零开销）✓
+ *     · **电池 / 显卡**：基本不变 ⇒ **只查一次**（首次），之后一直用缓存 ✓
+ *       ⚠️ 想彻底不弹：`config.machine.probePower`（**默认 false**）—— 关掉就一次都不查，
+ *          代价是提示词里没有电池/显卡信息（"我没电了"那种话术就没依据了）
+ */
+let BATTERY_CACHE; // undefined = 还没查过｜null = 查过但没有
+let GPU_CACHE;
+
 /** 电池信息（台式机没有，返回 null） */
 async function battery() {
+  if (BATTERY_CACHE !== undefined) return BATTERY_CACHE;
+  if (config.machine?.probePower !== true) {
+    BATTERY_CACHE = null; // 用户关了"查电源信息"⇒ 一次都不查（不弹窗）
+    return null;
+  }
   const out = await ps(
     'Get-CimInstance Win32_Battery | Select-Object -First 1 EstimatedChargeRemaining,BatteryStatus | ConvertTo-Json -Compress',
   );
-  if (!out) return null;
+  if (!out) {
+    BATTERY_CACHE = null;
+    return null;
+  }
   try {
     const j = JSON.parse(out);
     const pct = Number(j.EstimatedChargeRemaining);
-    if (!Number.isFinite(pct)) return null;
+    if (!Number.isFinite(pct)) {
+      BATTERY_CACHE = null;
+      return null;
+    }
     // BatteryStatus: 1=放电中 2=接电源 3=充满 4=低电量 5=临界 6=充电中
     const st = Number(j.BatteryStatus);
     const charging = st === 2 || st === 6 || st === 3;
-    return { percent: pct, charging, status: st };
+    BATTERY_CACHE = { percent: pct, charging, status: st };
+    return BATTERY_CACHE;
+  } catch {
+    BATTERY_CACHE = null;
+    return null;
+  }
+}
+
+/**
+ * CPU 使用率 —— **纯 node 原生**（`os.cpus()` 两次采样算差值）。
+ * ⚠️ 2026-11-20 改：原来跑 WMI（每 30 秒一个 PowerShell 窗）⇒ 现在零子进程 ✓
+ * ⚠️ 采样间隔 250ms：太短不准、太长拖慢这一轮采集，250ms 实测够稳。
+ */
+async function cpuLoad() {
+  try {
+    const snap = () => os.cpus().map((c) => ({ ...c.times }));
+    const a = snap();
+    await new Promise((r) => setTimeout(r, 250));
+    const b = snap();
+    let idle = 0;
+    let total = 0;
+    for (let i = 0; i < a.length; i++) {
+      const sum = (t) => t.user + t.nice + t.sys + t.idle + t.irq;
+      const da = sum(a[i]);
+      const db = sum(b[i]);
+      total += db - da;
+      idle += b[i].idle - a[i].idle;
+    }
+    if (!(total > 0)) return null;
+    return Math.max(0, Math.min(100, Math.round((1 - idle / total) * 100)));
   } catch {
     return null;
   }
 }
 
-/** CPU 使用率（要跑 WMI，比较慢，所以后台采集 + 缓存） */
-async function cpuLoad() {
-  const out = await ps('(Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average');
-  const n = Number(out);
-  return Number.isFinite(n) ? n : null;
-}
-
 /**
  * 独立显卡名。注意：装了向日葵之类的远程软件会多出来一个虚拟显示器，
  * 所以要过滤掉那些假显卡，优先报真显卡。
+ * ⚠️ 2026-11-20：**只查一次**（显卡不会中途换），之后用缓存 ✓
  */
 async function gpu() {
+  if (GPU_CACHE !== undefined) return GPU_CACHE;
+  if (config.machine?.probePower !== true) {
+    GPU_CACHE = null;
+    return null;
+  }
   const out = await ps('Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name');
-  if (!out) return null;
+  if (!out) {
+    GPU_CACHE = null;
+    return null;
+  }
   const lines = out
     .split(/\r?\n/)
     .map((x) => x.trim())
     .filter(Boolean);
   const fake = /OrayIddDriver|Virtual|Basic Display|Remote|ToDesk|Parsec|VDD|Mirror/i;
   const real = lines.filter((x) => !fake.test(x));
-  return (real.length ? real : lines).slice(0, 2).join(' / ') || null;
+  GPU_CACHE = (real.length ? real : lines).slice(0, 2).join(' / ') || null;
+  return GPU_CACHE;
 }
 
 /** 磁盘（系统盘） */

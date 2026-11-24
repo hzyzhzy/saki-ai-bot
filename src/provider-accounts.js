@@ -277,10 +277,17 @@ export function __ownerPid(port) {
 /** 那个 PID 的可执行文件路径（用来核对"它真的是协议端"，防误杀） */
 function procPath(pid) {
   try {
+    /* ⚠️ 2026-11-21：补 `windowsHide` ——
+     *   子代理实测抓到过一只「父进程是 bot、只活 1 秒」的 powershell，就是这条。
+     *   ⚠️ 它只在**用户点「重启协议端」**时才跑（频率极低），不是那条 6 分钟的弹窗链；
+     *     但这台机器上 powershell 5.1 会弹窗，所以补上（能挡多少算多少）✓
+     *   ⚠️ 为什么还留着 powershell：这里要的是**可执行文件路径**
+     *     （核对它真在协议端目录下，防误杀），`netstat` 给不了路径；
+     *     `wmic` 同样是控制台程序、同样会弹 ✗ */
     return execFileSync(
       'powershell',
-      ['-NoProfile', '-Command', `(Get-Process -Id ${Number(pid)} -ErrorAction SilentlyContinue).Path`],
-      { encoding: 'utf8', timeout: 10000 },
+      ['-NoProfile', '-NonInteractive', '-Command', `(Get-Process -Id ${Number(pid)} -ErrorAction SilentlyContinue).Path`],
+      { encoding: 'utf8', timeout: 10000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] },
     ).trim();
   } catch {
     return '';

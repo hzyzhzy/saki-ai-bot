@@ -1,5 +1,5 @@
 /**
- * 协议端自愈 —— 3001 连不上了就把协议端重新拉起来（2026-10-06 用户要求）。
+ * 协议端自愈 —— 3001 连不上了就把协议端重新拉起来（2026-10-06 要求）。
  *
  * ## 为什么加
  *
@@ -135,24 +135,41 @@ export function status() {
  */
 function countProviderInstances() {
   try {
-    // ⚠️⚠️ **按端口反查 PID**，不去匹配进程的命令行文本 ——
-    //    套件里有条硬断言：源码里不许出现那种匹配（会打中 DSH 自己的 runner）✗
-    //    SnowLuma 一个实例会同时听 3000~3003（AGENTS 里记的），
-    //    所以把这四个端口上"在听"的 PID 去重数一遍 = 实例个数 ✓
-    const ps = [
-      "$ErrorActionPreference='SilentlyContinue'",
-      '$pids = @(3000,3001,3002,3003 | ForEach-Object {',
-      '  (Get-NetTCPConnection -LocalPort $_ -State Listen -ErrorAction SilentlyContinue).OwningProcess',
-      '}) | Where-Object { $_ -and $_ -gt 0 } | Sort-Object -Unique',
-      '@($pids).Count',
-    ].join('\n');
-    const out = execFileSync(
-      'powershell.exe',
-      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand',
-        Buffer.from(ps, 'utf16le').toString('base64')],
-      { encoding: 'utf8', timeout: 25000 },
-    );
-    return Number(String(out ?? '').trim()) || 0;
+    /* ⚠️⚠️⚠️ 2026-11-21 重写：**不再起 PowerShell**（子代理实测锁定的真弹窗源）——
+     *
+     *   原来用 `powershell -EncodedCommand 'Get-NetTCPConnection ...'` 数实例：
+     *     · `Get-NetTCPConnection` 查 4 个端口**要挂十几秒**
+     *     · 而且这台机器上 `windowsHide: true` **对 powershell 5.1 无效**（实测过）
+     *     ⇒ **每 6 分钟弹一个黑窗、挂 14 秒左右自己关**（用户反复报的就是这个）✗
+     *
+     *   触发链（这才是一直循环的原因）：
+     *     · 某个号的 `onebot.url` 指向**没人监听**的端口（实测 3003 是死的）
+     *     · provider-watch 每 30 秒探 → 连续 3 次失败（90 秒）→ 判"协议端没在听" → `launch()`
+     *     · `launch()` 第一件事就是这里 → 弹窗；数到 ≥1 ⇒ 「不再拉起」⇒ 冷却 5 分钟 ⇒ 无限循环
+     *
+     *   ⇒ 改用 **`netstat -ano`**：纯文本、几十毫秒、不起控制台 ✓
+     *     （`tools/local-model.mjs` 早就这么干了，实测 0.41 秒、零窗口）
+     *   ⚠️ 判据不变：把这四个端口上 LISTENING 的 PID 去重数一遍 = 实例个数 ✓
+     *   ⚠️ 数不清就返回 -1（调用方"别拦"，宁可少拦一次也别把正常修复堵死）✓
+     */
+    const out = execFileSync('netstat', ['-ano'], {
+      encoding: 'utf8',
+      timeout: 8000,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    const pids = new Set();
+    for (const line of String(out ?? '').split('\n')) {
+      if (!/LISTENING/i.test(line)) continue;
+      // 形如：TCP    0.0.0.0:3001    0.0.0.0:0    LISTENING    12345
+      const m = line.match(/:(\d+)\s+\S+\s+LISTENING\s+(\d+)\s*$/i);
+      if (!m) continue;
+      const port = Number(m[1]);
+      if (port !== 3000 && port !== 3001 && port !== 3002 && port !== 3003) continue;
+      const pid = Number(m[2]);
+      if (pid > 0) pids.add(pid);
+    }
+    return pids.size;
   } catch {
     return -1; // 数不清就别拦（宁可少拦一次，也别把正常修复堵死）
   }
@@ -180,9 +197,15 @@ function launch() {
   try {
     // ⚠️ 和 `webui.js` 的「重启机器人」同一个套路：交给一个**独立进程**去做，
     //    别在这个进程里等它（协议端起来要几十秒，等它会把机器人自己也拖住）。
+    /* ⚠️⚠️ 2026-11-21：补 `windowsHide`（这条只在"真的需要拉起协议端"时才走到）——
+     *   ⚠️ 老实说 `cmd /c start /min` 里的 `start` **自己会开一个窗口**，
+     *      `windowsHide` 只能挡住 cmd 那一层、挡不住 start 新开的那个 ✗
+     *   真要彻底静音得改成直接 spawn launcher（`.exe` 可以；`.bat` 还得走 shell ⇒ 又会起 cmd）。
+     *   ⇒ 这里先加 `windowsHide`（少弹一层），并把这件事记在这 —— **已知残余** ✓ */
     spawn('cmd.exe', ['/c', 'start', '', '/min', l], {
       detached: true,
       stdio: 'ignore',
+      windowsHide: true,
       cwd: provider.dir() || undefined,
     }).unref();
     log.warn(`[协议端自愈] 已尝试拉起协议端：${l}`);

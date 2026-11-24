@@ -60,6 +60,13 @@ const KEEP_UI = argv.includes('--keep-ui');
 const MOUTH = arg('mouth', '');
 // 张嘴幅度增益：这个模型 ParamMouthOpenY=1 时只是很小一条缝，放大一点才看得出在说话
 const MOUTH_GAIN = Number(arg('mouth-gain', '1.6'));
+/* ⚠️⚠️ 2026-11-08：**眨眼的快慢自己定**
+ *   成片逐帧实测：模型自带的眨眼从闭到开要 **约 0.6 秒**（闭眼就占 9 帧 = 0.36s），
+ *   正常人是 0.2~0.3 秒 ⇒ 观感是"说着话突然定住一下" = 「抽搐」✗
+ *   ⇒ 接管 ParamEye{L,R}Open，用自己的曲线：全程 `--blink-ms`（默认 220ms），
+ *     每 `--blink-period`（默认 4200ms）眨一次；给 `--no-blink` 就完全不碰 ✓ */
+const BLINK_MS = argv.includes('--no-blink') ? 0 : Math.max(80, Number(arg('blink-ms', '220')) || 220);
+const BLINK_PERIOD = Math.max(1200, Number(arg('blink-period', '4200')) || 4200);
 let mouthTrack = null;
 if (MOUTH) {
   const p = resolve(MOUTH);
@@ -84,8 +91,15 @@ const browser = await chromium.launch({
   //    走本机 7890 代理反而卡在 1.8/5.8 MB 动不了 ✗
   args: [
     '--disable-blink-features=AutomationControlled',
-    '--use-gl=angle',
-    '--enable-unsafe-swiftshader',
+    /* ⚠️⚠️ 2026-11-08：**从软渲染切到真 GPU**
+     *   原来 --use-gl=angle + --enable-unsafe-swiftshader ⇒ headless 里回退成 SwiftShader，
+     *   页面 rAF 有 165fps，但录出来 10 秒只有 200 帧（20.6fps）⇒ 画面实际只画到 20fps，
+     *   眨眼这种小动作会长时间卡在同一帧 = 「抽搐」✗
+     *   这台是 RTX 4060 ⇒ 用 d3d11 后端走真显卡 ✓ */
+    '--use-angle=d3d11',
+    '--enable-gpu',
+    '--ignore-gpu-blocklist',
+    '--enable-gpu-rasterization',
     '--no-proxy-server',
   ],
 });
@@ -111,8 +125,8 @@ const ctx = await browser.newContext({
  * ⚠️ 时间锚点在"演出起点"那一刻由脚本设 `window.__dshMouth.anchor = performance.now()`，
  *   之后按 (now - anchor) 索引轨道 ⇒ 与配音严格同轴 ✓
  */
-await ctx.addInitScript(({ track, fps, gain }) => {
-  window.__dshMouth = { track, fps, gain, anchor: null, models: 0, err: null };
+await ctx.addInitScript(({ track, fps, gain, blink }) => {
+  window.__dshMouth = { track, fps, gain, blink, anchor: null, models: 0, err: null };
   const patch = () => {
     const core = window.Live2DCubismCore;
     if (!core || !core.Model || !core.Model.prototype) return false;
@@ -159,16 +173,60 @@ await ctx.addInitScript(({ track, fps, gain }) => {
           } catch (e) { M.err = e.message; }
         }
       }
-      return origUpdate.apply(this, args);
+      const _ret = origUpdate.apply(this, args);
+      /* ⚠️⚠️ 2026-11-08：**眨眼在这里接管** ——
+       *   必须放在 origUpdate **之后**：模型的自动眨眼是在 update 内部算的，
+       *   提前写会被它覆盖掉（嘴能在之前写，是因为 player 写嘴也在 update 前）✗ */
+      if (M && M.blink) {
+        try {
+          const P3 = this.parameters;
+          if (!this.__eyeIdx) {
+            const ei = { l: -1, r: -1 };
+            for (let i = 0; i < P3.ids.length; i++) {
+              const sid = String(P3.ids[i]);
+              if (sid === 'ParamEyeLOpen') ei.l = i;
+              else if (sid === 'ParamEyeROpen') ei.r = i;
+            }
+            this.__eyeIdx = ei;
+          }
+          const ei = this.__eyeIdx;
+          if (ei.l >= 0 || ei.r >= 0) {
+            if (!M.blink.t0) M.blink.t0 = performance.now();
+            const ph = (performance.now() - M.blink.t0) % M.blink.period;
+            let open = 1;
+            if (ph < M.blink.dur) {
+              // 半程闭、半程开，两端平滑；**别闭死**（留 0.06，全 0 看着像没电）
+              open = Math.max(0.06, Math.abs(Math.cos((Math.PI * ph) / M.blink.dur)));
+            }
+            if (ei.l >= 0) P3.values[ei.l] = open;
+            if (ei.r >= 0) P3.values[ei.r] = open;
+          }
+          M.lastEye = 1;
+        } catch (e) {
+          M.eyeErr = e.message;
+        }
+      }
+      return _ret;
     };
     proto.__dshPatched = true;
     return true;
   };
+  /* ⚠️⚠️ 2026-10-26：重试窗口从 90s 放宽到 10 分钟（原来 90s 刚好卡在模型加载前面）
+   *   实测：bdon.moe 的模型列表那一步加载了 86s，从 context 创建到"布景就绪"是 **105.8s**
+   *   ⇒ init 脚本里的 90s 定时器早就把重试停了，`Live2DCubismCore` 那时还没挂到 window 上
+   *   ⇒ `patched:false / models:0`，录出来的片**嘴一动不动**，日志里也只是一行 ⚠️ ✗
+   *   现在改成 10 分钟，并且把 patch 暴露成 `window.__dshPatch`，设锚点前再强制试一次 ✓ */
+  window.__dshPatch = patch;
   if (!patch()) {
     const t = setInterval(() => { if (patch()) clearInterval(t); }, 200);
-    setTimeout(() => clearInterval(t), 90000);
+    setTimeout(() => clearInterval(t), 10 * 60 * 1000);
   }
-}, { track: mouthTrack ? mouthTrack.values : null, fps: mouthTrack ? mouthTrack.fps : 25, gain: MOUTH_GAIN });
+}, {
+  track: mouthTrack ? mouthTrack.values : null,
+  fps: mouthTrack ? mouthTrack.fps : 25,
+  gain: MOUTH_GAIN,
+  blink: BLINK_MS ? { dur: BLINK_MS, period: BLINK_PERIOD } : null,
+});
 
 const page = await ctx.newPage();
 
@@ -231,7 +289,10 @@ const zoomDone = await page.evaluate(({ zoom, vw, vh }) => {
     return out;
   };
   const canvas = walk(document, []).find((e) => e.tagName === 'CANVAS');
-  const host = canvas?.getRootNode().host;
+  // ⚠️ 2026-11-07：页面改版后 canvas 直接挂在 light DOM 的 div.ournotes-live2d 里，
+  //    `getRootNode().host` 是 undefined（只有 shadow DOM 才有 host）⇒ 退回 parentElement。
+  //    两种结构都要认，别只留一条 ✗
+  const host = canvas?.getRootNode().host || canvas?.parentElement;
   if (!host) return false;
   host.style.setProperty('position', 'fixed', 'important');
   host.style.setProperty('left', '0', 'important');
@@ -256,7 +317,8 @@ const prep = await page.evaluate(({ boxed, keepUi }) => {
   const all = walk(document, []);
   const canvas = all.find((e) => e.tagName === 'CANVAS');
   if (!canvas) return { err: 'no canvas（模型没起来？）' };
-  const host = canvas.getRootNode().host;
+  // 同上：shadow DOM 用 host，light DOM 用 parentElement
+  const host = canvas.getRootNode().host || canvas.parentElement;
   // ⚠️ 加了 transform:scale 之后 getBoundingClientRect 返回的是**放大后**的超大矩形
   //   （左边界可能是负数、底部远超视口）⇒ 必须 clamp 到视口内，否则 ffmpeg crop 会报越界 ✗
   const rb = canvas.getBoundingClientRect();
@@ -383,6 +445,8 @@ const clickByName = (name) => page.evaluate((nm) => {
 /* ── 口型锚点：必须在"演出起点"这一刻设，之后嘴型才和配音同轴 ── */
 if (mouthTrack) {
   const mm = await page.evaluate(() => {
+    // ⚠️ 页面加载慢时 init 里的重试窗口可能已经过了；设锚点前再强制挂一次（见上面 2026-10-26 那段）
+    if (window.__dshPatch) window.__dshPatch();
     const M = window.__dshMouth;
     M.anchor = performance.now();
     let range = null;

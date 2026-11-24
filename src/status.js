@@ -244,6 +244,46 @@ function selfPing(addr, port, timeoutMs = 12000) {
 }
 
 /**
+ * **纯 TCP 探测** —— 只看"那条隧道通不通"，**不做 MC 握手**（2026-11-01 加）
+ *
+ * 用户：「能不能检测隧道是否是通的」
+ *
+ * ⚠️ 为什么需要它：服务器走的是 frp 隧道（`_minecraft._tcp` 那条 SRV 指过去）。
+ *   只做 MC 握手的话，"握手失败"分不清下面两种完全不同的情况：
+ *     · **隧道断了**（frp 挂了 / 网络问题）⇒ 得去查 frp
+ *     · **隧道通、MC 服务端没响应**（服务端崩了 / 正在重启）⇒ 得去查服务端
+ *   ⇒ 这个函数只 establish TCP，能连上就说明**隧道这层是通的** ✓
+ *
+ * @param {string} host 域名（含 SRV 即可）
+ * @param {number} [timeoutMs]
+ * @returns {Promise<{ok:boolean, target:string, port:number, srv:boolean, ms:number, err?:string}>}
+ */
+export async function probeTunnel(host, timeoutMs = 2500) {
+  const t0 = Date.now();
+  let target = String(host || '');
+  let port = 25565;
+  let srv = false;
+  try {
+    const t = await resolveTarget(host);
+    target = t.host;
+    port = t.port;
+    srv = !!t.srv;
+  } catch (e) {
+    return { ok: false, target, port, srv, ms: Date.now() - t0, err: 'SRV 解析失败：' + e.message };
+  }
+  const ok = await new Promise((resolve) => {
+    let done = false;
+    const sock = createConnection({ host: target, port, timeout: timeoutMs });
+    const fin = (v) => { if (done) return; done = true; try { sock.destroy(); } catch {} resolve(v); };
+    sock.on('connect', () => fin(true));
+    sock.on('error', () => fin(false));
+    sock.on('timeout', () => fin(false));
+    setTimeout(() => fin(false), timeoutMs + 500).unref?.();
+  });
+  return { ok, target, port, srv, ms: Date.now() - t0 };
+}
+
+/**
  * 查一次服务器状态。
  *
  * 顺序：**自己查（含 SRV）→ 失败才问第三方 API**。
@@ -251,7 +291,7 @@ function selfPing(addr, port, timeoutMs = 12000) {
  * @param {string} host 服务器地址（含 SRV 记录的域名即可，不用写端口）
  * @param {number} ttl 缓存毫秒
  */
-export async function queryServer(host, ttl = 60000) {
+async function _queryServerRaw(host, ttl = 60000) {
   // ⚠️⚠️ 硬超时（2026-09-13 加）。
   //
   //    这个查询在**回复的关键路径上** —— `handle` 里 `await queryServer(...)`
@@ -268,8 +308,25 @@ export async function queryServer(host, ttl = 60000) {
   //
   //    这不是掩盖 bug，而是把「查不到」和「卡死」分开 ——
   //    宁可回一句"我这会儿查不到"，也别让用户干等半分钟。
-  const HARD_TIMEOUT_MS = 6000;
+  /* ⚠️⚠️ 2026-11-06 改 6 秒 → 12 秒（用户：「那为什么 Saki 不知道服务器的状态？」）
+   *
+   *   现场（今天一共 **114 次**，从头到尾没停过）：
+   *     `查询服务器状态超过 6 秒，放弃本次实查`
+   *   22:12:51 那条「服是在重启还是爆了」之前 22:11:20 刚超时过一次 ⇒
+   *   她手上**根本没数据** ⇒ judge 判 `know: false` 其实是**对的** ✗
+   *
+   *   根因：这 6 秒罩住的是 `queryServerInner()` **整条链** ——
+   *     「先自己 ping（含 SRV 解析）→ 失败才问第三方 API」，
+   *   而我刚直接测那个第三方 API（`api.mcstatus.io`）**单独就要 3.4 秒** ✓
+   *   两步加起来轻松破 6 秒 ⇒ 每次都在半路被掐 ⇒ 连 `lastGood`（5 分钟内的旧数据
+   *   兜底）都从来没写上过 ⇒ 她**一次都没拿到过在线人数**。
+   *
+   *   ⇒ 先放宽到 12 秒让它能查到；真要"不卡回复"，正解是**后台预取**
+   *     （定时刷缓存，回复时只读缓存）—— 那是下一步，别在这儿硬扛 ✓
+   */
+  const HARD_TIMEOUT_MS = 12000;
   log.debug(`实查开始：host="${host}" ttl=${ttl}`);
+  const t0 = Date.now();
   let timer = null;
   const timeout = new Promise((resolve) => {
     timer = setTimeout(() => resolve('__TIMEOUT__'), HARD_TIMEOUT_MS);
@@ -277,9 +334,15 @@ export async function queryServer(host, ttl = 60000) {
   });
   const r = await Promise.race([queryServerInner(host, ttl), timeout]);
   clearTimeout(timer);
-  if (r !== '__TIMEOUT__') return r;
+  if (r !== '__TIMEOUT__') {
+    // ⚠️ 记下真实耗时（下次再超时就知道到底慢在哪一段）
+    log.debug(`实查成功：host="${host}" 耗时 ${Date.now() - t0} ms`);
+    return r;
+  }
 
-  log.warn(`查询服务器状态超过 ${HARD_TIMEOUT_MS / 1000} 秒，放弃本次实查`);
+  log.warn(
+    `查询服务器状态超过 ${HARD_TIMEOUT_MS / 1000} 秒（实际等了 ${Date.now() - t0} ms），放弃本次实查`,
+  );
   if (lastGood.data && Date.now() - lastGood.at < 5 * 60 * 1000) {
     const stale = { ...lastGood.data, stale: true };
     cache = { at: Date.now(), data: stale, error: null };
@@ -300,7 +363,22 @@ async function queryServerInner(host, ttl = 60000) {
   try {
     const target = await resolveTarget(host);
     log.debug(`实查目标：${target.host}:${target.port}${target.srv ? '（SRV）' : ''}`);
-    const r = await selfPing(target.host, target.port);
+    /* ⚠️⚠️⚠️ 2026-11-01 修（用户截图：「Saki 说服务器没关，其实关了」）
+     *
+     *    现场（`logs/bot-2026-11-01.log`）：
+     *      14:22:23  [群…] 触发实查服务器状态
+     *      14:2x:xx  WRN 查询服务器状态超过 6 秒，放弃本次实查      ← 连着 3 次
+     *      ⇒ 她拿不到「离线」，只能用 5 分钟前的旧数据说「在线，零个人」✗
+     *
+     *    根因：`selfPing` 的默认超时是 **12 秒**，而 `queryServer` 外层的硬超时是 **6 秒**
+     *      ⇒ 外层永远先放弃 ⇒ **②第三方 API 那一步根本没机会跑** ✗
+     *      （服务器关着的时候 TCP connect 不会立刻报错，就那么挂着等系统超时）
+     *
+     *    ⇒ 这里**显式传 2.5 秒**：服务器在线时实测 1~50ms 就返回（一点不影响），
+     *      真连不上时 2.5 秒就失败 ⇒ 落到下面 ② 问 mcstatus.io
+     *      （实测它 1 秒内返回 `online:false`）⇒ 总耗时 ~3.5 秒，6 秒硬超时够用 ✓
+     */
+    const r = await selfPing(target.host, target.port, 2500);
     log.debug(`自己查成功：${r.version} ${r.players?.online}/${r.players?.max} 名单 ${r.players?.names?.length ?? 0} 人`);
     const data = {
       ok: true,
@@ -314,7 +392,15 @@ async function queryServerInner(host, ttl = 60000) {
     lastGood = { at: now, data };
     return data;
   } catch (e) {
-    log.debug(`自己查失败（${e.code ?? e.message}），改用第三方 API 兜底`);
+    /* ⚠️ 2026-11-01：**握手失败时顺手探一下隧道**，好把"隧道断了"和
+     * "隧道通、服务端没响应"分开（用户：「能不能检测隧道是否是通的」）✓ */
+    const tun = await probeTunnel(host, 2000).catch(() => null);
+    log.debug(
+      `自己查失败（${e.code ?? e.message}）｜隧道${tun ? (tun.ok ? '通' : '不通') : '未知'}` +
+        `（${tun ? tun.target + ':' + tun.port : '?'}）⇒ 改用第三方 API 兜底`,
+    );
+    e.tunnelOk = tun ? tun.ok === true : null;
+    e.tunnelTarget = tun ? `${tun.target}:${tun.port}` : '';
   }
 
   // ② 兜底：第三方 API
@@ -336,7 +422,12 @@ async function queryServerInner(host, ttl = 60000) {
       return stale;
     }
 
-    const data = { ok: false, error: e.message };
+    const data = {
+      ok: false,
+      error: e.message,
+      tunnelOk: e.tunnelOk ?? null,
+      tunnelTarget: e.tunnelTarget || '',
+    };
     cache = { at: now - ttl + FAIL_RETRY_MS, data, error: e.message };
     return data;
   }
@@ -381,11 +472,30 @@ export function describe(data, serverName = '服务器') {
     '',
   ].join('\n');
 
+  /* ⚠️⚠️ 2026-11-02 按用户要求重写（原话：「**问服务器在不在线或者正不正常应该要对着回答，
+   *    不是一直和查人数一样要回人数**」）
+   *
+   *    现场（截图）：有人问「服务器在线了吗」，她答
+   *      「现在一个都没了，你自己十九分钟前刚下线的，忘了？」
+   *      「服务器状态那头查超时了，不过我这边名单是空的」
+   *    ⇒ **先报人数、把状态绕到后面**，还拿"名单空"当"服务器关了" ✗
+   *
+   *    ⇒ 每一档都写清：**对方问什么就答什么**；"查不到"和"关着"是两回事，
+   *      名单空 ≠ 服务器关了（可能只是我这边查不通）✓
+   */
   if (!data?.ok) {
-    return `${head}${serverName}状态：暂时查不到（${data?.error ?? '未知错误'}）。请直接告诉群友查询失败，不要编造。`;
+    return (
+      `${head}${serverName}状态：**查不到**（${data?.error ?? '未知错误'}）。\n\n` +
+      '⚠️ **先说清"我这会儿查不到 / 连不上"** —— 别拿"在线名单是空的"当答案。\n' +
+      '⚠️ 名单空**只说明**我没记录到谁在里面，**不等于服务器关了**（也可能只是我这边查不通）。\n' +
+      '⚠️ 对方问的是「在不在线 / 正不正常」⇒ **就只答这个**：我没查到 / 连不上。**别绕到人数上。**'
+    );
   }
   if (!data.online) {
-    return `${head}${serverName}状态：当前未开机 / 无法连接（离线）。`;
+    return (
+      `${head}${serverName}状态：**离线（连不上 / 没开）**。\n\n` +
+      '⚠️ 对方问「开了吗 / 在不在线 / 正不正常」⇒ **就答这个**（没开 / 连不上），**别绕到人数上**。'
+    );
   }
   const { online, max, names } = data.players;
   // ⚠️⚠️ 2026-10-01（用户截图 + 纠正）：
@@ -439,7 +549,7 @@ export function describe(data, serverName = '服务器') {
     '  你手上只有这份数据，数据没说的就别说（真实踩过：她自己加了「哪来的两个捏」',
     '  「Chihaya Anon 又不见了？」，群友一追问就越解释越像在编）。',
     '- ✅ 群友追问「这是谁」：**照实说** —— 服务器返回的名字就是 Anonymous Player，',
-    '   **看不出是谁**（⚠️ **不许解释成"没设名字"** —— MC 里不存在这回事，用户 2026-10-01 纠正过；',
+ ' **看不出是谁**（⚠️ **不许解释成"没设名字"** —— MC 里不存在这回事，2026-10-01 纠正过；',
     '   也不许猜"是不是假人/小号/挂机的"）。可以补一句「这个得问管理员才知道」。',
     '- ✅ 有真名字（昵称）就**念出来**：群友问「服里有没有人」就是想知道是谁在，',
     '  只回「有一个人」等于没答。人多就报几个主要的 + 总数。',
@@ -447,9 +557,89 @@ export function describe(data, serverName = '服务器') {
     '- ⚠️ 「在线人数」和「名单条数」对不上时（有人在但没设名字）—— **照上面那样解释一句就行，别猜**。',
     '',
   ].join('\n');
-  return `${head}${serverName}状态：在线。版本 ${data.version}，当前在线 ${online}/${max} 人${list}。${mustName}${noTime}${staleNote}`;
+  // ⚠️ 2026-11-02（用户：「问服务器在不在线或者正不正常应该要对着回答，
+  //    不是一直和查人数一样要回人数」）⇒ 在线时也写清：**问状态就答"在线"**，
+  //    只有问"几个人/谁在"才报人数和名单 ✓
+  return `${head}${serverName}状态：**在线（开着，正常）**。版本 ${data.version}，当前在线 ${online}/${max} 人${list}。\n\n⚠️ 对方问的是「在不在线 / 正不正常」⇒ **先答"在（开着）"**，人多不多只是补充；**只有问"几个人 / 谁在"时才报人数和名单**。${mustName}${noTime}${staleNote}`;
 }
 
 export function clearCache() {
   cache = { at: 0, data: null, error: null };
+}
+
+/* ⚠️⚠️ 2026-11-07 加（用户连着问「那为什么 Saki 不知道服务器的状态」/「继续」）——
+ *
+ *   现场（`logs/bot-2026-11-07.log`）：今天 **9 次**全是
+ *     `查询服务器状态超过 12 秒（实际等了 12001~12055 ms），放弃本次实查`
+ *   而且**每次都和一条消息/一次生成撞在同一秒**（例：10:50:12 超时，
+ *   10:50:12 同时收到 Anon 的 @）。
+ *
+ *   但我在**独立进程**里测同一个 `queryServer`：**207 ms 就成功了**
+ *   （`source: 'self'`，SRV → TCP 握手拿到了 1.20.1 / 2026 上限）。
+ *   ⇒ 说明卡的不是网络，是**跑在回复关键路径上、和 LLM 流式生成抢事件循环**。
+ *
+ *   ⇒ 两道补丁：
+ *   ① **并发去重**：多个群同时问，只真查一次（原来各查各的，互相抢 socket）
+ *   ② **后台预取**：每 60 秒在空闲时刷一次缓存 ⇒ 回复时**直接命中缓存**
+ *      （`ttl` 内不进真实查询），彻底把它移出关键路径 ✓
+ */
+let inflight = null;
+
+/**
+ * 查服务器状态（带缓存 + 并发去重）。
+ * ⚠️ 语义和原来一模一样，只是**同时只会有一个真实查询在跑**。
+ */
+export async function queryServer(host, ttl = 60000) {
+  const now0 = Date.now();
+  if (cache.data && now0 - cache.at < ttl) return cache.data;
+  if (inflight) return inflight;
+  inflight = _queryServerRaw(host, ttl);
+  try {
+    return await inflight;
+  } finally {
+    inflight = null;
+  }
+}
+
+/**
+ * **后台预取**（`index.js` 启动时调一次）。
+ *
+ * ⚠️ 为什么必须有它：这个查询在回复的关键路径上，一卡就是"她答不出服务器状态"。
+ *   后台每 60 秒刷一次，回复时读缓存 ⇒ **正常情况 0 ms** ✓
+ * ⚠️ `unref()`：别拦着进程退出（回归套件 import 它也不会挂住）✓
+ * ⚠️ 不并到 inflight 里：预取撞上真实查询时**共用同一次**（就是上面那个去重）✓
+ */
+export function startPrefetch(intervalMs = 60 * 1000) {
+  const host = String(config.status?.host ?? '').trim();
+  if (!host) return null;
+  /* ⚠️ 只在**状态变化**时打日志（第一次必打）——
+   *   60 秒一条 info 会刷屏，但一条都不打的话用户没法确认它在工作 ✓ */
+  let lastSig = '';
+  const tick = async () => {
+    try {
+      const r = await queryServer(host, 30 * 1000);
+      const sig = r?.ok
+        ? `on:${r.players?.online ?? '?'}/${r.players?.max ?? '?'}`
+        : `fail:${String(r?.error ?? '').slice(0, 40)}`;
+      if (sig === lastSig) return;
+      lastSig = sig;
+      if (r?.ok) {
+        log.info(
+          `[状态预取]「${host}」在线 ${r.players?.online ?? '?'}/${r.players?.max ?? '?'}` +
+            `（版本 ${r.version ?? '?'}）⇒ 之后回复直接用这份缓存`,
+        );
+      } else {
+        log.warn(`[状态预取]「${host}」这次没查到：${r?.error ?? '?'}`);
+      }
+    } catch (e) {
+      log.debug(`[状态预取] 出错：${e.message}`);
+    }
+  };
+  const timer = setInterval(tick, Math.max(15000, Number(intervalMs) || 60000));
+  timer.unref?.();
+  void tick(); // 启动就刷一次，别等第一个 60 秒
+  log.info(
+    `[状态预取] 已启动：每 ${Math.round(intervalMs / 1000)} 秒刷一次「${host}」的状态（回复时直接读缓存）`,
+  );
+  return timer;
 }

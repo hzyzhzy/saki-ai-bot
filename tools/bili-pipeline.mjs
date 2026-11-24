@@ -156,6 +156,9 @@ step('⑦ 合成成片', [join(ROOT, 'tools', 'bili-intro3.mjs'),
   '--lines', LINES,
   '--voice', VOICE_FIT,
   '--live2d', TAKE,
+  /* ⚠️ 2026-11-08：`--bg` = 用素材当背景，**不要群聊记录**（完全自己做那条路）。
+   *   给了就透传下去 ⇒ bili-intro3 会跳过群聊画面，直接拿这张图/这段视频铺满 ✓ */
+  ...(arg('bg', '') ? ['--bg', resolve(arg('bg', ''))] : []),
   '--chat-picked', join(ROOT, 'logs', 'bili', 'chat_picked.json'),
   '--l2d-h', L2D_H,
   // ⚠️ 片头只在**自制题材**那条路加（用户 2026-10-22：「群里的趣事类不用变，

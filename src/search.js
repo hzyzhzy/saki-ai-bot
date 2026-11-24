@@ -12,6 +12,9 @@
  */
 import { config } from './config.js';
 import * as persona from './persona.js';
+// ⚠️ 2026-11-19：DeepSeek 搜索 API 走**和模型请求同一套出网逻辑**（代理/直连自动切换、
+//    超时、网络错误重试一次）—— 自己 new 一个 fetch 会漏掉那些 ✓
+import { llmFetch } from './llm.js';
 // 重新导出，方便 bot.js 只 import 一个模块
 export { planSearch } from './search-plan.js';
 import { log } from './log.js';
@@ -574,16 +577,34 @@ export function keywords(query) {
 export function parseBaidu(html, limit = 5) {
   const out = [];
   const src = String(html ?? '');
-  // 结果块：<div ... class="result ...">…<h3>…<a href="...">标题</a>
-  const re = /<h3[^>]*>[\s\S]{0,400}?<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g;
-  let m;
-  while ((m = re.exec(src))) {
-    const url = m[1];
-    const title = clean(m[2]);
+  /* ⚠️⚠️ 2026-11-20 改（用户：「**参考 ds 官方搜索对内置搜索进行优化**」）——
+   *   原来这里 `snippet: ''` **硬编码空摘要** ⇒ 百度那几条进了提示词也是只有标题，
+   *   模型拿不到任何可用的材料（DS 的每条都带 `summary`，这就是差距之一）。
+   *   ⇒ 现在把整块结果（`<div class="result">…</div>`）切出来，
+   *     从里面抽**摘要那一段**（百度通常放在 `<span class="content-right_...">` 或裸文本里）✓
+   */
+  const blocks = src.split(/<div[^>]*class="[^"]*result[^"]*"/i).slice(1);
+  for (const blk of blocks) {
+    const mm = /<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i.exec(blk);
+    if (!mm) continue;
+    const url = mm[1];
+    const title = clean(mm[2]);
     if (!title) continue;
     // 过滤百度自家的导航/视频聚合等
     if (/^百度|_百度知道$/.test(title) && title.length < 6) continue;
-    out.push({ title, url, snippet: '' });
+    // 摘要：去掉标题那段和标签后剩下的可见文字，取前 160 字
+    let snippet = clean(
+      String(blk)
+        .replace(/<h3[\s\S]*?<\/h3>/i, ' ')
+        .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+        .replace(/<style[\s\S]*?<\/style>/gi, ' '),
+    )
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 160);
+    // ⚠️ 摘要里常把标题重复一遍 ⇒ 以标题开头就切掉
+    if (snippet.startsWith(title)) snippet = snippet.slice(title.length).trim();
+    out.push({ title, url, snippet });
     if (out.length >= limit) break;
   }
   return out;
@@ -634,7 +655,7 @@ export async function baiduSearch(query, limit = 5) {
 }
 
 /**
- * B站搜索 —— **查网络热梗/二创/歌名比搜索引擎强得多**（2026-09-13 用户提议）。
+ * B站搜索 —— **查网络热梗/二创/歌名比搜索引擎强得多**（2026-09-13 提议）。
  *
  * 用户的话：「联网搜索可以连接 b 站或者小红书这类社交平台吗，
  * 我觉得**在搜索网络热梗这种方面肯定比搜索引擎要好**」。
@@ -819,20 +840,64 @@ export async function moegirlSearch(query, limit = 3, opts = {}) {
 /**
  * 结果相关性打分：命中的关键词越多、越长，分越高。
  */
+/**
+ * ⚠️⚠️ 2026-11-20 参考 DS 官方搜索**重写打分**（用户：「**参考 ds 官方搜索对内置搜索进行优化**」）
+ *
+ *   DS 官方搜索为什么好用（实测对比）：每条都带**凝练摘要**（`summary`）+ **语义重排分**
+ *   （`rerank_score`）+ **来源权威度**（`authority`），所以模型拿到就是能直接用的材料。
+ *   而内置抓页原来：
+ *     · 只按**关键词命中**打分（`hit += k.length`），谁词多谁分高 —— 和"这个结果有没有用"没关系 ✗
+ *     · 百科 / 新闻 / 知乎 / B站视频 / 图片页**一视同仁**
+ *     · 摘要经常是空的
+ *
+ *   ⇒ 这里补上 DS 那套的三件事（不换架构，只改"结果加工层"）：
+ *     ① **来源权威度**（相当于 DS 的 `authority`）：百科/官方/新闻 高，知乎/博客 中，视频/问答 低
+ *     ② **多引擎共识**（`_hits`）：两个以上引擎都给了它 ⇒ 更可信（这也是 DS 排序的隐含信号）
+ *     ③ 关键词命中**只作为加成**，不再是唯一判据
+ *
+ *   ⚠️ 返回的是"相关性分"，`searchSmart` 用它决定"这批结果算不算搜到了"；
+ *      原来的阈值语义（>0 = 有相关内容）保持不变 —— 只是分数更贴近"有用程度" ✓
+ */
+const SITE_AUTHORITY = (url, site) => {
+  const u = String(url ?? '').toLowerCase();
+  const s = String(site ?? '');
+  /* ⚠️ 排序参考（实测调过一轮）：
+   *   百科/官方（能查到"是什么"）> 知乎/博客/新闻（有分析）> B站/视频（有料但多为二手）> 噪音
+   *   ⚠️ 第一版把视频给了 1、百科给 3，结果**视频全挤到前面**（因为视频条目的 snippet
+   *      永远非空、还带播放量，吃了"有摘要 +0.5"那一分）⇒ 这里把视频降到 0.6、
+   *      百科/官方提到 3.5，让"能查定义的材料"优先 ✓ */
+  if (/baike\.baidu\.com|wikipedia\.org|zh\.moegirl\.org|萌娘/.test(u + s)) return 3.5;
+  if (/\.gov\.cn|\.edu\.cn|news\.|people\.com\.cn|xinhuanet|thepaper|36kr|sspai/.test(u + s)) return 3;
+  if (/zhihu\.com|jianshu\.com|csdn\.net|juejin\.cn|cnblogs|weixin|mp\.weixin/.test(u + s)) return 2;
+  if (/bilibili\.com|douyin|xiaohongshu|weibo/.test(u + s)) return 0.6;
+  if (/image\.baidu|image\.so|tieba\.baidu|baidu\.com\/s\?|zhidao\.baidu/.test(u)) return -2;
+  return 1;
+};
+
 export function scoreResults(query, results) {
   const kws = keywords(query);
   if (!kws.length) return 0;
-  let hit = 0;
+  let total = 0;
   for (const r of results) {
-    const hay = `${r.title} ${r.snippet}`;
+    // ① 来源权重
+    let sc = SITE_AUTHORITY(r?.url, r?.site);
+    // ② 多引擎共识：几个引擎都命中过它 ⇒ 加分（DS 排序里最有效的信号）
+    sc += Math.min(3, Number(r?._hits) || 0) * 0.8;
+    // ③ 关键词命中（原来唯一的那项，现在只当加成）
+    const hay = `${r.title ?? ''} ${r.snippet ?? ''}`;
+    let hit = 0;
     for (const k of kws) {
       if (hay.includes(k)) {
         hit += k.length >= 4 ? 3 : k.length >= 3 ? 2 : 1;
-        break; // 一条结果只算一次
+        break;
       }
     }
+    sc += hit * 0.6;
+    // ④ 有摘要的优先（DS 每条都有 summary，没摘要的材料模型用不上）
+    if (String(r?.snippet ?? '').trim().length >= 20) sc += 0.5;
+    total += Math.max(0, sc);
   }
-  return hit;
+  return Math.round(total);
 }
 
 /**
@@ -843,12 +908,135 @@ export function scoreResults(query, results) {
  *   「梦限大MewType 剧情」→ 全变成「梦」的百科，一条都不相关
  *   **加词反而搜坏了**。所以第一次搜烂了要会换词重试，而不是直接放弃。
  */
+/**
+ * 挑一个**能用于 DeepSeek 搜索接口**的 key。
+ *
+ * ⚠️⚠️ 不能直接用 `config.llm.apiKey`（实测踩了）：那个是**当前激活那家**的 key ——
+ *   现在生产上激活的是本地 1.5B，它的 key 是字符串 `local`，
+ *   拿去打 ds 的搜索接口直接 401 `Your api key: ****ocal is invalid` ✗
+ * ⇒ 按下面的顺序找：① 搜索配置里显式填的 ② providers 里 baseURL 同源的（跳过 `lite` 那家）
+ *   ③ providers 里 host 带 deepseek 的 ④ 顶层扁平字段（但 `local`/`none` 这类假 key 不认）✓
+ */
+function dsSearchKey(base) {
+  const explicit = String(config.search?.deepseek?.apiKey ?? '').trim();
+  if (explicit) return explicit;
+  const hostOf = (u) => {
+    try {
+      return new URL(String(u)).hostname.toLowerCase();
+    } catch {
+      return '';
+    }
+  };
+  const real = (k) => {
+    const s = String(k ?? '').trim();
+    return s && !/^(local|none|null|dummy|test|x)$/i.test(s) ? s : '';
+  };
+  const want = hostOf(base);
+  const list = Array.isArray(config.llm?.providers) ? config.llm.providers : [];
+  for (const p of list) {
+    if (!p || p.lite === true) continue;
+    if (want && hostOf(p.baseURL) === want && real(p.apiKey)) return real(p.apiKey);
+  }
+  for (const p of list) {
+    if (!p || p.lite === true) continue;
+    if (hostOf(p.baseURL).includes('deepseek') && real(p.apiKey)) return real(p.apiKey);
+  }
+  return real(config.llm?.apiKey);
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * ⚠️⚠️ 2026-11-19 加：**DeepSeek 官方搜索 API**（`POST {baseURL}/tools/search`）
+ *
+ * 换过来的原因（用户原话：「搜索工具可以改成目前通用格式了，因为最近 ds 搜索 api 免费了，
+ *   可以直接调用 ds 搜索 api，并把之前做好的项目内置搜索作为可选搜索服务」）：
+ *   · 内置那套是**抓页面**（Bing/百度/DDG 的 HTML）—— 会被反爬挡、解析一改就瞎、
+ *     而且一次要串好几个引擎；ds 是**官方索引**，一次请求直接给结构化结果 ✓
+ *   · 结构化字段齐全（title/url/summary/date/site_name/authority/rerank_score），
+ *     正好能塞进下面统一的「通用结果格式」，`searchBlock()` 一个字都不用改 ✓
+ *
+ * ⇒ **通用格式**（两家都吐这个，下游只认这一套）：
+ *   `{ title, url, snippet, date, site, authority, rerank, _engines, _hits, _trusted? }`
+ *   ⚠️ 关键是 `snippet` —— `searchBlock()` 和模型读的就是它，别的字段都只是锦上添花 ✓
+ * ══════════════════════════════════════════════════════════════════════ */
+export async function deepseekSearch(query, opts = {}) {
+  const q = String(query ?? '').trim();
+  if (!q) return [];
+  const cfg = config.search?.deepseek ?? {};
+  if (cfg.enable === false) return [];
+  const base = String(cfg.baseURL ?? 'https://api.deepseek.com/v1').replace(/\/+$/, '');
+  // ⚠️ key：不能直接用 `config.llm.apiKey`（那是**当前激活那家**的，本地模型时是 `local`）
+  //    取法见 `dsSearchKey()` 那段注释 ✓
+  const key = dsSearchKey(base);
+  if (!key) {
+    log.debug('[搜索] 没配 DeepSeek 的 key ⇒ 跳过 ds 搜索');
+    return [];
+  }
+  const count = Math.max(1, Math.min(20, Number(opts.limit ?? cfg.count ?? config.search?.results ?? 5)));
+  const body = {
+    query: q.slice(0, 400),
+    count,
+    // ⚠️ 默认**不要正文**：`summary` 已经够模型用，正文一次能顶十几 KB（拖慢 + 烧 token）
+    need_content: cfg.needContent === true,
+  };
+  const t0 = Date.now();
+  let json = null;
+  try {
+    const r = await llmFetch(`${base}/tools/search`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(Number(cfg.timeoutMs ?? config.search?.timeoutMs ?? 20000)),
+    });
+    if (!r.ok) {
+      const t = await r.text().catch(() => '');
+      /* ⚠️ 402（余额/额度）要**说得清**：这种时候该回落到内置搜索，而不是当"没搜到" ✓ */
+      log.warn(
+        `[搜索] DeepSeek 搜索失败 HTTP ${r.status}` +
+          `${r.status === 402 ? '（额度/余额不足 ⇒ 会回落内置搜索）' : ''}：${t.slice(0, 160)}`,
+      );
+      return [];
+    }
+    json = await r.json();
+  } catch (e) {
+    log.warn(`[搜索] DeepSeek 搜索异常（回落内置搜索）：${e.message}`);
+    return [];
+  }
+  const rows = Array.isArray(json?.results) ? json.results : [];
+  const out = rows
+    .map((r) => ({
+      title: String(r?.title ?? '').trim() || String(r?.url ?? ''),
+      url: String(r?.url ?? '').trim(),
+      // snippet 的取法：summary（ds 的摘要，最凝练）> snippet > content 前 400 字
+      snippet: String(r?.summary || r?.snippet || r?.content || '')
+        .replace(/<[^>]+>/g, '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 400),
+      date: r?.date ? String(r.date).slice(0, 19).replace('T', ' ') : '',
+      site: String(r?.site_name ?? ''),
+      authority: Number(r?.authority ?? 0) || 0,
+      rerank: Number(r?.rerank_score ?? 0) || 0,
+      _engines: ['deepseek'],
+      _hits: 1,
+      /* ⚠️ 这两个字段见 `searchSmart` 里 `bestScore === 0` 那道闸：
+       *    ds 是**语义检索**，结果里不一定出现原词 ⇒ 按关键词算分会是 0，
+       *    而"分数 0 就当没搜到"会把官方结果整批丢掉 ✗ ⇒ 标成可信，跳过那道闸 ✓ */
+      _trusted: true,
+    }))
+    .filter((r) => r.url && r.title);
+  log.info(
+    `[搜索] DeepSeek「${q.slice(0, 30)}」→ ${out.length}/${rows.length} 条` +
+      `（${Date.now() - t0}ms${body.need_content ? '，带正文' : ''}）`,
+  );
+  return out.slice(0, count);
+}
+
 export async function searchSmart(query, opts = {}) {
   const q = String(query ?? '').trim();
   if (!q) return [];
 
   const kws = keywords(q);
-  // ⚠️ 2026-09-13 用户要求：「**搜索拆词时拆开之后的组合可以多留几个，
+ // ⚠️ 2026-09-13 要求：「**搜索拆词时拆开之后的组合可以多留几个，
   //    不一定就用一个组合搜索，然后把最符合的内容整合就行了**」。
   //
   //    原来是「多种问法各搜一次，但**只留分数最高的那一份**」——
@@ -878,13 +1066,42 @@ export async function searchSmart(query, opts = {}) {
   //    原来是单引擎（只问 Bing），一个引擎瞎了就全瞎
   //    （实测 Bing 对「公共厕所」「璧山铜梁市郊铁路」返回英文垃圾页，
   //     而 DDG/百度是有结果的）。现在是"每个组合 = 多引擎汇总 + 统一去垃圾"。
+  /* ⚠️⚠️ 2026-11-19：**搜索服务在这里分流**（`config.search.provider`）
+   *   · `auto`（默认）  = 先 ds 官方搜索，没结果才回内置抓页
+   *   · `deepseek`      = 只走 ds
+   *   · `builtin`       = 只走内置（Bing/百度/DDG/B站/萌娘）
+   * ⚠️ `opts.provider` 可以按次覆盖（某个调用点想强制用哪家）✓ */
+  const prov = String(opts.provider ?? config.search?.provider ?? 'auto').toLowerCase();
+  const useDs = prov !== 'builtin';
   const merged = [];
   const seenUrl = new Set();
   const seenTitle = new Set();
   let bestScore = 0;
   const used = [];
+  /* ⚠️⚠️ 2026-11-20 提速（用户：「**优化一下本地搜索的速度**」）
+   *
+   *   原来：**3 个问法串行**（每个问法内部 5 引擎并发）——
+   *     · 问法 1 慢 ⇒ 后面两个照样等
+   *     · 每个问法都要等**最慢的那个引擎**（DDG 一直 `fetch failed` 要等超时、
+   *       百度验证码页也要 1~2 秒）⇒ 实测 12.7 秒
+   *   现在：
+   *     ① **只要第一个问法搜到 ≥4 条就不再试后面两个**（原来要攒够 10 条才停）
+   *     ② 每个引擎单独超时 **6 秒**（有问题的引擎早点放弃，别拖累整轮）
+   *     ③ **首个问法命中就提前结束**（大多数查询一次就够）✓
+   *   ⚠️ 质量不打折：只有"结果够用"才提前停；结果差照样会换词重试 ✓
+   */
+  let provStop = false;
   for (const t of [...new Set(tries)].slice(0, 3)) {
-    const results = await searchAllEngines(t, opts);
+    let results = [];
+    if (useDs) {
+      results = await deepseekSearch(t, opts).catch(() => []);
+      if (!results.length && prov === 'auto') {
+        log.info(`[搜索] DeepSeek 没结果 ⇒ 回落内置抓页（${t.slice(0, 30)}）`);
+        results = await searchAllEngines(t, opts);
+      }
+    } else {
+      results = await searchAllEngines(t, opts);
+    }
     if (!results.length) continue;
     const sc = scoreResults(q, results);
     bestScore = Math.max(bestScore, sc);
@@ -900,16 +1117,67 @@ export async function searchSmart(query, opts = {}) {
       // 记下它是哪个组合搜到的 + 相关分（给模型参考可信度）
       merged.push({ ...r, _q: t, _sc: sc });
     }
-    // 已经攒够就不用再试（避免搜太多次把回复拖慢）
+    // ⚠️ 2026-11-20 提速：原来要攒够 10 条才停 ⇒ 现在**够用就停**（4 条起）
+    //    大多数查询第一个问法就有 4+ 条，省掉后面两轮（每轮几秒）✓
+    if (merged.length >= 4 && bestScore > 0) break;
     if (merged.length >= 10) break;
   }
 
-  if (!merged.length || bestScore === 0) {
+  /* ⚠️ 2026-11-19：`bestScore === 0` 那道闸**只对内置抓页成立** ——
+   *   ds 是语义检索，结果里可能一个原词都没有（但内容完全对得上），
+   *   按关键词算分自然 0 ⇒ 有 `_trusted` 条目时就不按分数判死 ✓ */
+  const hasTrusted = merged.some((r) => r._trusted);
+  if (!merged.length || (bestScore === 0 && !hasTrusted)) {
     log.info(`搜索「${q}」没搜到相关内容（试了 ${tries.length} 种问法），当作没搜到`);
     return [];
   }
   log.info(`搜索「${q}」→ 合并 ${merged.length} 条（组合：${used.join('、')}）`);
-  return merged.slice(0, 10);
+  /* ⚠️⚠️ 2026-11-20 加：**最终按"有用程度"重排**（用户：「参考 ds 官方搜索对内置搜索进行优化」）
+   *
+   *   原来这里直接 `merged.slice(0, 10)` —— 顺序**完全等于引擎顺序**
+   *   （Bing → 百度 → DDG → B站 → 萌娘）⇒ 给模型的材料里，B站视频常常挤掉百科/知乎 ✗
+   *   DS 那边是**按 rerank_score 排**的（语义相关性），这里用可得信号模拟一版：
+   *     来源权威度（百科/官方 > 知乎/新闻 > 视频） + 多引擎共识（`_hits`） + 关键词命中 + 有没有摘要
+   *   ⚠️ 稳定性：同分时按 `_hits` 再按原顺序（`_i`），保证结果可复现 ✓ */
+  merged.forEach((r, i) => {
+    r._i = i;
+    /* ⚠️⚠️ 排序公式（**相关性第一，权威度只是加分**）——
+     *   第一版我把"百科 +3.5"当主项，结果「2026年最强AI模型」搜出来
+     *   「2026年国际足联世界杯_百度百科」排第一（纯因为它是百科）✗
+     *   DS 那边是**语义分**当主项，权威度只是微调 —— 这里照那个比例来：
+     *     相关性（关键词命中，权重高） ≫ 多引擎共识 > 有摘要 > 来源权威度（小加分） */
+    const hay = `${r?.title ?? ''} ${r?.snippet ?? ''}`;
+    let hit = 0;
+    for (const k of keywords(q)) {
+      if (hay.includes(k)) {
+        hit += k.length >= 4 ? 3 : k.length >= 3 ? 2 : 1;
+        break;
+      }
+    }
+    // ① 相关性（主项，放大 3 倍）
+    let sc = hit * 3;
+    // ② 多引擎共识（两个以上引擎都给 ⇒ 更可信）
+    sc += Math.min(3, Number(r?._hits) || 0) * 0.8;
+    // ③ 有摘要（模型能直接用）
+    if (String(r?.snippet ?? '').trim().length >= 20) sc += 0.5;
+    // ④ 来源权威度（**只作为小幅加分**，不再是主项）
+    sc += Math.max(0, SITE_AUTHORITY(r?.url, r?.site)) * 0.4;
+    // ⑤ 完全没命中关键词 ⇒ 相关性 0，重罚（但仍保留，万一语义相关）
+    if (!hit) sc -= 4;
+    r._rank = sc;
+  });
+  merged.sort((a, b) => (b._rank - a._rank) || ((Number(b._hits) || 0) - (Number(a._hits) || 0)) || (a._i - b._i));
+  // ⚠️ 顺手把噪音（图片页/搜索页/贴吧）踢出前几条 —— DS 那边根本没有这种条目
+  const cleanList = merged.filter((r) => SITE_AUTHORITY(r?.url, r?.site) > -1);
+  const finalList = (cleanList.length ? cleanList : merged).slice(0, 10);
+  log.info(
+    `搜索「${q}」→ 重排后前 3：` +
+      finalList
+        .slice(0, 3)
+        .map((r) => `${String(r.title ?? '').slice(0, 14)}(分${(r._rank ?? 0).toFixed(1)})`)
+        .join(' / '),
+  );
+  return finalList;
 }
 
 /**
@@ -946,7 +1214,7 @@ export async function searchSmart(query, opts = {}) {
  */
 async function searchAllEngines(q, opts = {}) {
   const limit = opts.limit ?? config.search?.results ?? 5;
-  // ⚠️ 2026-09-13 用户要求「**站也加入一起用**」——
+ // ⚠️ 2026-09-13 要求「**站也加入一起用**」——
   //    B站（热梗/二创一手材料）和萌娘百科（ACG 梗权威）**并进同一个池子**，
   //    不替代原来的搜索引擎。各自失败就返回空，不影响别的（`allSettled`）。
   const engines = ['bing', 'ddg', 'baidu', 'bilibili', 'moegirl']
@@ -955,18 +1223,30 @@ async function searchAllEngines(q, opts = {}) {
 
   const settled = await Promise.allSettled(
     engines.map(async (eng) => {
+      /* ⚠️ 2026-11-20 提速：**每个引擎单独 6 秒硬超时** ——
+       *   原来没有任何单独超时，整轮要等**最慢的那个**：
+       *     · `ddg` 这台机器直连一直 `fetch failed`（等 TCP 超时）
+       *     · 百度偶尔返回验证码页（还要解析一遍）
+       *   ⇒ 实测一轮 12.7 秒，结果大部分时间花在"等坏引擎"上 ✗
+       *   ⚠️ 6 秒是实测值：正常引擎 1~3 秒就回，6 秒足够；
+       *      超时的那个当"这次没搜到"，不影响其它引擎 ✓ */
+      const withTimeout = (p) =>
+        Promise.race([
+          p,
+          new Promise((_, rej) => setTimeout(() => rej(new Error(`${eng} 超时 6s`)), 6000)),
+        ]);
       if (eng === 'baidu') {
         // 百度走它自己的解析器
-        return { eng, list: await baiduSearch(q, limit) };
+        return { eng, list: await withTimeout(baiduSearch(q, limit)) };
       }
       if (eng === 'bilibili') {
-        return { eng, list: await bilibiliSearch(q, limit, opts) };
+        return { eng, list: await withTimeout(bilibiliSearch(q, limit, opts)) };
       }
       if (eng === 'moegirl') {
         // 萌娘百科命中率低但质量高，给它少占点名额
-        return { eng, list: await moegirlSearch(q, Math.min(3, limit), opts) };
+        return { eng, list: await withTimeout(moegirlSearch(q, Math.min(3, limit), opts)) };
       }
-      return { eng, list: await search(q, { ...opts, engine: eng }) };
+      return { eng, list: await withTimeout(search(q, { ...opts, engine: eng })) };
     }),
   );
 
@@ -1342,9 +1622,20 @@ export function searchBlock(query, results) {
 
 /** 给管理界面看的状态 */
 export function searchStatus() {
+  const prov = String(config.search?.provider ?? 'auto').toLowerCase();
+  const dsKey = String(config.search?.deepseek?.apiKey || config.llm?.apiKey || '').trim();
+  const dsOn = config.search?.deepseek?.enable !== false && !!dsKey;
+  const provText =
+    prov === 'builtin'
+      ? '内置抓页（Bing/百度/DDG/B站/萌娘，免费）'
+      : prov === 'deepseek'
+        ? `DeepSeek 搜索 API${dsOn ? '' : '（⚠️ 没配 key，会一直空）'}`
+        : `DeepSeek 搜索 API${dsOn ? '（失败自动回落内置抓页）' : '（没 key ⇒ 全走内置抓页）'}`;
   return {
     enable: config.search?.enable !== false,
-    provider: 'bing（网页抓取，免费）',
+    provider: provText,
+    providerKey: prov,
+    deepseek: { on: dsOn, needContent: config.search?.deepseek?.needContent === true },
     blocked: Date.now() < blockedUntil,
     blockedSecondsLeft: Math.max(0, Math.round((blockedUntil - Date.now()) / 1000)),
     failStreak,

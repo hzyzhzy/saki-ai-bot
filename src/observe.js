@@ -23,7 +23,7 @@
  *
  * ---
  *
- * ## 2026-09-14 用户要求的三件事（都实现了）
+ * ## 2026-09-14 要求的三件事（都实现了）
  *
  * 用户原话：
  *   「**提升观察记录群友做了什么事什么性格的频率**，
@@ -45,11 +45,38 @@ import { reloadKnowledge, groupFileName } from './knowledge.js';
 import { groupsOf } from './names.js';
 import { backupKnowledge } from './backup.js';
 import { streamChat } from './llm.js';
+import * as thinkLog from './think-log.js';
 
 /** 把流式输出收成一段文本 */
-async function collect(messages) {
+async function collect(messages, meta = {}) {
   let out = '';
-  for await (const d of streamChat(messages)) out += d;
+  // ⚠️⚠️ 2026-11-13（用户：「空间和总结有思考链吗？如果有的话也计入思考链卡片」）：
+  //   这两条路原来**压根没传 report** ⇒ 模型吐的 reasoning_content 直接被扔掉 ✗
+  //   现在把它们也记进 webui 那张卡片：原因一栏写"定时任务"，正文写这份总结。
+  const report = {};
+  let tlId = '';
+  try {
+    tlId = thinkLog.start({
+      gid: String(meta.gid ?? ''),
+      who: String(meta.who ?? ''),
+      from: String(meta.label || '（定时任务）'),
+      msgText: String(meta.msgText || meta.label || ''),
+      reason: String(meta.reason || '定时任务：观察总结'),
+    });
+    report.onReasoning = (c) => thinkLog.appendThink(tlId, c);
+  } catch {}
+  try {
+    // ⚠️ 2026-11-18：**观察总结/空间摘要固定走云端**（`noLite: true`）——
+    //    这份提示词本身就把群聊记录全塞进去（实测 8 万 token），
+    //    本地小模型 32K 上下文直接 400 ✗（日志：`[空间] 生成失败 400 (81100 tokens)`）
+    for await (const d of streamChat(messages, undefined, { report, noLite: true })) out += d;
+  } finally {
+    try {
+      if (tlId) {
+        thinkLog.finish(tlId, { reply: out, usage: report.usage, cost: report.cost, failed: !out.trim() });
+      }
+    } catch {}
+  }
   return out;
 }
 
@@ -327,7 +354,7 @@ const PROMPT = `你在帮一个 QQ 群客服机器人**暗中积累**对群和�
 - 只输出上面那两节，不要开场白、不要解释。`;
 
 /**
- * 压缩用的提示词（2026-09-14 用户要求）。
+ * 压缩用的提示词（2026-09-14 要求）。
  *
  * ⚠️⚠️ 用户的两条硬约束，都写在下面：
  *   「**压缩不重要的事情**，但是**性格要不断细化，不能删除**」
@@ -450,10 +477,15 @@ export async function summarize(opts = {}) {
         `# 这批群聊记录（${batch.length} 条${gid ? `，群 ${gid}` : ''}）\n${lines}`,
       ].join('\n');
 
-      const res = await collect([
-        { role: 'system', content: PROMPT },
-        { role: 'user', content: user },
-      ]);
+      const res = await collect(
+  [{ role: 'system', content: PROMPT }, { role: 'user', content: user }],
+  {
+    gid,
+    label: '观察总结',
+    msgText: `总结这群最近 ${batch.length} 条群聊记录` + (gid ? `（群 ${gid}）` : ''),
+    reason: '定时任务：群观察总结（攒够条数或满 6 小时触发）',
+  },
+);
 
       const raw = String(res ?? '').trim();
       if (!raw) {
@@ -534,7 +566,7 @@ function parseSections(raw) {
 /**
  * 新的放前面，去掉明显重复的旧条目。
  *
- * ⚠️⚠️ **性格条目保留上限从 20 提到 60**（2026-09-14 用户要求「性格要不断细化」）。
+ * ⚠️⚠️ **性格条目保留上限从 20 提到 60**（2026-09-14 要求「性格要不断细化」）。
  *    原来 `oldPeople.slice(0, 20)` —— 攒到 20 条之后**每加一条就挤掉最老的一条**，
  *    等于性格**永远停在 20 条、细节被慢慢冲掉**，和"不断细化"正好相反。
  *    大事仍然限 20（那个本来就要靠 `compress()` 按时间压）。
@@ -578,7 +610,7 @@ function merge(existing, parsed) {
 }
 
 /**
- * **按时间压缩**自动区（2026-09-14 用户要求）。
+ * **按时间压缩**自动区（2026-09-14 要求）。
  *
  * 用户原话：「再加一个**按时间压缩**的功能，**压缩不重要的事情**，
  *   但是**性格要不断细化，不能删除**，**好感度也不能修改**」。
@@ -622,10 +654,14 @@ export async function compress(opts = {}) {
 
   running = true;
   try {
-    const res = await collect([
-      { role: 'system', content: COMPRESS_PROMPT },
-      { role: 'user', content: `# 现在记着的内容\n${existing.slice(0, 8000)}` },
-    ]);
+    const res = await collect(
+  [{ role: 'system', content: COMPRESS_PROMPT }, { role: 'user', content: `# 现在记着的内容\n${existing.slice(0, 8000)}` }],
+  {
+    label: '记忆压缩',
+    msgText: '把这批群记忆压短（合并同类项）',
+    reason: '定时任务：记忆压缩（默认 3 天一次）',
+  },
+);
     const raw = String(res ?? '').trim();
     if (!raw) return { ok: false, reason: '模型没返回内容' };
 
@@ -686,7 +722,7 @@ export async function compress(opts = {}) {
   }
 }
 
-// ── 撤回最近一次观察（2026-10-05 用户要求）──────────────────────
+// ── 撤回最近一次观察（2026-10-05 要求）──────────────────────
 //
 // 用户原话：「在机器人记群里内容的时候，加一个能撤回记住的机制，只要 @机器人
 //   然后以自然语言说出忘记刚才那个 之类的话，就撤回记住的那条，区别于 / 的命令」

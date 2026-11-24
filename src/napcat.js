@@ -65,7 +65,7 @@ function portOpen(port, timeoutMs = 1500) {
 /**
  * NapCat 到底在不在跑。
  *
- * ⚠️ 为什么要单独有个函数（2026-09-17 用户报「重启 NapCat 按钮还是没用，那两个窗口没动静」）：
+ * ⚠️ 为什么要单独有个函数（2026-09-17报「重启 NapCat 按钮还是没用，那两个窗口没动静」）：
  *    界面上那个「重启 NapCat」原来只有一条路 —— `POST /api/QQLogin/RestartNapCat`，
  *    而那是**发给 NapCat 管理接口**（6099）的请求。**NapCat 压根没跑的时候，
  *    那个请求只会 ECONNREFUSED**（界面弹「重启失败：fetch failed（NapCat 似乎没在运行）」），

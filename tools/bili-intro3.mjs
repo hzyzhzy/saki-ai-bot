@@ -498,6 +498,13 @@ say(`HTML 已生成（${picked.length} 条消息，${cues.length} 个滚动点�
 // 用户 2026-10-20：「用上祥子/live2d 形象配合声音」
 // 没有真 Live2D 模型 ⇒ 用官方立绘 PNG 做：呼吸上下浮动 + 说话时轻微抖动
 const TACHIE = arg('tachie', '');
+/* ⚠️⚠️ 2026-11-08：**--bg = 用素材当背景，不要群聊记录**
+ *   这条对应「完全自己做」那种片子（result.json 里 source='topic'）：
+ *   素材自己上网找（图片 / 视频片段），画面里不该出现 QQ 聊天记录。
+ *   不给就是老行为（群聊记录滚动 → source='group' 那种）✓ */
+const BG = arg('bg', '');
+const BG_PATH = BG ? resolve(BG) : '';
+const BG_IS_IMG = BG ? /\.(png|jpe?g|webp|bmp|gif|avif)$/i.test(BG) : false;
 const tachiePath = TACHIE ? resolve(TACHIE) : '';
 if (tachiePath && !existsSync(tachiePath)) {
   say('❌ 立绘文件不存在：' + tachiePath);
@@ -628,6 +635,14 @@ await page.waitForTimeout(400); // 等最后几帧推完
  *   位置由帧号算出来 ⇒ 时间轴绝对均匀，不可能跳帧 ✓
  *   代价：截图比实时录制慢（850 帧约 1.5 分钟），但结果确定。
  */
+let webm = null;
+if (BG) {
+  if (!existsSync(BG_PATH)) { say('❌ --bg 指定的素材不存在：' + BG_PATH); process.exit(2); }
+  webm = BG_PATH;
+  say(`背景用素材：${webm}（${BG_IS_IMG ? '图片' : '视频'}，**跳过群聊画面**）`);
+  try { await ctx.close(); } catch { /* ignore */ }
+  try { await browser.close(); } catch { /* ignore */ }
+} else {
 const CHAT_MP4 = join(work, 'chat.mp4');
 const SHOT_FPS = 25;
 const SHOT_N = Math.round((totalDur + 0.5) * SHOT_FPS); // 多给 0.5 秒尾巴
@@ -660,12 +675,13 @@ rmSync(shotsDir, { recursive: true, force: true }); // 帧用完就删（占空�
 await ctx.close();
 await browser.close();
 // 聊天画面是逐帧拼出来的 mp4（CHAT_MP4），不再有 webm
-const webm = existsSync(CHAT_MP4) ? CHAT_MP4 : null;
+webm = existsSync(CHAT_MP4) ? CHAT_MP4 : null;
 if (!webm) {
   say('❌ 没录到视频');
   process.exit(2);
 }
 say(`用画面：${webm}`);
+}  // ← 结束「没有 --bg」那条路
 
 /* ── ⑤ 拼音轨 + 字幕 + 合成 ───────────────────── */
 const gapFile = join(work, 'gap.wav');
@@ -734,7 +750,13 @@ if (USE_ASS) {
 cues.forEach((c, i) => say(`  字幕${i}：${wrapSub(c.text).map((x) => `〔${x}〕`).join('')}`));
 
 const filter = [];
-const inputs = ['-y', '-i', webm, '-i', voiceFile];
+const inputs = ['-y'];
+if (BG) {
+  // 素材当背景：图片要 -loop 1，视频用 -stream_loop -1（不够长就循环），都裁到 totalDur
+  if (BG_IS_IMG) inputs.push('-loop', '1', '-t', String(totalDur + 0.5));
+  else inputs.push('-stream_loop', '-1', '-t', String(totalDur + 0.5));
+}
+inputs.push('-i', webm, '-i', voiceFile);
 let hasAvatar = false;
 
 /* ── 片头（**只有"agent 自己搜集题材"那种视频用**，2026-10-22 用户定）──────
@@ -814,13 +836,23 @@ if (introDir) {
 }
 
 // ⚠️ 不要顶部那条 "Saki" 标题栏（用户 2026-10-20：「有点意义不明」）
-filter.push(`[0:v]scale=-2:${PANEL_H}:flags=lanczos,setsar=1,pad=${W}:${H}:(ow-iw)/2:0:color=0x0a0d11[bg]`);
+filter.push(
+  BG
+    /* ⚠️⚠️ 2026-11-08 加 **Ken Burns（缓慢推近）** ——
+     *   用户现场原话：「这个就是一个纯讲话的视频，背景动都不动一下，一点动画也没有」
+     *   原来 `--bg` 只是「等比放大 → 裁到 1080×1920」，**一帧都不动** ⇒ 50 秒死图 ✗
+     *   ⇒ 先放到 2 倍再 zoompan 慢推（1 → 1.18），全程都在动，但不晃眼 ✓
+     *   ⚠️ 必须先 scale 到 2 倍：直接 zoom 原图会糊（放大时没有多余像素可采） */
+    ? `[0:v]scale=${W * 2}:${H * 2}:force_original_aspect_ratio=increase,crop=${W * 2}:${H * 2},setsar=1,` +
+      `zoompan=z='min(1+0.00055*in,1.18)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s=${W}x${H}:fps=${FPS_OUT}[bg]`
+    : `[0:v]scale=-2:${PANEL_H}:flags=lanczos,setsar=1,pad=${W}:${H}:(ow-iw)/2:0:color=0x0a0d11[bg]`,
+);
 if (hasAvatar) {
   // 呼吸：3.4s 一个周期（真人呼吸 15~18 次/分）
   // 半身人物：底部齐着面板底边（像 C 位主播站在画面外），只露上半身
   // ⚠️ 别让它出画：`W-w+30` 会把右侧头发切掉（实测很突兀）⇒ 留 8px 边距
   filter.push(
-    `[bg][av]overlay=W-w-8:${PANEL_H}-h+4*sin(2*PI*t/3.4):eval=frame[withch]`,
+    `[bg][av]overlay=W-w-8:${BG ? H : PANEL_H}-h+4*sin(2*PI*t/3.4):eval=frame[withch]`,
     `[withch]${subChain}${introIdx >= 0 ? '[vsub]' : '[v]'}`,
   );
 } else {

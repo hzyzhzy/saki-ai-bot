@@ -134,7 +134,7 @@ export async function flush(sendFn, opts = {}) {
   // ⚠️ 剧情（`kind:'quest'`）给**长得多**的期限（默认 6 小时）。
   //    理由：聊天回复晚到半小时就是"答非所问"，很怪；
   //    但剧情是一条**连续的故事线**，晚一点送到照样看得懂 ——
-  //    丢了才真的接不上（用户 2026-09-15 那两句就是这么丢的）。
+ // 丢了才真的接不上（2026-09-15 那两句就是这么丢的）。
   const questMaxAge = Math.max(maxAge, nz(cfg().questMaxAgeMs, 6 * 3600 * 1000));
   const keep = [];
 

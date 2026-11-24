@@ -91,15 +91,58 @@ function onLine(line) {
 }
 
 function ensure() {
+  /* ⚠️⚠️ 2026-11-03 加（真事故：**投稿上传被常驻浏览器抢 profile**）
+   *
+   *    现场（11-03 20:36 手动补发）：
+   *      · 20:36:11 `release({pauseMs: 4min})` 成功让位，日志写"已释放常驻浏览器"
+   *      · 20:37:24 起 `bili-upload.mjs` ⇒ Playwright 报
+   *        `Target page, context or browser has been closed`，
+   *        浏览器日志是「**正在现有的浏览器会话中打开**」= profile 被占
+   *      · 20:37:35 / 20:37:57 两秒内又冒出两个 `bili-browser-serve` 进程
+   *
+   *    真因：**这道 `ensure()` 根本没看 `pausedUntil`** ——
+   *    `release()` 只是把 `proc` 置空 + 推后 `pausedUntil`，
+   *    可之后**任何**一次 `ensure()`（巡检、warmup、主动评论）都会无条件重新 spawn，
+   *    把 Chrome 又拉起来抢 `state/bili-profile` ⇒ 上传那边必然起不来 ✗
+   *
+   *    ⇒ 暂停期间一律**不许起**。到点之后巡检自然会再调 `ensure()`，不用这里兜 ✓
+   *    ⚠️ 返回 false（而不是 true）：让调用方知道"现在没有浏览器可用"。
+   */
+  if (Date.now() < pausedUntil) return Promise.resolve(false);
   if (ready && proc) return Promise.resolve(true);
   if (starting) return starting;
-  starting = new Promise((resolve) => {
+  /* ⚠️⚠️ 2026-10-24 修的真 bug：**进程泄漏**（用户问「为什么同时跑 5 个」）
+   *
+   *    现场：`Get-CimInstance` 数出来 **5 个** `bili-browser-serve.mjs` 同时活着，
+   *    它们互相抢 `state/bili-profile` ⇒ 谁都不稳定，Chrome 反复 exit 21 ✗
+   *
+   *    真因：走到这一行时只保证了「`ready && proc` 不成立」，
+   *    但**没排除"`proc` 还在、只是 `ready` 变 false"**这种情况（serve 活着、Chrome 挂了）。
+   *    于是直接 spawn 新的、把 `proc` 引用覆盖掉 ⇒ 旧的**再也没人管**，
+   *    它的 `exit` 回调还会把**新**的 `proc` 置空（串台），越滚越多 ✗
+   *
+   *    ⇒ 起新的之前，**先把残留的收掉**（kill + 等它真死）✓
+   */
+  if (proc) {
+    log.warn('[B站评论] 发现残留的常驻浏览器（没就绪）⇒ 先收掉再重起，避免进程泄漏');
     try {
-      proc = spawn(process.execPath, [join(TOOLS, 'bili-browser-serve.mjs')], {
+      proc.kill();
+    } catch {
+      /* 已经死了也无所谓 */
+    }
+    proc = null;
+    ready = false;
+    starting = null;
+  }
+  starting = new Promise((resolve) => {
+    let thisProc = null;
+    try {
+      thisProc = spawn(process.execPath, [join(TOOLS, 'bili-browser-serve.mjs')], {
         cwd: ROOT,
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,
       });
+      proc = thisProc;
     } catch (e) {
       log.warn(`[B站评论] 常驻浏览器起不来：${e.message}`);
       proc = null; starting = null;
@@ -108,7 +151,7 @@ function ensure() {
     }
     buf = '';
     ready = false;
-    proc.stdout.on('data', (b) => {
+    thisProc.stdout.on('data', (b) => {
       buf += b.toString('utf8');
       let i;
       while ((i = buf.indexOf('\n')) >= 0) {
@@ -117,11 +160,19 @@ function ensure() {
         if (line) onLine(line);
       }
     });
-    proc.stderr.on('data', (b) => {
+    thisProc.stderr.on('data', (b) => {
       const s = b.toString('utf8').trim();
       if (s) log.debug(`[B站评论/浏览器] ${s.slice(0, 200)}`);
     });
-    proc.on('exit', (code) => {
+    thisProc.on('exit', (code) => {
+      /* ⚠️ 2026-10-24 修：**只有"当前那个"死了才清状态**
+       *    旧进程的 exit 可能**晚到**（我们刚 kill 掉它、又起了新的）——
+       *    那时如果无条件 `proc = null`，会把**新进程的引用**抹掉 ⇒
+       *    新进程还在跑却"没人认得"，下次 ensure 又起一个 ⇒ 又泄漏 ✗ */
+      if (proc !== thisProc) {
+        log.debug(`[B站评论] 旧浏览器进程退出（code ${code}，已被替换，忽略）`);
+        return;
+      }
       log.info(`[B站评论] 常驻浏览器退出（code ${code}）—— 下次要用会重新起`);
       proc = null; ready = false; starting = null;
       while (waiters.length) waiters.shift()({ ok: false, err: '浏览器进程退出' });
@@ -137,8 +188,10 @@ function ensure() {
       } else if (Date.now() - t0 > 60000) {
         clearInterval(iv);
         log.warn('[B站评论] 常驻浏览器 60 秒没就绪 ⇒ 放弃这次');
-        try { proc.kill(); } catch { /* ignore */ }
-        proc = null; starting = null;
+        try { thisProc.kill(); } catch { /* ignore */ }
+        // ⚠️ 只有还是"当前这个"才清引用（否则会误清掉后来者）
+        if (proc === thisProc) proc = null;
+        starting = null;
         resolve(false);
       }
     }, 300);
@@ -205,7 +258,7 @@ export async function makeReply({ video, who, content, when, lines, isOwner, isR
   const isMine = Array.isArray(lines) && lines.length > 0;
   const sys = [
     '你在 B 站自己的视频下面**回复一条评论**。',
-    /* ⚠️⚠️⚠️ 2026-10-22 用户：「**回的评论都很公式化，开头都是想啥呢/刷什么/蹲啥/喵什么，句式太规整了**」
+ /* ⚠️⚠️⚠️ 2026-10-22：「**回的评论都很公式化，开头都是想啥呢/刷什么/蹲啥/喵什么，句式太规整了**」
      *   放在**最前面**（和主人分支同级）—— 因为放「要求」里实测没压住：
      *     连着四条还是「喵什么喵」「蹲什么后续」「抓什么」✗
      *   ⚠️ 只给**方向**、不给台词（写死台词又变成另一种模板）✓ */
@@ -215,7 +268,7 @@ export async function makeReply({ video, who, content, when, lines, isOwner, isR
     '   ⇒ 换着来：直接说事 / 先接他的话 / 先给结论 / 就一个词（「嗯。」「行吧。」）/ 先损一句 / 顺着往下说',
     '   ⇒ 但**别反过来又变成另一种固定套路** —— 每条的腔调都该不一样，这才是人 ✓',
     '',
-    // ⚠️⚠️⚠️ 2026-10-22 用户：「调一下，但是不要死板」
+ // ⚠️⚠️⚠️ 2026-10-22：「调一下，但是不要死板」
     //   第一版把这段放在「要求：」**后面** ⇒ 模型优先服从第 0 条「别认领创作」，
     //   主人夸一句它照样回「不是我铺的，得问作者去」✗
     //   ⇒ 挪到**最前面**，并明说「下面所有规则为他让路」。
@@ -229,7 +282,7 @@ export async function makeReply({ video, who, content, when, lines, isOwner, isR
           '⇒ 他夸这个视频（"太屌了""牛啊"这种没信息量的夸），**别去纠正"是谁做的"** —— ' +
           '就当在夸你（嘴硬一句「那当然」），或者损他一句（「就这还叫屌」「你眼光真低」）；' +
           '纠正归属那种事**留给陌生人**，对他做反而像在撇清 ✗',
-          /* ⚠️⚠️ 2026-10-21 用户定：「**不认领**」+「**作者是主人的视频，里面的成果都是属于主人做的**」
+ /* ⚠️⚠️ 2026-10-21 定：「**不认领**」+「**作者是主人的视频，里面的成果都是属于主人做的**」
            *   实测踩到的：他问「作者是谁」，她答「**就是我。铺了小半天，手都快废了**」✗
            *   ⇒ 区分两种场合（**这是这次修的重点**）：
            *     · 他**夸** ⇒ 接住，不用提是谁做的（提了像撇清）
@@ -273,7 +326,7 @@ export async function makeReply({ video, who, content, when, lines, isOwner, isR
     '3. 夸你就接一句（可以嘴硬/自嘲）；提问就直接答；挑刺就按你的脾气回（别骂人）；没营养的就短促接一下',
     '4. 别重复对方的话，别解释自己是 AI',
     '5. 只输出**回复正文**，不要引号、不要前缀',
-    /* ⚠️⚠️ 2026-10-22 用户纠正：「**如果对面是早上发的，但是 saki 是深夜才回的，
+ /* ⚠️⚠️ 2026-10-22纠正：「**如果对面是早上发的，但是 saki 是深夜才回的，
      *   就不要和别人说现在很晚之类的话，主要是根据对面的时间**」
      *
      *   ⇒ 第一版写成「或者现在已经是深夜凌晨，可以顺口带一句」——**错了** ✗
@@ -288,7 +341,7 @@ export async function makeReply({ video, who, content, when, lines, isOwner, isR
     '   · 🚫 **不许**因为"你这边现在是深夜"就去说对方「这么晚还不睡」—— 他可能早上就发了 ✗',
     '   · 也别每句都提时间，偶尔一次就够，提多了像在报时 ✗',
     '7. 「（xxx 表情）」那种是对方发的**B站表情**，照着它的情绪接就行（狗头=开玩笑、笑哭=无奈、星星眼=喜欢）',
-    /* ⚠️⚠️ 2026-10-22 用户：「**回的评论都很公式化，开头都是想啥呢/刷什么/蹲啥/喵什么，句式太规整了**」
+ /* ⚠️⚠️ 2026-10-22：「**回的评论都很公式化，开头都是想啥呢/刷什么/蹲啥/喵什么，句式太规整了**」
      *   实测她连着几条都是「X什么，……」这种反问开头 ✗
      *   两个原因都修了：① 上面不再给她自己的历史回复（不自我模仿）
      *                 ② 这里明确点出来，并给几种**不同方向**的开场（不是给模板，是打开思路）✓ */
@@ -299,7 +352,7 @@ export async function makeReply({ video, who, content, when, lines, isOwner, isR
     '     **先损一句**（「你这眼光」）、**顺着往下说**（「那你倒是去啊」）',
     '   · ⚠️ 但**别反过来又变成另一种固定套路** —— 每条的腔调都应该不一样，这才是人 ✓',
     '',
-    /* ⚠️⚠️⚠️ 2026-10-22 用户：「**发的几条还是有很严重的机器人味**」——
+ /* ⚠️⚠️⚠️ 2026-10-22：「**发的几条还是有很严重的机器人味**」——
      *   他点名三条：**每句都打句号 / 语气词很少 / 「倒」太多了**，
      *   另外让我自己再查还有什么像机器。下面这些就是"真人聊天 vs 机器人"的具体差别 ✓ */
     '⚠️⚠️ **这一整段是"像不像活人"的关键，比上面任何一条都重要**：',
@@ -314,7 +367,7 @@ export async function makeReply({ video, who, content, when, lines, isOwner, isR
     '· ✅ **别把话说满**：真人是想到哪说到哪，会省略主语、会答一半、会突然转话题 ✓',
     '· 🚫 别用书名号/引号强调（「所谓的…」那种），也别打「~~」这种波浪号收尾 ✗',
   ].filter(Boolean).join('\n');
-  /* ⚠️ 2026-10-22 用户提的两个问题（都在这儿修）：
+ /* ⚠️ 2026-10-22 提的两个问题（都在这儿修）：
    *   ① 「**b站有些表情 saki 好像不能直接读出来**」⇒ `emojiText()` 转成「（xxx 表情）」✓
    *   ② 「**saki 不知道对面发评论的时间，只知道现在几点**」
    *      ⇒ 原来只给了 `评论时间：2026-10-21 17:08:39`，她算不出"多久之前" ✗
@@ -339,7 +392,7 @@ export async function makeReply({ video, who, content, when, lines, isOwner, isR
   const ans = await llm.phrase({
     system: sys, user, maxTokens: 300, timeoutMs: 30000, thinking: { type: 'disabled' },
   });
-  /* ⚠️⚠️ 2026-10-22 用户：「**每句都打了句号，语气词很少，倒是太多了**」
+ /* ⚠️⚠️ 2026-10-22：「**每句都打了句号，语气词很少，倒是太多了**」
    *   ⇒ 三层兜底（提示词管不住的部分，代码兜住）：
    *     ① 去行尾句号 ② 去破折号这类"写出来"的标点 ③ 清多余空格
    *   ⚠️ 提示词里也加了对应规则（`别打句号` / `多用语气词` / `倒别每条都用`）✓ */
@@ -368,7 +421,7 @@ function myVideoOf(video) {
 }
 
 /**
- * **去掉行尾的句号**（2026-10-22 用户：「**每句都打了句号**」）
+ * **去掉行尾的句号**（2026-10-22：「**每句都打了句号**」）
  *
  * ⚠️ 真人在评论区打完就完了，**句号打太齐像在念稿** ✗
  * ⚠️ 这个函数是从 `bot.js` 的 `dropTrailingPeriods()` 复制过来的（那边是 QQ 聊天用的）——
@@ -392,7 +445,7 @@ function dropTrailingPeriods(text) {
 
 /**
  * **去掉"写出来"的标点**（人设里明令禁止的那些）
- *   · 破折号 `——` ⇒ 逗号（2026-09-14 用户：「不要发破折号之类一般聊天不常用的标点」）
+ * · 破折号 `——` ⇒ 逗号（2026-09-14：「不要发破折号之类一般聊天不常用的标点」）
  *   · 全角波浪/书名号堆砌等不常见标点，聊天里没人用 ✗
  * ⚠️ 和 `bot.js` 的 `stripChatUncommonPunct()` 一个思路，B站 这条路上原来**没有**这层兜底
  */
@@ -408,7 +461,7 @@ function stripChatPunct(text) {
 }
 
 /**
- * **把 B 站的表情标记转成人能读的样子**（2026-10-22 用户：
+ * **把 B 站的表情标记转成人能读的样子**（2026-10-22：
  *   「b站有些表情 saki 好像不能直接读出来」）
  *
  * ⚠️ B站评论区里的表情在文本里是 `[doge_金箍]` / `[星星眼]` / `[来古弥新_吃桃群众]` 这种
@@ -465,12 +518,12 @@ export async function runOnce({ max = 0 } = {}) {
   const cut = Date.now() - c.sinceHours * 3600 * 1000;
   const seen = new Set(shortMemory.list({ limit: 200 }).map((x) => x.key));
 
-  /* ⚠️ 用户 2026-10-22：「**有多少就回多少**」⇒ 不再有"每天上限/冷却/时间段"这三道闸，
+ /* ⚠️ 2026-10-22：「**有多少就回多少**」⇒ 不再有"每天上限/冷却/时间段"这三道闸，
    *    只有两个限制：① 只回 48 小时内的 ② 一次最多 `maxPerRun` 条 ✓ */
   const todo = [];
   for (const it of items) {
     if (it.isSelf) continue;
-    /* ⚠️ 2026-10-21 用户：「**现在能不能回复别人回复她的评论，比如说楼中楼这种**」
+ /* ⚠️ 2026-10-21：「**现在能不能回复别人回复她的评论，比如说楼中楼这种**」
      *   原来这里一句 `if (it.isReply) continue` 把**所有楼中楼都跳过了** ✗
      *   现在放开，但只接**别人回复我的**那条（`replyTo` 是页面上的字面，不是我猜的）：
      *     · replyTo 命中我的名字      → 这是"回复我的" ⇒ 回 ✓
@@ -544,7 +597,7 @@ export async function checkLogin() {
   return { ok: true, isLogin: loginOk, uname: r.uname || '', mid: r.mid || 0 };
 }
 
-/** 私聊主人（**只发私聊，绝不发群** —— 用户 2026-10-21 明确要求） */
+/** 私聊主人（**只发私聊，绝不发群** —— 2026-10-21 明确要求） */
 async function tellOwner(text) {
   try {
     const cfgRaw = yaml.load(readFileSync(CONFIG_FILE, 'utf8')) || {};
@@ -574,7 +627,22 @@ async function patrolLogin() {
    *   对方于是拿到一个**没有登录态的空会话**，还以为是"票失效了" ✗
    *   ⇒ 暂停期间**不巡检** ✓ */
   if (Date.now() < pausedUntil) return;
-  if (Date.now() - loginCheckedAt < 10 * 60 * 1000) return;
+  /* ⚠️ 2026-10-24 从 **10 分钟改成 3 分钟**（用户：「登录态失效告警太晚」）
+   *
+   *    现场：今天 16:23 之后其实就已经发不出去东西了，
+   *    但日志里**19:54 才第一次报「登录态失效」** ⇒ 白跑了三个多小时 ✗
+   *
+   *    两个原因：
+   *      ① 巡检节流原本 10 分钟一次（+ 每次还要 `ensure()` 起浏览器，更慢）；
+   *      ② **暂停期间不巡检**（`release()` 会让 `pausedUntil` 往后推），
+   *         而今天下午为了投稿 / 主动评论 / 我调试，反复 release 过好几次
+   *         ⇒ 巡检被这些暂停挡住，一拖再拖 ✗
+   *
+   *    ⇒ 节流收紧到 3 分钟。代价只是每 3 分钟问一次 nav（走常驻浏览器，一次几十毫秒），
+   *      换来"失效最多 3 分钟就被发现并私聊提醒" ✓
+   *      ⚠️ 暂停期间仍然不巡检 —— 那条是为了不抢 profile（见上面那段长注释），
+   *        但暂停本身现在最长 40 分钟，且暂停时本来也不该判"登录失效" ✓ */
+  if (Date.now() - loginCheckedAt < 3 * 60 * 1000) return;
   loginCheckedAt = Date.now();
   const r = await checkLogin();
   if (!r.ok) return;   // 查不了（浏览器没起）就不下结论
@@ -656,7 +724,7 @@ export function tick() {
     });
 }
 
-/** 预热（机器人启动时就起浏览器 —— 用户 2026-10-22：「每次启动机器人时都启动一个…一直运行」） */
+/** 预热（机器人启动时就起浏览器 —— 2026-10-22：「每次启动机器人时都启动一个…一直运行」） */
 export function warmup() {
   void ensure();
 }

@@ -7,7 +7,16 @@
 #   AE 上次崩溃后启动会弹「崩溃修复选项」对话框，按钮是
 #   「以安全模式启动 / 重置首选项 / 管理增效工具 / 继续」——
 #   以前这里对 #32770 一律发 WM_CLOSE，等于**取消**，AE 起不来 ⇒ 一直"starting" ✗
-#   ⇒ 现在先找按钮文字（继续/确定/OK/正常启动…）发 BM_CLICK，点不到才 WM_CLOSE。
+#
+# ⚠️⚠️ 2026-11-08 根治（用户：「经常会有这个弹窗，之前解决了很多遍都不行，必须根治一次」）：
+#   那个框是 **Windows TaskDialog**（标题「崩溃修复选项」），按钮是**自绘的**，
+#   不是 Button 控件 ⇒ EnumChildWindows 找不到、BM_CLICK 点不到 ✗
+#   点不到就退回 WM_CLOSE = 取消 ⇒ AE 永远起不来，一直 starting ✗✗
+#   ⇒ 四层兜底，一层比一层硬：
+#     ① 标准 Button（有些框是真按钮）→ BM_CLICK
+#     ② TaskDialog 专用消息 TDM_CLICK_BUTTON + IDCONTINUE(11)，不行再试 IDOK(1)
+#     ③ 提到前台发一次**回车**（TaskDialog 的默认按钮就是「继续」，回车必应）
+#     ④ 最后才 WM_CLOSE
 #
 # 输出：动了几个对话框（整数，一行）
 
@@ -16,6 +25,7 @@ $ErrorActionPreference = 'SilentlyContinue'
 Add-Type -TypeDefinition @'
 using System;
 using System.Text;
+using System.Threading;
 using System.Runtime.InteropServices;
 
 public class AEBox {
@@ -26,12 +36,24 @@ public class AEBox {
   [DllImport("user32.dll")] static extern int GetClassName(IntPtr h, StringBuilder s, int n);
   [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
   [DllImport("user32.dll")] static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
+  [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
+  [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
   delegate bool EnumProc(IntPtr h, IntPtr l);
 
-  // 想点的按钮（按优先级）
   static readonly string[] WANT = new string[] {
-    "继续", "Continue", "正常启动", "确定", "OK", "好", "是", "Yes", "关闭", "Close"
+    // ⚠️⚠️ 2026-11-08：「是否在关闭前保存对 saki_intro.aep 所做的更改？」——
+    //   **必须点「不保存」**：点「保存」会再弹一个保存对话框（又卡一层），
+    //   点「取消」等于中止关闭 ⇒ AE 不退，脚本收不了尾 ✗
+    "不保存", "Don't Save", "不儲存", "否", "No",
+    "继续", "Continue", "正常启动", "確定", "确定", "OK", "好", "是", "Yes", "关闭", "Close"
   };
+
+  const uint TDM_CLICK_BUTTON = 0x0400 + 102;
+  const int IDOK = 1;
+  const int IDNO = 7;        // 「不保存」
+  const int IDCONTINUE = 11; // 「继续」（崩溃修复框）
 
   public static int Handle(uint pid) {
     int acted = 0;
@@ -39,7 +61,7 @@ public class AEBox {
       uint p; GetWindowThreadProcessId(h, out p);
       if (p != pid || !IsWindowVisible(h)) return true;
       var cls = new StringBuilder(256); GetClassName(h, cls, 256);
-      if (cls.ToString() != "#32770") return true;   // 只要标准对话框
+      if (cls.ToString() != "#32770") return true;
 
       IntPtr btn = IntPtr.Zero;
       EnumChildWindows(h, (ch, l2) => {
@@ -53,12 +75,31 @@ public class AEBox {
       }, IntPtr.Zero);
 
       if (btn != IntPtr.Zero) {
-        PostMessage(btn, 0x00F5, IntPtr.Zero, IntPtr.Zero);  // BM_CLICK
+        PostMessage(btn, 0x00F5, IntPtr.Zero, IntPtr.Zero);
         acted++;
-      } else {
-        PostMessage(h, 0x0010, IntPtr.Zero, IntPtr.Zero);     // WM_CLOSE
-        acted++;
+        return true;
       }
+
+      // ② TaskDialog 自绘按钮 ⇒ 走专用消息（不保存 → 继续 → OK，都试一遍）
+      int[] ids = new int[] { IDNO, IDCONTINUE, IDOK };
+      foreach (int id in ids) {
+        SendMessage(h, TDM_CLICK_BUTTON, (IntPtr)id, IntPtr.Zero);
+        Thread.Sleep(280);
+        if (!IsWindowVisible(h)) { acted++; return true; }
+      }
+
+      IntPtr prev = GetForegroundWindow();
+      SetForegroundWindow(h);
+      Thread.Sleep(120);
+      keybd_event(0x0D, 0, 0, UIntPtr.Zero);
+      Thread.Sleep(40);
+      keybd_event(0x0D, 0, 2, UIntPtr.Zero);
+      Thread.Sleep(250);
+      if (prev != IntPtr.Zero) SetForegroundWindow(prev);
+      if (!IsWindowVisible(h)) { acted++; return true; }
+
+      PostMessage(h, 0x0010, IntPtr.Zero, IntPtr.Zero);
+      acted++;
       return true;
     }, IntPtr.Zero);
     return acted;

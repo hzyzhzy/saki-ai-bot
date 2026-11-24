@@ -11,6 +11,7 @@
  * 因为用户要的是「精确识别所有细节」，默认用 flash；想省钱可以在配置里换 chat。
  */
 import { readFileSync } from 'node:fs';
+import * as privacy from './privacy.js';
 import { config } from './config.js';
 import { log } from './log.js';
 // ⚠️ 2026-09-15 补：识图也是**直接 fetch** 的，原来**没记账**。
@@ -22,6 +23,10 @@ import { record as recordSpend } from './spend.js';
 const VISION_MODELS = {
   'deepseek-flash': { maxTokens: 8000, reasoning: true },
   'deepseek-chat': { maxTokens: 1500, reasoning: false },
+  /* 中转站的 4.1 flash：看图够用，**关掉思考链** —— 描述图片不需要推理，
+   * 思考纯粹白烧时间和 token（实测 flash 带思考 6.7s / 关思考 2.1s，描述还更长）。 */
+  'deepseek-v4.1-flash': { maxTokens: 3000, reasoning: false },
+  'deepseek-v4.1-pro': { maxTokens: 3000, reasoning: false },
 };
 const DEFAULT_VISION_MODEL = 'deepseek-flash';
 
@@ -112,7 +117,7 @@ const DESCRIBE_PROMPT = `详详细细地描述这张图片。规则：
   就直说它是截图，然后把**里面的对话内容、角色名、结论**都念出来。
 - 如果是表情包/动漫图，照实描述画面，**不要硬认角色**。
 
-## ⚠️⚠️ 「不给名字」只有一份**黑名单**：**二次元角色**（2026-09-17 用户定）
+## ⚠️⚠️ 「不给名字」只有一份**黑名单**：**二次元角色**（2026-09-17 定）
 
 **默认规矩是「看到什么说什么」** —— 品牌、型号、商品、地点、建筑、界面、
 文字、人物长相，**全部照实描述**。
@@ -291,12 +296,34 @@ export async function describeImageDetailed(image, opts = {}) {
     data = small;
   }
 
-  const baseURL = String(config.llm.baseURL ?? '').replace(/\/+$/, '');
-  const key = config.llm.apiKey;
+  /* ⚠️ 2026-11-22 修（「现在为什么不能识图了，之前一直可以吧」）：
+   *    原来只认 `config.llm.*` = **主模型**。主模型一切成**本地 GGUF**
+   *    （这台 llama-server 启动时没带 `--mmproj`）⇒ 识图请求全打给 127.0.0.1:18085
+   *    ⇒ 每个都 500「image input is not supported - hint: ... provide the mmproj」
+   *    ⇒ 她明明在线，却说「那张图到底是什么呀…我又看不见」✗
+   *    现在 `vision.baseURL` / `vision.apiKey` **配了就优先**（识图钉死云端），
+   *    留空才回落主模型 —— 老配置行为完全不变 ✓ */
+  const baseURL = String(config.vision?.baseURL || config.llm.baseURL || '').replace(/\/+$/, '');
+  const key = config.vision?.apiKey || config.llm.apiKey;
   if (!baseURL || !key) return { text: '', skipped: '没配置模型' };
 
   const model = opts.model ?? config.vision?.model ?? DEFAULT_VISION_MODEL;
   const preset = VISION_MODELS[model] ?? { maxTokens: DEFAULT_MAX_TOKENS, reasoning: true };
+
+  /* ⚠️ 识图这条出网路原本**完全没过脱敏**（它自己 fetch，不走 llm.js）——
+   *    prompt 里如果带了群名/群友名字，是明文发给中转站的。
+   *    ⚠️ 图片本身脱不了（就是要发给模型看的），这里只处理文字部分。 */
+  let pv = null;
+  let promptText = opts.prompt ?? DESCRIBE_PROMPT;
+  try {
+    if (privacy.enabled()) {
+      pv = privacy.mask(promptText);
+      promptText = pv.text;
+    }
+  } catch (e) {
+    log.warn(`[脱敏] 识图 prompt 脱敏失败，按明文发：${e.message}`);
+  }
+
   const body = {
     model,
     // ⚠️ 推理模型（flash）的思考过程会计入 completion_tokens。
@@ -307,7 +334,7 @@ export async function describeImageDetailed(image, opts = {}) {
       {
         role: 'user',
         content: [
-          { type: 'text', text: opts.prompt ?? DESCRIBE_PROMPT },
+          { type: 'text', text: promptText },
           { type: 'image_url', image_url: { url: data.url } },
         ],
       },
@@ -343,7 +370,15 @@ export async function describeImageDetailed(image, opts = {}) {
     } catch (e) {
       log.debug(`记账失败（不影响主流程）：${e.message}`);
     }
-    const out = String(j.choices?.[0]?.message?.content ?? '').trim();
+    let out = String(j.choices?.[0]?.message?.content ?? '').trim();
+    // ⚠️ 必须还原：否则描述里全是 @U12@ 这种占位符，后面拼进上下文会看不懂
+    if (pv && out) {
+      try {
+        out = privacy.unmask(out, pv.map);
+      } catch (e) {
+        log.debug(`[脱敏] 识图结果还原失败（保留占位符）：${e.message}`);
+      }
+    }
     if (!out) {
       log.warn(`识图返回空（模型 ${model} 可能不支持视觉，或 token 不够）`);
       return { text: '', skipped: '模型返回空', model };

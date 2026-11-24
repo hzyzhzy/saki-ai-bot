@@ -45,11 +45,26 @@ const MAX_DOWNLOAD = 40 * 1024 * 1024;
 /**
  * 读画面文字用的模型（**按顺序试**）。
  *
- * ⚠️ 中转站的模型**额度随时会用完**（实测 `Credits exhausted`），所以不能只写一个。
- * ⚠️ 都得是 **supports_vision** 的（`/models` 里带这个字段）。
- * ⚠️ 顺序：先挑响应快、视觉稳的；`deepseek-v4.1-flash` 垫底（它主职是文本）
+ * ⚠️⚠️ 2026-10-29 改（用户：「切换之后必须能把**所有用模型的地方**全部切换，
+ *    除了备用模型设置过的」）：
+ *    原来是写死的数组（先是 4 个中转站专有模型，昨天改成 `['deepseek-flash']`）——
+ *    写死就意味着**用户在界面上换了主模型，这里不跟着换** ✗
+ *    ⇒ 现在改成**现读配置**：
+ *      ① `config.vision.model`（识图那个，保存主模型时会一起同步）排第一
+ *      ② 然后是 `llm.providers` 里各家的 model（同一套配置里的，不会跑到别处去）
+ *    ⚠️ 全是空的话兜底 `deepseek-flash`（官方一定有这个）✓
  */
-const VISION_MODELS = ['gpt-5.6-terra', 'kimi-k2.8-preview', 'glm-5.3', 'deepseek-v4.1-flash'];
+function visionModels() {
+  const l = config.llm || {};
+  const out = [];
+  const main = String(config.vision?.model || l.model || '').trim();
+  if (main) out.push(main);
+  for (const p of (Array.isArray(l.providers) ? l.providers : [])) {
+    const m = String(p?.model || '').trim();
+    if (m && !out.includes(m)) out.push(m);
+  }
+  return out.length ? out : ['deepseek-flash'];
+}
 
 /** 读画面文字用的提示词 —— 只要字，不要发挥 */
 const PROMPT = `把这张画面里出现的**所有文字**原样读出来（字幕、标题、角标、水印、界面里的字都算）。
@@ -61,13 +76,15 @@ const PROMPT = `把这张画面里出现的**所有文字**原样读出来（字
 /** 挑一个"能读画面"的提供商（要有 key + baseURL） */
 function visionEndpoint() {
   const l = config.llm || {};
-  // 优先用**中转站**那家（22 个模型支持视觉）；没有就用扁平那套
-  const list = Array.isArray(l.providers) ? l.providers.filter((p) => p && p.baseURL && p.apiKey) : [];
-  const relay = list.find((p) => /example|relay|proxy/i.test(String(p.baseURL)))
-    || list[0]
-    || null;
-  if (relay) return { baseURL: String(relay.baseURL).replace(/\/+$/, ''), apiKey: String(relay.apiKey) };
+  /* ⚠️⚠️ 2026-10-29 改（用户：「中转站现在有危险，**直到危机解除之前都不能启用**」）：
+   *    这里原来写着「**优先用中转站**那家（22 个模型支持视觉）」——
+   *    `/example|relay|proxy/` 一命中就去连它 ✗
+   *    现在中转站已经彻底断开 ⇒ **只认配置里那一个 baseURL**，
+   *    不再从 providers 里挑，也不再有"优先中转站"这条路 ✓
+   */
   if (l.baseURL && l.apiKey) return { baseURL: String(l.baseURL).replace(/\/+$/, ''), apiKey: String(l.apiKey) };
+  const first = Array.isArray(l.providers) ? l.providers.find((p) => p && p.baseURL && p.apiKey) : null;
+  if (first) return { baseURL: String(first.baseURL).replace(/\/+$/, ''), apiKey: String(first.apiKey) };
   return null;
 }
 
@@ -187,7 +204,7 @@ export async function frameText({ page, count = 3, budgetMs = 75000 } = {}) {
 
   /* ── ④ 读字（按模型顺序试，整段有硬上限）── */
   const left = () => budgetMs - (Date.now() - t0);
-  for (const model of VISION_MODELS) {
+  for (const model of visionModels()) {
     if (left() < 8000) break;
     const texts = [];
     let okCount = 0;

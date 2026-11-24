@@ -100,6 +100,35 @@ natural 表示这句话是不是随口陈述（而不是明确在教学）。
  * @param {string} existingKnowledge 现有知识摘要（用来避免重复录入）
  * @returns {Promise<{hasKnowledge:boolean, natural:boolean, topic:string, fact:string}>}
  */
+/**
+ * `fetch` 加一次重试（**只在网络层失败时**重试；HTTP 4xx/5xx 不重试）。
+ *
+ * ⚠️⚠️ 2026-11-06 加（用户 15:58 在群里发「记住群文件没有增量更新包…」）：
+ *   日志 `知识抽取失败: fetch failed`，**一次就把那条知识丢了** ——
+ *   而这条路是**裸 fetch、没有 llm.js 那套降级/重试** ⇒ 网络抖一下整条知识就没了 ✗
+ *   而 `fetch failed` 这四个字是 node 的**固定文案**，真正原因（ENOTFOUND /
+ *   ECONNRESET / ETIMEDOUT）在 `e.cause` 里 ⇒ 这里既重试，也把 cause 拼进 message ✓
+ */
+async function fetchRetry(url, opt, { retries = 1, gapMs = 1000 } = {}) {
+  for (let i = 0; i <= retries; i++) {
+    try {
+      return await fetch(url, opt);
+    } catch (e) {
+      const cause = e?.cause || {};
+      const code = cause.code || cause.errno || '';
+      const detail = `${e?.message || 'fetch failed'}${code ? `（${code}${cause.hostname ? ` @${cause.hostname}` : ''}）` : ''}`;
+      if (i < retries) {
+        log.warn(`知识抽取网络失败：${detail} ⇒ ${gapMs}ms 后重试`);
+        await new Promise((r) => setTimeout(r, gapMs));
+        continue;
+      }
+      const err = new Error(detail);
+      err.cause = cause;
+      throw err;
+    }
+  }
+}
+
 export async function detectKnowledge(text, mode = 'natural', existingKnowledge = '') {
   const system = existingKnowledge
     ? `${SYSTEM_BASE}\n\n【现有知识（判断是否重复时参考，不要在输出里引用它）】\n${existingKnowledge.slice(0, 6000)}`
@@ -110,7 +139,7 @@ export async function detectKnowledge(text, mode = 'natural', existingKnowledge 
       ? '注意：对方用了明确的教学措辞，所以这句话很可能包含新知识，但如果没有实质内容（比如只是说了句「记住」），仍然返回 hasKnowledge=false。'
       : '注意：对方只是随口说的，你要自己判断这句里有没有新知识。没有就返回 hasKnowledge=false。';
 
-  const res = await fetch(`${config.llm.baseURL.replace(/\/+$/, '')}/chat/completions`, {
+  const res = await fetchRetry(`${config.llm.baseURL.replace(/\/+$/, '')}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

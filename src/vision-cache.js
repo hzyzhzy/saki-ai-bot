@@ -54,7 +54,12 @@ export async function loadImageBytes(p) {
   const s = String(p ?? '');
   if (!s) return null;
   if (/^https?:\/\//i.test(s)) {
-    const r = await fetch(s, { signal: AbortSignal.timeout(20000) });
+    /* ⚠️ 2026-11-22：20 秒 → 45 秒。
+     *   这台机器当前在 2.4G WiFi 上实测只有 ~0.45 MB/s，QQ 原图 3~5 MB
+     *   就要 10 秒以上，图床再抖一下 20 秒根本不够 ⇒
+     *   日志里两次 `取图失败（…jpg）：aborted due to timeout`，
+     *   而她那条回复就跟图完全无关了（用户截图：「识图的内容是不是没进上下文」）✗ */
+    const r = await fetch(s, { signal: AbortSignal.timeout(45000) });
     if (!r.ok) throw new Error(`下载图片 HTTP ${r.status}`);
     return Buffer.from(await r.arrayBuffer());
   }
@@ -74,20 +79,31 @@ export async function loadImageBytes(p) {
  * @param {string} file 协议端给的 file 标识
  */
 async function fetchImage(call, file) {
-  try {
-    const r = await call('get_image', { file });
-    const p = r?.data?.file ?? r?.file ?? r?.data?.url ?? r?.url;
-    if (!p) {
-      log.warn(`取图：协议端没给 file/url（${file}）`);
-      return null;
+  /* ⚠️ 2026-11-22：**失败重试一次**。
+   *   `aborted due to timeout` / 图床偶发 502 都是瞬时的，重试一次基本就过；
+   *   不重试的话整条回复就跟图无关（用户截图那次就是一整张夜景照没读）✗ */
+  let lastErr = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const r = await call('get_image', { file });
+      const p = r?.data?.file ?? r?.file ?? r?.data?.url ?? r?.url;
+      if (!p) {
+        log.warn(`取图：协议端没给 file/url（${file}）`);
+        return null;
+      }
+      return await loadImageBytes(p);
+    } catch (e) {
+      lastErr = e;
+      if (attempt === 0) {
+        log.debug(`取图第 1 次失败（${file}）：${e.message} ⇒ 重试`);
+        await new Promise((res) => setTimeout(res, 700));
+      }
     }
-    return await loadImageBytes(p);
-  } catch (e) {
-    // ⚠️ 提到 warn：这条曾经是 debug，`logLevel: info` 下完全看不到，
-    //    "她为什么看不到图"就查不出来（2026-09-23 实测）。
-    log.warn(`取图失败（${file}）：${e.message}`);
-    return null;
   }
+  // ⚠️ 提到 warn：这条曾经是 debug，`logLevel: info` 下完全看不到，
+  //    "她为什么看不到图"就查不出来（2026-09-23 实测）。
+  log.warn(`取图失败（${file}）：${lastErr?.message ?? '未知'}`);
+  return null;
 }
 
 /**
@@ -153,8 +169,22 @@ export async function describeImagesIn(event, call) {
   const jobs = [];
   const seenFiles = new Set();
   for (const seg of imgs.slice(0, MAX_IMAGES)) {
-    const file = String(seg.data?.file ?? '');
-    if (!file || seenFiles.has(file)) continue;
+    /* ⚠️⚠️⚠️ 2026-11-21 修（用户：「**查一下为什么这张图没落盘**」）——
+     *   现场：<主人> 发一张白车照问「这是什么车」⇒ 她回「你就给我看这么一小块」✗
+     *   真因：协议端给的图片段字段名**不一定是 `file`**（也可能是 file_id / path / url）
+     *        ⇒ 取不到就 `continue` ⇒ **这张图压根没识别** ⇒
+     *        只把"上下文里那张旧图的缓存描述"（白底Q版卡通人物）带给了模型 ✗✗
+     *   ⇒ ① 多试几个字段名 ② 一个都没有就打 warn 把字段列出来（下次一眼定位）✓ */
+    const _d = seg.data ?? {};
+    const file =
+      String(_d.file ?? _d.fileId ?? _d.file_id ?? _d.path ?? _d.url ?? _d.fid ?? _d.file_path ?? '').trim();
+    if (!file) {
+      log.warn(
+        `[识图] 这张图**取不到 file**（字段只有：${Object.keys(_d).join(',') || '（空）'}）⇒ 跳过识别`,
+      );
+      continue;
+    }
+    if (seenFiles.has(file)) continue;
     seenFiles.add(file);
 
     // 图片段带 `sub_type`/`subType`：1 = 动画表情（表情包），0 = 普通图片（截图/照片）。
@@ -241,6 +271,42 @@ export function visionDescriptions(list) {
     .map((x) => String(x?.desc ?? '').trim())
     .filter(Boolean)
     .join('\n');
+}
+
+/**
+ * ⚠️⚠️ 2026-11-24 加：**给「从上下文里捡到的旧图」用的弱化版本**。
+ *
+ * 不能用 `visionBlock()` —— 它开头就硬断言「**你已经看过这张图了**，绝对不要说看不到图」，
+ * 而那些旧图**跟当前这句话没关系**。
+ *
+ * 真实现场（用户截图）：15:20 群里在聊显卡型号（"买显卡都是90起步"），
+ * 她却被塞进了两段图片描述（其实是更早的表情/头像），于是思考写成
+ * 「用户说我在看图，但这里没有实际图片内容…用户可能误发了图片」，
+ * 回复变成了「你发两张图，我这儿好像只看到了……」✗✗
+ *
+ * ⇒ 这个版本**不声称"你看过图"**，只把描述当**背景**摆着，并明说"没提图就别提图"。
+ */
+export function backgroundBlock(list, originOf = null) {
+  if (!list || !list.length) return '';
+  const parts = list.map((x) => {
+    let origin = '';
+    try {
+      origin = originOf ? String(originOf(x) ?? '').trim() : '';
+    } catch {
+      origin = '';
+    }
+    const desc = String(x.desc ?? '').replace(/\s+/g, ' ').trim().slice(0, 300);
+    return `· ${origin ? origin + '：' : ''}${desc}`;
+  });
+  return [
+    '',
+    '# 【背景】群里早前发过的图（**不是你这次要看的东西**）',
+    ...parts,
+    '',
+    '⚠️ 这只是背景资料。**他这句话没提图、没问图 ⇒ 一个字都别提图**，',
+    '也别说什么「我看到了」「我这儿没看到图」—— 没人发图给你看。',
+    '只有这句话确实在说某张图（"这张""刚才那张""你看看"）时，才拿上面的描述来用。',
+  ].join('\n');
 }
 
 /** 拼成给主模型看的文本 */

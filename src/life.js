@@ -101,7 +101,7 @@ function toMin(hh, mm) {
 }
 
 /**
- * 解析 `knowledge/life-events.md`。
+ * 解析 `life-events.md`（**人设包里那份** —— `personaDataFile('life-events.md')`）。
  *
  * 只认两种行（其余一律忽略，所以你可以在里面随便写注释）：
  *   `### 名字 07:00-09:00`        ← 时段
@@ -112,8 +112,28 @@ export function parse(text) {
   let cur = null;
   for (const raw of String(text ?? '').split(/\r?\n/)) {
     const line = raw.trim();
-    if (!line || line.startsWith('>') || line.startsWith('<!--')) continue;
-    if (line.startsWith('<!--')) continue;
+    if (!line || line.startsWith('<!--')) continue;
+    // ⚠️ 2026-11-12 加：**分支行** `> 大凶：…` —— 挂在它上面最近那条事件上。
+    //    一条"事情"可以有好几种走向（午饭被偷 / 送晚 / 正常 / 多给小菜），
+    //    抽签时先抽事情、再按档位抽走向（见 pickBranch）。
+    //    ⚠️ 不匹配这个格式的 `>` 行仍然是注释，照旧跳过（文件里那些 `> 上课。` 就是）。
+    const bm = /^>\s*(大凶|大吉|凶|吉|平)\s*[:：]\s*(.+)$/.exec(line);
+    if (bm && cur && cur.templates.length) {
+      const lastTpl = cur.templates[cur.templates.length - 1];
+      let btext = bm[2].trim();
+      const btags = [];
+      btext = btext.replace(/#([^\s#|]+)/g, (_, tag) => {
+        btags.push(String(tag));
+        return '';
+      });
+      btext = btext.replace(/\[[^\]]*\]/g, ' ').replace(/\s+/g, ' ').trim();
+      if (btext) {
+        lastTpl.branches ??= [];
+        lastTpl.branches.push({ tier: bm[1], text: btext, tags: btags });
+      }
+      continue;
+    }
+    if (line.startsWith('>')) continue;
 
     const h = /^#{3,4}\s*(.+?)\s+(\d{1,2}):(\d{2})\s*[-~～]\s*(\d{1,2}):(\d{2})\s*$/.exec(line);
     if (h) {
@@ -128,7 +148,12 @@ export function parse(text) {
       out.push(cur);
       continue;
     }
-    const t = /^-\s*(?:\[(\d)\]|(\d))\s*\|\s*(.+)$/.exec(line);
+    // ⚠️ 2026-11-12 改：权重允许**一位小数**（`0.2` 这种）。
+    //    原因：大凶 / 大吉要压到「一年四五次」，可整个池子的总权重有三百多 ——
+    //    整数最低的 1 就已经是一年 4.5 次 **一条**。要放五六条不同种类的真事，
+    //    每条就必须小于 1，否则一年二十几次"真出事"，用户就会觉得"过得太惨"。
+    //    整数照旧能解析（向后兼容），不写小数的人和以前一模一样。
+    const t = /^-\s*(?:\[(\d+(?:\.\d+)?)\]|(\d+(?:\.\d+)?))\s*\|\s*(.+)$/.exec(line);
     if (t && cur) {
       let body = t[3].trim();
       const tags = [];
@@ -138,7 +163,8 @@ export function parse(text) {
       });
       body = body.replace(/\[[^\]]*\]/g, ' ').replace(/\s+/g, ' ').trim();
       if (!body) continue;
-      const w = Math.min(5, Math.max(1, Number(t[1] ?? t[2]) || 1));
+      // 下限 0.1（不是 0）：0 会让这条永远抽不到，等于"删了但看不出来"
+      const w = Math.min(5, Math.max(0.1, Number(t[1] ?? t[2]) || 1));
       cur.templates.push({ w, text: body, tags });
     }
   }
@@ -192,9 +218,12 @@ export async function preview(now = Date.now(), groupId = '') {
   }
   const slot = slotAt(now);
   if (!slot) return { ok: false, reason: '现在这个时刻没有对应时段（0-7 点不发）' };
-  const { pool, off, holidayEvents } = poolFor(slot, now, gid);
+  const { pool, off, holidayEvents } = poolFor(slot, now, gid, bucketOf(gid)?.showToday === true);
   if (!pool.length) return { ok: false, reason: `「${slot.name}」这个时段没有可用事件` };
-  const tpl = pickFrom(pool, Math.random);
+  // ⚠️ 2026-11-13：预览也要**走走向**（`pickBranch`）。
+  //    原来这里只 `pickFrom` ⇒ 预览看到的是"事情"（傍晚的班 / 排练），
+  //    而真发出去的是"事情 + 某一档走向"，两者对不上，界面上看着像两套东西。
+  const tpl = pickBranch(pickFrom(pool, Math.random), Math.random);
   let text = '';
   try {
     text = await compose({ template: tpl, slot: slot.name, off, holidayEvents, groupId: gid });
@@ -205,6 +234,10 @@ export async function preview(now = Date.now(), groupId = '') {
     ok: true,
     slot: slot.name,
     event: tpl.text,
+    /** 抽中的是哪件事（同一件事有多个走向，event 只是这一次的走向） */
+    base: tpl.baseText ?? tpl.text,
+    /** 往哪边走：平 / 吉 / 凶 / 大凶 / 大吉（没有分支的事情是空串） */
+    tier: String(tpl.tier ?? ''),
     // 润色失败就退回事件原文（和真发时一样，别让预览看起来"坏了"）
     text: text || tpl.text,
     /** 这条是"没润色成功、用的原文"吗（界面上标一下） */
@@ -244,10 +277,36 @@ function pickTemplate(slot, rng) {
  *     所以以后能顺着故事线关联到"上次元日我在店里加班"）。
  *  3. 中国节日**不进池子** —— 她不会自己过（见 holiday.js 顶部）。
  */
-function poolFor(slot, now, gid = '') {
+function poolFor(slot, now, gid = '', showToday = false) {
   let pool = slot.templates.slice();
   let off = false;
   let events = [];
+  // ⚠️ 2026-11-13 加：**按工作日 / 周末筛**（周历第一层，用户定的是「先按工作日和周末切」）。
+  //    工作日（周一到五）：上学、放学后打工或排练；
+  //    周末（周六日）：不上学，上午可能打工、晚上大概率演出。
+  //    标签只有两个：`#工作日` / `#周末`；不打标签 = 每天都能出。
+  //    ⚠️ 不做“周几”的细分（周二排练、周四排练那种）—— 那要维护一张周表，
+  //       现在的收益抵不上复杂度，等真需要了再加。
+  const dow = new Date(now).getDay();
+  const weekend = dow === 0 || dow === 6;
+  const dowOk = (t) => {
+    const ts = t.tags ?? [];
+    // ⚠️ 2026-11-13 改：日期标签是**并集**，不是同时满足。
+    //    `#工作日` = 周一到五，`#周六` = 周六，`#周日` = 周日；
+    //    写几个就是哪几天都能出（`#工作日 #周六` = 周一到六，不写 = 每天都出）。
+    //    ⚠️ 原来写成"带某个标签就必须是那一天"，结果 `#工作日 #周六` 两边互相排除、
+    //       一条都出不来（2026-11-13 实测到的）。
+    const days = new Set();
+    if (ts.includes('工作日')) [1, 2, 3, 4, 5].forEach((d) => days.add(d));
+    if (ts.includes('周六')) days.add(6);
+    if (ts.includes('周日')) days.add(0);
+    if (days.size && !days.has(dow)) return false;
+    // ⚠️ 今天有没有演出（一天定一次，见 rollDay）：两边的起因互斥
+    if (ts.includes('演出日') && showToday !== true) return false;
+    if (ts.includes('无演出') && showToday !== false) return false;
+    return true;
+  };
+  pool = pool.filter(dowOk);
   try {
     // ⚠️ 2026-09-16：「节日生效」也**按群**（全局那张卡删了，界面上在「按群设定」里设）。
     //    `holiday.enabled()` 保留当总闸（config.life.holidays，默认开）。
@@ -255,9 +314,27 @@ function poolFor(slot, now, gid = '') {
       const h = holiday.on(now);
       off = h.off;
       events = h.events ?? [];
+      // ⚠️ 2026-11-13 加：**节日事件也按时段筛**。
+      //    原来是把节日事件整块拼进池子 ⇒ 早上 7 点能抽到「快到十二点单子才停」，
+      //    晚上 9 点能抽到「一大早去神社参拜」。节日一年才几次，撞一次就很显眼。
+      //    约定：事件带 `#早 / #午 / #晚` 就只在那半天出现；不带 = 全天可用。
+      const part = slot.startMin < 12 * 60 ? '早' : slot.startMin < 17 * 60 ? '午' : '晚';
+      events = events.filter((e) => {
+        const ts = e.tags ?? [];
+        const timed = ts.some((x) => x === '早' || x === '午' || x === '晚');
+        return !timed || ts.includes(part);
+      });
       if (off) {
         const before = pool.length;
-        pool = pool.filter((t) => !t.tags.some((x) => x === '学校' || x === '通勤'));
+        // ⚠️ 2026-11-13：放假时**连场景是学校那边的也一起屏蔽** ——
+        //    标签加了 `#场景-教室` 之后，光按 `#学校`/`#通勤` 筛不干净
+        //    （「自带饭」只有 `#吃饭`，但它是学校午饭）。
+        //    ⚠️ **电车 / 车站 / 路上 不在这张表里**：那几件事真正的问题是"上学路上"，
+        //       已经有 `#通勤` 管着；按场景筛反而会误伤「手机上的推送」这种放假也该有的事。
+        const offScene = /^场景-(教室|校门口|操场|音乐室|学校)$/;
+        pool = pool.filter(
+          (t) => !t.tags.some((x) => x === '学校' || x === '通勤' || (typeof x === 'string' && offScene.test(x))),
+        );
         if (pool.length < before) log.debug(`[日常] 今天放假，屏蔽了 ${before - pool.length} 条学校/通勤事件`);
       }
       pool = pool.concat(events);
@@ -266,7 +343,12 @@ function poolFor(slot, now, gid = '') {
     log.debug(`节日判断失败（当普通日子）：${e.message}`);
   }
   // 全被屏蔽完了（比如早上只有学校/通勤）→ 退回原始池子，宁可出得普通也别不出
-  if (!pool.length) pool = slot.templates.slice();
+  // ⚠️ 2026-11-13：**周末 / 放假都不退回** —— 周日早上本来就该没有“赶电车”这种事，
+  //    放假的日子更不该"上课"；这一格空着就不发。退回原池子等于白筛。
+  if (!pool.length) {
+    if (weekend || off) return { pool: [], off, holidayEvents: events.length };
+    pool = slot.templates.slice();
+  }
   return { pool, off, holidayEvents: events.length };
 }
 
@@ -279,6 +361,48 @@ function pickFrom(pool, rng) {
     if (r <= 0) return t;
   }
   return pool[pool.length - 1];
+}
+
+/**
+ * 各档位在「**这一次往哪边走**」里的默认权重（只用来相对比较，加起来是 100）。
+ * ⚠️ 这是"没有日运的时候"的默认分布；日运接上之后会按当天运势在这上面乘系数。
+ * ⚠️ 大凶 / 大吉压得很低（2 / 1）——"一年四五次"那种事，落到某一件具体事情上更要稀。
+ * ⚠️ 2026-11-12 用户调过：凶 30→24、吉 12→18（"凶也太凶了"）——
+ *    凶比吉多一点就够，不能凶到"一共四个走向两个是坏的"。
+ */
+const TIER_W = { 大凶: 2, 凶: 24, 平: 55, 吉: 18, 大吉: 1 };
+
+/**
+ * 抽**走向**：事情已经抽定了，这一次它往哪边发展。
+ *
+ * ⚠️ **只在这条事情真会有的档位里抽** —— 午饭没有"大吉"就不给它大吉，
+ *    起床没有"大凶"就不会被抽到大凶。缺的档位不参与归一化。
+ * ⚠️ 没有分支的事情原样返回（老条目一条都不用改，行为跟以前一模一样）。
+ */
+export function pickBranch(tpl, rng) {
+  const branches = Array.isArray(tpl?.branches) ? tpl.branches : [];
+  if (!branches.length) return tpl;
+  // ⚠️ 同一档位**可以有多条**（"吉"有两句话可选）—— 必须**先按档抽、再在档内挑**。
+  //    直接按条数加权会让"这一档写了两句"变成"这一档概率翻倍"（12% → 24%）。
+  const byTier = new Map();
+  for (const b of branches) {
+    if (!byTier.has(b.tier)) byTier.set(b.tier, []);
+    byTier.get(b.tier).push(b);
+  }
+  const tiers = [...byTier.keys()];
+  const total = tiers.reduce((n, k) => n + (TIER_W[k] || 1), 0);
+  let r = rng() * total;
+  let chosen = tiers[tiers.length - 1];
+  for (const k of tiers) {
+    r -= TIER_W[k] || 1;
+    if (r <= 0) {
+      chosen = k;
+      break;
+    }
+  }
+  const list = byTier.get(chosen);
+  const b = list[Math.floor(rng() * list.length)] || list[0];
+  return { ...tpl, text: b.text, baseText: tpl.text, tier: b.tier, branchTags: b.tags || [] };
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -304,6 +428,17 @@ const emptyBucket = () => ({
   recent: [],
   /** 刚发失败（含回执超时）的**事件文本** → 失败时刻（45 分钟内重排不再抽它，见 `FAIL_COOLDOWN_MS`） */
   tried: {},
+  /**
+   * ⚠️ 2026-11-13 加：今天**已经出过事件的时段名**。
+   * 一个时段一天只出一条 —— 否则一天 8 条时，傍晚有一半的日子会被落两次，
+   * 变成「同一天既打工又排练」这种自相矛盾的生活。
+   */
+  firedSlots: [],
+  /**
+   * ⚠️ 2026-11-13 加：**事情 → 上次出现的时刻**（跨天保留，`rollDay` 不清）。
+   * 保底机制用它算"多久没露面"（见 plan() 里的 STARVE_DAYS）。
+   */
+  seen: {},
 });
 /** 群号 → 状态桶 */
 let buckets = new Map();
@@ -327,6 +462,20 @@ function readBucket(v) {
     nextAt: Number(v?.nextAt) || 0,
     recent: Array.isArray(v?.recent) ? v.recent.slice(-20) : [],
     tried,
+    // ⚠️ 2026-11-13 加：今天已经出过事件的**时段名**（一个时段一天只出一条）
+    firedSlots: Array.isArray(v?.firedSlots) ? v.firedSlots.filter((x) => typeof x === 'string').slice(-20) : [],
+    seen: (() => {
+      /** @type {Record<string, number>} */
+      const out = {};
+      if (v?.seen && typeof v.seen === 'object') {
+        for (const [k, ts] of Object.entries(v.seen)) {
+          const n = Number(ts);
+          if (k && Number.isFinite(n) && n > 0) out[k] = n;
+        }
+      }
+      return out;
+    })(),
+    showToday: v?.showToday === true,
   };
 }
 
@@ -432,6 +581,12 @@ function rollDay(day, now, rng, gid) {
   const hi = Math.max(lo, num(c.maxPerDay, 5));
   const b = bucketOf(gid, true);
   const recent = b.recent ?? [];
+  // ⚠️ 2026-11-13 加：**今天有没有演出**（周末六成有）。
+  //    15:00 的「演出前」和 16:30 的「演出 / 没演出的周末晚上」都读这一个值 ——
+  //    否则会出现"今天没演出，她却在后台调琴"这种矛盾。
+  //    ⚠️ 一天只掷一次（跟 target 一起掷），重启也保持同一个答案。
+  const dow = new Date(now).getDay();
+  const showToday = (dow === 0 || dow === 6) && rng() < 0.6;
   Object.assign(b, {
     day,
     target: lo + Math.floor(rng() * (hi - lo + 1)),
@@ -439,8 +594,10 @@ function rollDay(day, now, rng, gid) {
     lastFireAt: 0,
     nextAt: 0,
     recent,
+    showToday,
+    firedSlots: [],
   });
-  log.debug(`[日常] ${gkOf(gid) || '(没指定群)'} 新的一天 ${day}：今天计划发 ${b.target} 条`);
+  log.debug(`[日常] ${gkOf(gid) || '(没指定群)'} 新的一天 ${day}：今天计划发 ${b.target} 条${showToday ? '（有演出）' : ''}`);
 }
 
 /**
@@ -465,7 +622,13 @@ function pickNext(now, rng, gid) {
   //
   //    修法：**最后一条最晚发在「午夜前一个冷却」**（默认 90 分钟 → 22:30）。
   //    这也更自然 —— 没人会在半夜十一点五十九发自己今天的生活。
-  const latest = end - cd;
+  //    ⚠️ 2026-11-13 改：余量从「整个冷却」缩到 **30 分钟**。
+  //       原来写的是 `end - cd`（90 分钟）⇒ 最后一条最晚 22:30，
+  //       而「睡前 23:00-24:00」那一格**永远排不到**（写了等于没写）。
+  //       真正要防的只是"贴着午夜那一两分钟"，留一个 tick 间隔（5 分钟）就够，
+  //       30 分钟是给它留的宽松余量。
+  const LATE_MARGIN = 30 * 60 * 1000;
+  const latest = end - Math.min(cd, LATE_MARGIN);
   if (latest <= lo) return end; // 今天实在放不下了（冷却比窗口还长这类极端配置）
   const span = Math.max(60000, (latest - lo) / remaining);
   const hi = Math.min(latest, lo + span);
@@ -625,7 +788,19 @@ export function plan(now = Date.now(), rng = Math.random, groupId = '') {
   const slot = slotAt(now);
   if (!slot) return { fire: false, reason: '现在这个时刻没有对应时段', nextAt: b.nextAt };
 
-  const { pool, off, holidayEvents } = poolFor(slot, now, gid);
+  // ⚠️ 2026-11-13 加：**一个时段一天只出一条**。
+  //    不加这条的话，一天 8 条时有近一半的日子傍晚会被落两次 ——
+  //    「傍晚的班」和「排练」同时出现 = 她同一天又打工又排练，自相矛盾。
+  //    到点撞上已用过的时段 ⇒ 顺延到这一格的结尾，等下一个时段再抽。
+  if ((b.firedSlots ?? []).includes(slot.name)) {
+    return {
+      fire: false,
+      reason: `「${slot.name}」今天已经出过一条了（一个时段一天只出一条）`,
+      nextAt: dayStart(now) + slot.endMin * 60000,
+    };
+  }
+
+  const { pool, off, holidayEvents } = poolFor(slot, now, gid, b.showToday === true);
   // ⚠️⚠️⚠️ 2026-10-10 加（用户报：「**刚才为什么 200000002 又发了一遍**」）：
   //    跨群去重 —— 同一天里**同一条事件文本只发一次**（哪个群先用算哪个）✓
   //    实测那条重复：「上课打瞌睡被老师点起来回答问题」11:07 在 200000007、
@@ -638,15 +813,37 @@ export function plan(now = Date.now(), rng = Math.random, groupId = '') {
   //    ⚠️ 全被冷藏了就退回 `usePool` —— 宁可重复一次，也别让日常事件停摆。
   const usable = usePool.filter((t) => !triedRecently(b?.tried, t?.text, now));
   const finalPool = usable.length ? usable : usePool;
+  // ⚠️ 2026-11-13：周历筛完可能是空的（周日早上没有学校事件，也没有周末版的）
+  //    ⇒ 这一格**不发**，而不是硬凑一条。
+  if (!finalPool.length) {
+    return { fire: false, reason: '这个时段今天没有可发的事件（周末/休息日）', nextAt: 0 };
+  }
   if (finalPool !== usePool) {
     log.debug(`[日常] 群 ${gid || '(默认)'} 跳过 ${usePool.length - usable.length} 条刚发失败的事件`);
   }
+  // ⚠️ 2026-11-12：**先抽事情、再抽走向** —— 抽到的那条如果有分支，
+  //    这一步决定"这一次它往哪边发展"（午饭被偷 / 送晚 / 正常 / 多给小菜）。
+  //    没有分支的条目原样返回，行为完全不变。
+  // ⚠️ 2026-11-13：**保底**（用户原话「稀有剧情又难得触发了」）。
+  //    ⚠️ 试过"按多久没出加权"，实测**反而更差**（210 → 210+ 天）：稀有的那几条
+  //       一起慢慢变老、互相抢那个加成，等于排队更久。
+  //    改成**到点硬给**：这一格里有超过 60 天没露面的，就直接给它。
+  //       实测最慢从 210 天压到 111 天，而且只影响"本来就该偶尔出现"的那几条。
+  //    ⚠️ 从没出现过的（新加进库的）age 记成无穷大 → 一定会被轮到一次。
+  const STARVE_DAYS = 60;
+  let starved = null;
+  for (const t of finalPool) {
+    const at = Number(b?.seen?.[t.text]) || 0;
+    const age = at ? (now - at) / 86400000 : 1e9;
+    if (age > STARVE_DAYS && (!starved || age > starved.age)) starved = { t, age };
+  }
+  const tpl = pickBranch(starved ? starved.t : pickFrom(finalPool, rng), rng);
   return {
     fire: true,
     reason: '',
     groupId: gid,
     slot: slot.name,
-    template: pickFrom(finalPool, rng),
+    template: tpl,
     off,
     holidayEvents,
     nextAt: 0,
@@ -735,11 +932,21 @@ export async function compose(planObj, extra = {}) {
       const isHol = tpl.holiday || (h.local.length && (planObj?.holidayEvents ?? 0) > 0);
       if (isHol || h.noteText) {
         const bits = [];
-        if (tpl.holiday) bits.push(`今天是${tpl.holiday}`);
-        else if (h.names.length) bits.push(`今天是${h.names.join('、')}`);
-        if (h.off) bits.push('（放假，不用上学）');
-        if (h.noteText) bits.push(h.noteText);
-        todayLine = bits.join('，');
+        // ⚠️ 2026-11-13：`noteText` 每行都是「节日名：说明」——
+        //    名字已经在里面了，前面**别再拼一遍「今天是X」**，
+        //    否则出来是「今天是中秋节，中秋节：团圆的日子。」（实测就是这德行）。
+        const covered = h.names.length > 0 && h.names.every((n) => h.noteText.includes(n));
+        if (covered) {
+          // 名字已经在 noteText 里了 → 只补一句「放假」，别再重复节日名
+          todayLine = [h.off ? '今天放假，不用上学。' : '', h.noteText].filter(Boolean).join('');
+        } else {
+          const bits = [];
+          if (tpl.holiday) bits.push(`今天是${tpl.holiday}`);
+          else if (h.names.length) bits.push(`今天是${h.names.join('、')}`);
+          if (h.off) bits.push('（放假，不用上学）');
+          if (h.noteText) bits.push(h.noteText);
+          todayLine = bits.join('，');
+        }
       }
     }
   } catch (e) {
@@ -771,12 +978,21 @@ export async function compose(planObj, extra = {}) {
   } catch (e) {
     log.debug(`取最近事件失败：${e.message}`);
   }
+  // ⚠️ 2026-11-13：**场景标签当成硬约束**塞进提示词。
+  //    实测过一条"傍晚在**天台**吹风"——她那个点在客服室，天台是学校的东西。
+  //    事情上标了 `#场景-客服室`，就明确告诉模型"别挪地方"。
+  const sceneTag = (tpl.tags ?? []).find((x) => String(x).startsWith('场景-'));
+  const place = sceneTag ? String(sceneTag).slice(3) : '';
   const ROLL = {
     在哪: ['教室里', '走廊上', '回家路上', '便利店里', '楼梯间', '天台上', '自己房间里', '校门口', '电车上', '窗边'],
     一个细节: ['一个声音', '一束光', '一股味道', '别人的一句话', '手机屏幕', '手上的东西', '天气', '时间'],
     落点: ['有点烦', '无所谓', '想扎人', '累', '不想说话', '突然停了一下'],
   };
+  // ⚠️ 有场景标签时**不能掷"在哪"** —— 那会直接跟场景打架
+  //    （2026-11-13 实测：提示词里一边写"在客服室"，一边掷出"在哪：便利店里"，
+  //     模型只好折中，写出了"傍晚在天台吹风"）。
   const roll = Object.entries(ROLL)
+    .filter(([k]) => !(place && k === '在哪'))
     .map(([k, arr]) => `${k}：${arr[Math.floor(Math.random() * arr.length)]}`)
     .join('；');
 
@@ -842,13 +1058,27 @@ export async function compose(planObj, extra = {}) {
     log.debug(`[生日] 判定失败（当没生日）：${e.message}`);
   }
 
+  // ⚠️ 2026-11-13：**场景也要进提示词**。
+  //    原来这里只放 `tpl.text`（走向），而走向常常只有"具体那一下" ——
+  //    比如「一晚上没几个单子」，模型不知道说的是**打工的晚上**，
+  //    于是正文会写成一句悬空的话（<主人>提的「这件事是什么和怎么开始的」就是这个）。
+  //    ⇒ 写成「【场景】里，具体那一下」，两个都给，模型自己接得上。
+  const sceneText = String(tpl.baseText ?? '').trim();
+  const eventDesc =
+    sceneText && sceneText !== tpl.text ? `【${sceneText}】里，${tpl.text}` : tpl.text;
+  // （`place` 在上面掷随机方向之前就算好了，见那段注释）
   const lines = [
     todayLine ? `今天是：${todayLine}` : '',
     bdLine,
     bdLine
       ? `今天发生的事（**只是个方向**）：**今天有人过生日**（见上面那段）——` +
         `具体写哪一下你自己定，**不用跟着「${tpl.text}」走**。`
-      : `今天发生的事（**只是个方向，不是逐字剧本**）：${tpl.text}`,
+      : `今天发生的事（**只是个方向，不是逐字剧本**）：${eventDesc}`,
+    // ⚠️ 场景是**硬约束**（见上面 sceneTag 那段注释）
+    place
+      ? `📍 这件事发生在【${place}】—— **别把地方挪走**（别写成天台、教室、家里这种别处），` +
+        `那里有什么、旁边是谁，都要跟【${place}】对得上。`
+      : '',
     '⚠️⚠️ 上面那句**别原样复述** —— 具体那一下到底怎么样（在哪儿、旁边有没有人、你心里怎么想）',
     '   **完全由你自己定**，也可以换成同一类的别的小事。',
     '   ⚠️ **每次都写出不一样的那一下** —— 别像在填模板，也别用「谁也没…」这种套话开头。',
@@ -888,6 +1118,10 @@ export async function compose(planObj, extra = {}) {
       '（**细节可以自由补**：地点、声音、天气、心里那一下都行；能改的只是细节，身份和场所的类别不能改。）',
     extra.extraHint ? `\n${extra.extraHint}` : '',
   ].filter(Boolean);
+
+  // ⚠️ 2026-11-13：调试用 —— 传 `{ dryRun: true }` 只把提示词交出来，不调模型。
+  //    用来核对"提示词到底长什么样"，或者把同一段提示词喂给别的模型比输出。
+  if (extra.dryRun) return { system: extra.system ?? buildSystem(), user: lines.join('\n') };
 
   const raw = await phrase({
     system: extra.system ?? buildSystem(),
@@ -975,6 +1209,9 @@ const LIFE_SYSTEM = `你是「${persona.charName()}」（自称 ${persona.selfNa
    **视角是你自己**（第一人称，直接说），别加括号动作描写。
    ⚠️ 只是"视角是你" —— **别人当然可以出现，而且该出现就出现**，
    别把每一件事都写成你一个人扛。
+   ⚠️ **下面给你的「今天发生的事」是用第三人称写的（「她」「她的」）—— 那个「她」就是你自己**，
+      写出来一律换成「我」。别把「她」当成别人、也别原样搬到正文里。
+      （2026-11-13 加：节日说明那段原来全是「她那天…」，直接当今天的事实交给你，人称容易串。）
 2. **长度：一到两句，最好 30 字以内。** 长了就不像随手发的了。
    ⚠️ 但"短"不是目的 —— **先让人看懂**。实在一两句说不清，就多写几个字，
    别为了压字数把"谁、干了什么"都省掉（省掉就变成看不懂的半截话）。
@@ -988,6 +1225,15 @@ const LIFE_SYSTEM = `你是「${persona.charName()}」（自称 ${persona.selfNa
    · 🚫 **别写成"事件摘要"或旁白**（把给你的设定换个说法复述一遍），那不是说话；
    · ✅ 要像**把刚发生的事讲给群里听**：**谁 + 干了什么 + 结果或者你的反应**，
      一个都不能缺；
+   · ⚠️⚠️ **不许只给中间那一截**（<主人> 2026-11-13：「发出来容易感觉有点没头没尾的」）：
+     **有头** = 是什么引起来的（谁来了、发生什么、我先在做什么）；
+     **有尾** = 后来怎么样了、我什么反应。
+     只写「一晚上没几个单子」「班排得正常，到点交班」这种，就是没头没尾的一截。 ✅ 「刚坐下就来了一单，处理完又没动静了，一晚上就这么几个」；
+   · ⚠️⚠️ **开头得有个说话的起头**（<主人> 2026-11-13：「一般群友聊天的时候不会直接说事，会有个起头的句式」）：
+     ✅ 像「今天」「刚」「刚才」「说起来」「对了」「我」「你们猜」这种口语的开口，
+        或者先说个场景（「刚从店里出来」）。
+     🚫 别一上来就是报告体（「组长让她加班半小时」「一晚上没几个单子」直接丢出来）。
+     🚫 但也别每条都用「今天」开头、也别老用同一个起头 —— 会腻。
    · ⚠️ **别在对白里再套引号**（一句话里塞一句带引号的话，读起来像文档不像聊天）；
    · ⚠️ 代词要能落地：第一次提到的人/东西**说清楚是什么**，后面才可以用"他""那个"。
    · ⚠️ **别省主语**。中文口语爱省主语，但这里省了容易读成"是别人做的" ——
@@ -1045,6 +1291,20 @@ export function commit(planObj, text, at = Date.now(), opts = {}) {
   b.fired = (b.fired || 0) + 1;
   b.lastFireAt = at;
   b.nextAt = 0; // 下次 plan() 会按"上次+冷却"重排
+  // ⚠️ 记下"这个时段今天用过了"（一个时段一天只出一条，见 plan()）
+  if (planObj?.slot) {
+    b.firedSlots = Array.isArray(b.firedSlots) ? b.firedSlots : [];
+    if (!b.firedSlots.includes(planObj.slot)) b.firedSlots.push(planObj.slot);
+  }
+  // ⚠️ 2026-11-13：记下"这个**事情**什么时候出现过"（保底机制用，见 plan() 的 STARVE_DAYS）
+  const seenKey = String(planObj?.template?.baseText ?? planObj?.template?.text ?? '').trim();
+  if (seenKey) {
+    b.seen = b.seen && typeof b.seen === 'object' ? b.seen : {};
+    b.seen[seenKey] = at;
+    // 只留一年内的，别让这个对象一直长大
+    const cutoff = at - 365 * 86400000;
+    for (const [k, ts] of Object.entries(b.seen)) if (!(Number(ts) > cutoff)) delete b.seen[k];
+  }
   const line = String(text ?? '').slice(0, 200);
   // ⚠️ 文案为空 = 这一格**没发任何日常**（全被剧情占了）→ 不往 recent 里塞空条目
   if (line) {

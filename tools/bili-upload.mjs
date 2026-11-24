@@ -406,17 +406,49 @@ try {
         }
       }
       // 等弹层真的关掉，再往下走（否则分区/投稿都会被它挡住）
-      const closeDl = Date.now() + 20 * 1000;
-      while (Date.now() < closeDl) {
-        const open = await page.evaluate(() => {
+      const coverOpen = () =>
+        page.evaluate(() => {
           const el = document.querySelector('.cover-editor');
           if (!el) return false;
           const r = el.getBoundingClientRect();
           return r.width > 0 && r.height > 0;
         });
-        if (!open) break;
+      const closeDl = Date.now() + 20 * 1000;
+      while (Date.now() < closeDl) {
+        if (!(await coverOpen())) break;
         await new Promise((r) => setTimeout(r, 800));
       }
+      /* ⚠️⚠️ 2026-11-08：**20 秒还关不掉就强制关** ——
+       *   11-07 实测：点过「完成」了，弹层照样盖着（截图 04/05 里它一直在），
+       *   结果后面找不到「立即投稿」⇒ die ⇒ 当天两次全白跑 ✗
+       *   ⇒ Esc / 右上角叉 / 「取消」三重兜底，关掉一层是一层 */
+      if (await coverOpen()) {
+        say('⚠️ 封面弹层没自己关掉 ⇒ 强制关');
+        for (const how of ['esc', 'x', 'cancel']) {
+          try {
+            if (how === 'esc') await page.keyboard.press('Escape');
+            else if (how === 'x') {
+              const x = page
+                .locator('.cover-editor [class*="close"], .cover-editor [class*="Close"]')
+                .first();
+              if (await x.count()) await x.click({ timeout: 3000 });
+            } else {
+              const c = page
+                .locator('.cover-editor .button:has-text("取消"), .cover-editor button:has-text("取消")')
+                .first();
+              if (await c.count()) await c.click({ timeout: 3000 });
+            }
+          } catch {
+            /* 试下一种 */
+          }
+          await nap(700, 1200);
+          if (!(await coverOpen())) {
+            say(`✅ 用 ${how} 关掉了封面弹层`);
+            break;
+          }
+        }
+      }
+      if (await coverOpen()) say('⚠️ 封面弹层仍开着 —— 后面提交前会再关一次');
       const stillEmpty = await page.evaluate(() => {
         const el = document.querySelector('.cover-empty');
         if (!el) return false;
@@ -706,10 +738,27 @@ try {
   }
 
   /* ⑩ 正式投稿（⚠️ 发出去收不回来） */
-  const submit = await page
+  let submit = await page
     .$('span.submit-btn, .submit-btn, button:has-text("立即投稿"), span:has-text("立即投稿")')
     .catch(() => null);
-  if (!submit) die('找不到「立即投稿」按钮（可能分区分区没选，B站会禁用提交）');
+  /* ⚠️ 2026-11-08：找不到按钮时**先怀疑是遮罩没关**，别直接判死 ——
+   *   11-07 两次都死在"封面弹层还盖着"，报出来却是"找不到立即投稿"，看不出来 ✗ */
+  if (!submit) {
+    say('⚠️ 找不到「立即投稿」⇒ 先关一次遮罩再找');
+    await page.keyboard.press('Escape').catch(() => {});
+    await nap(1200, 2000);
+    for (const t of ['取消', '关闭']) {
+      const c = page.locator(`.button:has-text("${t}"), button:has-text("${t}")`).first();
+      if ((await c.count()) && (await c.isVisible().catch(() => false))) {
+        await c.click({ timeout: 3000 }).catch(() => {});
+        await nap(800, 1400);
+      }
+    }
+    submit = await page
+      .$('span.submit-btn, .submit-btn, button:has-text("立即投稿"), span:has-text("立即投稿")')
+      .catch(() => null);
+  }
+  if (!submit) die('找不到「立即投稿」按钮（可能分区没选，B站会禁用提交；也可能是封面弹层没关）');
   await nap(1200, 2600);
   await submit.click();
   say('已点击「立即投稿」');

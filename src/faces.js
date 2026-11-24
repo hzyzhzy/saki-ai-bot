@@ -145,6 +145,77 @@ export function faceDetailText() {
     .join('\n');
 }
 
+/** 清单里的一行（工具结果用，和 `faceMenuText` 同一个口径） */
+function slimGroup(g) {
+  const who = g.who && !/角色不确定|不确定|未知/.test(g.who) ? g.who.replace(/（.*?）$/, '') : '';
+  const when = String(g.when ?? '').replace(/[ ；]+$/g, '').replace(/。$/, '');
+  return { tag: g.tag, who, when, count: g.count, desc: g.desc ?? '' };
+}
+
+/**
+ * ⚠️⚠️ 2026-11-19 加：**按「想表达什么」找最接近的几个表情**（给 `看表情` 工具用）。
+ *
+ * 为什么要这个（用户：「**把发表情也收敛为工具，要让 bot 更精准地发送对应的那个表情，
+ *   而且发的时机要和原来一样**」）：
+ *   · **时机** = 她在**正文**里写 `[表情:tag]` 的那一处 ⇒ 只有留在正文里才控得住
+ *     （工具是生成**之前**跑的，那会儿正文还没有，说不清"插在哪句后面"✗）
+ *   · **精准** = 让她**先看清单再写**：库里几十个 tag，凭记忆写必错
+ *     ⇒ 调 `看表情 {"想表达":"有点尴尬又不想认输"}` ⇒ 这里给**最接近的几个 tag + 适用场合**
+ *     ⇒ 她挑一个写进正文 ⇒ 位置、时机和以前**一模一样** ✓
+ *
+ * ⚠️ 这是**检索**（tag / 适用场合 / 描述的字面相似度），不是"理解人话"的快判；
+ *    兜底永远给清单，最坏情况也比"凭记忆瞎写"准 ✓
+ */
+export function matchFaces(emotion = '', limit = 8) {
+  const groups = faceGroups();
+  if (!groups.length) return [];
+  const want = String(emotion ?? '').trim();
+  const n = Math.max(1, Math.min(20, Number(limit) || 8));
+  if (!want) return groups.slice(0, n).map(slimGroup);
+  // 字集合的 Dice 系数（中文**单字 + 双字**都算，短词也能命中）
+  const grams = (s) => {
+    const t = String(s ?? '').replace(/[\s　，。、；：！？…—\-（）()「」“”"'’·]/g, '');
+    const out = new Set();
+    for (let i = 0; i < t.length; i++) {
+      out.add(t[i]);
+      if (i + 1 < t.length) out.add(t.slice(i, i + 2));
+    }
+    return out;
+  };
+  const A = grams(want);
+  const scored = groups.map((g) => {
+    const B = grams(`${g.tag} ${g.when} ${g.desc} ${g.who}`);
+    let hit = 0;
+    for (const x of A) if (B.has(x)) hit++;
+    const score = A.size ? hit / A.size : 0;
+    // tag 本身出现在她的描述里 ⇒ 强烈命中
+    const bonus = g.tag && want.includes(g.tag) ? 0.5 : 0;
+    return { g, score: score + bonus };
+  });
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, n).map((x) => slimGroup(x.g));
+}
+
+/** `[xx]` 里那些**不是表情**的占位符（描别人消息用的），模糊匹配时必须排除 */
+const NOT_FACE_TAG = /^(图片|照片|表情包|动画表情|动图|贴纸|引用|语音|文件|视频|红包|转账)$/;
+
+/**
+ * 写错一个字就整条丢太狠了 ⇒ 宽容一次：完全一致 / 互为包含（取最长的那个 tag）。
+ * ⚠️ 只对**长度 ≥ 2** 的候选做包含匹配；`[图片]` 这类占位符直接排除 ✓
+ */
+function nearestFaceTag(t) {
+  const s = String(t ?? '')
+    .trim()
+    .replace(/^(表情|一个|一张|个|张)/, '')
+    .trim();
+  if (!s || s.length < 2 || NOT_FACE_TAG.test(s)) return '';
+  if (facePath(s)) return s;
+  const hits = faceGroups().filter((g) => g.tag.includes(s) || s.includes(g.tag));
+  if (!hits.length) return '';
+  hits.sort((a, b) => b.tag.length - a.tag.length);
+  return hits[0].tag;
+}
+
 /**
  * 从一段文本里抽出所有 `[表情:xxx]` 标记。
  *
@@ -162,7 +233,15 @@ export function pickMarkers(text) {
   let m;
   while ((m = re.exec(text)) !== null) {
     const tag = m[1].trim();
-    if (facePath(tag)) out.push({ tag, index: m.index, raw: m[0] });
+    if (facePath(tag)) {
+      out.push({ tag, index: m.index, raw: m[0] });
+      continue;
+    }
+    /* ⚠️ 2026-11-19 加：**写错一个字就整条丢**，群里表现是"说了要发却一张都没有" ✗
+     *   ⇒ 这里宽容一次（`nearestFaceTag`：完全一致 / 互为包含，排除 `[图片]` 那种占位符）✓
+     *   ⚠️ 只在**库里有明确对应**时才替换，绝不瞎猜 ✓ */
+    const near = nearestFaceTag(tag);
+    if (near) out.push({ tag: near, index: m.index, raw: m[0], fixedFrom: tag });
   }
   return out;
 }
@@ -182,7 +261,7 @@ export function pickMarkers(text) {
  * | `[拍照:场景]` / `[拍照]` | **有她**（自拍 / 别人帮她拍） | **要传** | 「拍个自拍」 |
  * | `[拍:场景]` / `[拍]` | **她拍的东西**，她不在画面里 | **不传** | 「拍张月之森校门」 |
  *
- * ⚠️ **可以只写 `[拍照]` 不带场景**（2026-09-22 用户要求「这些要先经过 llm 理解
+ * ⚠️ **可以只写 `[拍照]` 不带场景**（2026-09-22 要求「这些要先经过 llm 理解
  *    需要拍什么照片得出」）—— 那种情况下 `scene` 是空串，"拍什么"完全由那次理解决定。
  *
  * 用户原话：「不一定是自拍，比如让祥子拍一张月之森校门的照片就不是自拍，
@@ -241,6 +320,20 @@ export function stripMarkers(text) {
         /[「『“”‘’"']\s*工具\s*[:：]\s*(?:动这一单|催进度|搜图|停|交付|搜|报价|收款码|截图|加急|退款|打住|够开工|补收)[^」』“”‘’"'\n]{0,80}[」』“”‘’"']/g,
         '',
       )
+      /* ⚠️ 2026-11-23 加：**剥掉行首的 `你：` / `你:`**。
+       *   现场：历史里被我加过 `你：` 前缀，模型学着在正文里也写「你：」，
+       *   发出去是 `你： 你： ……你才守夜呢`（双重前缀，群里看着莫名其妙）✗
+       *   ⇒ 只剥**行首**，正文中间的「你：」不动 ✓ */
+      .replace(/^[ \t]*你[：:][ \t]*/gm, '')
+      /* ⓪-a ⚠️ 2026-11-23 加（现场：<主人> 戳她一下，她回了一条内容全是 `[戳一戳]` 的消息）——
+       *   `[戳一戳]` / `[图片]` 这些是**协议端给的占位符**，她从上下文里**照抄**进了正文 ⇒
+       *   群友收到一条内容就是 `[戳一戳]` 的怪消息，看着莫名其妙 ✗
+       *   ⇒ 只清「**单独占一整行**」的协议占位符（确切字面白名单），
+       *     正文里的 `[图片]`（"你发的[图片]我看不到"）不动 ✓ */
+      .replace(
+        /^[ \t]*\[(?:戳一戳|图片\/表情|图片|表情包|QQ表情|转发消息|合并转发|QQ红包|语音|视频|特殊消息)\][ \t]*(?:\r?\n|$)/gm,
+        '',
+      )
       // ⓪-c 完全裸的：`工具:动这一单 {"说明":"…"}`
       //    ⚠️ 只认**白名单里的工具名** —— 早先写的是"工具[:：]后面随便什么"，
       //      那会**误伤正常说话**（「这个工具：Word 就行」会被吃掉半句 ✗）
@@ -270,7 +363,7 @@ export function stripMarkers(text) {
       .replace(/[ \t]*\[\s*(?:合照|拍照|拍)\s*(?:[:：][^\]]*)?\][ \t]*/g, (m) => (/^[ \t]/.test(m) ? '，' : ''))
       // ② 裸标签：真表情 tag 剥掉；`[图片]` / `[表情包]` 这类**类别名**也剥掉
       //    ⚠️ 这里原来写的注释是「`[图片]` / `[表情包]` 这种要留着」—— **那是旧的、已作废**，
-      //       2026-09-19 用户截图之后改成了"一律剥掉"，理由见下面那段。
+ // 2026-09-19截图之后改成了"一律剥掉"，理由见下面那段。
       // ⚠️⚠️ 2026-09-19（用户截图：她"复读表情包"时，群里直接出现了一行 `[表情包]`）：
       //    `[表情包]` / `[图片]` 是**类别名**，不是表情库里的名字
       //    （库里是「大笑 / 吃瓜 / 得意…」）→ `facePath()` 认不出来 →
