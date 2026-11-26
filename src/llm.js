@@ -851,6 +851,20 @@ export function llmFallbackStatus() {
   };
 }
 
+/**
+ * ⚠️ 2026-11-26 加：**最近一次真正跑了模型的调用用的是哪个模型**。
+ *
+ * 和 `llmFallbackStatus()` 的区别：那个是"此刻的状态"（降级窗口会一直持续几分钟），
+ * 这个是"上一次实际发出去并成功的那个" —— 思考链卡片要显示的就是后者。
+ * ⚠️ 只给展示用，别拿它做任何判据。
+ */
+let LAST_OK = { model: '', provider: '', at: 0 };
+
+/** @returns {{model:string, provider:string, at:number}} */
+export function lastUsedModel() {
+  return { ...LAST_OK };
+}
+
 /** 手动复位（界面上"立刻回主模型"用） */
 export function llmFallbackReset() {
   FO.level = 0;
@@ -1075,6 +1089,28 @@ export async function* streamChat(messages, outerSignal, opts = {}) {
   //    复用（见 `bot.js` 的 `_genOnce`），不清空就会把两次的思考拼在一起 ⇒
   //    上一次写过的工具暗号会被**执行两遍** ✗
   if (opts.report) opts.report.reasoning = '';
+
+  /* ⚠️⚠️ 2026-11-26 加：**把"这一次到底用的哪个模型"交给调用方**。
+   *
+   *   起因：思考链卡片上看不到模型名，自动降级之后更看不出"这条其实是 4B 回的"。
+   *   为什么必须在这里写、而不是让调用方自己去问 `llmFallbackStatus()`：
+   *     · 降级/同家换模型/切备选都发生在**这条消息的生成过程中**，
+   *       卡片收尾时再问全局状态，得到的是"此刻"的状态，不一定等于"这条用的"✗
+   *     · 备选模型那条路（`opts.model` 覆盖）压根不经过降级状态机，
+   *       全局状态里永远是主模型 ⇒ 会显示错 ✗
+   *   ⇒ 每次 `streamChat` 一进来就写一遍，**最后一次成功的调用会覆盖前面的**，
+   *     所以报告对象里留下的就是"真正产出这段正文的那个模型" ✓
+   *   ⚠️ 调用了传 `opts.model` / `opts.baseURL` 的是**故意切备选**，不算降级 ✓ */
+  if (opts.report) {
+    try {
+      const _byOverride = !!(opts.model || opts.baseURL);
+      opts.report.model = useModel;
+      opts.report.provider = String(llm._provider ?? '');
+      opts.report.degraded = _byOverride
+        ? false
+        : Number(llm._level) > 0 || Number(llm._modelIdx) > 0;
+    } catch { /* 只是展示用 */ }
+  }
 
   /* ══════════════════════════════════════════════════════════════════
    * ⚠️⚠️ 2026-11-14 脱敏层接入点（1/2）：**请求体拼好、真正发 HTTP 之前**
@@ -1581,6 +1617,10 @@ export async function* streamChat(messages, outerSignal, opts = {}) {
     }
 
     if (usage) {
+      // ⚠️ 2026-11-26：记下"这次真用的是谁"（思考链卡片兜底用，见 `lastUsedModel()`）
+      try {
+        LAST_OK = { model: useModel, provider: String(llm._provider ?? ''), at: Date.now() };
+      } catch { /* ignore */ }
       // ⚠️ 2026-11-13 加：把这次用量/花费交给调用方（webui 思考链页面要显示"这条花了多少")
       if (opts.report) {
         try {

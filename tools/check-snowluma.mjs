@@ -46,7 +46,7 @@ function snowlumaProcs() {
     //    ⇒ 改用 PowerShell，并且用 **-EncodedCommand**（base64）避开引号地狱 ✓
     const ps = [
       'Get-CimInstance Win32_Process -Filter "Name=\'node.exe\'" |',
-      '  ForEach-Object { "$($_.ProcessId)|$($_.ExecutablePath)|$($_.CommandLine)" }',
+      '  ForEach-Object { "$($_.ProcessId)|$($_.ParentProcessId)|$($_.ExecutablePath)|$($_.CommandLine)" }',
     ].join(' ');
     const b64 = Buffer.from(ps, 'utf16le').toString('base64');
     const out = execSync(`powershell -NoProfile -EncodedCommand ${b64}`, {
@@ -56,16 +56,22 @@ function snowlumaProcs() {
     });
     const hits = [];
     for (const line of String(out).split(/\r?\n/)) {
-      const [pid, exe, ...rest] = line.split('|');
+      const [pid, ppid, exe, ...rest] = line.split('|');
       const cmd = rest.join('|').trim();
       const path = String(exe ?? '').trim();
       if (cmd.includes('runner.js') || cmd.includes('check-snowluma') || cmd.includes('agent-busy')) continue;
       // ① 命令行带 index.mjs  ② 可执行文件在 SnowLuma 目录下（裸命令行的实例靠这条）
       const hit = cmd.includes(marker) || path.toLowerCase().includes(exeHint);
       if (!hit) continue;
-      hits.push({ pid: String(pid).trim(), cmd: cmd || path });
+      hits.push({ pid: String(pid).trim(), ppid: String(ppid ?? '').trim(), cmd: cmd || path });
     }
-    return hits;
+    /* ⚠️⚠️ 2026-11-27 修（这次真踩了）：**SnowLuma 正常跑就是两个 node 进程** ——
+     *   父进程（相对路径 `index.mjs`）+ 子进程（绝对路径 `C:\SnowLuma\index.mjs`，占 3001）。
+     *    以前把父子当成"两个实例"⇒ 我照着它把父进程杀了 ⇒ **整棵进程树一起死**，
+     *    端口没了、bot 掉线，自愈又拉起一个、我又手动起一个 ⇒ 折腾出真正的双实例 ✗
+     *    ⇒ 只数**根进程**（父进程不在 SnowLuma 进程集合里的那些）✓ */
+    const pids = new Set(hits.map((h) => h.pid));
+    return hits.filter((h) => !pids.has(h.ppid));
   } catch {
     return null; // 查不了
   }

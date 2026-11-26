@@ -76,6 +76,8 @@ const buildPrompt = () => `【说话判断】你是一个 QQ 群里**假装成�
 
 1. **@ 了你 / 点了你的名（含各种变体、昵称、日文写法）** ⇒ 是冲你 ✓
 2. **引用你说过的话、或者接着你上一句往下问** ⇒ 是冲你 ✓
+   ⚠️ 只在**确认被引用的就是你自己**时才算。看到「引用#数字」而看不出是谁、
+   或者引用的是**别人**说的话 ⇒ **不是冲你** ✗（群里常见「引用 A 的话去问 B」）
 3. **上文里他正在跟另一个人说话**（叫了别人的名字、@ 了别人、
    或者这条明显是回给某个人的）⇒ **不是冲你** ✗✗ 别插
 4. **只是"你正好懂这个话题"** ⇒ **不是冲你** ✗（懂归懂，没问你就别答）
@@ -365,10 +367,13 @@ export async function judgeSpeak(event, opts = {}) {
       for (const [k, v] of speakBurst) if (nowMs - v.at > 60000) speakBurst.delete(k);
     }
     let hit = null;
+    // ⚠️ 引用她自己说的话 ⇒ 必须单独判，不许复用"上一条不说"
+    //    （否则同一个群里连着刷时，有人引用她问一句也会被按掉 = 该回没回）
+    const quotedSelf = opts.quoted?.self === true;
     const pSelf = speakBurst.get(tkSelf);
-    if (winSelf > 0 && pSelf && pSelf.speak === false && nowMs - pSelf.at < winSelf) {
+    if (!quotedSelf && winSelf > 0 && pSelf && pSelf.speak === false && nowMs - pSelf.at < winSelf) {
       hit = { p: pSelf, who: '同一个人' };
-    } else {
+    } else if (!quotedSelf) {
       const pG = speakBurst.get(tkGroup);
       if (winGroup > 0 && pG && pG.speak === false && nowMs - pG.at < winGroup) {
         hit = { p: pG, who: '群里刚有人' };
@@ -490,6 +495,30 @@ export async function judgeSpeak(event, opts = {}) {
     return '';
   })();
 
+  /* ⚠️⚠️ 2026-11-26 修（真实现场：摇光喵喵**引用鲸鲸**的话问「具体说一下」，
+   *   judge 只看到 `[引用#270957745]` ⇒ 按「引用你说过的话 ⇒ 是冲你」放行，
+   *   于是她跑去接了一句，连她自己的思考链都写着"这不是在跟我说话"✗）。
+   *   ⇒ 引用归属要**明说**：引用的是别人 / 是自己 / 看不出是谁。
+   *   看不出是谁时**按不是冲她算**（群里更常见的是"引用 A 的话去问 B"）。 */
+  const quoteLine = (() => {
+    const r = Array.isArray(event?.message)
+      ? event.message.find((s) => s && s.type === 'reply')
+      : null;
+    const q = opts.quoted;
+    if (!r && !q) return '';
+    if (!q) {
+      return (
+        '⚠️ 这条**引用了一条旧消息，但看不出被引的是谁** —— ' +
+        '**不要**当成"引用你说过的话"，按「不是冲你」算 ✗'
+      );
+    }
+    if (q.self === true) return '⚠️ 这条**引用的正是你自己说过的话** ⇒ 是冲你 ✓';
+    return (
+      `⚠️ 这条引用的是**${q.name || '别人'}**说的话${q.text ? `（「${String(q.text).slice(0, 40)}」）` : ''}` +
+      ' —— **不是你的话**，所以引用本身不算"在跟你说话" ✗'
+    );
+  })();
+
   const user = [
     '# 群聊最近的记录（从旧到新）',
     opts.context || '（没有更多上下文）',
@@ -497,6 +526,7 @@ export async function judgeSpeak(event, opts = {}) {
     '# 现在这条消息',
     `发送者：${sender}`,
     `内容：${text || (isMedia ? '[发了一张图/表情包]' : '（空的）')}`,
+    quoteLine,
     opts.voluntary ? `（这条是系统筛出来的「可能值得接」的，类型：${opts.voluntary}）` : '',
     // ⚠️⚠️ 最强的信号：**他刚才就在跟我说话**（2026-09-13 加）
     //

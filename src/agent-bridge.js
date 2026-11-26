@@ -52,6 +52,9 @@ import { log } from './log.js';
 //    （真机上的表现是"她说完那句之后愣一下才动手"）
 //    ⚠️ `recent.js` 不 import 本文件 ⇒ 不会成环 ✓
 import * as recentStore from './recent.js';
+import { resolveTaskModel } from './task-model.js';
+import { taskModelLaunchArgs } from './task-model-launch.js';
+export { resolveTaskModel } from './task-model.js';
 
 const FILE = process.env.QQBOT_AGENT_FILE
   ? join(ROOT, process.env.QQBOT_AGENT_FILE)
@@ -787,6 +790,14 @@ function identityRule(id) {
 export async function voiceize(kind, facts, { task = '', gid = '', timeoutMs = 15000, phrase: inject = null } = {}) {
   const raw = String(facts ?? '').trim();
   if (!raw) return '';
+  if (kind === 'autoProgress') {
+    const system = '这是群任务主动播报，没有人在问进度。用一句简短中文陈述当前步骤或刚完成的阶段，约十到二十字。只采用材料中的事实；只有运行状态就只报状态。不要称呼、回应、安抚、抱怨、预计时间或虚构进展。只输出这句话。';
+    try {
+      const say = inject ?? (await import('./llm.js')).phrase;
+      const out = stripMd(String(await say({ system, user: `进度事实：${raw.slice(0, 400)}`, maxTokens: 80, timeoutMs }) ?? '').trim());
+      return out && out.length <= 40 && !/[\r\n]/.test(out) ? out : '';
+    } catch { return ''; }
+  }
   // ⚠️⚠️⚠️ 2026-10-13 加（用户：「**这就**这个词出现频率太高了，接受任务和完成的句式也太重复了，
   //    要多样一点，就和日常聊天一样」）：
   //
@@ -1451,7 +1462,7 @@ export function redact(text) {
   '9. ⚠️⚠️ **你要跟群里那个人说话，唯一的出口是任务文件夹里的 `要说的话.md`**：',
   '   · 用**追加**的方式写进去（`>>`），一行就是一条，**别把前面的覆盖掉**；',
   '   · 你每写一行，机器人就**立刻**把它当成你说的话发到群里（他一条条看得到）；',
-  '   · 想让他别干等（"我先翻一下""这个得算一下"）→ 写一句；中途有要紧的发现 → 写一句；',
+  '   · 只在有新的实际进展时写一句简短事实：当前步骤或刚完成的阶段，不揣测群友是否在等；',
   '   · ⚠️ 一两句就够，**别写成报告**（那是聊天，不是文档）；',
   '   · ⚠️ 最终结果**照旧用你自己的回答说**（那条也一定会发出去）—— 这个文件只用来"先说点什么"。',
   // ⚠️⚠️ 2026-10-14 加（用户：「该去**读那一段对话**」／「靠任务台账可以吗」）：
@@ -2981,7 +2992,9 @@ function cliRunner(taskText, hooks = {}) {
   // ⚠️ 认"本次那个会话"除了"新增"，还要看**工作区尾巴** ——
   //    同时有别的活（另一个私聊 / 群任务）在跑时，别捞到别人的会话 ✗
   const wsTail = basename(ws);
-  const child = spawn(r.node, [r.dsh, '--profile', r.profile, prompt], {
+  const launch = taskModelLaunchArgs({ dsh: r.dsh, profile: r.profile, prompt,
+    home: dshHome(), route: hooks.modelRoute });
+  const child = spawn(r.node, launch.args, {
     cwd: ws,
     windowsHide: true,
     // ⚠️ 2026-10-14：**按次指定权限** —— 私聊工作模式"收到文件先预读一遍"那一步要 **只读**
@@ -3008,6 +3021,7 @@ function cliRunner(taskText, hooks = {}) {
    *      （开工 26 秒就 297 KB）⇒ 早扫就有 ✓
    *    ⇒ 这里每 2 秒扫一次"新增的那个"，**一捞到就立刻**交给 `onSetup`（只交一次）✓
    */
+  child.once('close', () => { try { launch.cleanup?.(); } catch (e) { log.warn(`[任务] 清理本次模型设置失败：${e.message}`); } });
   let liveSid = '';
   const grabSid = () => {
     if (liveSid || done) return;
@@ -3327,6 +3341,7 @@ export async function startRun({
   by,
   byName,
   task,
+  model = '',
   related = false,
   reuseDir = '',
   // ⚠️ 2026-10-19 加：`'image'` = 「搜图」那一次（见 `src/image-search.js`）——
@@ -3337,6 +3352,8 @@ export async function startRun({
   //    不传 ⇒ 新建一条（正常派活）；传了 ⇒ 把那条改回 running，面板上不会冒出第二条 ✓
   reuseHistId = '',
 }) {
+  // 校验必须在停止旧任务、创建目录及发消息之前完成。
+  const selectedModel = resolveTaskModel(model);
   const self = related === true;
   const skipImages = String(mode ?? '') === 'image';
   // ⚠️ 2026-10-19 加（用户：「把询问 b站内容的问题都接入 b站工具，直接把问题丢给 agent，
@@ -3407,6 +3424,8 @@ export async function startRun({
     by: String(by),
     byName: String(byName ?? ''),
     task: clip(task, 200),
+    model: selectedModel?.name ?? '',
+    modelRoute: selectedModel ? { provider: selectedModel.provider, model: selectedModel.model } : null,
     related: self,
     mode: String(mode ?? ''),
     startedAt: Date.now(),
@@ -3638,8 +3657,11 @@ export async function startRun({
           //    「接着上回那份来：日期场地我按 11.21 / RiNG 主厅填死，两位新娘的配图补上，配色再顺一遍。」
           //    ⇒ 现在**每一行都过她自己的模型**（和进度/结果同一个 `voiceize` 层 ✓）
           //    ⚠️ 它失败就退回原文 —— 群里不能没动静 ✓
-          const said = await voiceImpl('progress', clip(l, 300), { task, gid, timeoutMs: 8000 }).catch(() => '');
-          await taskSay(bot, gid, hidePaths(said || clip(l, 300), dir)).catch(() => {});
+          const said = await voiceImpl('autoProgress', hidePaths(clip(l, 300), dir), { task, gid, timeoutMs: 8000 }).catch(() => '');
+          if (said && state.running?.id === runId) {
+            state.running.progressSent = true;
+            await taskSay(bot, gid, hidePaths(said, dir)).catch(() => {});
+          }
         }
       } catch (e) {
         log.debug(`[任务] 读「要说的话.md」失败：${e.message}`);
@@ -3699,7 +3721,9 @@ export async function startRun({
     log.debug(`[任务] 取群聊上下文失败：${e.message}`);
   }
 
+  if (selectedModel) log.info(`[任务] 本次指定模型：${selectedModel.name}（${selectedModel.provider}/${selectedModel.model}）`);
   const { promise, kill } = runnerImpl(task, {
+    modelRoute: selectedModel,
     taskDir: dir,
     selfBlock: selfHint,
     contextBlock,
@@ -3738,7 +3762,7 @@ export async function startRun({
       //    「先翻了翻任务文件夹…没现成的模板…正新建一个副本」——**agent 腔** ✗
       //    用户要的是：「**不要说任务文件夹里有什么东西**」⇒ facts 只说"她动手了"
       const hint = '你刚刚动手，这件事还在做（还没做完）。';
-      voiceImpl('progress', hint, { task, gid, timeoutMs: 8000 })
+      voiceImpl('autoProgress', hint, { task, gid, timeoutMs: 8000 })
         .then((line) => {
           if (!line) return;
           return taskSay(bot, gid, line);
@@ -3805,11 +3829,9 @@ export async function startRun({
       if (state.running.progressSent) return;
       state.running.progressSent = true;
       voiceImpl(
-        'progress',
-        '他让你做的那件事还在做、没卡住，已经比平常久了一点。'
-          + '⚠️ 不是让你汇报进度 —— 就当你在群里顺口接一句（可以淡淡的一句、可以嫌他挑得多、'
-          + '可以只说人还在），**别念做了什么、别报百分比、别用「还在弄 / 我一张张在挑」这种播报腔** ✗',
-        { task, timeoutMs: 8000 },
+        'autoProgress',
+        '任务仍在运行，没有具体阶段信息。',
+        { task, gid, timeoutMs: 8000 },
       )
         .then((line) => {
           if (line) return taskSay(bot, gid, line);
@@ -4080,6 +4102,7 @@ export async function resumePending(bot) {
     by: String(r.by ?? ''),
     byName: String(r.byName ?? ''),
     task: String(r.task),
+    model: String(r.model ?? ''),
     related: r.related === true,
     reuseDir: String(r.dir ?? ''),
     mode: resumeMode,

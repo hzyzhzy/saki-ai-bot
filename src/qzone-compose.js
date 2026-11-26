@@ -167,7 +167,15 @@ try {
   } catch {}
 } finally {
   try {
-    if (tlId) thinkLog.finish(tlId, { reply: raw, usage: report.usage, cost: report.cost, failed: !raw.trim() });
+    if (tlId) thinkLog.finish(tlId, {
+      reply: raw,
+      usage: report.usage,
+      cost: report.cost,
+      // ⚠️ 2026-11-26：卡片上要能看出这条是哪个模型写的（`streamChat` 写进 report 的）
+      model: report.model,
+      modelNote: report.degraded ? '（已自动降级）' : '',
+      failed: !raw.trim(),
+    });
   } catch {}
 }
 

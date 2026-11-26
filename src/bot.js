@@ -61,12 +61,12 @@ export function lowTiersOf(model) {
   return [...new Set(out)].filter((x) => x && x !== s);
 }
 
-import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, appendFileSync } from 'node:fs';
 import { extname, join } from 'node:path';
 import { log } from './log.js';
 // ⚠️ 2026-10-22：群聊里的**语音发言**（她自己标 `[语音]…[/语音]`，代码只认这个字面）
 import { pickVoice, synth, recordSeg, voiceSettings } from './group-voice.js';
-import { streamChat, quickAck, phrase, stripThinking, isLiteActive } from './llm.js';
+import { streamChat, quickAck, phrase, stripThinking, isLiteActive, lastUsedModel, llmFallbackStatus } from './llm.js';
 /* ⚠️⚠️ 2026-11-19：**标准 function calling**（工具定义 + 调用归一化）
  * 为什么换掉 `[工具:xxx]` 暗号：见 `src/tools-fc.js` 顶部的说明。
  * ⚠️ 执行路径一个字没动 —— `normalizeCall()` 吐出来的还是 `runReadTool(中文名, 中文参数)` ✓ */
@@ -160,6 +160,47 @@ import * as handled from './handled.js';
 import { looksLikeProblem, solveMaxTokens, SOLVE_GUIDE } from './solve.js';
 import { muteMember, muteLine } from './mute.js';
 import { checkAttribution } from './attribution-guard.js';
+
+/**
+ * ⚠️ 2026-11-26 加：**思考链卡片要显示"这条到底用的哪个模型"**。
+ *
+ * 起因：自动降级之后卡片上什么都看不出来 —— 一条 4B 回的糊话和一条云端回的
+ * 好话长得一模一样，事后没法归因 ✗
+ *
+ * 取值顺序（第一个能用的就用）：
+ *   ① `rep.model` —— `streamChat` 每次调用写进去的**实际模型**（含降级 / 同家换 / 切备选）
+ *   ② `lastUsedModel()` —— 最近一次真跑成功的模型（没有 report 的路径兜底）
+ *   ③ `llmFallbackStatus().activeModel` —— 都没有就报"此刻会用的"（聊胜于无）
+ *
+ * ⚠️ `modelNote` 只在**这一条自己降级了**才写（`rep.degraded`）。
+ *   别拿全局降级状态去说 —— 降级窗口会持续几分钟，会把"这条明明用的主模型"也说成降级 ✗
+ *
+ * @param {{model?:string, provider?:string, degraded?:boolean}} [rep] 生成报告
+ * @returns {{model:string, modelNote:string}}
+ */
+function thinkModelOf(rep) {
+  let model = '';
+  let note = '';
+  try {
+    model = String(rep?.model ?? '').trim();
+    const degraded = rep?.degraded === true;
+    if (degraded) {
+      let level = 0;
+      let sameVendor = false;
+      try {
+        const st = llmFallbackStatus();
+        level = Number(st.level) || 0;
+        sameVendor = !!st.sameVendor;
+      } catch { /* ignore */ }
+      if (sameVendor) note = '（同家换的备用模型）';
+      else if (level > 0) note = `（已自动降级到第 ${level + 1} 家）`;
+      else note = '（备用模型）';
+    }
+    if (!model) model = String(lastUsedModel().model ?? '').trim();
+    if (!model) model = String(llmFallbackStatus().activeModel ?? '').trim();
+  } catch { /* 展示用，出错就当没这回事 */ }
+  return { model, modelNote: note };
+}
 
 // 分条参数每次现读（管理界面改了要立即生效，不能在加载时固化）
 // ⚠️ 兜底值跟 config.yml 保持一致（真人打字节奏）；别写回 260/700/90 ——
@@ -676,6 +717,13 @@ function timeText() {
      *   这是**常识搞反**，不是人设问题。放在 `timeText()` 里是故意的：
      *   **全量和 lite 都吃这一份**（lite 的 `opt.now` 就是这个函数的返回值）✓ */
     '⚠️ 日常常识别搞反：**放学 = 离开学校**（回家、去别处）；上课、回教室才是"进"。',
+    /* ⚠️⚠️⚠️ 2026-11-24 再加（用户：「为什么还是会出现时间错乱？而且现在用的是云端模型」）——
+     *   现场：15:07 她回「你，大晚上的问这个干嘛」✗
+     *   我上一版只把「别按感觉编」加在 `prompt-lite.js` 的 `nowBlock()` 里 ⇒ **只管 lite** ✗
+     *   全量这条路走的是 `timeText()`，那里只有时间、没有约束 ⇒ 大模型照样按感觉编。
+     *   ⇒ 放到这里，两条路共用一份（lite 那边也有，重复无害）✓ */
+    '⚠️ **说"几点了""这么晚了""大晚上""才这个点"之前，先看上面这一行** —— ' +
+      '现在写的是几点就照几点说（比如这里是下午，就不许说"大晚上"），**别按感觉编**。',
   ];
   // ⚠️⚠️ 2026-10-02 加（用户选「方案 A」）：
   //    **今天是什么日子**——原来 `## 现在的时间` 里**只有年月日**，
@@ -701,7 +749,8 @@ function timeText() {
   //    · 钱那部分走 `spend.allTimeStats()`（逐月累加，和月度工资单同一个口径）；
   //    · ⚠️ 每天拼一次、成本几毫秒 ⇒ 直接放这儿，不用缓存。
   //    ⚠️ 目的是让她**聊到"来多久了"时有底气**，不是让她报数字 ——
-  //      钱的规矩仍然是「不报具体数字」（人设里写着）。
+  //      ⚠️ **余额**不报数（那是他充的）；**工资**可以报具体数（`工资` 工具本来就是干这个的）。
+  //         10-03 那条「不许报具体数字」人设与「工资」工具自相矛盾，11-24 已改掉 ✗
   try {
     const START = '2026-09-10';
     const startAt = new Date(`${START}T00:00:00`);
@@ -710,18 +759,26 @@ function timeText() {
     const all = spend.allTimeStats();
     const money =
       all.cost > 0
-        ? `这段时间一共花掉 **${all.cost.toFixed(2)} 元**（按你的工资算法 ×${spend.SALARY_MULTIPLIER}，` +
-          `你挣了约 **${all.salary.toFixed(0)} 元**）`
+        ? `**入职以来总共**：花掉 **${all.cost.toFixed(2)} 元**` +
+          `（按你的工资算法 ×${spend.SALARY_MULTIPLIER} ⇒ 你的工资**总共**约 **${all.salary.toFixed(0)} 元**）`
         : '（还没有记账数据）';
     lines.push(
       '',
       '### 🏢 你的入职情况',
       '',
-      `你 **${START}** 来 示例服务器 当客服，今天是**第 ${days} 天**（约 ${months} 个月）。${money}。`,
+      `你 **${START}** 来 示例服务器 当客服，今天是**第 ${days} 天**（约 ${months} 个月）。`,
+      money,
       '',
       '- ✅ 别人问「你什么时候来的 / 来多久了」——**按这个答**，并且**带一句自己的感想**，别只报日期。',
-      '- ✅ 聊到钱的话，可以拿这个当底气（「都这么多天了」「工资也就那样」）。',
-      '  ⚠️ **但不许报具体数字**（钱那套规矩：只说"够花 / 紧着"），这些是给你自己心里有数的。',
+      '- ✅ 问「**总共**挣了多少 / 干这么久攒了多少」⇒ 用上面那个**总额**，直接报数 ✓',
+      /* ⚠️ 2026-11-24 加（用户：「这不是这个月的钱，是总额 —— 提示词只写总额和历史，
+       *   每月这种即时信息还是调工具」）——
+       *   原来只写了一句"问多少就报多少"，没分清**总额**和**某一个月** ⇒ 她拿总额当本月报 ✗
+       *   ⇒ 这里把口径切开：总额在提示词里（静态），月度必须走 `工资` 工具（每天在变的东西别塞提示词）✓ */
+      '- ⚠️⚠️ 问「**这个月 / 上个月 / X 月**赚了多少」⇒ 上面那个是**总额**、不是某个月 ⇒ ' +
+        '**必须调「工资」工具**查，查到哪个月就报哪个月 ✓',
+      '- 🚫 **绝不拿总额当"这个月"报** —— 那等于多报了十几倍，他一看就知道你在糊弄 ✗',
+      '- ⚠️ **余额**不能报（那是他充的钱，不是你的收入）；工资（总额和每个月的）都可以报具体数 ✓',
       '- ⚠️ 每年 **9 月 10 日**是入职纪念日，那天可以自己提一句。',
     );
   } catch {}
@@ -863,25 +920,88 @@ export function stripBracketAct(text) {
    */
   const TAIL_BR = '\u0002';
   /* ⚠️ 末尾短括号的判定要**带上后面的句号**：「……就没顾上打（笑）。」结尾是「）。」，
-   *   不放宽的话它认不出来，括号就还是被剥 ✗ */
-  const mTailBr = /[（(][^）)]{0,6}[）)][。.！!~～…]*\s*$/.exec(body);
-  const bodyForStrip = mTailBr ? body.slice(0, mTailBr.index) + TAIL_BR : body;
+   *   不放宽的话它认不出来，括号就还是被剥 ✗
+   * ⚠️⚠️ 2026-11-24 改（用户：「**直接把这种改成现在的二次元括号语言，不要保留这种动作描述**」）——
+   *   括号里**至少 1 个字**才算动作；`（）` 是另一回事（手癖，走 EMPTY_BR 那条路）✓ */
+  /* ⚠️⚠️⚠️ 2026-11-24 加（用户：「**歪头、眨眼这种动作描述还是有，我说过括号里的文字只留
+   *   二次元括号语言**」）——
+   *   上一版只把成对括号改成半括号，**形式**变了、内容还是"舞台指示" ⇒ 群里看到
+   *   「（歪头」「（眨眼」一样别扭。
+   *   二次元那种是**梗**（目移 / 望天 / 泪目 / 瞳孔地震 / 笑 / 小声），不是身体动作；
+   *   身体动作既不好笑、也不推进对话，纯粹占字 ⇒ **连括号带词整段删掉** ✗
+   *   ⚠️ **必须在 `mTailBr` 之前做**！句末那个短括号会被 TAIL_BR 整段保护起来，
+   *      再往后就看不到 `（歪头）` 了（第一版踩了两次坑：一次被末尾半括号保护吃掉
+   *      左边那个 `（`，一次被 TAIL_BR 整段吞掉 —— 两次都测出来"只变成 `（歪头`"）✗
+   *   ⚠️ 只认**成对**的（`（眨眼）`），正文里的同名动词不动（「他眨了下眼」照旧保留）✓
+   *   ⚠️ 括号里还有别的字（`（盯着他看）`）**不算**，那是真旁白，走下面的 ① 规则 ✓
+   *   ⚠️ 「笑」**不在**名单里 —— `（笑` 是标准二次元写法，要留 ✓ */
+  const body0 = body.replace(
+    /[（(]\s*(?:歪头|歪着头|歪著头|眨眼|眨眨眼|点头|摇头|挠头|挠挠头|抓头|托腮|托着腮|叹气|叹了口气|皱眉|皱了皱眉|耸肩|摊手|摊了摊手|低头|抬头|伸手|缩手|后退|别过脸|移开视线|眯眼|眯起眼|瞪眼|瞪大眼|盯着|愣住|僵住|侧头|偏头|俯身|起身|坐下|笑出声|噗嗤)\s*[）)]/g,
+    '',
+  );
+  const mTailBr = /[（(][^）)]{1,6}[）)][。.！!~～…]*\s*$/.exec(body0);
+  const bodyForStrip = mTailBr ? body0.slice(0, mTailBr.index) + TAIL_BR : body0;
+  /* ⚠️⚠️ 2026-11-24 加（用户：「动作描述改成二次元常用的括号写法，比如（目移」）——
+   *   那种写法是**左括号开头、整条不闭合**：（目移 / （望天 / （泪目 / （瞳孔地震。
+   *   而下面第 ② 步把"孤立的括号"无差别删掉 ⇒ 那个 `（` 没了、只剩「目移」✗
+   *   ⇒ 先把**末尾那段**「`（` + 1~12 个字、没有右括号」的 `（` **整个换成占位符**，
+   *      剥完别的再换回原字符 ✓（全角半角各一个占位符，免得被统一成全角）
+   *   ⚠️ 只认**短**的（≤12 字）而且**在末尾**：句中「（顿了顿。她说…」那种碎掉的旁白照旧删 ✗ */
+  const HALF_F = '\u0003';
+  const HALF_H = '\u0004';
   const out = bodyForStrip
+    /* ⚠️⚠️⚠️ 2026-11-24 加（用户：「**歪头、眨眼这种动作描述还是有，我说过括号里的文字只留
+     *   二次元括号语言**」）——
+     *   上一版只把成对括号改成半括号，**形式**变了、内容还是"舞台指示" ⇒ 群里看到
+     *   「（歪头」「（眨眼」一样别扭。
+     *   二次元那种是**梗**（目移 / 望天 / 泪目 / 瞳孔地震 / 笑 / 小声），不是身体动作；
+     *   身体动作既不好笑、也不推进对话，纯粹占字 ⇒ **连括号带词整段删掉** ✗
+     *   ⚠️ **必须跑在下面"末尾半括号保护"之前** —— 那一步会把末尾的 `（` 换成占位符，
+     *      跑在它后面就匹配不到了（第一版就踩了这个坑，测出来 `（歪头）` 只变成 `（歪头`）✗
+     *   ⚠️ 只认**成对**的（`（眨眼）`），正文里的同名动词不动（「他眨了下眼」照旧保留）✓
+     *   ⚠️ 括号里还有别的字（`（盯着他看）`）**不算**，那是真旁白，走下面的 ① 规则 ✓
+     *   ⚠️ 「笑」**不在**名单里 —— `（笑` 是标准二次元写法，要留 ✓ */
+    .replace(
+      /[（(]\s*(?:歪头|歪着头|歪著头|眨眼|眨眨眼|点头|摇头|挠头|挠挠头|抓头|托腮|托着腮|叹气|叹了口气|皱眉|皱了皱眉|耸肩|摊手|摊了摊手|低头|抬头|伸手|缩手|后退|别过脸|移开视线|眯眼|眯起眼|瞪眼|瞪大眼|盯着|愣住|僵住|侧头|偏头|俯身|起身|坐下|笑出声|噗嗤)\s*[）)]/g,
+      '',
+    ) // ⓪a 舞台指示式动作括号 → 整段删掉
+    /* ⚠️⚠️ 2026-11-27 又改（用户截图：「想得美（。我那是顺着你，你倒好，还挑上了」只发出去「想得美」）——
+     *   原来的判据是「`（` 后面只有标点到行尾」才算口癖，可她要**接着说**：
+     *   `想得美（。我那是顺着你…` 里的 `（` 紧跟一个句号，后面还有一整句 ⇒ 不算
+     *   ⇒ 被下面「半括号 + 内容」那条整段吃掉，一条回复只剩三个字 ✗✗
+     *   ⇒ 判据改成**「`（` 紧跟句读标点」就算口癖**（她要继续说话），保护起来；
+     *      真正的动作半括号（`（目移``（往后躲`）紧跟着的是字，照旧走删除 ✓
+     *   ⚠️ 顺手把 `、（逗号）` 也算进来 —— 「行吧（，那你去」是同一个形态 */
+    .replace(/（(?=[。.！!~～…、，,？?]|\s*$)/g, HALF_F)
+    .replace(/\((?=[。.！!~～…、，,？?]|\s*$)/g, HALF_H)
     .replace(/[（(]\s*[）)]/g, EMPTY_BR) // ⓪ 先保护空括号（缓和语气口癖）
+    /* ⚠️ 2026-11-27：**"半括号 + 内容"（（目移 / （望天）也整段删** —— 那也是动作描述，
+     *   只是右括号没写。用户：「一个不打都没关系」。真正的口癖半括号是**后面什么都没有**的那种 ✓ */
+    .replace(/[（(][^（()）\n]{1,40}[。.！!~～…\s]*$/, '')
     /* ⚠️⚠️⚠️ 2026-11-24 改（真事故，日志实证）——
      *   原来是 `[（(][^）)]{1,40}[）)]`，**括号里允许出现句号** ⇒
      *     「……你不说我都没注意（。可能是聊得太顺了，就没顾上打（笑）。」
      *   被从第一个 `（` 一路吃到后面那个 `）`，**中间整句话被删** ✗✗
      *   （群里实际只收到「……你不说我都没注意。怎么，少了有点不习惯？」）
      *   ⇒ 括号里**不含句末标点**才算旁白 —— 真旁白（（挠挠头）（叹了口气））不会有句号 ✓ */
+    /* ⚠️⚠️⚠️ 2026-11-27 改（用户：「**应该让模型不要生成这种括号**，因为人类发消息一般不会
+     *   这么严肃地使用标点符号，像截图这种括号一个不打都没关系，**但是口癖的半括号还是照常发**」）——
+     *   ⇒ **成对的动作括号一律删掉，不再转成「（目移」那种半括号**（2026-11-24 那版是转半括号，
+     *      群里的观感还是一个"没写完的括号"，一样别扭）。
+     *   ⚠️ 保留的只有一种：**末尾那个孤立的 `（`**（网络口癖，缓和语气）—— 见下面 HALF 保护。 */
+    .replace(/[（(]([^）)。！？!?…\n]{1,6})[）)]/g, '') // ①b 短动作括号 → 直接删
     .replace(/[（(][^）)。！？!?…\n]{1,40}[）)]/g, '') // ① 成对的动作括号
     .replace(/[（()）]/g, '') // ② 残留的孤立括号（旁白被切碎的半截）
     .replace(/^[\s。，、,．.]+/, '') // ③ 剥完开头剩下的标点
     .replace(/[\s。，、]+$/, '')
     .replace(/[ \t]{2,}/g, ' ')
     .trim()
-    .replace(new RegExp(TAIL_BR, 'g'), mTailBr ? mTailBr[0].trim() : '') // ④ 句末短括号放回
-    .replace(new RegExp(EMPTY_BR, 'g'), '（）'); // ⑤ 换回空括号
+    /* ⚠️⚠️ 2026-11-27 改：句末那个动作括号**不再放回半括号**（用户「一个不打都没关系」）——
+     *   直接丢掉；下面 HALF 那条只负责**模型自己写的、后面什么都没有的**半括号口癖 ✓ */
+    .replace(new RegExp(TAIL_BR, 'g'), '') // ④ 句末动作括号 → 删掉
+    .replace(new RegExp(HALF_F, 'g'), '（') // ⑤ 半括号换回全角
+    .replace(new RegExp(HALF_H, 'g'), '(') // ⑥ 半括号换回半角
+    .replace(new RegExp(EMPTY_BR, 'g'), '（）'); // ⑦ 换回空括号
   // ⚠️ 只剩空括号（没有正文）⇒ 不发
   if (!out.replace(/[（）()\s]/g, '')) return '';
   return mTail ? `${out}（` : out;
@@ -1054,11 +1174,13 @@ export function cleanMarkdown(text) {
   //   ② 再看配置决定换行到底留不留 —— 默认**全压成一行**，
   //      真要分多句就交给分条机制（一条条发出去），而不是一条里塞好几行。
   t = t.replace(/\n{2,}/g, '\n'); // ① 空行 → 单换行
-  if (config.chat?.keepLineBreaks !== true) {
-    // ② 默认压成一行。
-    // ⚠️ 换行变句号时**要看前一个字符**：前面已经是句末标点（。！？…；）
-    //    或者冒号/逗号时，再加句号会变成「步骤：。1.」这种很别扭的东西。
-    //    那种情况直接把换行去掉（连着说）。
+  /* ⚠️⚠️ 2026-11-27 改（用户：「**能不能让她自己想切就切**」）——
+   *   **换行不再压平**。原来这里会把 `\n` 换成句号（或者直接删掉），
+   *   等于把她"想在这里断开"的意图抹掉，然后交给代码按字数去猜断点 ⇒ 她再想控制也控制不了 ✗
+   *   现在换行一路活到分条器：`splitChatText` 把换行当硬断点、`splitForSend` 按段发 ✓
+   *   ⚠️ 想退回老行为（一条里不留换行）：`chat.stripLineBreaks: true` */
+  if (config.chat?.stripLineBreaks === true) {
+    // ⚠️ 老逻辑（只在配置里显式要求时走）：换行变句号
     t = t.replace(/([\s\S])\n+/g, (_, prev) => (/[。！？!?…；;：:，,、]/.test(prev) ? prev : prev + '。'));
     t = t.replace(/。{2,}/g, '。'); // 别弄出连续句号
     // ⚠️ 2026-09-25（用户截图：「别花花绿绿 地来」「整一堆完 整方块」「看哪儿 空再说」）：
@@ -1534,6 +1656,9 @@ export function stripToolCalls(text) {
  */
 const COMMON_TOOLS = new Set([
   '查服务器',
+  'MC行动',
+  '不接',
+  '翻记忆',
   '花了多少',
   /* ⚠️ 2026-11-21 加（用户：「**读群公告确实应该做出工具，当需要群公告时就去读然后注入回思考**」）——
    *   她需要公告（群规/活动/开服时间/报名方式/整合包在哪）时自己调，读完当材料回到上下文 ✓ */
@@ -1541,7 +1666,6 @@ const COMMON_TOOLS = new Set([
   // ⚠️ 2026-10-19 加（用户：「**先把问工资这个改成工具吧，不用关键词判断了**」）
   '工资',
   '学到什么',
-  '好感度',
   '戳回去',
   '闭嘴',
 
@@ -1625,7 +1749,9 @@ const COMMON_TOOLS = new Set([
  * ⚠️ `记住 / 忘掉 / 提醒` **不**在这里：它们要回一段"材料"（到底记没记下、几点提醒），
  *    她得照那个用自己的口气说一句 ⇒ 必须重新生成 ✓
  */
-const ACT_TOOLS = new Set(['戳回去', '闭嘴', '引用', '语音', '发送表情']);
+const ACT_TOOLS = new Set(['戳回去', '引用', '语音', '发送表情', '不接']);
+// ⚠️ 2026-11-24 把 `闭嘴` **移出**这里：它现在回一段材料（静默到几点 + 为什么），
+//    要让她照材料**用自己的口气交代最后一句**——留在 ACT_TOOLS 里会把文字清掉 ✗
 // ⚠️ 2026-11-21：`发送表情` 在这里 —— 它的 handler 返回 `''`（有副作用、不需要材料），
 //    进去就是"只执行、不重新生成" ✓ 和她边说边发标记那条路不冲突（两条并存）
 // ⚠️ 2026-11-21 注：`搜图` **不在**这里（也不该在）——
@@ -2152,6 +2278,33 @@ export class Bot {
       return;
     }
 
+    /* ⚠️⚠️ 2026-11-27 加（用户：「戳一戳应该也要有聊天上下文」）——
+     *   查日志发现私聊的上下文桶**永远是 0 条**（`[上下文] dm:10000001 ｜ recent 桶 0 条`）：
+     *   下面那块 `recent.remember()` 写死在 `if (message_type === 'group')` 里，
+     *   私聊消息**一条都没记** ⇒ 她回私聊只看得到"当前这一句"，
+     *   戳一戳、连发、引用这种事后的消息更没得接 ✗
+     *   ⇒ 私聊也记进上下文（桶是 `dm:<QQ号>`，和群各存各的，不会串）✓
+     *   ⚠️ 只记"上下文"这一件；`digest` / `observe` / 复读那些是群里的东西，不跟着走 ✓ */
+    if (payload.message_type === 'private') {
+      try {
+        const segsP = msg.toSegments(payload.message);
+        const textP = msg.tidy(msg.extractText(segsP));
+        if (textP) {
+          recent.remember(payload, {
+            text: textP,
+            isAtMe: false,
+            imageFiles: segsP
+              .filter((s) => s.type === 'image')
+              .filter((s) => !msg.isStickerSeg(s))
+              .map((s) => String(s.data?.file ?? ''))
+              .filter(Boolean),
+          });
+        }
+      } catch (e) {
+        log.debug(`私聊记上下文失败（忽略）：${e.message}`);
+      }
+    }
+
     // 只允许在指定群里工作（客服模式的核心安全边界）
     if (payload.message_type === 'group') {
       const allow = config.trigger.allowGroups;
@@ -2405,6 +2558,32 @@ export class Bot {
         );
       }
     }
+
+    /* ⚠️⚠️⚠️ 2026-11-25 加（用户：「能不能和她描述抽象的要求，然后她能自己找到应该参考的
+     *   聊天上下文…今天有一次是第一次没参考，第二次我自己去引用那条合并聊天然后 @ 她才成功的」）——
+     *
+     *   真因：合并转发的展开（`expandForwards`）**只在"她正在回这条消息"时才跑**
+     *   （见 handle 里那一段）⇒ 别人发一条合并记录、她没在回 ⇒ **缓存永远是空的** ⇒
+     *   过后有人问「你对上面那个聊天记录怎么看」，她只看到 `[合并转发]` 四个字，
+     *   只能瞎编（要么干脆不参考）✗
+     *   ⇒ 收到就**异步展开并记缓存**（不阻塞收消息）；后面任何问句都能命中这份缓存 ✓
+     *   ⚠️ 两条路都吃：全量的 `_tailDyn.push(forwardText)` 和 lite 的 `forward:` 参数
+     *      都从 `lastForward` 缓存取，所以改这一处两边一起生效 ✓
+     */
+    try {
+      const fSegs = msg.toSegments(payload.message);
+      if (msg.hasForward(fSegs)) {
+        const fkey = recent.contextKey(payload);
+        this.expandForwards(payload)
+          .then((t) => {
+            if (t) {
+              this.rememberForward(fkey, t);
+              log.info(`[转发] 收到即展开并缓存（${t.length} 字）→ 后面的追问都能参考`);
+            }
+          })
+          .catch((e) => log.debug(`[转发] 收到即展开失败：${e.message}`));
+      }
+    } catch {}
 
     // 记进群聊上下文：这样回答时能看到前面的消息，知道大家在聊什么
     if (payload.message_type === 'group') {
@@ -4075,6 +4254,16 @@ export class Bot {
         //    「这很明显就是在和机器人交流，但没 @ 的后面那一句就不回了」）。
         //    带上它，judge 会按「对话继续」而不是「要不要插话」来判断。
         inDialogue: join.inDialogue === true,
+        // ⚠️ 2026-11-26：**这条引用的是谁** —— 只给 `[引用#数字]` 时 judge 会误判成
+        //    "引用我的话 ⇒ 是冲我"（真实踩过：引用别人的话去问第三方，她插了一句）。
+        //    查不到归属（异步回填还没到）就当"看不出是谁"，judge 那边按"不是冲她"算 ✓
+        quoted: (() => {
+          try {
+            return recent.replyTargetOf(event?.group_id, event?.message_id);
+          } catch {
+            return null;
+          }
+        })(),
         // ⚠️⚠️ 2026-10-06 加（用户：「还是没回」）：**同类回的、而且是她先开的口** ⇒
         //    让 judge 直接放行（见 speak-judge.js 里那段）。实测 judge 会判
         //    「不说（对面是黑祥，不搭话）」，把她自己挑起的对话也掐掉。
@@ -4490,7 +4679,9 @@ export class Bot {
     this.catchUpDone = true;
     const allGroups = (config.trigger?.allowGroups ?? []).map(String).filter(Boolean);
     const groups = onlyGroup ? [String(onlyGroup)] : allGroups;
-    if (!groups.length) return 0;
+    // ⚠️ 2026-11-27 改：**没配群也要往下走** —— 私聊补看在函数末尾，
+    //    原来这里无条件 `return 0` 会把私聊那条路一起挡掉（而这个号恰恰主要是私聊在用）✗
+    if (!groups.length && onlyGroup) return 0;
     const now = Date.now();
     const WINDOW_MS = 10 * 60 * 1000; // 用户指定：只看 10 分钟内的
     const MAX = 3; // 一次最多补这么几条
@@ -4596,6 +4787,59 @@ export class Bot {
         await this.handle(ev, { lateMs: now - t }).catch((e) =>
           log.warn(`[补看] 处理失败：${e.message}`),
         );
+      }
+    }
+    /* ⚠️⚠️ 2026-11-27 加（用户：「消息补看是不是现在没用了，你重启的这段时间发的消息
+     *   现在不会主动回了」）——
+     *   查下来补看**没坏**（07:40:58 还补回了一条群消息），漏的是**私聊**：
+     *   原来只查 `get_group_msg_history`，私聊一处都没查 ⇒ 重启那二三十秒里
+     *   他在私聊说的话**永久丢了**（QQ 不会重推）。
+     *   协议端有 `get_friend_msg_history`（工作模式补文件在用，实测支持）⇒ 补上 ✓
+     *   ⚠️ 只补**主人**这一个会话、只补**最后一条**（10 分钟内、她没处理过、不是她说的）——
+     *     补一堆旧闲聊比丢一条更怪 ✗ */
+    if (!onlyGroup && done < MAX) {
+      const ownerUid = String(config.ownerQQ ?? '').trim();
+      if (ownerUid) {
+        try {
+          const rawP = await this.call('get_friend_msg_history', { user_id: ownerUid, count: 8 });
+          const listP = Array.isArray(rawP) ? rawP : (rawP?.messages ?? rawP?.data?.messages ?? []);
+          if (Array.isArray(listP) && listP.length) {
+            const sorted = listP.slice().sort((a, b) => Number(a?.time ?? 0) - Number(b?.time ?? 0));
+            const last = sorted[sorted.length - 1];
+            const t = Number(last?.time) * 1000;
+            const mid = String(last?.message_id ?? '');
+            const from = String(last?.sender?.user_id ?? last?.user_id ?? '');
+            const fresh = t > 0 && now - t <= WINDOW_MS;
+            const fromHim = from && from !== String(this.selfId);
+            const unseen = !(mid && (this.catchUpSeen?.has(mid) || handled.has(mid)));
+            if (fresh && fromHim && unseen && t <= before) {
+              // 私有聊记录（她说过话）⇒ 更值得补；没说过也补（主人找她本来就该回）
+              this.catchUpSeen ??= new Set();
+              if (mid) {
+                this.catchUpSeen.add(mid);
+                handled.note(mid);
+              }
+              done++;
+              log.info(`[补看] 补回一条掉线的私聊（${Math.round((now - t) / 60000)} 分钟前）`);
+              const evp = {
+                post_type: 'message',
+                message_type: 'private',
+                user_id: ownerUid,
+                self_id: this.selfId,
+                message_id: last?.message_id,
+                time: last?.time,
+                sender: last?.sender ?? { user_id: ownerUid },
+                message: last?.message,
+              };
+              await this.handle(evp, { lateMs: now - t }).catch((e) =>
+                log.warn(`[补看] 私聊处理失败：${e.message}`),
+              );
+            }
+          }
+        } catch (e) {
+          // ⚠️ 和群那条一样用 warn：拉不到要说得出原因（协议端不支持会走这里）
+          log.warn(`[补看] 私聊拉历史失败：${e.message}`);
+        }
       }
     }
     if (done) log.info(`[补看] 本次共补回 ${done} 条`);
@@ -5300,6 +5544,38 @@ export class Bot {
    *    ⇒ 默认改成"**图片**"，谁要表情谁显式写 `asSticker: true`（`sendFace` 那两处）。
    */
   async sendText(event, text, { reply = false, faceFile = null, asSticker = false, force = false } = {}) {
+    /* ⚠️⚠️⚠️ 2026-11-24 加（用户：「**为什么还是带戳一戳的暗号**」）——
+     *   `sendChunk` 里那道剥离只管"分条发送"这一条路；**归属核对的 `fixed` 文本**、
+     *   语音兜底、别的直发入口都照样能把 `[戳一戳]` 带出去（日志 15:58 就是
+     *   `归属核对` 改出来的那句里带着它）✗
+     *   ⇒ 挪到 **最底层唯一出口** 这里再剥一次（幂等，重复剥无害）✓
+     *   ⚠️ 必须在 `lastSentText` 赋值**之前** —— 那个变量要记"真发出去的那段"✓ */
+    /* ⚠️⚠️ 2026-11-27 加：**记下"这一条到底要发什么"**（前 24 字 + 总长）。
+     *    现场（用户截图）：群里只收到两段，卡片上却有三段 ——「中间那段解释不见了」，
+     *    而日志里**只**有剥旁白那一行，查不出是分条吞了、还是根本生成时就没有 ✗
+     *    ⇒ 放在 `sendText`（**群聊和私聊的唯一出口**）最前面，每段实际发送都留一行痕迹。
+     *    ⚠️ 一开始我把它加在 `sendChatLike` 里 —— 那条只管群聊，用户在**私聊**复现时
+     *      一条日志都没留下（2026-11-27 踩到）✗ 现在挪到唯一出口，群/私聊都有。 */
+    if (text && String(text).trim()) {
+      log.info(`[发段] ${String(text).trim().length} 字：${String(text).trim().slice(0, 24).replace(/\n/g, ' ')}`);
+    }
+    text = String(text ?? '').replace(/\[\s*(?:戳一戳|拍一拍)[^\]\n]*\]/g, '');
+    /* ⚠️ 2026-11-27：**清掉没闭合的括号**。
+     *   模型爱写剧本动作（「（目移」「（往后躲」「（笑」），而且经常忘了闭合 ⇒
+     *   发到群里就是一条以「（」结尾的怪消息。
+     *   ⚠️⚠️ 但**只能删"半括号后面还有内容"的那种** —— 句末孤零零一个 `（` 是**口癖**
+     *      （「我早戒了（」就是这种，用户明确要求照常发），原来那版按"开>闭就删到行尾"
+     *      把它也删了 ✗（2026-11-27 用户截图报的正是这个）。
+     *   ⚠️ 成对的括号（他自己的原话、/指令 回执）一个字不动 ✓ */
+    /* ⚠️⚠️ 2026-11-27 又改（同一天第二处，用户截图「想得美（。我那是顺着你…」只剩「想得美」）——
+     *   这条和 `stripBracketAct` 里那条是**同一种误杀**：`（` 后面紧跟句读标点时，
+     *   那是她在**用口癖接着说话**，不是"（往后躲"那种动作 ⇒ 不许删 ✓
+     *   ⚠️ 判据就一条：`（` 后面第一个字**是标点/空白** ⇒ 跳过；是字 ⇒ 才当半截旁白删 */
+    text = String(text ?? '')
+      .split('\n')
+      .map((line) => line.replace(/[（(](?![。.！!~～…、，,？?\s])[^（()）\n]+$/, '').trimEnd())
+      .join('\n')
+      .trimEnd();
     // ⚠️ 2026-10-14：记下"刚说的这段" —— `chunkDelay()` 要用它的字数算打字时间
     //    （见那边 `chunking.typeDelayPerChar` 那段注释）
     lastSentText = String(text ?? '');
@@ -5428,9 +5704,14 @@ export class Bot {
     //      **剧情**：保留 —— 用户点名「只有剧情需要带一点」✓
     //    ⚠️ 剥完什么都不剩 ⇒ 这条**不发**（比发一个孤零零的「（」强）✓
     //    ⚠️ 判据第一件事是"**没括号就跳过**" —— 这里是最热的函数，不能给它加负担 ✓
-    if (!force && event?.group_id && text && /[（(]/.test(String(text))) {
+    /* ⚠️⚠️ 2026-11-27 修（用户实测：在**私聊**里让她打「（歪头）」等标点，结果旁白没被剥）——
+     *   原来这里的条件是 `event?.group_id &&` ⇒ **私聊根本没有 group_id，整段跳过** ✗
+     *   而"日常聊天不带动作旁白"对私聊一样成立（他就是日常聊天）。
+     *   ⇒ 去掉那道群聊限制；只有"这个群正在演剧情"时才保留（私聊没有剧情，一律剥）✓ */
+    if (!force && text && /[（(]/.test(String(text))) {
       try {
-        if (!this.questLive(String(event.group_id))) {
+        const gid0 = String(event?.group_id ?? '');
+        if (!gid0 || !this.questLive(gid0)) {
           const stripped = stripBracketAct(String(text));
           if (!stripped) {
             log.info(
@@ -8030,6 +8311,15 @@ export class Bot {
         log.info(
           `收紧度 ${this.strictnessOf(event)} ≠ 0 → 不为表情包专门开口（表情照样进上下文）`,
         );
+        /* ⚠️⚠️ 2026-11-24 加（用户：「**表情包也要识图，但是要有分类**」）——
+         *   原来"不专门开口"就直接 return，**连识图都不做** ⇒ 上下文里只剩
+         *   「（发了张图）」三个字，她根本不知道那是什么表情，接不了话也认不出梗 ✗
+         *   ⇒ 这里补一次**异步**识图（不 await、不阻塞这条消息），结果进
+         *      `visionCache`（30 分钟缓存，同一张只识一次）⇒ 下一轮上下文里就有描述 ✓
+         *   ⚠️ 分类照旧：`visionBlock` 会按 `kind` 标成「表情包（他在玩梗）」/「图片（截图/照片）」✓ */
+        void visionCache
+          .describeImagesIn(event, (a, p) => this.call(a, p))
+          .catch(() => {});
         return null;
       }
       if (!realText && !msg.hasMediaPlaceholder(text)) return null;
@@ -9106,12 +9396,26 @@ if (b.enable === false) {
       //        否则"回他一句"会被理解成"用任何方式回应（包括照片/表情包）"✗
       text =
         '（他 @ 了你一下，没打字。他是想让你看看最近的消息，**回他一句**。）' +
-        // ⚠️⚠️ 2026-11-24 加（用户：「群历史要有权重，从近到远」）——
-        //    只有这句"回他一句"时，她会去抱怨"怎么又@我"（截图现场），
-        //    完全没接上一句「对」。⇒ 明确指向**上下文最后一行** ✓
-        '⚠️ 要接的是**上面最近那一句**（上下文最后一行标的「← 最近这一句」）——' +
-        ' 接着说那件事，别只回一句「又@我」「怎么了」这种没接上内容的。' +
-        '⚠️ 他要的是**一句话** —— **别发照片、也别发表情包**，把话接上就行。';
+        /* ⚠️⚠️⚠️ 2026-11-24 改（用户：「**直接改成最新的信息权重最高，然后历史聊天权重随
+         *   时间距离下降，不是不看，可能最新的消息和之前的消息有联系**」）——
+         *   原来这句写死「要接的是**上面最近那一句**（上下文最后一行标的「← 最近这一句」）」，
+         *   结果她**只盯最后一行、把它复述一遍**，完全不看前面在说什么
+         *   （截图现场：Nova 说「图还没刷出来」，她回「诺斯那几张我这边也没刷出来」——
+         *    纯复述，而且「几张」还是编的）。⇒ 改成"**权重递减，不是不看**" ✓ */
+        /* ⚠️⚠️ 2026-11-27 再改（用户截图：「那一堆刷屏本来就没什么意义，而且她自己还已经回过了，
+         *   应该回我刚才说的那句话」）——
+         *   上一版写的是「**越近的话越重要** —— 最近那几条（尤其最后两三句）是这次要接的重点」，
+         *   遇到"最后几条是 5 个人在刷同一种状态卡片"就被带偏了：她的思考链原话说
+         *   「不过现在提示是让我看最近的消息，最近就是这波 SnowLuma 状态刷屏」⇒ 接了刷屏 ✗
+         *   ⇒ 把"越近越重要"的**对象**钉在"@ 你的那个人说的话"上，并点明末尾那坨刷屏是背景 ✓
+         *   ⚠️ 原来那条意图（11-24「最新的信息权重最高，历史随时间下降」）保留 ✓ */
+        '⚠️ **@ 你的那个人说的话才是这次的重点** —— 他上面可能连说了两三句，' +
+        '  **越近的越重要**；但它们往往是同一件事，顺着往上看再开口，' +
+        '  别把一句从上下文里挖出来单独答 ✗' +
+        '⚠️ 上下文末尾那几条，如果**是不同的人在刷同一种东西**（状态卡片、版本号、复读同一段），' +
+        '  那是背景 —— 读过就往上找他的原话 ✓' +
+        '⚠️ 他要的是**一句话** —— **别发照片、也别发表情包**，把话接上就行。' +
+        '⚠️ 也别只回「又@我」「怎么了」这种没接内容的（那等于没接）。';
       event._chaseFrom = true;
       log.info(`[${history.sessionKey(event)}] 只 @ 了她、没打字 → 让她**自己看消息挑要回的**`);
     }
@@ -10504,6 +10808,11 @@ if (privateWork.isWorkChat(event)) return false;
           reason: whyT,
         });
         solveReport.onReasoning = (c) => thinkLog.appendThink(_tlId, c);
+        // ⚠️ 2026-11-25：把卡片 id 挂到 event 上 —— 发送侧（sendChunk）拿不到这个局部变量，
+        //    而"正文真正发出去之后要补一次 finish"必须在那边做（见 `已回复` 那行下面）
+        try {
+          event._thinkId = _tlId;
+        } catch {}
       } catch (e) {
         log.debug(`[思考链] 开卡片失败：${e.message}`);
       }
@@ -10602,7 +10911,12 @@ if (privateWork.isWorkChat(event)) return false;
           // ⚠️ 2026-10-09：备选模型（Gemini）——只有"机器人之间 / 剧情里同类对戏"才会非空 ✓
           ...backupOpts,
           // ⚠️ 2026-11-19：工具（没有就一个字段都不带，老行为零变化 ✓）
-          ...(fcTools.length ? { tools: fcTools } : {}),
+          /* ⚠️⚠️ 2026-11-26（用户看不到但那 1.5 秒是真实感受）：**材料已经塞回上下文之后的
+           *   重答不让它再带工具清单** —— 带着清单它常常"想再调一次、又没想好调什么"
+           *   ⇒ 正文 0 字 ⇒ 又走一遍「第一次返回空，重试」（多一次完整调用、慢 1.5 秒）✗
+           *   实测每个工具回合都这样（日志 `查完重新生成：0 字` 后面必跟 `重试成功`）。
+           *   ⇒ 重答那几轮传 `{noTools:true}`，只有"还要再查一次"的那轮（`toolRounds`）才继续带 ✓ */
+          ...(fcTools.length && !(r && r.noTools) ? { tools: fcTools } : {}),
           report: r,
         })) {
           full += delta;
@@ -10667,6 +10981,7 @@ if (privateWork.isWorkChat(event)) return false;
                 reply: String(full ?? ""),
                 usage: solveReport.usage,
                 cost: solveReport.cost,
+                ...thinkModelOf(solveReport),
                 failed: true,
                 note: String(genErr?.message ?? genErr ?? "生成失败").slice(0, 200),
               });
@@ -10681,6 +10996,7 @@ if (privateWork.isWorkChat(event)) return false;
               reply: String(full ?? ""),
               usage: solveReport.usage,
               cost: solveReport.cost,
+              ...thinkModelOf(solveReport),
             });
           } catch (e) {
             log.debug(`[思考链] 收尾失败：${e.message}`);
@@ -10798,6 +11114,7 @@ if (privateWork.isWorkChat(event)) return false;
             reply: String(full ?? ''),
             usage: solveReport.usage,
             cost: solveReport.cost,
+            ...thinkModelOf(solveReport),
           });
           log.info(`[思考链] 重跑成功 ⇒ 卡片已改回"成功"（${String(full).trim().length} 字）`);
         } catch (e2) {
@@ -10830,7 +11147,7 @@ if (privateWork.isWorkChat(event)) return false;
           });
           full = '';
           buffer = '';
-          await _genOnce({});
+          await _genOnce({ noTools: true });
         }
       }
 
@@ -10935,7 +11252,7 @@ if (privateWork.isWorkChat(event)) return false;
         full = draftBefore.full;
         buffer = draftBefore.buffer;
         try {
-          await _genOnce({});
+          await _genOnce({ noTools: true });
           log.info(`[${who}] 查完重新生成：${buffer.trim().length} 字 ✓`);
         } catch (e) {
           log.warn(`查完重新生成失败（用上一版）：${e.message}`);
@@ -10980,6 +11297,9 @@ if (privateWork.isWorkChat(event)) return false;
        */
       if (!privateWork.isWorkChat(event)) {
         let toolRounds = 0;
+      /* ⚠️ 2026-11-26：第 2 轮及以后那次生成用的 report —— **必须读它的 toolCalls**，
+        *   否则她又调一次工具时那次调用被直接丢掉、正文空（实测 toolCalls=1、正文 0 字）✗ */
+      let toolRep = {};
       /** ⚠️ 2026-11-21：这一轮有没有调过"只执行类"工具（发送表情 / 戳回去 / 闭嘴…） */
       let _onlyActTools = false;
         /* ⚠️⚠️ 2026-11-19：**从"只跑一轮"放宽到 2 轮**
@@ -11013,6 +11333,11 @@ if (privateWork.isWorkChat(event)) return false;
              *   4B 常见形态是"第一轮直接答（空）→ 重试时才想起调工具"，
              *   只扫 `solveReport` 就会把它丢掉（用户当场看到"没有深度思考的卡片"）✗ */
             ...(Array.isArray(retryRep?.toolCalls) ? retryRep.toolCalls : []),
+            /* ⚠️ 2026-11-26：**第 2 轮之后那次生成的调用也要算** ——
+             *   原来只读 `solveReport` / `retryRep`，而 `_genOnce(toolRep)` 那次返回的
+             *   toolCalls **没人读** ⇒ 她"材料不够、又调了一次工具"时那次调用被直接丢掉、
+             *   正文 0 字 ⇒ 白烧一次完整调用 + 慢 1.5 秒（实测日志 `toolCalls=1，正文 0 字`）✗ */
+            ...(Array.isArray(toolRep?.toolCalls) ? toolRep.toolCalls : []),
           ];
           for (const raw of fcRaw) {
             const r = normalizeCall(raw);
@@ -11035,6 +11360,7 @@ if (privateWork.isWorkChat(event)) return false;
             );
             // ⚠️ 必须清掉：下一轮循环（或重生成）读到旧值会**重复执行同一批**
             solveReport.toolCalls = [];
+            toolRep.toolCalls = [];
           }
           // ⚠️⚠️ 2026-11-21 删掉这里原来的"正文兜底"（`parseToolCalls`）——
           //    它会在模型**没有发起 tool_call** 时，去正文/思考里认
@@ -11302,10 +11628,26 @@ if (privateWork.isWorkChat(event)) return false;
                 );
               } catch {}
             }
-            // ⚠️ 有副作用的（戳回去 / 闭嘴）**不需要材料、也不用重生成** ✓
+            // ⚠️ 有副作用的（戳回去 / 表情 / 语音）**不需要材料、也不用重生成** ✓ 闭嘴是例外（现在回材料）
             if (got) parts2.push(`### ${c.name}\n${got}`);
           }
           if (!parts2.length) break;
+          /* ⚠️⚠️⚠️ 2026-11-26 加（实测：定时任务到点后她只搜、只说话，**就是不排下一次**，
+           *   观察链 30 分钟就断了）——
+           *   开头那段"必须再排"在她发起工具调用之后**被稀释**了（重新生成时注意力全在材料上）
+           *   ⇒ 在**工具结果材料**里再钉一次：这是定时任务 ⇒ 没完就得排下一次 ✓ */
+          if (event?._scheduledTask) {
+            const _it = event._scheduledTask;
+            const _untilAt = Number(_it?.until ?? 0) || 0;
+            const _expired = _untilAt > 0 && Date.now() >= _untilAt;
+            parts2.push(
+              '### ⏰ 别忘了（这是你自己设的定时任务）\n' +
+                (_expired
+                  ? '这次已经是**最后一次**了（观测期限到了）⇒ 说完就收，**不用再排**。'
+                  : '只要这件事还没完 ⇒ **现在再调一次 `set_reminder` 排下一次**（观测到不用填，会自动沿用原期限）；\n' +
+                    '事情彻底完了才不排。**先排，再说你怎么讲。**'),
+            );
+          }
           /* ⚠️⚠️⚠️ 2026-11-23 加（用户：「**第二轮思考应该有第一轮思考和第一轮调的工具的记忆**」，
            *   并补一句「**加的时候不要破坏缓存率**」）——
            *
@@ -11363,8 +11705,20 @@ if (privateWork.isWorkChat(event)) return false;
           full = draftBefore.full;
           buffer = draftBefore.buffer;
           try {
-            await _genOnce({});
-            log.info(`[${who}] 查完重新生成：${buffer.trim().length} 字 ✓`);
+            /* ⚠️ 2026-11-26：带上诊断 —— 这一路**每次都 0 字**（然后靠下面"重试"救回来，
+             *   等于每个工具回合白烧一次完整调用、还慢 1.5 秒）。看不出是"又调了工具"
+             *   还是"正文被吃光"，所以把 report 摊在日志里 ✓ */
+            /* ⚠️ 每轮都用**新对象**（不能复用同一个）—— `_genOnce` 会往 r.onReasoning 上
+             *   再包一层回调，复用同一个对象会让思考链被重复记两遍 ✗ */
+            toolRep = {};
+            const rep2 = toolRep;
+            await _genOnce(rep2);
+            log.info(
+              `[${who}] 查完重新生成：${buffer.trim().length} 字 ✓` +
+                `（toolCalls=${rep2.toolCalls?.length ?? 0}` +
+                `，截断=${rep2.truncated ?? '无'}` +
+                `，思考=${rep2.reasoning ? `${String(rep2.reasoning).length}字` : '无'}）`,
+            );
           } catch (e) {
             log.warn(`查完重新生成失败（用上一版）：${e.message}`);
             full = draftBefore.full;
@@ -11528,6 +11882,18 @@ if (privateWork.isWorkChat(event)) return false;
             });
             if (!attr.ok && attr.fixed) {
               buffer = attr.fixed; // 用改好的版本
+              /* ⚠️⚠️⚠️ 2026-11-24 加（用户：「**这句正文为什么和群里实际发送的不同**」）——
+               *   卡片（思考链页面那栏"回复"）是在**归属核对之前**就 `finish` 过的，
+               *   这里把正文换成 `attr.fixed` 之后**没人再更新卡片** ⇒
+               *   页面显示的是"没改的原文"、群里收到的是"改好的"，两边对不上 ✗
+               *   （现场 22:54：卡片「不是啦，整合包是整套打包好的…」，群里实际是
+               *    「你好呀喵~ 我在呢，有啥事？」）
+               *   ⇒ 改完立刻补一次 `finish`（它是幂等覆盖，重复调用无害）✓ */
+              if (_tlId) {
+                try {
+                  thinkLog.finish(_tlId, { reply: buffer, ...thinkModelOf(solveReport) });
+                } catch {}
+              }
             }
           } catch (e) {
             // 核对出错不影响发送（它只是保险）
@@ -11965,11 +12331,31 @@ if (privateWork.isWorkChat(event)) return false;
           })) full2 += delta;
           const clean2 = cleanMarkdown(stripMarkers(full2).trim());
           if (clean2) {
-            await this.sendText(
-              event,
-              dropDashBreak(dropTrailingPeriods(stripChatUncommonPunct(clean2))),
-              { reply: false },
-            );
+            /* ⚠️⚠️ 2026-11-26 修（用户：「分条机制完全没起作用」）——
+             *   重试这条路原来是一句 `sendText` **整段一条发完**，
+             *   绕过了上面那套分条（`splitForSend`）⇒ 一旦第一次空、
+             *   走重试，回复就必定是"一大段挤在一条里" ✗
+             *   （实测：183 字一条发出，日志里没有 `[分条]` 那行）
+             *   ⇒ 这里改成同一套分条 + 条间停顿 ✓ */
+            const body2 = dropDashBreak(dropTrailingPeriods(stripChatUncommonPunct(clean2)));
+            const pieces = this.splitForSend(body2);
+            if (pieces.length > 1) {
+              log.info(
+                `[分条] 重试回复 ${String(body2).length} 字 → 拆成 ${pieces.length} 条（各 ${pieces
+                  .map((c) => c.length)
+                  .join('/')} 字）`,
+              );
+            }
+            for (let k = 0; k < pieces.length; k++) {
+              if (!pieces[k]) continue;
+              if (k > 0) {
+                try {
+                  const wait = this.chunkDelay ? this.chunkDelay() : 0;
+                  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+                } catch {}
+              }
+              await this.sendText(event, pieces[k], { reply: false });
+            }
             retried = true;
             full = full2;
             sentFirst = true;
@@ -12066,6 +12452,26 @@ if (privateWork.isWorkChat(event)) return false;
         this.noteLookupPromise(event, stripMarkers(full).trim(), promptText);
       }
       log.info(`[${who}] 已回复 ${stripMarkers(full).trim().length} 字`);
+      /* ⚠️⚠️⚠️ 2026-11-25 加（用户：「调用了表情或者回戳，思考链页面的卡片还是显示不了回复正文」
+       *   「刚才发了聊天正文没显示」）——
+       *
+       *   现场（state/think-log.json 实证）：最近几条卡片 `reply` 是 **空字符串**，
+       *   思考却有 318 字，页面就显示「（还没开始写）」；而群里**正文其实发出去了**
+       *   （日志 `已回复 5 字`）。
+       *
+       *   原因：走工具轮时会先 `finish(_tlId, { reply: full })` 收一次尾，那时 `full` 还是空的
+       *   （正文要等工具结果回来、**再生成一轮**才有）；之后正文出来了，却**再没人更新卡片** ✗
+       *
+       *   ⇒ 这里在**正文真正发出去之后**补一次（幂等覆盖，重复调用无害），
+       *     而且用的是**实际发出去的文本**（`stripMarkers(full)`）⇒ 卡片和群里永远一致 ✓
+       */
+      try {
+        const _cardId = event?._thinkId || _tlId;
+        if (_cardId) {
+          const _sent = stripMarkers(full).trim();
+          if (_sent) thinkLog.finish(_cardId, { reply: _sent, ...thinkModelOf() });
+        }
+      } catch {}
       // ⚠️⚠️ 2026-10-16 加（用户：「**润色时必须参考那个修改建议发过来之后 bot 立刻回答的
       //    那个消息**」）—— 把她这句记一笔，好让后到的"回话建议"接得上 ✓
       //    ⚠️ 不走 `recent`：那条路对**主人**的私聊是故意不记的（执行回执不进上下文 ✗），
@@ -13952,6 +14358,15 @@ if (privateWork.isWorkChat(event)) return false;
         log.debug(`[戳一戳] 记上下文失败（不影响发送）：${e.message}`);
       }
       log.info(`[戳一戳] ${uid} 拍了我，拍回去了${gid ? `（群 ${gid}）` : '（私聊）'}`);
+      /* ⚠️⚠️ 2026-11-27 加（用户：「**对戳一戳也存在幻觉**，所以导致每次都调戳回去」）——
+       *   她判断"这一场有没有还过手"靠的是**回忆上下文**，而上下文会压缩/被别的话淹掉
+       *   ⇒ 她以为自己没还过手（截图思考：「其实我一直没调 poke_back…这场还没还过手」），
+       *      于是每次被戳都再调一次 `戳回去`。
+       *   ⇒ 这里记**真实的**还手时刻，提示词那边把结果当事实告诉她，不让它猜 ✓ */
+      try {
+        this._pokeBackAt ??= new Map();
+        this._pokeBackAt.set(gid ? `g${gid}` : `p${uid}`, Date.now());
+      } catch {}
       return true;
     } catch (e) {
       // ⚠️ 失败用 `info` 不是 `debug`：用户就是靠日志确认这条链通不通的。
@@ -14357,6 +14772,12 @@ if (privateWork.isWorkChat(event)) return false;
           log.info('[工具] 「动这一单」跳过：这件事**已经在做了**，不重复开');
           return '✅ 这件事**已经在做了**，不用再开一遍。\n⚠️ 用你自己的口气说一句"在弄了"就行。';
         }
+        let selectedModel;
+        try {
+          selectedModel = agentBridge.resolveTaskModel(args?.用什么模型 ?? args?.模型 ?? '');
+        } catch (e) {
+          return `⚠️ ${e.message}。请根据可选模型说明情况，不要声称已经开工。`;
+        }
         // 🚫 **不许 await** —— 这活要跑好几分钟，await 会把她这条回复卡住 ✗
         agentBridge
           .startRun({
@@ -14365,12 +14786,14 @@ if (privateWork.isWorkChat(event)) return false;
             by: String(event?.user_id ?? ''),
             byName: String(event?.sender?.card || event?.sender?.nickname || ''),
             task,
+            model: selectedModel?.name ?? '',
             related: true,
           })
           .catch((e) => log.warn(`[工具] 群里派活失败：${e.message}`));
         log.info(`[工具] 群里派活（主人）：${task.slice(0, 40)}`);
         return (
           `✅ 已经开做了：「${task.slice(0, 70)}」\n` +
+          `本次执行模型：${selectedModel?.name ?? '原默认模型'}。\n` +
           '（做完产物会**自动发到这个群**，不用你操心）\n' +
           '⚠️ 回他一句"这就动手"就行，🚫 别提 agent / 脚本 / 工作区 / 自动。'
         );
@@ -14550,6 +14973,34 @@ if (privateWork.isWorkChat(event)) return false;
       return `这个群的公告和群文件（**原文，照这里说，别自己编**）：\n${out}`;
     }
 
+    if (name === 'MC行动') {
+      const gid = String(event?.group_id ?? '');
+      if (!isMainAccount() || config.persona?.id !== 'saki' || !gid || !this.answerServerIn(gid)) return '当前账号或群不能执行 MC 行动。';
+      if (!this.selfId || !msg.isAt(msg.toSegments(event.message), this.selfId)) return '群里需明确 @Saki 才执行 MC 操作。';
+      try {
+        const { mcAction } = await import('./mc-build.js');
+        const dir = join(config.mcBuild?.instance ?? 'C:/minecraftje/.minecraft/versions/示例服务器', 'saki-bridge');
+        return await mcAction(args, {host:config.status?.host, dir, plot:config.mcBuild?.plot, gid});
+      } catch (e) { return `MC 操作未确认：${String(e.message).slice(0,240)}`; }
+    }
+    if (name === '翻记忆') {
+      /* ⚠️ 2026-11-27 加：她能自己翻旧账（借鉴 dsh-world 的 memory_find）——
+       *   有人问「上次谁说的 X」，她不该只靠上下文里恰好还在的那几句。
+       *   ⚠️ 只翻**她自己记下的** + **当前这个群**的原文；别的群、别人的私聊一个字都不给 ✓
+       *   ⚠️ 翻不到就照实说想不起来（`formatMemory` 里已经写明），别让她补 ✓ */
+      const q = String(args?.找什么 ?? args?.翻什么 ?? args?.关键词 ?? '').trim();
+      if (!q) return '';
+      try {
+        const { findMemory, formatMemory } = await import('./memory-search.js');
+        const gid = String(event?.group_id ?? '');
+        const r = findMemory({ q, gid, scope: args?.范围 });
+        log.info(`[工具] 翻记忆「${q}」⇒ ${r?.items?.length ?? 0} 条`);
+        return formatMemory(r, q);
+      } catch (e) {
+        log.warn(`[工具] 翻记忆失败：${e.message}`);
+        return '';
+      }
+    }
     if (name === '查服务器') {
         /* ⚠️⚠️ 2026-11-06 修（用户：「**怎么爱音又回服务器的消息了，这个群没开啊**」）
          *
@@ -14722,12 +15173,38 @@ if (privateWork.isWorkChat(event)) return false;
           } catch (e) {
             return `⚠️ 匹配表情出错：${e.message}`;
           }
-          const first = near.find((x) => x?.tag && (() => {
-            try { return !!facePath(x.tag); } catch { return false; }
-          })());
+          /* ⚠️⚠️⚠️ 2026-11-25 改（用户：「表情老是发同一个，其他几乎没发过」，
+           *   并且明确：「**不要改得太随机，代码随机那种肯定不行**」）——
+           *
+           *   原来固定取 `near` 的**第一个**：`matchFaces()` 是稳定排序、同分顺序固定
+           *   ⇒ 同一个词永远发同一张（实测最近 6 次：嘟嘴×3、磕到美的、害羞、无语）。
+           *
+           *   ⇒ 改成**确定性轮换**（不是随机）：
+           *     在前 3 名（都算"贴"）里，挑**最久没发过的那一张**。
+           *     · 同条件下结果唯一、可复现、可预期 ✓
+           *     · 自然做到"最近发过的排最后"，不会连发同一张 ✓
+           *     记账用 `_faceUsedAt`（tag → 上次发的时间戳），进程内滚动即可。
+           */
+          const okPath = (t) => {
+            try {
+              return !!facePath(t);
+            } catch {
+              return false;
+            }
+          };
+          const cands = near.filter((x) => x?.tag && okPath(x.tag));
+          const used = this._faceUsedAt ?? (this._faceUsedAt = Object.create(null));
+          const pool = cands.slice(0, 3);
+          // 稳定排序：上次用得越早越靠前；从没用过的算 0 ⇒ 优先
+          const first = pool
+            .slice()
+            .sort((a, b) => Number(used[a.tag] ?? 0) - Number(used[b.tag] ?? 0))[0];
           if (first) {
             tag0Final = first.tag;
-            log.info(`[工具] 「${tag0}」⇒ 自动挑中表情「${tag0Final}」（一轮发出，不用先查）`);
+            log.info(
+              `[工具] 「${tag0}」⇒ 自动挑中表情「${tag0Final}」` +
+                `（候选 ${cands.length} 个，本次池 ${pool.map((x) => x.tag).join('/')}，按最久没用轮换）`,
+            );
           } else {
             let some = [];
             try {
@@ -14740,8 +15217,18 @@ if (privateWork.isWorkChat(event)) return false;
           }
         }
         try {
-          await this.sendFace(event, tag0Final);
-          log.info(`[工具] 发了表情「${tag0Final}」✓（她写的是「${tag0}」）`);
+          /* ⚠️ 2026-11-27 改（用户：「**表情必须在消息正文发出后再发**」）——
+           *   原来这一行是 `await this.sendFace(event, tag0Final)` ⇒ **工具回合里立刻发** ✗
+           *   群里先冒一张图、她正文一个字都还没出来（看着像"只回了个表情"）。
+           *   ⇒ 现在**只排队**，由 `sendChunk()` 在正文全部分条发完之后统一发；
+           *     正文为空（她只调了表情、没写字）时由 `replyOnce` 那处兜底发 ✓
+           *   ⚠️ 仍然"一条回复最多一张"：它插在正文表情标记最前面，只发第一张 ✓ */
+          event._pendingFace = tag0Final;
+          // 记「这张上次是什么时候发的」—— 轮换按它排（最久没用的优先），不是随机
+          try {
+            (this._faceUsedAt ?? (this._faceUsedAt = Object.create(null)))[tag0Final] = Date.now();
+          } catch {}
+          log.info(`[工具] 表情「${tag0Final}」已排队，等正文发完再发（她写的是「${tag0}」）`);
         } catch (e) {
           return `⚠️ 表情没发出去：${String(e.message || e).slice(0, 60)}`;
         }
@@ -14907,13 +15394,35 @@ if (privateWork.isWorkChat(event)) return false;
           return `（查 ${code} 次失败了：${e.message}）`;
         }
       }
+      if (name === '不接') {
+        /* ⚠️ 2026-11-26 加（用户：「加一个工具，当模型自己觉得不想接的时候就调用，
+         *   打断这次接话，不发出信息」+「调用到不发的工具，可以打断发送然后戳那个人一下」）——
+         *   她**自己**判断这句不是在跟她说 ⇒ 这次一个字都不发，只戳一下发消息的人
+         *   （表示"我看到了"）。⚠️ 判据在她那边，代码不做关键词判断 ✓ */
+        const uidSkip = String(event?.user_id ?? '');
+        const gidSkip = String(event?.group_id ?? '');
+        const noPoke = args?.戳 === false || args?.不戳 === true;
+        try {
+          event._skipSpeak = true;
+        } catch {}
+        if (!noPoke && uidSkip && gidSkip) {
+          await this.sendPokeBack(uidSkip, gidSkip).catch(() => {});
+        }
+        log.info(
+          `[工具] 「不接」⇒ 这一轮什么都不发${noPoke ? '（也没戳）' : '，只戳了他一下'} ✓`,
+        );
+        return ''; // 有副作用、不需要材料
+      }
       if (name === '戳回去') {
         // ⚠️ 2026-10-19 加（工具化第二批）：她想戳回去就戳 ✓
         const uid2 = String(event?.user_id ?? '');
         const gid2 = String(event?.group_id ?? '');
-        if (!uid2) return '';
-        await this.sendPokeBack(uid2, gid2);
-        return ''; // 有副作用，不需要材料
+        if (!uid2) return '（没戳成：不知道要戳谁）';
+        /* ⚠️ 2026-11-27 改（用户截图：卡片上显示「（没有产出）」，她会以为没执行）——
+         *   原来返回空串 ⇒ 界面只能显示"没有产出" ⇒ 她下一轮又去调一次 ✗
+         *   ⇒ 回一句**真实结果**（成功/失败），既让她知道发出去了，也顺手把"已经还过手"钉住 ✓ */
+        const ok2 = await this.sendPokeBack(uid2, gid2);
+        return ok2 ? '（已经戳回去了）' : '（这次没戳成，协议端没发出去）'; // 有副作用，不需要材料
       }
       // ⚠️⚠️⚠️ 2026-10-20 加（用户：「**就用提示词里加工具+删触发**」）——
       //    「群里问 B 站」原来靠 `hotQuery()` 关键词自动触发 ⇒
@@ -14977,21 +15486,51 @@ if (privateWork.isWorkChat(event)) return false;
         const mHour = /(\d+)\s*(个)?小时/.exec(raw);
         let ms = mHour ? Number(mHour[1]) * 3600000 : mMin ? Number(mMin[1]) * 60000 : 5 * 60000;
         ms = Math.max(60000, Math.min(ms, 30 * 60000));
+        /* ⚠️⚠️ 2026-11-24 改（原来是 `return ''` + 常驻 ACT_TOOLS）——
+         *   那样整轮会被判成"只发了动作类（表情/戳/闭嘴）"⇒ **文字被清掉**
+         *   ⇒ 她一句话都没说就哑了，群里只看到她消失、不知道为什么 ✗
+         *   现在**回一段材料**：真算到"几点解除 + 为什么"，让她**用自己的口气交代最后一句** ✓
+         *   ⚠️ 所以它必须**移出 `ACT_TOOLS`**（返回材料的工具不许留在那里面，否则材料白给）✓
+         */
+        const why = String(args?.为什么 ?? args?.原因 ?? '')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, 20);
+        const DELAY = 8000;
+        const mins = Math.round(ms / 60000);
         this._justMuted = { gid: gid3, at: Date.now() };
         setTimeout(() => {
           try {
-            this.muteGroup(gid3, ms, '她自己判断该闭嘴了（工具）');
+            this.muteGroup(gid3, ms, `她自己判断该闭嘴了（工具）${why ? `：${why}` : ''}`);
           } catch {}
-        }, 8000).unref?.();
-        log.info(`[静默] 她调了「闭嘴」⇒ 8 秒后静默 ${Math.round(ms / 60000)} 分钟（${gid3}）✓`);
-        return '';
+        }, DELAY).unref?.();
+        // ⚠️ 真实算到"哪一刻解除"，别让她自己瞎报一个时间 ✓
+        const until = new Date(Date.now() + DELAY + ms);
+        const nowD = new Date();
+        const two = (n) => String(n).padStart(2, '0');
+        const dayWord =
+          until.getDate() === nowD.getDate() && until.getMonth() === nowD.getMonth()
+            ? ''
+            : '明天 ';
+        const hhmm = `${dayWord}${two(until.getHours())}:${two(until.getMinutes())}`;
+        log.info(
+          `[静默] 她调了「闭嘴」⇒ 8 秒后静默 ${mins} 分钟（到 ${hhmm}，${gid3}）` +
+            (why ? ` 原因：${why}` : '') +
+            ' ✓',
+        );
+        return [
+          `这个群已经静默 ${mins} 分钟（到 ${hhmm}，这之前群里说话你不接；有人 @ 你还是能叫出来）。`,
+          `原因：${why || '你自己想歇会儿'}`,
+          `那 ${DELAY / 1000} 秒是留给你把最后一句话说完的 —— 用你自己的口气跟群里交代一声`,
+          `你要安静到什么时候，然后就不用再接了。`,
+        ].join('\n');
       }
-      if (name === '好感度') {
-        const uid = String(event?.user_id ?? '');
-        const gid = String(event?.group_id ?? '');
-        const v = affinity.get(uid, gid);
-        return `他（${event?.sender?.nickname ?? uid}）跟你的好感度：${v}`;
-      }
+      /* ⚠️⚠️⚠️ 2026-11-24 删（用户：「**把好感度删工具，因为这种非常轻量的注入而且实现很简单的
+       *   功能不应该用工具，去调一个工具的时间肯定比这个长，不划算**」）——
+       *   好感度本来就**每轮都注入**（`## 你对这个人的好感度` 那段，值就在提示词里），
+       *   再挂一个工具让她"查一下"纯属重复：查一次要多一次模型往返（几秒），
+       *   而答案她手上早就有 ⇒ 留注入、删工具 ✓
+       *   ⚠️ 注入那段**没动**（在 `// ── 好感度（2026-09-14 要求）` 那里）*/
 
       // ⚠️⚠️ 2026-10-19 第三批：**记住**（真写知识库）——
       //    工具化省掉的是 `judgeMemoryCommand` 那次模型复核（她写暗号 = 明确指令），
@@ -15062,8 +15601,9 @@ if (privateWork.isWorkChat(event)) return false;
           log.debug(`[工具] 写印象失败（忽略）：${e.message}`);
         }
         return (
-          `✅ 已经写进学习档案：\n· 主题：${res.topic ?? topic}\n· 内容：${fact}\n` +
-          `· 落到：${res.file ?? 'learned.md'}${res.replaced ? '（覆盖了同名主题的旧内容）' : '（新增）'}\n` +
+          `✅ 已经记进她的笔记：\n· 主题：${res.topic ?? topic}\n· 内容：${fact}\n` +
+          `· 落到：${res.file ?? 'learned.md'}${res.replaced ? '（覆盖了同名主题的旧内容）' : '（新增）'}` +
+          `${res.merged ? '（跟已有那条是同一件事，合并进去了）' : ''}\n` +
           '⚠️ 回他一句"记下了"就行，用你自己的口气，别列条目、别说"已写入学习档案"。'
         );
       }
@@ -15109,6 +15649,56 @@ if (privateWork.isWorkChat(event)) return false;
         const when = String(args?.何时 ?? args?.时间 ?? args?.几点 ?? '').trim();
         const what = String(args?.说什么 ?? args?.做什么 ?? args?.事 ?? '').trim().slice(0, 200);
         if (!what) return '⚠️ 这次没记：没说提醒他什么事';
+        /* ⚠️⚠️ 2026-11-25 加（用户在「按群设定」里放了开关，这里必须真的读，
+         *   否则那两个开关就是个摆设）——
+         *   `groupParams.<群>.remind.allowAt`（默认开）：**被 @ / 私聊时允许她排任务**。
+         *   关掉 = 这个群不让她自己排（她该照实说"这个群我不排"，而不是假装记下了）。*/
+        const _rg = String(event?.group_id ?? '');
+        if (_rg) {
+          const _allowAt = config.groupParams?.[_rg]?.remind?.allowAt;
+          if (_allowAt === false) {
+            return '⚠️ 这个群没开「让我自己排定时任务」⇒ 这次记不了，照实跟他说一句就行（别假装记下了）。';
+          }
+        }
+        /* ⚠️ 2026-11-25：两种任务 —— remind（到点说一句）/ watch（到点她自己去查进展） */
+        const kindRaw = String(args?.哪种 ?? args?.类型 ?? '').trim().toLowerCase();
+        const kind = /watch|关注|观察|盯/.test(kindRaw) ? 'watch' : 'remind';
+        // 要不要 @ 他 / 没完成要不要接着排 —— 她给的（`1`/`0`，没给就按要）
+        /* ⚠️ 2026-11-25：要不要 @ 由**她**判断（观测类不@、提醒类@）。
+         *   ⚠️ 没填时默认 **false（不 @）** —— 乱 @ 人比不 @ 更烦人；
+         *     而且"提醒"这类她通常会明确填 1（工具描述里写了规律）。*/
+        const flag = (v, dflt = true) => {
+          const s = String(v ?? '').trim();
+          if (!s) return dflt;
+          return !/^(0|false|no|不|否|不用|不要)$/i.test(s);
+        };
+        const mention = flag(args?.要_at吗 ?? args?.['要@吗'] ?? args?.要at吗 ?? args?.mention, false);
+        const again = flag(args?.还排吗 ?? args?.again, true);
+        /* ⚠️ 2026-11-25：观测期限（「接下来 24 小时持续观测」）——
+         *   支持 `+24小时` / `+24h` / `明天 00:30` 这几种；解析不出就当没填（单次）*/
+        let until = 0;
+        const untilRaw = String(args?.观测到 ?? args?.until ?? '').trim();
+        if (untilRaw) {
+          const mH = /^\+?\s*(\d+(?:\.\d+)?)\s*(小时|h|时)$/i.exec(untilRaw);
+          const mD = /^\+?\s*(\d+(?:\.\d+)?)\s*(天|d|日)$/i.exec(untilRaw);
+          if (mH) until = Date.now() + Math.round(Number(mH[1]) * 3600 * 1000);
+          else if (mD) until = Date.now() + Math.round(Number(mD[1]) * 24 * 3600 * 1000);
+          else until = this.parseToolWhen(untilRaw) || 0;
+        }
+        // `给谁`：填了别人就去群里找 uid；不填就是当前说话的人
+        const whoRaw = String(args?.给谁 ?? '').trim();
+        const gid = String(event?.group_id ?? '');
+        let targets = [];
+        if (whoRaw) {
+          let uid = '';
+          try {
+            uid = matchNameToUid(whoRaw, gid) || '';
+          } catch {}
+          if (uid) targets = [{ uid, name: whoRaw }];
+          else targets = [{ uid: '', name: whoRaw }]; // 只有名字 ⇒ 到点会 @ 他本人并说一句没找到
+        }
+        const by = targets.length && targets[0].uid ? targets[0].uid : String(event?.user_id ?? '');
+        const byName = targets.length && targets[0].uid ? targets[0].name : names.of(event?.user_id, gid);
         const at = this.parseToolWhen(when);
         if (!at) {
           return (
@@ -15116,15 +15706,17 @@ if (privateWork.isWorkChat(event)) return false;
             '⇒ 要么按固定格式重写一次（`明天 08:00` / `08:00` / `+30分钟`），要么问他一句几点。'
           );
         }
-        const gid = String(event?.group_id ?? '');
         let r;
         try {
           r = remind.add({
             at,
             what,
-            by: String(event?.user_id ?? ''),
-            byName: names.of(event?.user_id, gid),
-            targets: [],
+            kind,
+            mention,
+            again,
+            by,
+            byName,
+            targets,
             groupId: gid,
             now: Date.now(),
           });
@@ -15132,10 +15724,20 @@ if (privateWork.isWorkChat(event)) return false;
           return `⚠️ 这次没记成：${e.message}`;
         }
         if (!r?.ok) return `⚠️ 这次没记成：${r?.reason ?? '不知道为啥'}`;
-        const d = new Date(at);
+        const d = new Date(r?.item?.at ?? at);
         const p2 = (n) => String(n).padStart(2, '0');
         const atText = `${d.getMonth() + 1}月${d.getDate()}日 ${p2(d.getHours())}:${p2(d.getMinutes())}`;
-        log.info(`[工具] 定下提醒：${atText}「${what}」（${gid ? `群${gid}` : '私聊'}）`);
+        log.info(
+          `[工具] 定下${kind === 'watch' ? '关注任务' : '提醒'}：${atText}「${what}」` +
+            `（${gid ? `群${gid}` : '私聊'}｜@=${mention ? '要' : '不要'}｜${kind === 'watch' ? `还排=${again ? '要' : '不要'}` : ''}）`,
+        );
+        if (kind === 'watch') {
+          return (
+            `✅ 记下了：${atText} 去查「${what}」的进展，然后自己说给大家\n` +
+            `（这次${mention ? '会 @ 他' : '不 @ 他'}；查完${again ? '还没完就接着排下一次' : '不用再排'}）\n` +
+            '⚠️ 回他时就说一句"行，我盯着"，别说得像日程系统。'
+          );
+        }
         return (
           `✅ 记下了：${atText} 提醒他「${what}」\n` +
           '⚠️ 回他时用你自己的口气应一声（把时间带上），别说得像日程系统。'
@@ -15286,7 +15888,9 @@ if (privateWork.isWorkChat(event)) return false;
     const gid = payload.group_id ? String(payload.group_id) : '';
     const allow = config.trigger.allowGroups;
     if (gid && allow.length > 0 && !allow.includes(gid)) {
-      log.debug(`[戳一戳] 群 ${gid} 不在 allowGroups，不响应`);
+      // ⚠️ 2026-11-27：这条原来是 debug（默认不落盘）⇒ 群里戳了没反应时，
+      //    日志上只看得到「收到」，看不到"为什么没回"，等于静默失败。
+      log.info(`[戳一戳] 群 ${gid} 不在 allowGroups 白名单里 ⇒ 不响应（不回拍也不说话）`);
       return;
     }
 
@@ -15387,11 +15991,15 @@ if (privateWork.isWorkChat(event)) return false;
     //    「0 戳了你」，连是谁都说不出来，更没法回戳（回戳要按昵称定位）。
     //    SnowLuma / NapCat 不传这个字段 ⇒ 走原来的 `names.label(uid, gid)`，行为不变 ✓
     const pokedBy = String(payload._clientName ?? '').trim() || names.label(uid, gid);
-    if (gid) {
+    /* ⚠️⚠️ 2026-11-27 改（用户：「戳一戳应该也要有聊天上下文」）——
+     *   原来只有 `if (gid)` 才把这次戳记进上下文 ⇒ **私聊戳不进桶**，
+     *   她连"刚才那一串是在闹什么"都看不到，只能孤立地回一句 ✗
+     *   ⇒ 群、私聊都记（私聊走 `dm:<QQ号>` 桶）✓ */
+    {
       recent.remember(
         {
-          message_type: 'group',
-          group_id: gid,
+          message_type: gid ? 'group' : 'private',
+          group_id: gid || undefined,
           user_id: uid,
           message_id: pokeMsgId,
           sender: { user_id: uid, nickname: pokedBy, card: pokedBy },
@@ -16008,7 +16616,7 @@ if (privateWork.isWorkChat(event)) return false;
          *   她回「啧，怎么又@我」，那个「对」完全没接 ✗
          *   ⇒ 把**最后一行**（最新那句）显式标出来，配合 `prompt-lite.js` 里的
          *     「越往下越新，最后一行是他刚说的」一起用 ✓ */
-        if (recentRows.length) recentRows[recentRows.length - 1] += '　←（最近这一句，先接它）';
+        if (recentRows.length) recentRows[recentRows.length - 1] += '　←（最近这句，权重最高；前面几句可能跟它是同一件事）';
         recentText = recentRows.join('\n');
       } catch {
         /* 取不到就不带（别把主流程弄挂） */
@@ -16085,6 +16693,35 @@ if (privateWork.isWorkChat(event)) return false;
          *   （全量那条路有 `parts.push(vision)`，lite 这条路漏了）
          *   ⇒ 传进去，由 `prompt-lite.js` 的 `visionBlock()` 原样拼 ✓ */
         vision: String(vision ?? ''),
+        /* ⚠️⚠️ 2026-11-24 加（用户：「**都补**」）——
+         *   ① **合并聊天记录**：`buildSystemPrompt` 本来就有 `forwardText` 参数，
+         *      但 lite 分支在函数**开头**就 return 了，那一段展开逻辑根本没走到 ⇒
+         *      别人发一条合并转发，lite 下她只看到占位符 ✗
+         *   ② **接对面口癖**：`lite.md` 里只有"你自己的口癖清单"，没有一句讲"跟着对方口气走"
+         *      （全量那条路有 `cues` 检测 + 两段规则）⇒ 这里照着全量的判据同步算一份 ✓
+         *   ⚠️ 两个都是**只在有内容时才注入**（`.filter(Boolean)` 会剔掉）⇒ 平时零占用 ✓ */
+        forward: String(forwardText ?? '').slice(0, 3000),
+        tics: (() => {
+          try {
+            const t = String(currentText ?? '');
+            const c = [];
+            if (/捏/.test(t)) c.push('「捏」');
+            if (/[啦呗嗷嘞]/.test(t)) c.push('「啦 / 呗 / 嗷」这类尾音');
+            if (/[～~]/.test(t)) c.push('波浪号「～」');
+            if (/www|233|hhh/i.test(t)) c.push('「www / 233」这种网络写法');
+            if (/哈{2,}|嘿{2,}|嘻{2,}/.test(t)) c.push('笑声「哈哈」');
+            if (/喵|呐/.test(t)) c.push('「喵 / 呐」这类尾音');
+            if (!c.length) return '';
+            return (
+              `他这条带了：${c.join('、')}\n` +
+              '⚠️ 你也**顺着用他那个**（一个就够）：他带「捏」→ 你用「捏」；' +
+              '他带「啦 / 呗」→ 用**同类的**（别换成捏）；他带「～」→ 也带一个。\n' +
+              '🚫 只跟语气、**不跟内容**（他骂人 / 带脏字一个都别跟）；一条里最多一个。'
+            );
+          } catch {
+            return '';
+          }
+        })(),
         /* ⚠️ 2026-11-21：**群友信息**（用户：「那个动态段不是应该有一段会自动总结群友信息吗」）——
          *   `knowledge/group-memory.md` 就是那段，但原来只有全量模式读 ⇒ lite 下她不知道谁是谁 ✗
          *   截 3000 字（保住「关键人物」表 + 常说话群友的前几行）✓ */
@@ -16173,7 +16810,34 @@ if (privateWork.isWorkChat(event)) return false;
               raw = out.join('\n');
             }
             const ev = cut(pickEvents(raw), EV_CAP);
-            const head = cut(dropEvents(raw), CAP - (ev ? ev.length + 60 : 0));
+            /* ⚠️⚠️⚠️ 2026-11-25 加（用户：「在回复某个人或者需要用到画像的时候模型想不起来」）——
+             *
+             *   真因（实测字数）：群资料库的「群友」段 **5105 字**，而留给它的额度只有
+             *   `CAP(3000) - 大事(约 950) - 60 ≈ 1990 字` ⇒ `cut()` 从**头**截 ⇒
+             *   只保留前 39%，**后面 40 来个群友画像从来没进过提示词** ✗
+             *   于是"回复某个人时想不起来"是必然的 —— 不是模型不看，是那段根本没给它。
+             *
+             *   ⇒ 按**相关性重排**：当前这句话 + 最近群聊里出现过的名字，他们的画像行**置顶**，
+             *     其余照旧跟在后面（额度不变，只是把该看的挪到前面）✓
+             *   ⚠️ 只重排**行**、不改内容；命中判据是"这行的人名出现在当前对话里"（不是关键词快判人话）✓
+             */
+            const capHead = CAP - (ev ? ev.length + 60 : 0);
+            const headRaw = dropEvents(raw);
+            let head = '';
+            try {
+              const probe = String(currentText ?? '') + '\n' + String(recent ?? recentText ?? '');
+              const hit = [];
+              const rest = [];
+              for (const L of headRaw.split('\n')) {
+                const m = /^\s*[-*]\s*([^：:\n]{2,24})[：:]/.exec(L);
+                if (m && probe.includes(m[1].trim())) hit.push(L);
+                else rest.push(L);
+              }
+              head = cut(hit.concat(rest).join('\n'), capHead);
+              if (hit.length) log.info(`[群记忆] 按对话重排：${hit.length} 个正在聊的人排到前面（额度 ${capHead} 字）`);
+            } catch {
+              head = cut(headRaw, capHead);
+            }
             const warn = degraded
               ? '\n⚠️ **这个群还没有自己的资料库** —— 下面是**全服共享**的印象；' +
                 '提到的人**不一定在这个群**（人名名单已经滤掉了）。' +
@@ -16281,6 +16945,14 @@ if (privateWork.isWorkChat(event)) return false;
     //      `config.llm.systemPrompt`。所以这条不会影响客服小祥。
     const sysOverride = persona.promptFile('system');
     const parts = [sysOverride || config.llm.systemPrompt.trim()];
+    /* ⚠️⚠️⚠️ 2026-11-24 加（用户：「改」，起因是**缓存命中只有 72%**）——
+     *   实测两轮提示词逐字符对比：公共前缀只到 **78.5%**，分叉点正是
+     *   `# 【他戳了你一下】` 那段，而它**后面还挂着 52 段静态内容**（拍照、表情、知识库…）
+     *   ⇒ 前面一动、后面全废，云端每轮白付 3 万 token ✗
+     *   ⇒ 凡是**依赖当前这条消息**的段（戳一戳 / 戳回去 / 口癖…）一律先攒在 `_tailDyn`，
+     *      拼到最后再 append —— 这就是 AGENTS 那条「每轮会变的放末尾」在**全量**这边的落实 ✓
+     *   ⚠️ 只挪**纯动态**的；静态段的位置别动，挪了等于整份重排、反而掉一次缓存 ✓ */
+    const _tailDyn = [];
     /* ⚠️⚠️⚠️ 2026-11-07 加（用户：「补」—— 把每轮会变的那几段真的挪到**整个提示词最末尾**）——
      *
      *   `knowledgeText({split:true})` 已经能把 `learned / presence / shortMemory`
@@ -16320,7 +16992,7 @@ if (privateWork.isWorkChat(event)) return false;
 
     // ⚠️ 解题模式：**放在最前面**（紧挨着系统提示词）。
     //    这个是"这次要做的事"的说明，比人设细节更需要模型优先看到。
-    if (solveMode) parts.push('\n' + SOLVE_GUIDE);
+    if (solveMode) _tailDyn.push('\n' + SOLVE_GUIDE);
 
     // ⚠️⚠️ 2026-10-07 加（用户：「**除了剧情开始和推进的转述，其他时候都不要转述，
     //    都是在正常聊天，不要写这种转述的话**」）：
@@ -16343,8 +17015,29 @@ if (privateWork.isWorkChat(event)) return false;
         return false;
       }
     })();
+    /* ⚠️⚠️ 2026-11-24 加（用户：「能不能把工具段提前，本来工具段也不会总是变」）——
+     *   真的 `tools` schema 是 API 参数，**Qwen3 模板把它渲染在 system 之后** ⇒ 模型要读完
+     *   这 4.7 万字人设才看见工具定义，注意力早散了（实测：短 system 下同一个 4B 三投三中，
+     *   长 system 下一次都不调）。
+     *   速查表是**静态的**（`TOOLS` 每轮都一样）⇒ 挪到**最前面**先打一遍，压住开头的注意力；
+     *   中段那段完整的工具规矩**照旧保留**（这里只是摘要，不替代细节）✓
+     *   ⚠️ 代价：提示词多约 2 KB；且在开头插内容 ⇒ 这一轮的全量缓存要重算一次，之后稳定 ✓ */
+    {
+      const _tt = toolTableLines();
+      if (_tt.length) {
+        _tailDyn.push(
+          '\n' +
+            [
+              '# 【你手上有这些东西，随时可以真用（完整规矩在后面）】',
+              ..._tt,
+              '⚠️ 真要做什么（发图 / 查东西 / 记住 / 闭嘴 / 派活）⇒ **直接调用那个工具**；',
+              '  在正文里写工具名不算调用，说一句"我查一下"却没调 = 空头承诺 ✗',
+            ].join('\n'),
+        );
+      }
+    }
     if ((event?.message_type === 'group' || event?.message_type === 'private') && !_inQuestCtx) {
-      parts.push(
+      _tailDyn.push(
         '\n' +
           [
             '⚠️⚠️ **你是在群里说话，不是在写小说、也不是在转述剧情**：',
@@ -16702,6 +17395,30 @@ if (privateWork.isWorkChat(event)) return false;
           k = picked2;
         }
       }
+      /* ⚠️⚠️ 2026-11-27：**这段按人设分流**。
+       *    默认（活泼人设）照旧 —— 语气词是她们的活人味；
+       *    但人设声明了 `identity.style.noVerbalTics`（古风寡言那种）时换成反向说明，
+       *    否则"语气词一个都不许省"会把这个人的语体顶掉，人设等于白写
+       *    （实测原话：「问吧，我听着呀」「没干什么，躺着呢」）。 */
+      const _noTics = (() => {
+        try {
+          return persona.style?.()?.noVerbalTics === true;
+        } catch {
+          return false;
+        }
+      })();
+      if (_noTics) {
+        parts.push(
+          [
+            '\n# 【说话方式：按人设来，**不加语气词**】',
+            '',
+            '⚠️ 这个人设说话**不挂语气词**（呀 / 嘛 / 啦 / 呗 / 哦 / 诶 / 捏 一个都不加），',
+            '也**不用网络口语**（牙白 / 绝了 / 破防 / 好家伙 / 绷不住），不写句尾那个「（」梗。',
+            '短、干净、带点古意 —— 句子具体长什么样**看下面的人设正文，以人设为准**。',
+            '- 🚫 别为了「显得像活人」去加语气词：这个人设的活人味在**语气硬、话短、判断准**上。',
+          ].join('\n'),
+        );
+      } else {
       // ⚠️⚠️ 2026-09-25（用户要求：「**要模仿戳一戳对语气词的规定**」）：
       //    戳一戳那边那条（「语气词一个都不许省」+「别捏了」/「别捏了嘛」的对照）
       //    之所以管用，是因为它**带左右对照**、还明说了"用户要的是后者"。
@@ -16743,9 +17460,11 @@ if (privateWork.isWorkChat(event)) return false;
           //    ⇒ 明确许可这个写法（以前代码还把它当旁白剥掉 ✗ 现在留着了 ✓）
           "⚠️ **想缓和语气时，句尾带一个「（」也行** —— 那是网上的习惯写法，算活人味 ✓",
           "  （例：「行行行，我改（」「真拿你没办法（」）",
-          "  🚫 但**别写成成对的旁白括号**（「（顿了顿）」「（笑）」那种一律不许）。",
+          "  ✅ **括号里只写二次元那种情绪梗**：`（目移` `（望天` `（泪目` `（瞳孔地震` `（小声` `（笑` —— 左括号开头、不闭合 ✓",
+          "  🚫 别写身体动作（那是舞台指示，不是二次元）；也别写成对括号包旁白，也别写 `*笑*`。",
         ].join("\n"),
       );
+      }
       parts.push('\n# 以下是人格设定与知识库，请严格遵守\n');
       parts.push(k);
       // ⚠️ 2026-10-07 加（用户要求：「A，但是要带上时间，不是一直觉得是刚发生的事」）：
@@ -16768,7 +17487,7 @@ if (privateWork.isWorkChat(event)) return false;
        *   ⇒ 追加到 kTail：内容一个字不少，但落在提示词最末尾 ✓ */
       if (sl) kTail += '\n' + sl;
     } else {
-      parts.push('\n（注意：知识库未加载成功，请只做最保守的回答，并说明自己暂时查不到资料）');
+      _tailDyn.push('\n（注意：知识库未加载成功，请只做最保守的回答，并说明自己暂时查不到资料）');
     }
 
     /* ⚠️⚠️ 2026-11-19 加（用户：「**思考链输出的话可以也带角色语气吗**」）——
@@ -16794,9 +17513,19 @@ if (privateWork.isWorkChat(event)) return false;
      *      放太靠前会被压住；放在这里离生成最近，权重最高 ✓
      *   ⚠️ 示例只是"长这样"，明写**别照抄**（AGENTS 铁律：写死的话会被她原样念出来）✓ */
 
-    if (faceCount() > 0 && this.warmAllowed()) {
+    /* ⚠️ 2026-11-27：人设可以声明自己**不发表情包 / 不自拍**（`identity.style.noStickers` / `noPhoto`）——
+     *    那两段加起来八千多字，每一轮都在提示词里；对"用不上"的人设就是纯浪费。
+     *    （沈策那种古风寡言的角色：不发表情、不自拍 —— 段留着反而会被它照着演 ✗） */
+    const _noStickers = (() => {
+      try {
+        return persona.style?.()?.noStickers === true;
+      } catch {
+        return false;
+      }
+    })();
+    if (faceCount() > 0 && this.warmAllowed() && !_noStickers) {
       // 放在知识库前面，位置显著，模型更容易记得用
-      parts.push(
+      _tailDyn.push(
         [
           '\n# 你的表情包（重要，别忘了用）',
           '',
@@ -16854,7 +17583,7 @@ if (privateWork.isWorkChat(event)) return false;
     // ⚠️ 和上面表情那段是同一套思路：**能力说明放代码里**（所有角色一样），
     //    **角色语气放人设里** —— 所以这里不拼 persona 字段，见 persona.js 文件头那条规矩。
     if (imagegen.ready().ok) {
-      parts.push(
+      _tailDyn.push(
         [
           '\n# 你可以拍照（发照片，不只是表情包）',
           '',
@@ -17030,7 +17759,7 @@ if (privateWork.isWorkChat(event)) return false;
       //    所以必须明确告诉它：**这是一句话被拆开的，要拼成一个意思再答**。
       if (srcs.length > 1) {
         const multi = uniqSpeakers.length > 1;
-        parts.push(
+        _tailDyn.push(
           [
             '',
             '# 【这次要回的是连着发的几条】',
@@ -17101,7 +17830,7 @@ if (privateWork.isWorkChat(event)) return false;
       //      这里只负责**告诉她可以这么干**；真正"一行一个气泡"由
       //      `charPlayParts()` 在发送时实现（她不想接梗就正常回一整句，也行）。
       if (event._charBurst) {
-        parts.push(
+        _tailDyn.push(
           [
             '\n# 【他在一个字一个字跟你说话】',
             '',
@@ -17121,10 +17850,21 @@ if (privateWork.isWorkChat(event)) return false;
             '  ```',
             '- ⚠️ 千万别写成一整句（那就不叫一个字一条了）',
             '',
-            '## ② 不想接 → 就正常回一句短的',
-            '- 比如嫌他幼稚、或者直接回答他真正问的事，一两句就行',
+            '## ①½ 想跟着玩、又不想太夸张 → **短句一条一条发**',
+            '- 每条就一两个词（「行啊」「你就会」「这套」那种），分 2~3 条 —— 节奏跟他一样，',
+            '  但不用真拆成单字',
+            '- ⚠️ 换行 = 一条消息（代码照着你的换行发，别自己在一个气泡里塞好几行）',
+            '',
+            '## ② 不想接 → 就正常回，但**别攒成一大段**',
+            '- 他连发好几条，你也跟着**一句一条**、分 2~3 条，节奏才对得上',
+            '- ⚠️ 第一条就要把话说到（主回应），后面只放补充或反问',
+            '  —— 别再加一句「嗯，知道了」那种**接不上的尾巴** ✗（2026-11-27 用户截图）',
             '- ⚠️⚠️ **绝对不许**用句号把字隔开（「真是。拿。你。没。办。法」这种',
             '  最不像真人 —— 真人不这么打字，要么一条条发，要么正常说一句话）',
+            '',
+            '⚠️ 通用一条：**他这次的分条方式很怪**（一个字一条 / 一句一条 / 连着刷好几条短的）⇒',
+            '你可以**适当模仿他的分法**回他 —— 也拆成几条、每条跟着短。',
+            '条数不用跟他一模一样，玩一下再回到正常说话 ✓',
           ].join('\n'),
         );
       }
@@ -17202,7 +17942,7 @@ if (privateWork.isWorkChat(event)) return false;
         //    所以她的反应必须是**把界线钉回去**：明确拒绝 + 反击，而且对方越戳越硬。
         //    ⚠️ 仍然不骂人、不带脏字 —— 立界线不需要靠骂人。
         if (!this.warmAllowed()) {
-          parts.push(
+          _tailDyn.push(
             [
               '\n# 【他戳了你一下】',
               '',
@@ -17234,7 +17974,7 @@ if (privateWork.isWorkChat(event)) return false;
                 : '- 这是私聊，随便说。',
             ].join('\n'),
           );
-        } else parts.push(
+        } else _tailDyn.push(
           [
             '\n# 【他戳了你一下】',
             '',
@@ -17277,11 +18017,30 @@ if (privateWork.isWorkChat(event)) return false;
             /* ⚠️⚠️ 2026-11-24 加（和 lite 那条对齐）——
              *   原来这一段**只教"怎么用嘴回"**，一个字没提"可以真戳回去" ⇒
              *   工具 `戳回去` 从来没被自发调用（历史 5 次全是低概率碰上的）✗
-             *   ⚠️ 而且**必须写成"默认动作"**：实测「想真还手就调」是 0/6，
-             *     「还手是默认的，先调再说」是 4/6~6/6（4B 对条件式几乎零响应）✓ */
-            '- ✅ **还手是默认的**：被捏、被拍，就**先调 `戳回去`** 把那一下还回去，再回你的话',
+             *   ⚠️ 而且当时**必须写成"默认动作"**：实测「想真还手就调」是 0/6，
+             *     「还手是默认的，先调再说」是 4/6~6/6（4B 对条件式几乎零响应）✓
+             * ⚠️⚠️ 2026-11-27 再改（「**降低一下戳一戳工具的使用率，
+             *   现在每次被戳都会调用戳一戳戳回去**」）——
+             *   上一版那句"还手是默认的"反过来顶成了**每戳必还**，戳一戳变成套话动作 ✗
+             *   ⇒ 改成给**判据**：动作亲近才还、有话要说就只回话、一场只还一次 ✓
+             *   ⚠️ 仍然按 4B 的脾气写"要什么"而不是"别做什么" ✓ */
+            /* ⚠️⚠️ 2026-11-27 加（用户：「**对戳一戳也存在幻觉**」）——
+             *   把"这一场到底还过手没有"当**事实**给她，而不是让她从上下文里回忆 ✗
+             *   （截图现场：她思考里写「其实我一直没调 poke_back…这场还没还过手」，
+             *     可前面明明刚还过一次 ⇒ 于是每次被戳都再调 `戳回去`）✓ */
+            (() => {
+              const key = event.message_type === 'group' ? `g${event.group_id}` : `p${String(event.user_id)}`;
+              const at = this._pokeBackAt?.get(key) ?? 0;
+              const mins = at ? Math.round((Date.now() - at) / 60000) : -1;
+              return mins >= 0 && mins <= 30
+                ? `- ⚠️ **真实状态**：${mins <= 1 ? '刚刚' : `${mins} 分钟前`}你**已经真的戳回去过**了 ⇒ 这一次**只用嘴接**，别再调 \`戳回去\``
+                : '- ⚠️ **真实状态**：这一场你**还没**真的戳回去过（要还手的话，这次可以）';
+            })(),
+            '- ✅ **还手是挑出来的**：这一下是闹着玩的亲近动作（捏脸 / 摸头 / 抱 / 蹭），',
+            '  或者他已经连着戳你好几下 —— 就调 `戳回去` 还回去，再回你的话',
             '  （这是让系统真的把那个动作发出去，不是你在嘴上说还手）；',
-            '  只有你确实懒得理他，才只回一句、不动手。',
+            '- ✅ **你本来就有话要说 ⇒ 只回话**（文字比一个戳有分量）；',
+            '  **这一场已经还过手 ⇒ 这次只用嘴接**。还手**一场一次**就够。',
             '  ⚠️ 只在正文里写「[戳一戳]」**不算还手** —— 那是系统给的字，发出去群里会收到一条怪消息 ✗',
             '- ⚠️ 别每次被戳就发一张表情图',
             event.message_type === 'group'
@@ -17296,7 +18055,7 @@ if (privateWork.isWorkChat(event)) return false;
         //    ⚠️ 放在整段的**最后** = 离对话最近、影响力最大（要压过上面那句"可以逗他"）。
         if (event._pokeRetort) {
           const n = Number(event._pokeTimes) || Math.max(1, Number(config.poke?.countPerBack ?? 3));
-          parts.push(
+          _tailDyn.push(
             [
               `\n## ⚠️⚠️ 这次不一样：他已经连着戳你 ${n} 次了`,
               '',
@@ -17359,12 +18118,12 @@ if (privateWork.isWorkChat(event)) return false;
       const whereHint = whereState.hint();
       // ⚠️ 2026-10-24：现场状态（道具/攻受/身体进度）—— 上一轮她自己报的那份
       const sceneHint = scene.hint(String(event?.group_id ?? ''));
-      if (whereHint) parts.push(whereHint);
-      if (sceneHint) parts.push(sceneHint);
+      if (whereHint) _tailDyn.push(whereHint);
+      if (sceneHint) _tailDyn.push(sceneHint);
       // ⚠️⚠️ 2026-10-24：这一场真有道具的话，把「用它做、别用手指」钉在**最末尾**（优先级最高）
       try {
         const propHint = scene.propHint(String(event?.group_id ?? ''));
-        if (propHint) parts.push(propHint);
+        if (propHint) _tailDyn.push(propHint);
       } catch {}
     }
     // ⚠️⚠️ 2026-09-18（用户反馈「提醒不会进聊天上下文」）：**挂着的提醒每次都要带上** ——
@@ -17373,7 +18132,7 @@ if (privateWork.isWorkChat(event)) return false;
     //       `hint()` 只给**这个会话**的提醒（A 群定的不在 B 群说）。
     {
       const remindHint = remind.hint(event?.message_type === 'group' ? String(event.group_id ?? '') : '');
-      if (remindHint) parts.push(remindHint);
+      if (remindHint) _tailDyn.push(remindHint);
     }
  // ⚠️⚠️ 2026-09-30 要求（两句）：
     //    ①「如果她要回的话本身就带捏，就更可以在回的内容加捏了」
@@ -17405,10 +18164,18 @@ if (privateWork.isWorkChat(event)) return false;
       //    用户原话：「那几个之前调的语气词**不要放入黑祥了**」——
       //    语气共振也是"口癖"的一类，`sakiko-dark` 那种"不用语气词"的人设
       //    不该被要求"跟着对方的口气走"。判据同样是 `identity.style.verbalTics`。
-      if (cues.length && persona.verbalTics().length) {
-        parts.push(
+      /* ⚠️⚠️⚠️ 2026-11-24 **拆成两半**（用户：「挪」/ 起因是缓存卡在 78%）——
+       *   这一段原来**整段**依赖 `cues`（他这条带什么口癖），所以它整段每轮都变，
+       *   而它位于提示词 **85.4%** 处 ⇒ 前面 85% 能命中、后面全废。
+       *   但整段挪末尾又会掉风格（实测：她自己主动带「捏」变少了，位置就是权重）。
+       *   ⇒ 拆开：**静态的"怎么跟"规则留在原位进缓存**，
+       *          **只有"他这条带了哪些"这一句挪到末尾**（那才是真的每轮在变）✓
+       */
+      if (persona.verbalTics().length) {
+        // ① 静态：跟着对方口气走的那套规则（他带不带都成立，一直给）
+        _tailDyn.push(
           [
-            '## ⚠️ 他这条话里带着这些口癖：' + cues.join('、'),
+            '## ⚠️ 他说话带口癖的时候，你也跟着用他那个',
             '',
             '⚠️ **你这次回话就顺着用他那个** —— 语气跟着他走，听着才像在同一个频道。',
             '（真人都这样：对方说「啦」你也说「啦」，对方说「捏」你也说「捏」。）',
@@ -17422,12 +18189,22 @@ if (privateWork.isWorkChat(event)) return false;
             '  · 他哈哈哈 → 你也跟着笑一句',
             '- ✅ 用上**他那个**就行（一个就够），别把上面几个全塞进一条回话里。',
             '- 🚫 **只跟语气，不跟内容**：他**骂人 / 带脏字** —— 一个都别跟（人设铁律优先）。',
- '- ✅ **「喵 / 呐」这类可以跟**（2026-09-30放宽：「加油喵 这种也不算很硬凹',
+            '- ✅ **「喵 / 呐」这类可以跟**（2026-09-30放宽：「加油喵 这种也不算很硬凹',
             '  二次元，可以放宽一点」）—— 但**只在他先用了的时候**跟着回一个：',
             '  「好，加油**喵**」「知道**喵**」都可以。',
             '  ⚠️ **你自己别主动发起**（那才是硬凹，你人设里嫌的是那个），也别一条里塞好几个。',
           ].join('\n'),
         );
+        // ② 动态：他**这一条**带了哪些（每轮在变，挪末尾）
+        if (cues.length) {
+          _tailDyn.push(
+            [
+              '## ⚠️ 他**这条**话里带着这些口癖：' + cues.join('、'),
+              '',
+              '⚠️ 这次就跟他这几个，按上面那套规则用 ✓',
+            ].join('\n'),
+          );
+        }
       }
     }
     // ⚠️⚠️ 2026-09-18：「他这条只是 @ 了她、一个字都没打」→ 那是**在催她回上一条**
@@ -17435,16 +18212,32 @@ if (privateWork.isWorkChat(event)) return false;
     //     她回「**你@我半天不说话，想干嘛**」）。
     //    `handle()` 里已经把 `text` 续接成上一条了，但**得把这件事告诉她** ——
     //    否则她看到的最近一条就是"@她但没内容"，会把火撒错地方。
+    /* ⚠️⚠️ 2026-11-27 改（用户截图：「**这个光@的回话还是有点问题，那一堆刷屏本来就没什么意义，
+     *   而且她自己还已经回过了，应该回我刚才说的那句话**」）——
+     *   现场（群 200000008，05:13:41）：他 @ 她 + 甩了个表情包 ⇒ text 空 ⇒ 走到这里；
+     *   而当时上下文最后是 **5 个不同的人在刷同一种 SnowLuma 状态卡片**（她 05:11 已经连着
+     *   回过三条关于运行时长的），他真正要她答的是上面两句「你怎么刚才变成决策了」「怎么光回个表情」。
+     *   她的思考链写得很明白：「那句上面标了权重最高……**不过现在提示是让我看最近的消息**，
+     *   最近就是这波 SnowLuma 状态刷屏」⇒ 被"看最近"+"越近越重要"带着去接了刷屏 ✗
+     *   ⇒ 这一段原来只说"自己看上面的记录、挑该接的接"，等于把**最显眼的那坨**当成了目标。
+     *     现在先把**搜寻顺序**钉死：先找 @ 你的那个人的话，再找没人答的提问；
+     *     并把"一帮人在刷同一种东西"和"你已经接过的"点明成背景 ✓
+     *   ⚠️ 全部写成"要找什么"（4B 对否定句是反的），不写"别接什么" ✓ */
     if (event?._chaseFrom) {
-      parts.push(
+      _tailDyn.push(
         [
-          '## ⚠️ 他这条只是 **@ 了你一下、一个字都没打**',
+          '## ⚠️ 他这条只是 **@ 了你一下**（没打字，或者只甩了个表情）',
           '',
-          '那不是跟你打招呼，意思是「**看看最近的消息，回我一句**」。',
-          '⚠️ 所以你要**自己看上面的聊天记录**，挑该接的话接：',
-          '· 有人**问了你什么、还没被你回答** → 就答那句（**最常见**，优先答这个）；',
-          '· 有人在说跟你有关的事、或者提到你 → 接那个；',
-          '· 实在没什么可接的 → 就随口说一句你此刻想说的（别问「怎么了」「有什么事」）。',
+          '那不是跟你打招呼，意思是「**上面有话要你答，接着回**」。',
+          '⚠️ 所以你要**自己往上找**，按这个顺序找目标：',
+          '① **@ 你的那个人**最近说的那句**有字的话** —— 那才是他真正要你答的，',
+          '   往往就在上面两三句之内（可能他上面连说了两句，是一件事）；',
+          '② 其次：有人**问了你什么、还没被你回答** → 答那句；',
+          '③ 实在没什么可接的 → 就随口说一句你此刻想说的（别问「怎么了」「有什么事」）。',
+          '',
+          '⚠️ 辨认背景：',
+          '· 一帮人**在刷同一种东西**（状态卡片、版本号、复读同一段）—— 那是背景，读过就算了；',
+          '· 同一件事你**上一两条已经接过** ⇒ 他这次是在往下说别的（他在追问你没答的那句）。',
           '',
           '⚠️ 本次要回应的那条「（他 @ 了你一下…）」**不是他打的字**，是给你的说明 ——',
           '   🚫 别复述它、别引用它、别拿它当他的话说。',
@@ -17477,7 +18270,7 @@ if (privateWork.isWorkChat(event)) return false;
         return out;
       };
       if (r.cancelled) {
-        parts.push(
+        _tailDyn.push(
           [
             '## ⏰ 他让你**取消**刚才那条提醒',
             '',
@@ -17487,7 +18280,7 @@ if (privateWork.isWorkChat(event)) return false;
           ].join('\n'),
         );
       } else if (r.updated) {
-        parts.push(
+        _tailDyn.push(
           [
             '## ⏰ 他**改了**刚才那条提醒（**已经改好了**）',
             '',
@@ -17499,7 +18292,7 @@ if (privateWork.isWorkChat(event)) return false;
           ].join('\n'),
         );
       } else if (r.fail === 'noPrev') {
-        parts.push(
+        _tailDyn.push(
           [
             '## ⏰ 他在改 / 取消一条提醒，但**你手里没有这条**',
             '',
@@ -17514,7 +18307,7 @@ if (privateWork.isWorkChat(event)) return false;
       } else if (r.fail === 'alreadySent') {
         // ⚠️ 2026-09-29 加（用户的真实场景）：他要改的那条**已经发出去过了** ——
         //    这不是"你没定过"，说成那样他只会觉得她在胡扯。
-        parts.push(
+        _tailDyn.push(
           [
             '## ⏰ 他要改 / 取消的那条提醒，**已经发出去过了**',
             '',
@@ -17528,7 +18321,7 @@ if (privateWork.isWorkChat(event)) return false;
           ].join('\n'),
         );
       } else if (r.fail === 'time') {
-        parts.push(
+        _tailDyn.push(
           [
             '## ⏰ 他刚让你提醒他一件事，但**你没听清是什么时候**',
             '',
@@ -17537,7 +18330,7 @@ if (privateWork.isWorkChat(event)) return false;
           ].join('\n'),
         );
       } else if (r.fail) {
-        parts.push(
+        _tailDyn.push(
           [
             '## ⏰ 他刚让你提醒他一件事，但这个时间**你记不了**',
             '',
@@ -17580,7 +18373,7 @@ if (privateWork.isWorkChat(event)) return false;
     //    ⚠️ 状态本身不分群（她是一个人），但只在群里注入：私聊里没人喊她"一起吃饭"。
     if (event?.message_type === 'group') {
       const mealHint = meal.hint();
-      if (mealHint) parts.push(mealHint);
+      if (mealHint) _tailDyn.push(mealHint);
     }
  // ⚠️⚠️ 「他是谁」迷你摘要（2026-09-17报的：「**不可能什么印象都没有吧**」）。
     //    群资料确实进了提示词，但整份 4 万字里它在**中段**，她没翻到（中段迷失）。
@@ -17600,7 +18393,7 @@ if (privateWork.isWorkChat(event)) return false;
       if (who) whoParts.push(who);
       const wq = quest.whoInQuest(currentText, event?.group_id ?? '');
       if (wq) whoParts.push(wq);
-      if (whoParts.length) parts.push(whoParts.join('\n\n'));
+      if (whoParts.length) _tailDyn.push(whoParts.join('\n\n'));
     }
     // ⚠️⚠️ 2026-09-19（用户截图：他问「还记得mei吗」，她答「mei？没听过这名字，不认识」）：
     //    根因不是"她忘了" —— 是**她根本看不到名字表**（`state/names.json` 是程序用的）。
@@ -17610,7 +18403,7 @@ if (privateWork.isWorkChat(event)) return false;
     if (currentText) {
       const named = names.mentioned(currentText, event?.group_id ?? '');
       if (named.length) {
-        parts.push(
+        _tailDyn.push(
           [
             '## 👤 他这句话里提到的人，**群成员名单里有**',
             ...named.map((x) => `· ${x.name}`),
@@ -17628,9 +18421,9 @@ if (privateWork.isWorkChat(event)) return false;
     //    放在靠后位置（离提问最近，最不容易被中段迷失吃掉）。
     if (currentText) {
       const meme = memesFor(currentText);
-      if (meme) parts.push(meme);
+      if (meme) _tailDyn.push(meme);
     }
-    if (webSearch) parts.push(webSearch);
+    if (webSearch) _tailDyn.push(webSearch);
 
     // ⚠️ 2026-10-19 加：**主人的作息 / 固定习惯**（只有跟主人说话时才带）——
     //    和 `owner.md` 同一个规矩：那是他私人的东西，群友看不到 ✓
@@ -17639,8 +18432,15 @@ if (privateWork.isWorkChat(event)) return false;
     //    🚫 **工作模式（工作号私聊客户）禁用** —— 谈项目的时候发自拍不合场景 ✗
     // ⚠️ 2026-10-19：判据统一成「**这次开不开思考链**」（`thinkDisabledFor`）——
     //    用户：「**只有机器人互聊这种不开思考链的，同时不要用上工具清单**」✓
-    if (!this.thinkDisabledFor(event) && !privateWork.isWorkChat(event)) {
-      parts.push(
+    const _noPhoto = (() => {
+      try {
+        return persona.style?.()?.noPhoto === true;
+      } catch {
+        return false;
+      }
+    })();
+    if (!this.thinkDisabledFor(event) && !privateWork.isWorkChat(event) && !_noPhoto) {
+      _tailDyn.push(
         [
           "",
           "# 【想拍张照 / 发自拍的时候】",
@@ -17730,14 +18530,14 @@ if (privateWork.isWorkChat(event)) return false;
           "- 你花了多少钱 / 多少 token ⇒ `[工具:花了多少]`",
           "- **你赚了多少 / 工资 / 这个月挣了多少 / 够不够花 ⇒ `[工具:工资]`**（含往月和物价参照）",
           "- 你学过什么 ⇒ `[工具:学到什么]`",
-          "- 某个人跟你的好感度 ⇒ `[工具:好感度]`",
+          // 2026-11-24 删掉好感度的引导（工具已删；好感度每轮都在提示词里，不用查）
           // ⚠️ 2026-10-19 加（用户：「**闭嘴判定不应该是一个在思考链时可能调用的工具吗，
           //    不是每次都要判定吧**」）—— 原来系统对每条 @ 她的消息都判一次"是不是让她闭嘴"，
           //    纯烧钱 ✗ ⇒ 现在**你自己判**：读得懂上下文、知道那句是不是冲你说的，比孤立一句扔给模型准 ✓
-          "- **他让你闭嘴 / 别说了 / 安静 / 少刷几句**（确实是冲你说的）⇒ `[工具:闭嘴]`",
-          "  ⚠️ 先把答应的话说出来（「行，我不说了」）—— **工具 8 秒后才生效**，来得及 ✓",
+          "- **他让你闭嘴 / 别说了 / 安静 / 少刷几句**（确实是冲你说的）⇒ 调用「闭嘴」工具：",
+          "  「为什么」填他这次嫌的是什么，时长照他的意思（他没说就 5 分钟）—— 工具会把「静默到几点」告诉你，",
           "  ⚠️ 玩笑、或者说的不是你（他在说别人吵 / 说电影里让人闭嘴）⇒ **别调** ✗",
-          "- **你自己想歇一会儿**（这波插不上话 / 想消停一下）⇒ `[工具:闭嘴 {\"多久\":\"20分钟\"}]`",
+          "- **你自己想歇一会儿**（这波插不上话 / 想消停一下）⇒ 调用「闭嘴」工具，多久填你想要的：",
           "  （默认 5 分钟、最长 30 分钟；静默期里**有人 @ 你照样能把你叫出来**）✓",
           "- **火车 / 车次的事**（有人说自己正在赶车、问某趟车到没到、为什么晚点、几点到哪站）",
           "  ⇒ `[工具:查车次 {\"车次\":\"G1234\"}]`（车次照他说的写，`G/D/K/T/Z` 开头那种）",
@@ -17771,8 +18571,11 @@ if (privateWork.isWorkChat(event)) return false;
           "- ✅ **说不出实的就说实的**：「这是照时刻表推的，实时的我也看不着」——这句话比编一个位置强得多 ✓",
           "",
           "# 【想动手的时候】",
-          "- 他戳你、你也想戳回去 ⇒ `[工具:戳回去]`",
-          "- 群里太吵 / 你想歇会儿 ⇒ `[工具:闭嘴 {\"多久\":\"10分钟\"}]`（**最多 30 分钟**）",
+          // ⚠️ 2026-11-27 改：原来写的是「他戳你、你也想戳回去 ⇒ [工具:戳回去]」——
+          //    这条清单一向读成"可选动作列表" ⇒ 和上面那段一起把还手堆成了默认 ✗
+          //    ⇒ 收紧成判据 + 频次（一场一次），和「被戳」那段同一个口径 ✓
+          "- 他戳你、这一下值得还手（亲近的动作 / 他连着戳你好几下）⇒ 调用「戳回去」，**一场一次**",
+          "- 群里太吵 / 你想歇会儿 ⇒ 调用「闭嘴」工具（**最多 30 分钟**），完事跟群里交代一声",
           "- 写在心里，别人看不到；代码查完会把材料给你，你再**用人的口气**说一句 ✓",
           "- ⚠️ 你自己知道的、闲聊、算得出来的 ⇒ **别查**（白等几秒）✗",
           // ⚠️⚠️ 2026-10-19 加（工具化第三、四批）—— 记住 / 忘掉 / 提醒 / 引用。
@@ -17801,7 +18604,7 @@ if (privateWork.isWorkChat(event)) return false;
       // ⚠️ `event` 可能是 null（`buildSystemPrompt` 允许在没有消息事件时拼提示词，
       //    `test/schedule.js` 就是这么调的）⇒ 这里**必须先判空**，否则整条提示词崩掉 ✗
       if (event && event.message_type === 'group' && this.speakerRole(event) === 'owner') {
-        parts.push(
+        _tailDyn.push(
           [
             '',
             '# 【群里的活：只有他能让你动本机】',
@@ -17870,7 +18673,7 @@ if (privateWork.isWorkChat(event)) return false;
     if (this.speakerRole(event) === 'owner') {
       try {
         const rh = ownerRhythm.digest();
-        if (rh) parts.push(rh);
+        if (rh) _tailDyn.push(rh);
       } catch {}
     }
 
@@ -17931,10 +18734,17 @@ if (privateWork.isWorkChat(event)) return false;
     );
 
     // 合并转发的展开内容（不然只能看到「[合并转发]」三个字）
-    if (forwardText) parts.push(forwardText);
+    if (forwardText) _tailDyn.push(forwardText);
 
-    // 崩溃日志解析结果（有人发了 .log/.zip 才有）
-    if (crashLog) parts.push(crashLog);
+    /* ⚠️⚠️⚠️ 2026-11-24 删（用户：「**日志解析也有工具了吧，这几个有工具的重复的对比一下
+     *   那条路更好，然后删掉另一条路**」）——
+     *   原来这里注入 `crashLog`（= `logText`，群友发 .log/.zip 时的解析摘要），
+     *   而**「看错误报告」工具**（`tools-fc.js`）做得更全：
+     *     · 真去把文件取下来、解压、挑出 `Caused by:` 那行
+     *     · 返回**上传者**（昵称+QQ，防张冠李戴）+ **message_id**（让她能引用那条）
+     *     · 支持参数 `谁`（群里好几个人都发过时挑人）
+     *   注入那条只有一个静态摘要、还不能引用 ⇒ **同一条路两套数据，留工具** ✗
+     *   ⚠️ 参数 `crashLog` 保留在签名里（调用方还在传），只是不再注入 ✓ */
 
     // 电脑状态：把运行这个机器人的电脑当成小祥的工作电脑
     /* ⚠️ 2026-11-23 挪进 kTail —— CPU / 内存 / 网络每轮都在变（实测卡在 85.3%），
@@ -17985,7 +18795,7 @@ if (privateWork.isWorkChat(event)) return false;
 
     // 这次说话的由来
     if (voluntary === 'question') {
-      parts.push(
+      _tailDyn.push(
         [
           '\n## 这次没人 @ 你，是你自己看到有人问服务器的事，主动接的',
           '',
@@ -17996,7 +18806,7 @@ if (privateWork.isWorkChat(event)) return false;
         ].join('\n'),
       );
     } else if (voluntary === 'followUp') {
-      parts.push(
+      _tailDyn.push(
         [
           '\n## 这次是「对话延续」——你们刚才正在聊，对方又说话了',
           '',
@@ -18007,7 +18817,7 @@ if (privateWork.isWorkChat(event)) return false;
         ].join('\n'),
       );
     } else if (voluntary === 'chat') {
-      parts.push(
+      _tailDyn.push(
         [
           '\n## 这次是「自由接话」——群里的消息跟服务器无关，但你觉得能接一句',
           '',
@@ -18030,9 +18840,9 @@ if (privateWork.isWorkChat(event)) return false;
       );
     } else if (voluntary === 'share') {
       const s = this.shareHint();
-      if (s) parts.push(s);
+      if (s) _tailDyn.push(s);
     } else if (voluntary === 'sticker') {
-      parts.push(
+      _tailDyn.push(
         [
           '\n## 这次是有人发了个**没见过的新表情**，你在接梗',
           '',
@@ -18047,7 +18857,7 @@ if (privateWork.isWorkChat(event)) return false;
         ].join('\n'),
       );
     } else if (voluntary === 'mention') {
-      parts.push(
+      _tailDyn.push(
         [
           // ⚠️ 2026-09-21：名字从 identity 来（shortName = 群里那种昵称叫法）
           `\n## 这次没人 @ 你，是有人在聊到「${persona.shortName()}」/ 聊到你，你自己冒泡接的话`,
@@ -18090,7 +18900,7 @@ if (privateWork.isWorkChat(event)) return false;
       summoned = false;
     }
     if (!summoned) {
-      parts.push(
+      _tailDyn.push(
         [
           '\n## ⚠️ 现在**没人在指名跟你说话**（没人 @ 你、没人叫你的名字、也没人引用你的话）',
           '',
@@ -18133,7 +18943,7 @@ if (privateWork.isWorkChat(event)) return false;
     //    ⚠️ 关键点：这类话她**根本没有数据**。"谁喊了你几次、什么时候喊的"
     //      上下文里只有**聊天记录**，那不是账本 —— 说了就是编。
     if (event && String(event.message_type) === 'group') {
-      parts.push(
+      _tailDyn.push(
         [
           '## ⚠️ 别清点对方做过什么（你没有这个数据）',
           '',
@@ -18403,7 +19213,7 @@ if (privateWork.isWorkChat(event)) return false;
       if (event?.message_type === 'group') {
         const ats = this.atTargetsOf(String(event.group_id ?? ''));
         if (ats.length) {
-          parts.push(
+          _tailDyn.push(
             [
               '',
               '# 【想叫另一个机器人做事，就 @ 它】',
@@ -18426,7 +19236,13 @@ if (privateWork.isWorkChat(event)) return false;
         }
       }
 
-      parts.push('\n' + this.attitudeFor(this.speakerRole(event), event));
+      /* ⚠️⚠️⚠️ 2026-11-24 挪进 `_tailDyn`（用户：**缓存只有 70% 左右，继续查**）——
+       *   实测分叉点就在这一段（72.4%）：`## 当前对话者：**<主人> 本人**`（4,158 字）
+       *   vs `## 现在跟你说话的是：普通群友 XXX`（910 字）——
+       *   **每换一个人说话，整段的长度和内容都不一样** ⇒ 它后面 27% 全部重算 ✗
+       *   ⚠️ 它同时是"这是谁"（状态）和"对他什么态度"（引导），
+       *      但既然是**按当前说话人**生成的，放末尾才对（离提问最近、也不会拖累前缀）✓ */
+      _tailDyn.push('\n' + this.attitudeFor(this.speakerRole(event), event));
 
       // ⚠️⚠️ 2026-09-30 加：人设包的「对主人例外」开关。
       //
@@ -18561,7 +19377,7 @@ if (privateWork.isWorkChat(event)) return false;
       //    还击，但**不许跟着骂、不许拿"妈"回敬**。
       //    （起因：用户问「为什么刚才那句骂人的话不反击」。）
       if (event._swearAtMom) {
-        parts.push(
+        _tailDyn.push(
           [
             '\n# 🚨 他刚才骂的是你妈',
             '',
@@ -18590,7 +19406,7 @@ if (privateWork.isWorkChat(event)) return false;
         });
         // ⚠️ 2026-09-30：暖色被关掉时（黑祥 / 演示模式）**不注入** ——
         //    "好感度 XX/100"本质是"你们有多亲近"，对厌世版的人设是反向暗示。
-        if (line && this.warmAllowed()) parts.push('\n' + line);
+        if (line && this.warmAllowed()) _tailDyn.push('\n' + line);
       } catch (e) {
         log.debug(`好感度注入失败：${e.message}`);
       }
@@ -18618,7 +19434,7 @@ if (privateWork.isWorkChat(event)) return false;
         try {
           const streak = recent.challengeStreak(event);
           if (streak >= 2) {
-            parts.push(
+            _tailDyn.push(
               '\n' +
                 [
                   '⚠️ **这一句必须"接住"，不许再质疑。**',
@@ -18646,7 +19462,7 @@ if (privateWork.isWorkChat(event)) return false;
         try {
           const th = tic.ticHint(event.group_id);
           if (th) {
-            parts.push('\n' + th);
+            _tailDyn.push('\n' + th);
             // ⚠️ 2026-09-17 修：这里原来取的是 `.repeated?.head`，而 `tic.status()` 给的是
             //    `{g, kind, count}`（`head` 是**老格式**的字段名）—— 于是日志一直打
             //    「注入抑制提示：undefined…」，看着像口癖功能坏了（其实是找不到字段）。
@@ -18723,7 +19539,7 @@ if (privateWork.isWorkChat(event)) return false;
     //       这是这个项目反复验证过的 —— **1.2 万字人设里的规矩，模型会当背景音忽略**；
     //       只有放在**最靠近对话**的位置、而且**只在真被问到时**才出现，才管用。
     if (event && /如何评价|怎么评价|评价一下|你觉得.{0,8}(怎么样|怎样|如何|好不好)|(怎么|如何)看|对.{1,8}的看法|是什么样的人|是个什么样/.test(String(currentText ?? ''))) {
-      parts.push(
+      _tailDyn.push(
         [
           '\n## ⚠️ 他是在问你「怎么看某某」—— **别写成评价**',
           '',
@@ -18751,7 +19567,7 @@ if (privateWork.isWorkChat(event)) return false;
     //      那是**客服小祥那套**；黑祥演示模式要的正好相反（一样冷、一样往外推、可以带刺）。
     //      而且它是**放在最末尾**的（影响力最大），不关掉的话人设怎么写都白搭。
     if (event && this.speakerRole(event) === 'owner' && config.persona?.ownerException !== false) {
-      parts.push(
+      _tailDyn.push(
         [
           '',
           '# 🚨 最后提醒：他不是群友',
@@ -18811,7 +19627,7 @@ if (privateWork.isWorkChat(event)) return false;
       const meQQ = String(this.selfId ?? '');
       batteryLife.publish(meQQ);
       const bdPower = batteryLife.guide({ selfId: meQQ });
-      if (bdPower) parts.push(bdPower);
+      if (bdPower) _tailDyn.push(bdPower);
     } catch {}
 
     try {
@@ -18834,7 +19650,7 @@ if (privateWork.isWorkChat(event)) return false;
             .map((q) => birthday.personaIdOfQQ(q))
             .filter(Boolean),
         });
-        if (bdNote) parts.push(bdNote);
+        if (bdNote) _tailDyn.push(bdNote);
       }
     } catch {}
 
@@ -18855,7 +19671,7 @@ if (privateWork.isWorkChat(event)) return false;
         // ⚠️ 文案收在 `member-birthday.js` 的 `note()` 里（和日常事件、剧情**共用同一段**）——
         //    分开写两遍的话，"门槛 90"和"怎么写 @"这两件事迟早在两边漂移 ✗
         const line = memberBirthday.note(gidB);
-        if (line) parts.push(line);
+        if (line) _tailDyn.push(line);
       }
     } catch {}
 
@@ -18921,7 +19737,7 @@ if (privateWork.isWorkChat(event)) return false;
             });
             const p = String(sp?.premise ?? sp ?? '').trim();
             if (p) {
-              parts.push(
+              _tailDyn.push(
                 '\n🔴🔴 **这个群正在演一条剧情，而且你就在那个场景里**（不是收到消息，是你亲眼看见的）：\n' +
                   `   「${p}」\n` +
                   '   🚫 不许写"收到消息 / 手机响了一下 / 把手机按灭 / 回你" —— 你和她此刻在同一个地方，身体能碰到 ✗\n' +
@@ -18938,7 +19754,7 @@ if (privateWork.isWorkChat(event)) return false;
         try {
           const midHint = String(quest.nextHint(String(event?.group_id ?? '')) ?? '').trim();
           if (midHint) {
-            parts.push(
+            _tailDyn.push(
               '\n🔴🔴🔴 **群主刚刚下的剧情命令（最高优先级 —— 这一轮必须照做）**：\n' +
                 `   「${midHint}」\n` +
                 '   🚫 和其他任何规矩冲突时，**以这一条为准** ✓\n' +
@@ -18955,7 +19771,7 @@ if (privateWork.isWorkChat(event)) return false;
       try {
         const wipedUntil = this.questWipedUntil?.get(gidR) ?? 0;
         if (wipedUntil > Date.now()) {
-          parts.push(
+          _tailDyn.push(
             '\n' +
               [
                 '⚠️⚠️ **刚才那条剧情已经被管理员清掉了（作废）**：',
@@ -18998,12 +19814,12 @@ if (privateWork.isWorkChat(event)) return false;
     //    ⚠️ `runningNote()` 是**同步**的（本函数全程同步，await 不了）；
     //    ⚠️ 它每轮都在变（"N 分钟前"）⇒ 只能放**动态区（末尾）**，别插到人设前面（会打掉上下文缓存）。
     const onHand = agentBridge.runningNote();
-    if (onHand) parts.push(`\n${onHand}`);
+    if (onHand) _tailDyn.push(`\n${onHand}`);
     // ⚠️⚠️ 2026-10-13 加（用户截图：他问「这个 py 文件怎么用」，她回「哪个 py，发来看看呗」✗）：
     //    「**如果是在问和之前任务相关的话题时，要能接上**」
     //    ⇒ 最近做完的活也给她（任务 + 成没成 + 产物叫什么），她才能接上话 ✓
     const doneNote = agentBridge.recentDoneNote();
-    if (doneNote) parts.push(`\n${doneNote}`);
+    if (doneNote) _tailDyn.push(`\n${doneNote}`);
     // ⚠️⚠️ 2026-10-14 加（用户截图：他 @她「**继续完善昨天的 PPT**」，
     //    她回「**昨天的 PPT？我这边没留底诶**」✗）：
     //    `recentDoneNote()` 只看**最近 6 小时** ⇒ 昨天那条活早出窗口，
@@ -19013,13 +19829,13 @@ if (privateWork.isWorkChat(event)) return false;
     //      和 `recentDoneNote` 不重叠）—— 她"昨天的那个""上次那个"就能对上号了 ✓
     //    ⚠️ 同样放**末尾动态区**（它偶尔才变，插人设前面会打掉上下文缓存）✓
     const ledgerNote = agentBridge.taskLedgerNote();
-    if (ledgerNote) parts.push(`\n${ledgerNote}`);
+    if (ledgerNote) _tailDyn.push(`\n${ledgerNote}`);
     // ⚠️⚠️ 2026-10-14 加（用户：「**直接把 agent 设定为 saki 自己的电脑**，
     //    由她自己决定什么时候该用电脑…」）：
     //    她得**知道自己有台电脑** —— 不然别人问起、或者她自己说到做过的活时，
     //    会冒出"我没有电脑""我打不开文件"这种话 ✗（那台电脑就是她的 ✓）
     if (agentBridge.enabled()) {
-      parts.push(
+      _tailDyn.push(
         [
           '',
           '# 🖥️ 你自己有一台电脑',
@@ -19044,7 +19860,7 @@ if (privateWork.isWorkChat(event)) return false;
 
     if (event && this.speakerRole(event) === 'owner') {
       const wantException = config.persona?.ownerException !== false;
-      parts.push(
+      _tailDyn.push(
         [
           '',
           '# 🚨 最后一条：被问「你和我是什么关系」时怎么说',
@@ -19079,7 +19895,7 @@ if (privateWork.isWorkChat(event)) return false;
     //      会把整个回复拖慢一拍。所以状态全在内存里，落盘在别的时机做 ✓
     try {
       const pwNote = privateWork.noteFor(event);
-      if (pwNote) parts.push(pwNote);
+      if (pwNote) _tailDyn.push(pwNote);
     } catch (e) {
       log.debug(`[私聊工作] 状态块注入失败（不影响聊天）：${e.message}`);
     }
@@ -19101,7 +19917,7 @@ if (privateWork.isWorkChat(event)) return false;
     //    ⚠️ 缺一个就一个字都不加 —— 别把"老早以前聊过"也算成"刚才那段"。
     try {
       const carry = this.carryOnBlock(event, currentText);
-      if (carry) parts.push(carry);
+      if (carry) _tailDyn.push(carry);
     } catch (e) {
       log.debug(`[承接] 提示词块注入失败（不影响聊天）：${e.message}`);
     }
@@ -19109,8 +19925,34 @@ if (privateWork.isWorkChat(event)) return false;
     // ⚠️⚠️ 2026-10-24 加（用户：「**这个群是新建的群**」—— 那真实群比模拟多出的 1.9 万字
     //    就不该是"历史积累"了，得查清楚到底差在哪）：
     //    把每一段的字数按大小排出来打一行 —— 一眼就能看出那 1.9 万是谁 ✗
+    /* ⚠️⚠️⚠️ 2026-11-24 加：动态段（戳一戳 / 戳回去…）**攒到这里才 push** ——
+     *   它们每轮都变，夹在中段的话后面 52 段静态内容全部作废（实测公共前缀只到 78.5%）✗
+     *   ⚠️ 排在 `kTail` 之前没问题：那几段也都是"每轮会变"的，只要都落在静态区之后就行 ✓ */
+    if (_tailDyn.length) parts.push(..._tailDyn);
     //    （只在剧情里打，日常不打；每段只打前 16 字当标签）
     try {
+      /* ⚠️⚠️⚠️ 2026-11-24 加（用户：「**你查分叉点不能一次多查几个吗**」）——
+       *   原来只丢两份全文（`_prompt-*.prev/last`），一次只能定位**最早**那个分叉点
+       *   ⇒ 修一个、下一个顶上，来回挤牙膏（今晚已经来回 4 次）✗
+       *   ⇒ 每轮把**每一段的指纹**（FNV 哈希 + 长度 + 开头 24 字）追加到
+       *      `logs/_seg-fp.ndjson`。累积十几轮后可以**一次**算出"哪些段每轮都在变"，
+       *      不用再一个个试 ✓
+       *   ⚠️ 纯诊断：不参与任何判断，查完把这几十行和 `appendFileSync` 导入删掉即可 ✓ */
+      try {
+        const fp = parts.map((p) => {
+          const t = String(p ?? '');
+          let h = 2166136261;
+          for (let k = 0; k < t.length; k++) {
+            h ^= t.charCodeAt(k);
+            h = Math.imul(h, 16777619) >>> 0;
+          }
+          return `${h.toString(16)}|${t.length}|${t.slice(0, 24).replace(/\s+/g, ' ')}`;
+        });
+        appendFileSync(
+          'logs/_seg-fp.ndjson',
+          JSON.stringify({ at: new Date().toISOString(), key: String(event?.group_id ?? ''), n: parts.length, fp }) + '\n',
+        );
+      } catch {}
       /* ⚠️ 2026-11-07 改（用户：「60+ 还是不够，没省多少钱」）——
        *   要看清 13.8 万字到底被谁占着，就得每一条都打一次明细。
        *   原来只在**演剧情**时打（条件太窄，日常聊天看不到）。
@@ -19755,12 +20597,47 @@ if (privateWork.isWorkChat(event)) return false;
           raw = fixed;
         }
       }
-      /* ⚠️ 2026-11-21（用户：「**不知道发什么文字好的时候可以直接发表情而不发文字**」）——
-       *   她这一轮只调了动作类工具（发送表情 / 戳回去 / 闭嘴）⇒ **不发文字**，动作照发 ✓
-       *   ⚠️ 表情走 sendFaceFile，不经过这里 ⇒ 图照发 ✓ */
-      if (event?._onlyActTools) {
-        log.info('[发送] 这一轮只发了动作类（表情/戳/闭嘴）⇒ 跳过文字 ✓');
+      /* ⚠️⚠️⚠️ 2026-11-24 改（用户：「**每次调用了回戳之后消息正文都显示不出来**」）——
+       *   原来这里**无条件** `return null` ⇒ 她只要调了「戳回去 / 发送表情」，
+       *   **写好的正文一个字都不发** ✗（截图现场：思考里已经把话说好了
+       *   「都几点了还捏呢，不困啊」13 字，回复栏却是「（还没开始写）」）
+       *   ⚠️ 那条 2026-11-21 的原始要求是「**不知道发什么文字好**的时候可以只发动作」——
+       *      **前提是没话说**，不是"调了动作就禁止说话" ⇒ 这里按那个原意改：
+       *      只有**她确实没写正文**才跳过；写了就照发（动作 + 一句话）✓ */
+      /* ⚠️⚠️⚠️ 2026-11-26 加：她自己调了「不接」⇒ **这条一个字都不发**（工具已经戳过对方）。
+       *   放在动作类那条之前 —— 那一条只清"没写正文"的情况，而这里是她**明确不想开口**，
+       *   哪怕正文已经写好了也要丢掉 ✓ */
+      if (event?._skipSpeak) {
+        log.info('[发送] 她调了「不接」⇒ 这一轮不发言 ✓');
+        try {
+          if (event?._thinkId) {
+            thinkLog.finish(event._thinkId, { reply: '（这一轮她判断这话不该接，没有发言）', ...thinkModelOf() });
+          }
+        } catch {}
         return null;
+      }
+      if (event?._onlyActTools) {
+        const body = String(raw ?? '').trim();
+        if (!body) {
+          /* ⚠️ 2026-11-27：**只有表情没有正文** ⇒ 也得真发出去（不然那张图永远在排队）*/
+          if (event?._pendingFace) {
+            const _pf2 = String(event._pendingFace);
+            event._pendingFace = '';
+            try { await this.sendFace(event, _pf2); } catch (e) { log.warn(`表情兜底发送失败：${e.message}`); }
+          }
+          log.info('[发送] 这一轮只调了动作类、也没写正文 ⇒ 跳过文字 ✓');
+          /* ⚠️ 2026-11-25 加（用户：「只发表情不发文字消息的情况我还没见过，是不是不行」
+           *   +「调用了表情或者回戳，思考链页面的卡片还是显示不了回复正文」）——
+           *   这一轮**确实什么都没发**（只发了表情/戳），卡片不能停在「（还没开始写）」，
+           *   得说清"这轮只发了动作" —— 否则看起来像生成失败 ✗ */
+          try {
+            if (event?._thinkId) {
+              thinkLog.finish(event._thinkId, { reply: '（这一轮只发了表情/动作，没有文字）', ...thinkModelOf() });
+            }
+          } catch {}
+          return null;
+        }
+        log.info(`[发送] 这一轮调了动作类，但她写了正文（${body.length} 字）⇒ 照发 ✓`);
       }
  /* ⚠️⚠️ 2026-10-21截图报的：「为什么工具直接输出正文了而不是思考链？」
      *   截图里发出去的是 `[工具:语音] 别捏了嘛，脸都要被你捏歪了` ✗
@@ -19828,7 +20705,20 @@ if (privateWork.isWorkChat(event)) return false;
     //    但万一她还是写了 `[表情:xxx]`，`stripMarkers` 只会把标记从**正文**里剥掉，
     //    `markers` 数组照样会让图片发出去 ⇒ 这里必须清空。
     //    ⚠️ 只清表情，**拍照标记不动**（那是另一个机制，用户没让关）。
-    const markers = this.warmAllowed() ? pickMarkers(raw) : [];
+    /* ⚠️⚠️⚠️ 2026-11-25 改（用户明确要求：「**不要两条路了，就留工具这一套**」）——
+     *
+     *   原来有两条发图的路：
+     *     ① 正文里写 `[表情:名字]` → `pickMarkers()` 解析 → 发图
+     *     ② 调 `send_sticker` 工具 → 发图
+     *   两条并存的结果：她更爱走**写标记**（便宜、不用 function calling），
+     *   而标记那条又被 `sendEvery` 频率闸挡（每 6 条才放一张），
+     *   表现就是"表情几乎发不出来 / 老是同一张"，还多出一套要维护的口径 ✗
+     *
+     *   ⇒ **标记路整个关掉**（`markers` 恒为空 ⇒ 不再发图），只留工具那套 ✓
+     *   ⚠️ `stripMarkers(raw)` 那边**照旧剥** —— 她万一还是写了标记，
+     *      字面绝不能漏到群里（那会变成一条莫名奇妙的方括号消息）✗
+     */
+    const markers = [];
     // 拍照标记（`[拍照:场景]`）—— 和表情是**两套**，见 `faces.js` 的 `pickPhoto()`
     const photo = pickPhoto(raw);
     // ⚠️⚠️ 2026-09-19 加（用户连着报两次"群里出现字面 [表情包] / [图片]"）：
@@ -19955,7 +20845,31 @@ if (privateWork.isWorkChat(event)) return false;
     try {
       let sentText = '';
       if (text) {
-        await this.sendText(event, text, { reply: quote });
+        /* ⚠️⚠️⚠️ 2026-11-26 修（用户：「**分条机制完全没起作用，很长一段话都挤在一条**」）——
+         *
+         *   原来这里是一句 `sendText(event, text)` ⇒ **整段一条发出去** ✗
+         *   而分条逻辑只写在**流式**那条路里（见 11786 那段）⇒
+         *   凡是"非流式"的回复（工具回合之后重新生成的那段、日常事件、定时任务…）
+         *   **一律不分条**，几十上百字挤成一条，一眼就是机器 ✗
+         *
+         *   ⇒ 这里也按句末切开（最多 `maxChunks` 条），和流式那条口径一致 ✓
+         */
+        const chunks = this.splitForSend(text);
+        if (chunks.length > 1) {
+          log.info(`[分条] 非流式回复 ${String(text).length} 字 → 拆成 ${chunks.length} 条（各 ${chunks.map((c) => c.length).join('/')} 字）`);
+        }
+        for (let i = 0; i < chunks.length; i++) {
+          const piece = chunks[i];
+          if (!piece) continue;
+          if (i > 0) {
+            // 条间停顿（和流式那条同一个函数，带随机抖动）
+            try {
+              const wait = this.chunkDelay ? this.chunkDelay() : 0;
+              if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+            } catch {}
+          }
+          await this.sendText(event, piece, { reply: quote && i === 0 });
+        }
         sentText = text;
         // ⚠️⚠️ 她在剧情群里**接的话**也要算剧情发展（2026-09-15 晚 <主人> 截图反馈：
         //    「机器人已经答应了的话，应该要计入剧情发展」）——见下面那个方法。
@@ -19990,6 +20904,14 @@ if (privateWork.isWorkChat(event)) return false;
       //    观感就是"连着甩两张图"。
       //    真人在群里一次只发一张表情（真要发第二张，也会先补一句话）——
       //    所以现在**只发第一个**，多余的丢掉（下面有 debug 日志记着丢了几张）。
+      /* ⚠️ 2026-11-27：**工具发的表情也排到正文之后** —— 它现在只在工具回合里排了队
+       *   （见 `runReadTool` 的 `event._pendingFace`），到这里和正文标记汇合、正文发完才真发 ✓
+       *   ⚠️ 插在最前面 ⇒ 下面的 `slice(0, 1)` 只会发它一张（不会工具一张、标记又一张）✓ */
+      if (event?._pendingFace) {
+        const _pf = String(event._pendingFace);
+        event._pendingFace = '';
+        keepMarkers.unshift({ tag: _pf });
+      }
       for (const m of keepMarkers.slice(0, 1)) {
         await sleep(280);
         await this.sendFace(event, m.tag);
@@ -20040,6 +20962,146 @@ if (privateWork.isWorkChat(event)) return false;
     }
     // 兜底：照常当文字发（绝不让她说的话消失）
     try { await this.sendText(event, t); } catch (e) { log.warn(`[群语音] 文字兜底也失败：${e.message}`); }
+  }
+
+  /**
+   * ⚠️⚠️ 2026-11-26 加：把一段话按**句末**切成最多 `maxChunks` 条（**非流式**路径用）。
+   *
+   * 为什么需要：流式那条路有自己的分条（见 11786 那段），但"工具回合之后重新生成"
+   * 的比赛回复、日常事件、定时任务都走**非流式** ⇒ 原来整段一条发，几十上百字挤一起 ✗
+   *
+   * 规则：按 `。！？；!?;…` 和换行切（保留标点）；超过 `maxChunks` 就把尾巴合并成一条；
+   *      某一段空掉直接丢掉；链接单独一行时自然会成为独立一条（用户要的"链接单独发"）。
+   */
+  splitForSend(text) {
+    const raw = String(text ?? '').trim();
+    if (!raw) return [];
+    let maxChunks = 3;
+    let softLimit = 40;
+    try {
+      const c = chunkCfg();
+      maxChunks = Math.max(1, Number(c.maxChunks) || 3);
+      /* 单条软上限 = 配置的单条上限 × 2（非工作模式 `max` 已被砍半 ⇒ 这里是 40 字） */
+      softLimit = Math.max(24, (Number(c.max) || 40) * 2);
+    } catch {}
+
+    /* ⚠️⚠️⚠️ 2026-11-26 重写（用户：「分条机制完全没起作用，很长一段话都挤在一条」）——
+     *   上一版只按句末 `。！？；` 切、而且**最多 3 条** ⇒ 她那种"一句里全是（动作）（叹气）"的
+     *   口语，句号本来就少 ⇒ 实测切出来是 `18 / 216 / 60` 字，中间那条 216 字还是
+     *   "一大段挤在一条"✗
+     *
+     *   现在：**先把末尾链接摘出来**（不然按 `:` 切会把 `https://` 切成两条 ✗），
+     *   再按标点贪心切到"总字数 ÷ 单条软上限"估出的条数（最多 `maxChunks + 1` 条），
+     *   最后把链接**单独**放一条 ✓
+     */
+    let body = raw;
+    let link = '';
+    const lm = /(https?:\/\/\S+)\s*$/.exec(body);
+    if (lm && body.length > lm[1].length + 16) {
+      link = lm[1];
+      body = body.slice(0, lm.index).trim();
+    }
+    /* ⚠️⚠️ 2026-11-27 加（用户：「**能不能让她自己想切就切**」）——
+     *   **她自己分段的地方优先**：她在回复里换了行 = 她想分几条发 ⇒ 一条一段照办，
+     *   不再拿总字数去重新算一遍（那样等于把她自己划的段抹掉，又回到"按字数硬切"✗）。
+     *   ⚠️ 只有三种情况才动她划的段：
+     *     · 某一段本身太长（> 1.5× 软上限）⇒ 只在那一段内部再切；
+     *     · 段数超过 `maxChunks + 1` ⇒ 把最短的相邻两段并回去（别一条回复刷七八个气泡）；
+     *     · 没换行 ⇒ 才回落到下面那套"打分挑断点"的兜底 ✓
+     *   ⚠️ 空行也认（`\n+` 一次吃掉），她想隔一行分就隔一行 ✓ */
+    const paras = body.split(/\n+/).map((s) => s.trim()).filter(Boolean);
+    let out;
+    if (paras.length > 1) {
+      const segs = [];
+      for (const p of paras) {
+        if (p.length <= softLimit * 1.5) {
+          segs.push(p);
+        } else {
+          segs.push(...this._splitByScore(p, Math.max(2, Math.ceil(p.length / softLimit))));
+        }
+      }
+      while (segs.length > maxChunks + 1) {
+        let bi = 0;
+        let best = Infinity;
+        for (let k = 0; k < segs.length - 1; k++) {
+          const s = segs[k].length + segs[k + 1].length;
+          if (s < best) {
+            best = s;
+            bi = k;
+          }
+        }
+        segs.splice(bi, 2, segs[bi] + segs[bi + 1]);
+      }
+      out = segs;
+      log.debug(`[分条] 她自己分了 ${paras.length} 段 ⇒ 照办（发 ${segs.length} 条）`);
+    } else {
+      const want = Math.min(
+        maxChunks + 1,
+        Math.max(1, Math.ceil(body.length / softLimit)),
+      );
+      out = want <= 1 || body.length <= softLimit ? [body] : this._splitByScore(body, want);
+    }
+    if (link) out.push(link);
+    return out.filter(Boolean);
+  }
+
+  /**
+   * 把一大段**没有她自己分段**的文字切成 `want` 条 —— 挑"最像换气处"的断点。
+   *
+   * ⚠️⚠️ 2026-11-27 加（用户：「**这种代码分句还是太僵硬了**」）——
+   *   上一版按「总字数 ÷ 条数」算目标长度、**凑够就切** ⇒ 切点全落在逗号上：
+   *   实测 70 / 72 / 65 / 80 字四条，其中两条是「…群里丢一句好了，」「…我记得你当时那个兴致，」
+   *   这种从句中间断开的样子，一眼就是机器切的 ✗
+   *
+   *   现在给每个候选断点打"自然度"分，再挑分数最高的：
+   *     · 句末 `。！？；…` 或换行 = 最自然（+100）
+   *     · 逗号后面紧跟转折/因果词（但他 / 可你 / 所以 / 然后…）= 次自然（+40）
+   *     · 普通逗号 = 一般（+10）· 顿号 = 根本不该断（−10）
+   *   条数规模不变，断点会自己挪到句号上 ✓
+   */
+  _splitByScore(body, want) {
+    const UNITS = String(body ?? '').split(/(?<=[。！？；!?;…\n，、,：:])/).filter((s) => s.trim());
+    if (UNITS.length <= 1) return [String(body ?? '').trim()];
+    const scoreAfter = (i) => {
+      const tail = UNITS[i] ?? '';
+      const next = UNITS[i + 1] ?? '';
+      let s = 0;
+      if (/[。！？；!?;…]\s*$/.test(tail)) s += 100;
+      else if (/\n\s*$/.test(tail)) s += 100;
+      else if (/[，,：:]\s*$/.test(tail)) s += 10;
+      else if (/、\s*$/.test(tail)) s -= 10;
+      if (/^\s*(但|可|不过|所以|然后|于是|因为|反正|其实|要是|如果|只是|再说|结果)/.test(next)) s += 40;
+      return s;
+    };
+    const out = [];
+    let idx = 0;
+    while (idx < UNITS.length - 1 && out.length < want - 1) {
+      const left = UNITS.slice(idx).reduce((a, b) => a + b.length, 0);
+      const target = left / Math.max(1, want - out.length);
+      /* 先走到"字数接近目标"的那个 unit 边界，再在它前后两格内挑分数最高的 */
+      let acc = 0;
+      let cand = idx;
+      while (cand < UNITS.length - 1 && acc < target) {
+        acc += UNITS[cand].length;
+        cand++;
+      }
+      let cut = cand;
+      let bestScore = -Infinity;
+      for (let k = Math.max(idx + 1, cand - 2); k <= Math.min(UNITS.length - 1, cand + 2); k++) {
+        const lenBefore = UNITS.slice(idx, k).reduce((a, b) => a + b.length, 0);
+        const ratio = lenBefore / target;
+        if (ratio < 0.62 || ratio > 1.5) continue; // 太短 / 太长都不算候选
+        const sc = scoreAfter(k - 1) - Math.abs(1 - ratio) * 30;
+        if (sc > bestScore) {
+          bestScore = sc;
+          cut = k;
+        }
+      }
+      out.push(UNITS.slice(idx, cut).join('').trim());
+      idx = cut;
+    }
+    if (idx < UNITS.length) out.push(UNITS.slice(idx).join('').trim());
+    return out.filter(Boolean);
   }
 
   trimChunk(text) {
@@ -20244,33 +21306,41 @@ if (privateWork.isWorkChat(event)) return false;
     return [...new Set(problems)];
   }
 
-  /** 起定时器，定期检查要不要发说说 */
   /**
-   * 定期查 API 余额（= 小祥的「工资」），低于档位就在「1 档群」抱怨一句。
+   * 定期查 API 余额（= 小祥的「工资」），低于档位就**私聊提醒主人**。
    *
-   * ⚠️ 用户要求（2026-09-13），三条都要满足：
+   * ⚠️ 2026-09-13 定的三条（①档位 ②③见下）**仍然有效**：
    *   ① 「把余额和祥子的工资设定结合到一起，低于5块抱怨一次，低于2块再抱怨一次」
-   *   ② 「**没人说话时也自动发送**」← 冷场时自言自语才自然；
-   *      群里正聊得热闹时插一句"我工资没了"会打断话题
-   *   ③ 「**只在设定为 1 的群发送**」← 2/3 档是安静档，不该有这种主动发言
-   *   ④ 「如果有人接话机器人**要知道自己抱怨了什么**」←
-   *      抱怨的话要**记进群上下文**（`recent.rememberBot`），
-   *      否则别人回一句「你工资怎么了」它会一脸茫然
-   *      （这个坑踩过：不记自己的发言，模型就不知道上一句自己说了什么）
+   *
+   * ⚠️⚠️ 2026-11-27 推翻/作废的两条（原话：「**把余额提醒从 1 档群提前
+   *   改成只对主人私聊提醒**」）：
+   *   ② 「**没人说话时也自动发送**」（冷场才发）—— 作废。
+   *      "等群里冷清下来再说"在热闹的群里**几乎永远不成立**，越是急需提醒越发不出去 ✗
+   *   ③ 「**只在设定为 1 的群发送**」—— 作废。这条提醒的收件人只有他一个，
+   *      发到群里等于当着全部群友的面催他充钱 ⇒ 改成私聊 ✓
+   *
+   * ⚠️ 原第 ④ 条（"她要知道自己抱怨了什么"）也随之作废：
+   *    那句只对他一个人说，不再进群上下文。
    */
   startBalanceWatch() {
     const b = config.balance ?? {};
     if (b.enable === false) return;
     const interval = Math.max(60000, Number(b.checkIntervalMs) || 30 * 60 * 1000);
-    // 冷场判定：最后一条消息多久之前（默认 3 分钟没人说话就算冷场）
-    const quietMs = Math.max(30000, Number(b.quietMs) || 3 * 60 * 1000);
 
-    // ⚠️ 「1 档群」= `trigger.groupRespondTo` 里值为 1 的群。
-    //    和月末工资单共用同一份名单（`level1Groups()`）——
-    //    两处各写一遍的话，改了一处忘另一处，就会出现"抱怨发到了工资单不发的群"
-    const groups = this.level1Groups();
-    if (!groups.length) {
-      log.info('工资余额监控：没有 1 档群，跳过（不会主动发）');
+    /* ⚠️⚠️ 2026-11-27 改（用户：「**把余额提醒从 1 档群提前改成只对主人私聊提醒**」）——
+     *
+     *   原来是「每个 1 档群各提醒一次」，而且偏低档还要**等群里冷场 3 分钟**才发。
+     *   两个毛病：
+     *     · 这条提醒的收件人**本来就只有他一个**，发到群里等于当着全部群友的面催老板充钱；
+     *     · "冷场才发"那道闸在热闹的群里几乎永远不满足 ⇒ **越急着要提醒越收不到** ✗
+     *   ⇒ 现在只发给主人**私聊**：一处、立刻到、不看冷场 ✓
+     *   ⚠️ 档位（见底 / 偏低）、去重（`balanceComplaint`）、"彻底耗尽就一条都不发"、
+     *      "润色不出来就不发"这几条**一个字都没动** —— 变的只是"发到哪" ✓
+     *   ⚠️ 于是 `level1Groups()` 在这里不再需要（群里一条都不发了）；
+     *     `balance.quietMs` 配置也跟着失效（私聊没有"热闹不热闹"这回事）。 */
+    const owner = String(config.ownerQQ ?? '').trim();
+    if (!owner) {
+      log.info('工资余额监控：没配 ownerQQ ⇒ 不知道私聊发给谁，跳过（不会主动发）');
       return;
     }
     const tiersNow = balance.tierInfo();
@@ -20280,8 +21350,7 @@ if (privateWork.isWorkChat(event)) return false;
         //    见 `src/balance.js` 文件头那段（用户要求适配中转站）。
         `档位：${tiersNow.map((t) => `${t.label}<${t.below}`).join(' / ')}` +
         `（单位按所选余额接口返回的币种：官方 DeepSeek 一般 CNY、中转站多半 USD）；` +
-        `**每个 1 档群各提醒一次**；` +
-        `见底档直接发（@ 服主），偏低档要冷场 ${Math.round(quietMs / 60000)} 分钟：${groups.join('、')}）`,
+        `**只私聊提醒主人（${owner}）**，群里一条都不发）`,
     );
 
     const tick = async () => {
@@ -20324,85 +21393,60 @@ if (privateWork.isWorkChat(event)) return false;
           } catch (e) {
             log.debug(`[闭麦] 对齐失败：${e.message}`);
           }
-          // ⚠️⚠️ 逐个 1 档群各问一次（2026-09-15 晚改，修 <主人> 报的
-          //    「699 开头这个群好像不会发送余额报警信息」）：
-          //    · 原来**只在循环外面问一次**，标记是全局的 → 第一个群收到提醒后，
-          //      **别的群再也收不到**（而余额提醒本来就是挨个 1 档群发的）；
-          //    · 所以现在把 `balanceComplaint({ groupId: g })` 放进循环，
-          //      **每个群各记各的"提醒过了"**。
-          const now = Date.now();
-          for (const g of groups) {
-            const c = balance.balanceComplaint({ total: r.total, groupId: g });
-            if (!c.need) {
-              log.debug(
-                `[工资] 余额 ${r.total} ${balance.currencyNow() || '（币种未知）'}，群 ${g} 这次不用抱怨`,
-              );
-              continue;
-            }
-            // 冷场判定：**只有"偏低"那档才等冷场**。
-            // ⚠️ 「见底」档（< 2 元）是**@ 服主的硬提醒**，不该被这条闸挡住 ——
-            //    热闹的群（比如 699）几乎永远不冷场，等下去就是"永远收不到"。
-            const last = recent.lastMessageAt(g);
-            const quietFor = last ? now - last : Infinity;
-            if (c.tier !== 'critical' && quietFor < quietMs) {
-              log.debug(
-                `[工资] ${g} 刚有人说过话（${last ? Math.round(quietFor / 1000) + 's 前' : '无记录'}），这次不发`,
-              );
-              continue;
-            }
-            log.info(`[工资] 余额 ${r.total} ${balance.currencyNow() || '（币种未知）'} → 在 ${g} 抱怨一句（${c.tier}）：${c.line}`);
- // ⚠️ 「见底」档（< 2 元）**直接 @ 服主本人**（2026-09-13 要求：
-            //    「2 块钱提醒加一个直接@我的qq账号，增强提醒效果」）。
-            //    偏低档不 @ —— 那档只是随口提一句，每次都 @ 会变成骚扰。
-            //    ⚠️ 2026-09-15 晚：偏低档已按用户要求**关掉**（`config.balance.low: 0`），
-            //       所以现在实际只剩 @ 这一档；代码留着，改回正数就恢复。
-            // ⚠️ 2026-09-17：话术**先过一遍模型润色**（用户要求：「2块钱余额提醒的话术
-            //    出现几次雷同了，建议也加入 llm 润色」）。
-            //    失败或不合格（太长／没带 <主人>／报了数字）会退回 `c.line` 那条写死的话术。
-            // ⚠️⚠️ 2026-09-28（用户：「如果彻底没钱了直接别发就行了」）：
-            //    **余额真的耗尽（≤ 0）就一条都不发** —— 那时候模型也调不动，
-            //    润色必然失败、只能发预制话术；而"彻底没钱"这件事，
-            //    每个群提醒过一次就够了，不需要反复念。
-            if (!(Number(r.total) > 0)) {
-              log.info(`[工资] 余额 ${r.total} ${balance.currencyNow() || '（币种未知）'}（已彻底耗尽）→ 按用户要求不发提醒`);
-              break;
-            }
-            const line = await balance.phraseLine(c.tier, c.line);
-            // ⚠️ 润色拿不到就**不发**（`phraseLine` 现在失败时返回空串）——
-            //    用户明确要求「不要发预制消息」，宁可不吭声，也别刷模板话术。
-            if (!line) {
-              log.info(`[工资] ${g} 这一条没润色出来 → 不发（用户要求不发预制话术）`);
-              continue;
-            }
-            await this.sendToGroup(g, line, {
-              at: c.tier === 'critical' ? config.ownerQQ : '',
-              atName: '<主人>',
-            }).catch((e) =>
-              log.warn(`抱怨余额失败（${g}）：${e.message}`),
+          /* ⚠️⚠️ 2026-11-27：**先"试"再真记**（`dry: true`）——
+           *   原来（群里那版）是"先标记提醒过、再去润色"，润色失败这条就彻底没了。
+           *   群里那样还能接受（每个群各一次机会），**私聊只有这一处** ⇒ 一次失败
+           *   就再也不会提醒，账上没钱了主人却毫不知情 ✗
+           *   ⇒ 现在：`dry` 只问"该不该提醒、话术是哪条"（不改状态）→ 真发出去 → 才标记 ✓
+           *   没发出去 ⇒ 状态没变 ⇒ 30 分钟后的下一次 tick 还会再试 ✓ */
+          const gidKey = 'private';
+          const probe = balance.balanceComplaint({ total: r.total, groupId: gidKey, dry: true });
+          if (!probe.need) {
+            log.debug(
+              `[工资] 余额 ${r.total} ${balance.currencyNow() || '（币种未知）'}，私聊这次不用提醒`,
             );
-            // 记进上下文的内容**不带 @**（@ 只是提醒用的，不属于她说的话）
-            // ⚠️ 记的必须是**实际发出去的那句**（润色后的）——
-            //    记成兜底那句的话，别人接「你工资怎么了」她会跟自己的原话对不上。
-            const remembered = line;
-            // ⚠️⚠️ **把自己抱怨的话记进群上下文**（用户要求 ④）。
-            //     不记的话，别人接一句「你工资怎么了」它会答不上来 ——
-            //     这个坑踩过（不记自己的发言，模型不知道上一句自己说了什么）。
+            return;
+          }
+          log.info(
+            `[工资] 余额 ${r.total} ${balance.currencyNow() || '（币种未知）'} → 私聊提醒主人（${probe.tier}）：${probe.line}`,
+          );
+          // ⚠️⚠️ 2026-09-28（用户：「如果彻底没钱了直接别发就行了」）：
+          //    **余额真的耗尽（≤ 0）就一条都不发** —— 那时候模型也调不动，
+          //    润色必然失败、只能发预制话术；而"彻底没钱"这件事提醒过一次就够了。
+          if (!(Number(r.total) > 0)) {
+            log.info(`[工资] 余额 ${r.total} ${balance.currencyNow() || '（币种未知）'}（已彻底耗尽）→ 按用户要求不发提醒`);
+            return;
+          }
+          /* ⚠️ 2026-09-17：话术**先过一遍模型润色**（要求：「2块钱余额提醒的话术
+           *   出现几次雷同了，建议也加入 llm 润色」）。
+           * ⚠️⚠️ 2026-11-27：这里加 `{ dm: true }` —— 那道"**必须出现「<主人>」**"的验收闸
+           *    是**为群里写的**（群里光说"你"别人不知道在跟谁说）。私聊里只有他一个人，
+           *    模型很可能直接说"该充钱了"⇒ 被那道闸判不合格 ⇒ **一条都提醒不出来** ✗
+           *    所以私聊走"不点名也放行"那一支 ✓ */
+          const line = await balance.phraseLine(probe.tier, probe.line, { dm: true });
+          // ⚠️ 润色拿不到就**不发** —— 宁可不吭声，也别刷预制的模板话术。
+          if (!line) {
+            log.info('[工资] 这一条没润色出来 → 这次不发（下个周期再试）');
+            return;
+          }
+          // ⚠️ 私聊发送：直接调协议端，**不经过 `sendText`** ——
+          //    那样既不会被分条逻辑拆散，也不会被"闭麦"那道闸挡住
+          //    （账上快见底时正是最需要把这条提醒送出去的时候）✓
+          let sent = false;
+          try {
+            await this.call('send_private_msg', { user_id: owner, message: line });
+            sent = true;
+          } catch (e) {
+            log.warn(`私聊提醒余额失败（下个周期再试）：${e.message}`);
+          }
+          // ⚠️ **真发出去了才记"提醒过"**（见上面 `dry` 那段）
+          if (sent) {
             try {
-              recent.rememberBot(
-                {
-                  message_type: 'group',
-                  group_id: g,
-                  user_id: this.selfId,
-                  message_id: `salary-${now}`,
-                  // ⚠️ 2026-09-21：这是她自己的消息记进上下文时的**显示名**（换人设后要跟着变，
-      //    否则历史记录里她还是旧名字）。用 selfName（"Saki"）而不是小写 saki。
-      sender: { user_id: this.selfId, nickname: persona.selfName() },
-                },
-                remembered,
-              );
+              balance.balanceComplaint({ total: r.total, groupId: gidKey });
             } catch (e) {
-              log.debug(`记抱怨内容失败：${e.message}`);
+              log.debug(`标记余额提醒失败：${e.message}`);
             }
+            log.info(`[工资] 已私聊主人：${line}`);
           }
         }
       } catch (e) {
@@ -20828,6 +21872,189 @@ if (privateWork.isWorkChat(event)) return false;
    *
    * @returns {Promise<boolean>} 发出去了没有
    */
+  /**
+   * ⚠️⚠️⚠️ 2026-11-25（用户：「**其实不用分两种吧**，普通提醒的话只要确实提醒完毕就
+   *   不自动续期了，watch 的话判断这件事情还没结束的话自动续期下一个提醒就好了」）——
+   *
+   *   把原来的 `runWatchTask` 改成**通用的"到点交给她"**：不管这条任务是"叫我起床"
+   *   还是"盯着 GTA6 的破解进度"，都**由她在这一刻自己决定怎么做**：
+   *   · 只是提醒 ⇒ 用自己的话说一句就行（说完就完了，不再续）；
+   *   · 是件还没结束的事 ⇒ 自己去搜、说进展、**自己再排下一次**；
+   *   · 已经结束了 ⇒ 不排了。
+   *
+   *   ⚠️ 代码里**没有任何**"这是提醒还是关注"的区分，也没有"完成没完成"的判断 ——
+   *      全交给她（用户明确要求全链路交模型）。
+   */
+  async runDueTask(item) {
+    const gid = String(item?.groupId ?? '').trim();
+    const topic = String(item?.what ?? '').trim();
+    if (!topic) return false;
+    const by = String(item?.by ?? '').trim();
+    const byName = String(item?.byName ?? '').trim() || '群友';
+    const atLine =
+      item?.mention === false
+        ? '这次**不用 @ 任何人**，直接跟大家说就行（这是"跟大家讲进展"，不是叫某个人）'
+        : `这次**要 @ 他**（${byName}）—— 这是给他的提醒，得让他看得见`;
+    /* ⚠️⚠️ 2026-11-26 加（用户：「这种要关注的事和 @bot 要她关注的那个人没有直接关系，
+     *   比如 @ 她要用户起床的那种，就不要说 XXX 这个进度怎么怎么样了，
+     *   像助手给老板汇报消息，只需要和一般群友一样以自己的语气转发这个事情的变化就行了」）——
+     *
+     *   ⇒ 观测类（mention=false）**不许对着某个人说话**：别写「<主人>，有新动静了」，
+     *     而是像群里随便谁看到新鲜事那样开口（「哎你们看，GTA6 那个 PC 移植…」）✓
+     */
+    const toneLine =
+      item?.mention === false
+        ? '⚠️ **别对着某个人说**：不要写「<主人>，有新动静了」「XX，进展来了」这种汇报开头 ——\n' +
+          '  你是在群里顺手跟大家分享，像普通群友那样开口就行（「哎你们看…」「刚刷到…」）'
+        : '';
+    // ⚠️ 前几次执行说过的话（让她自己能对比"上次多少、这次多少"）
+    const hist = Array.isArray(item?.history) ? item.history.slice(-5) : [];
+    /* ⚠️ 2026-11-25：观测期限（用户：「24 小时持续观测…确实续到 24 小时然后结束，
+     *   目标提前完成可以提前结束」）—— 到点了就明说"这是最后一次、别再排"，她就停 ✓ */
+    const untilAt = Number(item?.until ?? 0) || 0;
+    const untilLine = (() => {
+      if (!untilAt) return '';
+      const left = untilAt - Date.now();
+      const d = new Date(untilAt);
+      const p2 = (n) => String(n).padStart(2, '0');
+      const hm = `${d.getMonth() + 1}/${d.getDate()} ${p2(d.getHours())}:${p2(d.getMinutes())}`;
+      if (left <= 0) {
+        return `⚠️ **这次观测的期限到了（${hm}）—— 这是最后一次，说完就别再排了**。`;
+      }
+      return `（这件事你只观测到 ${hm} 为止，还剩 ${Math.max(1, Math.round(left / 3600000))} 小时；到点就到头了）`;
+    })();
+    const text = [
+      '（这是你自己之前记下的、到点该办的事 —— **不是群友发的消息**，是闹钟叫你）',
+      `内容：**${topic}**`,
+      ...(untilLine ? ['', untilLine] : []),
+      ...(toneLine ? ['', toneLine] : []),
+      '',
+      ...(hist.length
+        ? [
+            '你之前几次说过（**先看一眼，能对比就说出来**）：',
+            ...hist.map((h) => {
+              const d = new Date(Number(h.at) || Date.now());
+              const p2 = (n) => String(n).padStart(2, '0');
+              return `· ${d.getMonth() + 1}/${d.getDate()} ${p2(d.getHours())}:${p2(d.getMinutes())} —— ${String(h.note ?? '').slice(0, 120)}`;
+            }),
+            '',
+          ]
+        : []),
+      '⚠️⚠️ **这一轮你还有一件事必须做（别漏）**：',
+      '· 只要这件事**还没完**、期限也**还没到** ⇒ **必须再调一次 `set_reminder` 排下一次**',
+      '  （时间你自己定，一般 30 分钟到几小时；`观测到` 可以不填，会自动沿用原来的期限）。',
+      '· **只有**这两种情况才不排：① 事情已经彻底完了；② 上面写着"期限到了，这是最后一次"。',
+      '· ⚠️ 实测踩过：只搜了、说了，**忘了排下一次** ⇒ 这条观察就断了 ✗ 所以先想着排，再想怎么说。',
+      '',
+      '现在自己判断该怎么说（**跟你平时在群里说话一样，工具随便用**）：',
+      '· 这是个**提醒**（叫他起床 / 该吃药了 / 到点了）⇒ 用你自己的话说一句就行，说完就完了，不用调任何工具；',
+      '· 这是件**要盯的事**（某个进度 / 某个消息）⇒ 该查就去查：',
+      '  搜网页、看群公告、翻日志、查服务器 —— **你手上有什么就用什么**，跟平时聊天一模一样；',
+      '  ⚠️⚠️ **怎么说是重点（用户明确说过：不要像汇报）**：',
+      '  · **只讲这一次的新变化** —— 上一轮说过的别再重复一遍（上面"你之前几次说过"就是拿来对比的，',
+      '    有变化就点出来：「比刚才又多了…」「上次还是 X，现在 Y 了」）；',
+      '  · **短**：一两句、顶多三句。别列条目、别复述背景、别把搜到的内容讲全 ✗',
+      '  · **语气词一个都不能省**（啊/吧/嘛/诶/呀/哦/呗/啦/捏 这些才是活人味），',
+      '    短 ≠ 干巴巴：宁可少说一件事，也别把语气词砍掉；',
+      '  · **链接单独一条发，别混进正文**（用户：「链接附件直接和定时 b 站分享一样以单条信息发送」）：',
+      '    ① 第一句只说事 —— 抓重点、只讲这次的新变化，**句子里不要带链接**；',
+      '    ② 然后**另起一行**单独写链接，格式和平时的 B 站分享一样：`【视频标题】 https://…`',
+      '    这样会自然分成**两条消息**，就像一个真人先打字、再把链接甩出来 ✓',
+      '  · 🚫 别把链接塞在句子中间，也别写「来源：xxx https://…」那种播报格式 ✗',
+      '  ⚠️⚠️ **只要这件事还没完、期限也还没到，就必须自己再调一次 `set_reminder` 排下一次** ——',
+      '  别只报一次就停了（用户要的是"持续盯 24 小时"，不是"报一次"）；',
+      '  **完事了**（目标达成了 / 期限到了）才不排。',
+      '· 也可能你查完发现这事儿不用你说、或者根本不重要 ⇒ 那就别发，或者只说一句就完。',
+      `· ${atLine}。`,
+    ].join('\n');
+    const fake = {
+      message_type: 'group',
+      group_id: gid,
+      user_id: by,
+      message_id: `sched-${item?.id ?? 0}-${Date.now()}`,
+      message: [{ type: 'text', data: { text } }],
+      sender: { card: byName, nickname: byName, user_id: by },
+      time: Math.floor(Date.now() / 1000),
+      _scheduledTask: item,
+    };
+    log.info(`[定时任务] 到点交给她：「${topic}」→ 她自己去判断（群 ${gid || '私聊'}）`);
+    try {
+      await this.handle(fake);
+      /* ⚠️ 2026-11-25：把她这次说的话记进这条任务的历史 ——
+       *   下次到点时拼进提示词，她才能自己对比（"上次 30 帧，这次 60 了"）✓ */
+      try {
+        // ⚠️ 用 lastSelfText（她自己说的）—— lastFromUid 会排除她自己，取不到
+        const mine = recent.lastSelfText(gid, 1);
+        const t = Array.isArray(mine) && mine.length ? String(mine[mine.length - 1] ?? '') : '';
+        if (t) remind.pushHistory(item?.id, t);
+      } catch {}
+      /* ⚠️⚠️⚠️ 2026-11-26 加（用户：「**自动续期要能确实续到 24 小时然后结束**」）——
+       *
+       *   实测三轮：她每次都是"搜完、说完"，**就是不调 set_reminder 排下一次** ⇒
+       *   观察链 30 分钟就断了。提示词强调过（开头 + 工具材料里都钉了），模型照样漏 ✗
+       *
+       *   ⇒ 用户要的是"**确实**续到期限"，所以这里做**代码兜底**：
+       *     · 期限（until）还没到；
+       *     · 而且她**没有**排下一条同主题任务；
+       *     ⇒ 代码按原参数自动续一次（间隔 30 分钟，不越过期限）。
+       *   ⚠️ 这不是"替她判断要不要盯"（那是她排任务时就定下的），
+       *      只是**保证她排过的观察链不断** —— 日志会写明"她没排 ⇒ 兜底续上" ✓
+       */
+      try {
+        if (untilAt && Date.now() < untilAt) {
+          /* ⚠️ 2026-11-26：**要把当前这条自己排掉** —— 此刻它还没 markSent，
+           *   留在 pending 里 ⇒ live.length 恒 ≥ 1 ⇒ 兜底永远不触发（实测三轮都这样）✗ */
+          const live = remind
+            .pending()
+            .filter(
+              (x) =>
+                x !== item &&
+                String(x.what ?? '') === topic &&
+                String(x.groupId ?? '') === gid,
+            );
+          if (!live.length) {
+            const gapMs = 30 * 60 * 1000;
+            const nextAt = Math.min(Date.now() + gapMs, untilAt);
+            if (nextAt > Date.now() + 60 * 1000) {
+              const r = remind.add({
+                at: nextAt,
+                what: topic,
+                kind: 'watch',
+                mention: item?.mention !== false,
+                again: item?.again !== false,
+                until: untilAt,
+                by,
+                byName,
+                groupId: gid,
+                history: Array.isArray(item?.history) ? item.history : [],
+                now: Date.now(),
+              });
+              if (r?.ok) {
+                log.info(
+                  `[定时任务] 她没排下一次 ⇒ **代码兜底续上**（${new Date(nextAt).toLocaleTimeString('zh-CN')}，` +
+                    `期限到 ${new Date(untilAt).toLocaleTimeString('zh-CN')} 为止）`,
+                );
+              } else {
+                log.warn(`[定时任务] 兜底续期没成：${r?.reason ?? '未知'}`);
+              }
+            }
+          }
+        }
+      } catch (e) {
+        log.warn(`[定时任务] 兜底续期出错：${e.message}`);
+      }
+      return true;
+    } catch (e) {
+      log.warn(`[定时任务] 执行失败：${e.message}`);
+      return false;
+    }
+  }
+
+  /** 旧名字留着（别的地方可能还引用）—— 直接转给 `runDueTask` */
+  async runWatchTask(item) {
+    return this.runDueTask(item);
+  }
+
   async sendReminder(item) {
     const gid = String(item?.groupId ?? '');
     const isGroup = !!gid;
@@ -21175,6 +22402,7 @@ if (privateWork.isWorkChat(event)) return false;
         log.debug(`[旁白] 剥离出错（照原样发）：${e.message}`);
       }
     }
+    // ⚠️ 2026-11-27：`[发段]` 诊断日志已经挪到 `sendText` 最前面（唯一出口）—— 那里群聊私聊都过。
     // ⚠️⚠️⚠️ 2026-10-11 加（用户：「**一个 bot 收到另一个 bot 发的差不多的重复信息时，
     //    直接把自己的掐断**」）—— 这条出口也要同一道闸（剧情 / 日常事件 / 同类搭话走这里）✓
     if (text && /生日/.test(String(text))) {
@@ -24512,9 +25740,17 @@ export function splitChatText(raw, opts = {}) {
   //    ⇒ **空行（连续 2 个以上换行）当"硬断点"**：在那里一定分条，不看字数门槛。
   //    ⚠️ 必须标在**清洗之前** —— `cleanMarkdown` 那几步会把空行压掉，
   //      等 `cleaned` 出来再找换行已经一个都没有了（实测三段空行会被粘成一句）✗
-  //    ⚠️ 单换行不算（那常是排版，不是语气停顿）。
+  //    ⚠️ 单换行**现在也算**（见下面 2026-11-27 那条）。
   const HARD_BREAK = '\u0001';
-  _rawC = _rawC.replace(/\r\n/g, '\n').replace(/\n[ \t]*\n\s*/g, HARD_BREAK);
+  /* ⚠️⚠️ 2026-11-27 改（用户：「**能不能让她自己想切就切**」）——
+   *   原来只有**空行**算硬断点、单换行被 `cleanMarkdown` 压成句号或直接删掉 ⇒
+   *   她"想在这里断开"的意图在清洗那一步就没了，只能等代码按字数去猜 ✗
+   *   ⇒ **换行就是她说"这条发到这里"**，一律标成硬断点（条数仍有 `opts.maxChunks` 兜底，
+   *     超出来的并进最后一条，不会刷屏）✓ */
+  _rawC = _rawC
+    .replace(/\r\n/g, '\n')
+    .replace(/\n[ \t]*\n\s*/g, HARD_BREAK) // 空行
+    .replace(/\n[ \t]*/g, HARD_BREAK); // 单换行（她自己划的段）
   const cleaned = dropTrailingPeriods(
     stripChatUncommonPunct(cleanMarkdown(stripMarkers(stripDraftResidue(_rawC))), { keepMarker: true }),
   );

@@ -102,6 +102,9 @@ const FILE_ENVS = [
   'PEERCHAT', 'OWNER', 'OWNER_RECENT', 'OWNER_RHYTHM', 'OWNER_UPDATE',
   'MEMBER_BD', 'HANDLED', 'TOOL_STATS', 'MONTHLY', 'BILI_SHARE',
   'SERVER_WATCH', 'DM_TAKEOVER', 'SENT_ARTS', 'PENDING_ARTS',
+  // ⚠️ 2026-11-27 加 PEOPLE：「QQ号 ↔ 昵称」通讯录 —— 不隔离的话模拟器会把假群友的昵称
+  //    灌进用户真实的 state/people.json，认识视图就对不上号了 ✗
+  'PEOPLE',
 ];
 const ISOLATED = {
   // ⚠️ 钉成 off：这个脚本只拼提示词、只调模型，**绝不许真起 agent**（那会真花算力）

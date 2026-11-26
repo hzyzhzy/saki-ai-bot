@@ -1,0 +1,21 @@
+modLoader="javafml"
+loaderVersion="[47,)"
+license="All Rights Reserved"
+[[mods]]
+modId="saki_bridge"
+version="1.0.0"
+displayName="Saki 客户端建造桥"
+displayTest="IGNORE_ALL_VERSION"
+description='''仅在指定服务器上用普通玩家交互放置白名单方块。'''
+[[dependencies.saki_bridge]]
+modId="forge"
+mandatory=true
+versionRange="[47.4.15]"
+ordering="NONE"
+side="CLIENT"
+[[dependencies.saki_bridge]]
+modId="minecraft"
+mandatory=true
+versionRange="[1.20.1]"
+ordering="NONE"
+side="CLIENT"

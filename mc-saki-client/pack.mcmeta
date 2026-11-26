@@ -1,0 +1,6 @@
+{
+  "pack": {
+    "pack_format": 15,
+    "description": "saki bridge — 没有资源文件，这个文件只是让 Forge 别报 ResourcePackInfo 警告"
+  }
+}

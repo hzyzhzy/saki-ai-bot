@@ -50,6 +50,15 @@ export function path() {
 const cfg = () => config.remind ?? {};
 const enabled = () => cfg().enable !== false;
 
+/** 分配一个**不撞已有 id** 的编号（2026-11-26：撞号会让 markSent 标错条目） */
+function newId() {
+  let id = Math.max(1, Number(st.nextId) || 1);
+  const used = new Set(st.items.map((x) => x.id));
+  while (used.has(id)) id++;
+  st.nextId = id + 1;
+  return id;
+}
+
 /** 最多同时挂多少条（防被刷爆） */
 function maxItems() {
   const v = Number(cfg().maxItems);
@@ -79,6 +88,21 @@ export function reload() {
           id: Number(x?.id) || 0,
           at: Number(x?.at) || 0,
           what: String(x?.what ?? '').trim(),
+          /* ⚠️⚠️⚠️ 2026-11-25 修（全链路测试抓到的真 bug）：
+           *   原来这里只映射旧字段 ⇒ 重启后 kind/history/mention/again **全被丢掉**，
+           *   所有 watch 任务都退化成普通 remind（日志走"到点已发出"而不是"到点跑 watch"）✗
+           *   ⇒ 四个字段必须一起读回来 ✓ */
+          kind: String(x?.kind ?? 'remind').trim() === 'watch' ? 'watch' : 'remind',
+          mention: x?.mention !== false,
+          again: x?.again !== false,
+          until: Number(x?.until) || 0,
+          history: (Array.isArray(x?.history) ? x.history : [])
+            .slice(-5)
+            .map((h) => ({
+              at: Number(h?.at) || 0,
+              note: String(h?.note ?? '').trim().slice(0, 200),
+            }))
+            .filter((h) => h.at && h.note),
           by: String(x?.by ?? '').trim(),
           byName: String(x?.byName ?? '').trim(),
           // 提醒谁：`[{uid, name}]`；`uid` 空 = 没找到这个人（到点要如实说）
@@ -91,7 +115,16 @@ export function reload() {
           sentAt: Number(x?.sentAt) || 0,
         }))
         .filter((x) => x.id && x.at && x.what),
-      nextId: Math.max(1, Number(j?.nextId) || 1),
+      /* ⚠️⚠️ 2026-11-26 修（真 bug，我自己插测试数据时炸出来的）：
+       *   原来只信文件里的 `nextId` ⇒ 万一它落后于已有 id（手写过 / 老版本写的），
+       *   新任务会拿到**和旧任务一样的 id** ⇒ `markSent(id)` 命中的是旧那条，
+       *   新那条永远「没发过」⇒ **每分钟重复触发**（实测 00:54、00:55 连着跑两次）✗
+       *   ⇒ 载入时保证 `nextId` 严格大于现有最大 id ✓ */
+      nextId: Math.max(
+        1,
+        Number(j?.nextId) || 1,
+        ...((Array.isArray(j?.items) ? j.items : []).map((x) => (Number(x?.id) || 0) + 1)),
+      ),
     };
     log.debug(`提醒：载入 ${st.items.length} 条（还没发的 ${st.items.filter((x) => !x.sentAt).length} 条）`);
   } catch (e) {
@@ -127,13 +160,70 @@ export function add(r = {}) {
   if (at <= now) return { ok: false, reason: '那个时间已经过了' };
   if (at - now > maxAheadMs()) return { ok: false, reason: '时间太远了（超过 7 天）' };
 
+  /* ⚠️⚠️⚠️ 2026-11-25 加 `kind`（用户：「bot 还可以自己设定定时任务」）——
+   *   · `remind`：到点发一句固定的话（原来那套）
+   *   · `watch` ：到点**真的跑一次**（自己去搜、用自己的话转述、附来源链接），
+   *              完没完成、要不要接着排下一次，**都由她自己看搜索结果决定** ✓
+   *   ⚠️ 这里只做**频率护栏**，不判断"这件事值不值得盯"——那是她的判断。
+   */
+  const kind = String(r.kind ?? 'remind').trim() === 'watch' ? 'watch' : 'remind';
+  if (kind === 'watch') {
+    const minGap = Math.max(5 * 60 * 1000, Number(config.remind?.watchMinGapMs) || 30 * 60 * 1000);
+    if (at - now < minGap) {
+      // 不拒绝，直接**帮她推到最早允许的时刻** —— 免得她排太密把群刷了
+      r = { ...r, at: now + minGap };
+      return addByOnce({ ...r, at: now + minGap, kind, _pushed: true }, now);
+    }
+    const perDay = Math.max(1, Number(config.remind?.watchPerDay) || 8);
+    const dayStart = new Date(now);
+    dayStart.setHours(0, 0, 0, 0);
+    const usedToday = st.items.filter(
+      (x) => String(x.kind ?? '') === 'watch' && Number(x.sentAt) >= dayStart.getTime(),
+    ).length;
+    if (usedToday >= perDay) {
+      return { ok: false, reason: `今天自动关注任务已经跑过 ${usedToday} 次（上限 ${perDay}），明天再来` };
+    }
+  }
+
+  /* ⚠️⚠️⚠️ 2026-11-25 加 `until`（用户：「如果是和她说**接下来 24 个小时要持续观测**，
+   *   自动续期要能确实续到 24 小时然后结束，但是如果目标提前完成了可以提前结束」）——
+   *
+   *   `until` = 这件事观测到什么时候为止（时间戳，0=单次）。
+   *   · 续期时（同一主题再排一次）**自动继承**上一次的 until ⇒ 她不用每次重算；
+   *   · 新任务时间超过 until ⇒ 直接拒（"这次观测只到 X"）⇒ 24 小时到了自然停 ✓
+   *   · 目标提前完成 ⇒ 她自己不排了（那是她的判断，代码不管）✓
+   */
+  let until = Number(r.until) || 0;
+  if (!until) {
+    try {
+      const same = st.items
+        .filter((x) => String(x.what ?? '') === what && String(x.groupId ?? '') === String(r.groupId ?? ''))
+        .sort((a, b) => (b.at || 0) - (a.at || 0))[0];
+      if (same?.until && Number(same.until) > now) until = Number(same.until);
+    } catch {}
+  }
+  if (until && at > until) {
+    const d = new Date(until);
+    const p2 = (n) => String(n).padStart(2, '0');
+    return {
+      ok: false,
+      reason: `这次观测只到 ${d.getMonth() + 1}/${d.getDate()} ${p2(d.getHours())}:${p2(d.getMinutes())}，那之后别再排了`,
+    };
+  }
+
   const live = st.items.filter((x) => !x.sentAt);
   if (live.length >= maxItems()) return { ok: false, reason: `挂着的提醒太多了（${live.length} 条）` };
 
   const item = {
-    id: st.nextId++,
-    at,
+    id: newId(),
+    at: Number(r.at) || at,
     what: what.slice(0, 200),
+    /* ⚠️ 2026-11-25：任务类型 + 她自己的两个判断（到点要不要 @、没完成要不要接着排） */
+    kind,
+    mention: r.mention !== false,
+    again: r.again !== false,
+    until,
+    history: [],
     by: String(r.by ?? '').trim(),
     byName: String(r.byName ?? '').trim(),
     targets: (Array.isArray(r.targets) ? r.targets : [])
@@ -153,6 +243,56 @@ export function add(r = {}) {
   }
   save();
   return { ok: true, item };
+}
+
+/** watch 排太密时用它把时间往后推（内部递归入口，避免重复校验死循环） */
+function addByOnce(r = {}, now = Date.now()) {
+  const live = st.items.filter((x) => !x.sentAt);
+  if (live.length >= maxItems()) return { ok: false, reason: `挂着的提醒太多了（${live.length} 条）` };
+  const item = {
+    id: newId(),
+    at: Number(r.at) || now,
+    what: String(r.what ?? '').trim().slice(0, 200),
+    kind: 'watch',
+    mention: r.mention !== false,
+    again: r.again !== false,
+    /* ⚠️ 2026-11-25：**接续时要带上一条的历史**（用户：「这次游戏能到30帧，
+     *   下次到了60帧会自己拉出来对比」）—— 从被接续那条继承 ✓ */
+    history: Array.isArray(r.history) ? r.history.slice(-5) : [],
+    by: String(r.by ?? '').trim(),
+    byName: String(r.byName ?? '').trim(),
+    targets: (Array.isArray(r.targets) ? r.targets : [])
+      .map((t) => ({ uid: String(t?.uid ?? '').trim(), name: String(t?.name ?? '').trim() }))
+      .filter((t) => t.uid || t.name)
+      .slice(0, 5),
+    groupId: String(r.groupId ?? ''),
+    createdAt: now,
+    sentAt: 0,
+  };
+  st.items = [...st.items, item];
+  save();
+  return { ok: true, item, pushedTo: item.at };
+}
+
+/**
+ * ⚠️⚠️ 2026-11-25 加（用户：「连续生成的定时任务，输入的内容要有前几次任务的输出和记忆，
+ *   比如这次游戏能到30帧，下次到了60帧会自己拉出来对比」）——
+ *
+ *   一条 watch 任务每跑一次，就把**她这次说的话**记进它的 `history`；
+ *   下次到点时把最近几次一起拼进提示词里 ⇒ 她自己能说出"上次 30 帧，这次 60 了" ✓
+ *
+ *   ⚠️ 只留最近 5 次（再多就是噪音，也省 token）。
+ *   @param {number} id  任务 id
+ *   @param {string} note 她这次说的（截断到 200 字）
+ */
+export function pushHistory(id, note, at = Date.now()) {
+  const it = st.items.find((x) => Number(x.id) === Number(id));
+  if (!it) return false;
+  it.history = Array.isArray(it.history) ? it.history : [];
+  it.history.push({ at: Number(at) || Date.now(), note: String(note ?? '').trim().slice(0, 200) });
+  if (it.history.length > 5) it.history = it.history.slice(-5);
+  save();
+  return true;
 }
 
 /** 12/24 小时制 → 当天的小时数（0-23） */
@@ -351,7 +491,10 @@ export function latest({ by = '', groupId = '' } = {}) {
  * ⚠️ 加人时**自动去重**（同一个人说两遍不会 @ 两次）。
  */
 export function amend(id, patch = {}, now = Date.now()) {
-  const it = st.items.find((x) => x.id === Number(id));
+  /* 2026-11-26：优先标记**还没发**的那条 —— 撞号时原来的 find 会标到旧那条，
+   * 新的一条永远发不出去、每分钟重复触发 */
+  const nid = Number(id);
+  const it = st.items.find((x) => x.id === nid && !x.sentAt) ?? st.items.find((x) => x.id === nid);
   if (!it || it.sentAt) return { ok: false, reason: '这条已经不在待发里了' };
   if (patch.at !== undefined) {
     const at = Number(patch.at) || 0;
@@ -459,7 +602,11 @@ export function stale(before = Date.now()) {
 
 /** 标成"发过了" */
 export function markSent(id, at = Date.now()) {
-  const it = st.items.find((x) => x.id === Number(id));
+  /* ⚠️ 2026-11-26：**优先标记还没发的那条** —— id 万一撞号（老数据 / 手写数据），
+   *   原来的 find 会标到旧那条 ⇒ 新那条永远"没发过" ⇒ **每分钟重复触发** ✗ */
+  const nid = Number(id);
+  const it =
+    st.items.find((x) => x.id === nid && !x.sentAt) ?? st.items.find((x) => x.id === nid);
   if (!it) return false;
   it.sentAt = at;
   save();

@@ -17,6 +17,8 @@
  *   5. `scope` 限可见范围：`'group-owner'` 只有群里 + 主人能看见（其余人连工具名都看不到）。
  */
 
+import { taskModelChoices } from './task-model.js';
+
 /** @typedef {{type:'function', function:{name:string, description:string, parameters:object}}} ToolSchema */
 
 /**
@@ -33,6 +35,44 @@ const TOOLS = [
       '拿到的是实时结果，不是记忆里的。' +
       '⚠️ 没抓到的（IP、版本细节）照实说没有，别补。',
     params: {},
+  },
+  {
+    name: 'mc_action', cn: 'MC行动',
+    desc: '以 Saki 普通玩家身份在查服工具指定的 MC 服执行建造、查看状态或停止。群友 @Saki 可以用自然语言安排动作，建筑设计由你决定。建筑限主世界专用地块，只在空位放背包里的材料，不挖、不执行聊天或管理命令。不支持的动作照实说。根据客户端回执报告，不把提交当作完工。',
+    params: {
+      action: {type:'string',enum:['build','status','stop'],desc:'建造、查看或停止',map:'动作',required:true},
+      parts: {type:'array',desc:'仅 build 需要：1～32个实心长方体部件，最多256个方块。from/to 为相对专用地块最小角的闭区间 [x,y,z]，y 向上，留空处不写。材料取指定列表。',map:'部件',items:{type:'object',required:['from','to','block'],properties:{from:{type:'array',minItems:3,maxItems:3,items:{type:'integer'}},to:{type:'array',minItems:3,maxItems:3,items:{type:'integer'}},block:{type:'string',enum:['oak_planks','spruce_planks','cobblestone','stone_bricks','glass','bricks','oak_log','white_concrete']}}}},
+    },
+  },
+  {
+    name: 'skip_reply',
+    cn: '不接',
+    desc:
+      '这一轮**什么都不发**（没有文字、没有图），只在 QQ 里**戳一下**发这条消息的人 —— 意思是"我看到了，但这话不该我接"。\n' +
+      '用它的判据：**这句话不是在跟你说**（他们在互相对话、引用别人的话去问第三方、自言自语），或者你插一句会很怪。\n' +
+      '🚫 **被 @ 了、点到你名字了 ⇒ 一定不许用**：那是明确在跟你说话，必须回。\n' +
+      '⚠️ 用了之后你已经写好的正文会被丢掉，所以只在真的不想开口时用。',
+    params: {
+      poke: { type: 'boolean', desc: '默认 true（戳一下那个人）。连戳都不想戳时填 false', map: '戳' },
+    },
+  },
+  {
+    name: 'memory_find',
+    cn: '翻记忆',
+    desc:
+      '在你自己记得的东西里按字面翻一遍：群记忆、主人的资料、你被纠正过的错、这个群自己的资料，以及群里的聊天原文。\n' +
+      '返回最多 8 条摘录，每条都标着出处和大概多久以前。\n' +
+      '翻不到就是真没有 —— 照实说想不起来，别编。\n' +
+      '只翻得到你自己记下的、和当前这几个群的；别的群、别人的私聊翻不到。',
+    params: {
+      q: { type: 'string', desc: '要翻的原话里的那个词：人名、地名、或者那句话里最要紧的词', map: '找什么', required: true },
+      scope: {
+        type: 'string',
+        enum: ['memory', 'chat', 'all'],
+        desc: '只翻记下来的结论填 memory（默认）；翻聊天原文填 chat；拿不准填 all',
+        map: '范围',
+      },
+    },
   },
   {
     name: 'spend_today',
@@ -61,20 +101,12 @@ const TOOLS = [
     params: {},
   },
   {
-    name: 'affinity_of',
-    cn: '好感度',
-    desc:
-      '查当前这个说话的人跟你的好感度数值。' +
-      '只管当下这个人 —— 别人、群里整体都查不到。' +
-      '⚠️ 数值低也别翻脸，语气自己拿捏。',
-    params: {},
-  },
-  {
     name: 'poke_back',
     cn: '戳回去',
     desc:
-      '戳回去：给对方发一个戳一戳（只发动作，不返回内容）。' +
-      '⚠️ 没真被戳、或你其实不想还手 ⇒ 别调。' +
+      '戳回去：给对方发一个戳一戳（发完会回你成没成）。' +
+      '⚠️ 没真被戳 ⇒ 别调。' +
+      '⚠️ **这一场还要不要还手，看提示词里那句「真实状态」** —— 别凭记忆猜自己还过没有 ✗' +
       '⚠️ **别在回复正文里写「[戳一戳]」这种占位符** —— 那是系统给的字，' +
       '照抄发出去，群里会收到一条内容就是「[戳一戳]」的怪消息 ✗ ' +
       '真想还手就调这个工具，或者干脆只用话说。',
@@ -84,18 +116,25 @@ const TOOLS = [
     name: 'shut_up',
     cn: '闭嘴',
     desc:
-      '静默一段时间：这期间群里说话你不接。' +
+      '静默一段时间：这期间群里说话你不接（被 @ 照样能把你叫出来）。' +
       '`minutes` = 静默几分钟（1~30，不给按 5）。' +
-      '⚠️ 调完 8 秒才生效，先把答应的话说完；⚠️ 玩笑、说的不是你 ⇒ 别调。',
+      '`reason` = 为什么闭嘴，几个字说清 —— 会记进日志，也决定你怎么跟群里交代。' +
+      '⚠️ 调完 8 秒才生效 —— 那 8 秒就是留给你把最后一句话说完的。' +
+      '⚠️ 玩笑、说的不是你 ⇒ 别调。',
     params: {
       minutes: { type: 'integer', desc: '静默几分钟（1~30，不给按 5 分钟）', map: '多久', suffix: '分钟' },
+      reason: {
+        type: 'string',
+        desc: '为什么闭嘴，几个字（他嫌你吵 / 他让你闭嘴 / 你自己想歇会儿）—— 会记进日志，也决定你怎么跟群里说',
+        map: '为什么',
+      },
     },
   },
   {
     name: 'remember',
     cn: '记住',
     desc:
-      '把一条该长期记住的事写进学习档案。' +
+      '把一条该长期记住的事写进她的笔记（以后她会当成自己的笔记用）。' +
       '`topic` 短标题、`content` 那条事实本身。' +
       '⚠️ content 照对方原话（可压短，不许加细节）—— 代码会核对，编的会被拒。' +
       '⚠️ 自己猜的、别人转发的，别记。',
@@ -116,13 +155,34 @@ const TOOLS = [
     name: 'set_reminder',
     cn: '提醒',
     desc:
-      '定一条到点提醒（到点会主动发消息）。' +
-      '`when` 只认这几种写法：`08:00` / `明天 08:00` / `后天 8点` / `2026-10-20 08:00` / `+30分钟`；' +
-      '`what` = 提醒他什么事。' +
-      '⚠️ 他说得含糊（晚点 / 有空）⇒ 先问几点。',
+      '给自己排一件"到点该办的事"。**时间、要不要 @ 人、到时怎么处理，全由你决定**。\n' +
+      '\n' +
+      '到点时会把你叫醒，把它交回给你 —— 那一刻**你自己判断**：\n' +
+      '· 只是个提醒（叫他起床 / 该吃药了）⇒ 用自己的话说一句就完事；\n' +
+      '· 是件还没结束的事（某款游戏的破解进度 / 某个消息的下文）⇒ 自己去搜现在的情况，\n' +
+      '  用自己的话讲一句、把来源链接带上；**还没完**就再排一次，完了就不排。\n' +
+      '\n' +
+      '`when`：**自己把话换算成具体时间**再填 —— `07:30` / `明天 07:30` / `2026-11-27 08:00` / `+30分钟` / `+24小时`。\n' +
+      '  ⚠️ 他说「下午」「等会儿」「明早」「过一会儿」这种**你自己换算**（你知道现在几点），\n' +
+      '  🚫 别把模糊词原样填进来 —— 代码只认上面那几种写法。\n' +
+      '`what`：要办什么事 / 盯什么（写具体，比如「GTA6 电脑版破解进度」）。\n' +
+      '`who`：给谁（不填 = 当前跟你说话的人；写别人的名字也行）。\n' +
+      '`mention`：到点要不要 @ 他。**自己按这件事的性质判断**：\n' +
+      '  · 是**给某个人的提醒**（叫他起床 / 该吃药 / 到点该走了）⇒ `1` 要 @ 他；\n' +
+      '  · 是**跟大家说的进展**（某款游戏的破解进度 / 某个消息的下文）⇒ `0` 不 @，直接说。\n' +
+      '`观测到`：**只在这件事要持续盯一段时间时填** —— 观测到什么时候为止。\n' +
+      '  例：「接下来 24 小时持续观测」⇒ `观测到` 填 `+24小时` 或 `明天 00:30`。\n' +
+      '  到点续期会自动沿用这个期限，**到期就停**；事情提前完了你自己不排就行。\n' +
+      '\n' +
+      '⚠️ 对方说得含糊（"晚点""有空"）⇒ 先问清几点，别自己替他定。\n' +
+      '⚠️ 盯一件事时别排得太密：最短间隔 30 分钟、每天最多 8 次。',
     params: {
       when: { type: 'string', desc: '什么时候（按上面那几种写法）', map: '何时', required: true },
-      what: { type: 'string', desc: '提醒他什么事', map: '说什么', required: true },
+      what: { type: 'string', desc: '要办什么事 / 盯什么', map: '说什么', required: true },
+      who: { type: 'string', desc: '给谁（不填 = 当前说话的人）', map: '给谁' },
+      mention: { type: 'string', desc: '到点要不要 @ 他（1/0）', map: '要@吗' },
+      again: { type: 'string', desc: '（一般不用填）保留字段', map: '还排吗' },
+      until: { type: 'string', desc: '观测到什么时候为止（持续盯一段时间时填，如 +24小时）', map: '观测到' },
     },
   },
   {
@@ -301,6 +361,7 @@ const TOOLS = [
       '⚠️ 要图 ⇒ `搜图`；问进度 ⇒ `催进度`；试探"能不能做" ⇒ 先回话。',
     params: {
       task: { type: 'string', desc: '一句话说清做什么，越具体越好', map: '做什么', required: true },
+      model: { type: 'string', desc: '原样提取要求执行本次任务的模型名称或简称，保留版本号；未指定或要求默认时省略。任务内容中提及但未要求使用的模型不算。由执行器解析别名，未知型号不得自行替换。', map: '用什么模型' },
     },
   },
   {
@@ -418,6 +479,7 @@ export function buildTools(ctx = {}) {
     for (const [k, v] of Object.entries(t.params ?? {})) {
       const p = { type: v.type, description: v.desc };
       if (Array.isArray(v.enum)) p.enum = v.enum;
+      if (v.items) p.items = v.items;
       props[k] = p;
       if (v.required) required.push(k);
     }
@@ -425,7 +487,9 @@ export function buildTools(ctx = {}) {
       type: 'function',
       function: {
         name: t.name,
-        description: t.desc,
+        description: t.desc + (t.name === 'take_task'
+          ? ` 本次可选模型：${taskModelChoices().map(x => x.name).join('、')}。自然语言中的模型要求填入 model；未点名则省略，沿用默认模型。指定型号不存在时先说明，不得自行换型号。`
+          : ''),
         parameters: {
           type: 'object',
           properties: props,

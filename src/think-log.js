@@ -98,6 +98,12 @@ export function start(meta = {}) {
           .map((x) => ({ name: String(x.name ?? ''), text: String(x.text ?? '').slice(0, 400) }))
       : [],
     reason: String(meta.reason ?? '').slice(0, 600),
+    /* ⚠️ 2026-11-26 加（「思考链卡片加上那条对话使用的模型，自动降级了也要能正确显示」）——
+     *   `model`     = **真正产出这段正文的那个模型名**（降级/同家换模型/切备选之后的值）
+     *   `modelNote` = 一句人话说明它为什么不是主模型（降级到第几家 / 同家换的备用模型）
+     *   ⚠️ 开卡片时还不知道（要等真的调用完），所以这里先留空，由 `finish()` 填 ✓ */
+    model: String(meta.model ?? ''),
+    modelNote: '',
     think: '',
     /* ⚠️⚠️ 2026-11-19 加（用户：「**要能完全图形化切开每轮输出，和 dsh 一样，不能用字符切开**」）——
      *   `rounds` = **按轮分块**的思考内容，页面一轮渲染一个块（轮次徽标 + 左侧色条 + 工具 chip）。
@@ -182,6 +188,11 @@ export function finish(id, opts = {}) {
     e.rt = Number(u.completion_tokens_details?.reasoning_tokens) || 0;
   }
   if (Number.isFinite(opts.cost)) e.cost = Number(opts.cost);
+  /* ⚠️ 2026-11-26 加：卡片上要显示**这条消息实际用的模型**。
+   *   ⚠️ 只在真有值时覆盖 —— 重跑/补 finish 时如果不带 model（例如"只发了表情"那条），
+   *     不能把前面已经写好的模型名清掉 ✗ */
+  if (opts.model) e.model = String(opts.model).slice(0, 80);
+  if (opts.modelNote !== undefined) e.modelNote = String(opts.modelNote ?? '').slice(0, 60);
   // ⚠️⚠️ 2026-11-18 改（用户：「**本地处理的消息能不能也在思考链页面显示出来**」）——
   //    原来这里是「正文和思考都是空的 ⇒ `drop()` 删掉」，理由是"别让页面上一堆（还没开始写）"。
   //    但换了本地小模型之后这条变成**掩盖问题**：
@@ -220,6 +231,8 @@ export function finish(id, opts = {}) {
     cached: e.cached ?? 0,
     rt: e.rt ?? 0,
     cost: e.cost ?? null,
+    model: e.model ?? '',
+    modelNote: e.modelNote ?? '',
   });
 }
 
@@ -285,6 +298,8 @@ export async function demo() {
     reply: '（这是测试记录，不是真回复）',
     usage: { prompt_tokens: 118420, completion_tokens: 96, prompt_cache_hit_tokens: 72400 },
     cost: 0.0432,
+    model: 'qwen3.5-4b',
+    modelNote: '',
   });
   return id;
 }

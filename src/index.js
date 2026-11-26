@@ -1,8 +1,8 @@
 import { WebSocketServer, WebSocket } from 'ws';
-import { readFileSync, writeFileSync, rmSync, statSync, utimesSync } from 'node:fs';
+import { readFileSync, writeFileSync, rmSync, statSync, utimesSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { config, validate, ROOT, DEFAULT_LIFE, DEFAULT_QUEST, paramsFor, stateDir, isMainAccount, watchConfigFile } from './config.js';
+import { config, validate, ROOT, DEFAULT_LIFE, DEFAULT_QUEST, paramsFor, stateDir, isMainAccount, watchConfigFile, KNOWLEDGE_DIR, knowledgePrivateDir } from './config.js';
 // ⚠️ 协议端适配层：启动横幅要报它、管理能力也由它决定（换协议端只改 config.yml）
 import * as provider from './provider.js';
 import { startLocalWatch } from './llm.js';
@@ -10,6 +10,12 @@ import { log } from './log.js';
 import { Bot } from './bot.js';
 import { startWebUI } from './webui.js';
 import * as observe from './observe.js';
+// ⚠️ 2026-11-27：群观察顺手抽出来的知识要落成她的笔记（不 @ 也能学）
+import { harvestNotes } from './memory-harvest.js';
+// ⚠️ 口癖动态库（`phrases.md`，按号一份，界面可改）
+import * as phrasesStore from './phrases.js';
+// ⚠️ 2026-11-27：日记由她自己写（每天一篇，见下面「日记」那段）
+import * as diary from './diary.js';
 // ⚠️ 「他的资料」自动更新（2026-10-03 要求）：他私聊里聊到生活变化 → 自动改 owner.md
 import * as ownerUpdate from './owner-update.js';
 // ⚠️ 2026-10-17 加：**主人最近的近况**短时记忆（48 小时滚动）—— 攒够就总结、定期清过期的 ✓
@@ -920,9 +926,36 @@ try {
 if (config.observe?.enable !== false && !privateWork.noLearn()) {
   const every = config.observe?.checkIntervalMs ?? 600000;
   setInterval(() => {
-    observe.summarize().then((r) => {
+    observe.summarize().then(async (r) => {
       if (r.ok) {
         if (r.added) log.info(`[观察] 自动总结完成，新增 ${r.added} 条`);
+        // ⚠️ 顺手把它自己听到的知识落下来（不 @ 也能学）
+        try {
+          const got = await harvestNotes(r.notes);
+          if (got) log.info(`[观察] 这一轮自己学到 ${got} 条笔记`);
+        } catch (e) {
+          log.warn(`[观察] 笔记落盘出错（不影响观察本身）：${e.message}`);
+        }
+        // ⚠️ 顺手把「群里反复在用的说法」补进口癖库（动态库，界面可改、可删）
+        try {
+          const rows = (r.phrases ?? [])
+            .map((line) => {
+              const m = /^(.{1,24}?)[｜|]\s*(.+)$/.exec(String(line ?? '').trim());
+              if (!m) return null;
+              const word = m[1].trim();
+              const how = m[2].trim();
+              return word.length >= 1 && word.length <= 12 ? { word, how } : null;
+            })
+            .filter(Boolean);
+          if (rows.length) {
+            const res = phrasesStore.addPhrases(rows);
+            if (res.ok && (res.added || res.improved)) {
+              log.info(`[观察] 口癖库 +${res.added} 条新词、完善 ${res.improved} 条用法`);
+            }
+          }
+        } catch (e) {
+          log.warn(`[观察] 口癖库写入出错（不影响观察本身）：${e.message}`);
+        }
       } else if (!/还没攒够|没有新消息|还在跑/.test(r.reason ?? '')) {
         log.debug(`[观察] 这次没跑：${r.reason}`);
       }
@@ -931,6 +964,62 @@ if (config.observe?.enable !== false && !privateWork.noLearn()) {
   log.info(`群友观察：每 ${Math.round(every / 60000)} 分钟检查一次，攒够 ${config.observe.threshold} 条消息就总结`);
 } else if (privateWork.noLearn()) {
   log.info('群友观察：**工作模式禁止学习** ⇒ 这个号不跑（攒下来的也不总结）');
+}
+
+// ── 日记：她自己写的一天一篇 ──
+// ⚠️ 为什么不让代码拼：拼出来的就是"今日工作汇报"。日记只给她自己回想用，
+//    材料只给"他今天在忙什么 + 各群最近的对话"，写完存盘不再改（`src/diary.js`）。
+// ⚠️ 一天只写一次：状态落 `state/diary.json`（重启不会重写，也不会把昨天写两遍）。
+if (config.diary?.enable !== false && !privateWork.noLearn()) {
+  const at = String(config.diary?.at ?? '23:40');
+  const stateFile = join(stateDir(), 'diary.json');
+  const readState = () => {
+    try {
+      return JSON.parse(readFileSync(stateFile, 'utf8'));
+    } catch {
+      return {};
+    }
+  };
+  /** 日记材料只取"有记忆的那些群"里最近的对话 */
+  const diaryGids = () => {
+    const set = new Set();
+    for (const base of [knowledgePrivateDir(), KNOWLEDGE_DIR]) {
+      try {
+        for (const f of readdirSync(join(base, 'groups'))) {
+          if (f.endsWith('.md')) set.add(f.replace(/\.md$/, ''));
+        }
+      } catch {
+        /* 没这个目录 */
+      }
+    }
+    return [...set];
+  };
+  const tickDiary = async () => {
+    const now = new Date();
+    const hhmm = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+    if (hhmm < at) return;
+    const today = diary.dayOf(now);
+    if (readState().lastDate === today) return;
+    const r = await diary.writeDiary({ gids: diaryGids() });
+    if (!r.ok) {
+      // ⚠️ 没材料 / 已经有了 ⇒ 把日期记下来（今天再试也没意义），但标明没写成
+      if (r.reason === '今天没有可写的材料' || r.reason === '今天已经写过') {
+        writeFileSync(stateFile, JSON.stringify({ lastDate: today, wrote: false, reason: r.reason }, null, 2), 'utf8');
+      }
+      log.debug(`[日记] 今天没写：${r.reason}`);
+      return;
+    }
+    writeFileSync(
+      stateFile,
+      JSON.stringify({ lastDate: today, wrote: true, at: now.toISOString(), chars: r.chars }, null, 2),
+      'utf8',
+    );
+    log.info(`[日记] 今天的日记写好了（${r.chars} 字）`);
+  };
+  setInterval(() => {
+    tickDiary().catch((e) => log.debug(`[日记] 出错：${e.message}`));
+  }, 5 * 60 * 1000).unref();
+  log.info(`日记：每天 ${at} 之后写一篇（每 5 分钟看一眼，落 diary/YYYY-MM-DD.md）`);
 }
 
 // ── 协议端自愈（2026-10-06 要求）──
@@ -1217,22 +1306,29 @@ if (true) {
          */
         if (config.chat?.lifeRelay !== false) {
           const nowMs = Date.now();
-          const idle = nowMs - (Number(recentStore.lastAt(g)) || 0);
-          const cold = Math.max(0, Number(config.chat?.lifeRelayColdMs) || 20 * 60 * 1000);
-          const warm = Math.max(0, Number(config.chat?.lifeRelayWarmMs) || 5 * 60 * 1000);
-          // ⚠️ 别用 `Number(x) ?? 0.5` —— `Number(undefined)` 是 **NaN 不是 undefined**，
-          //    `??` 兜不住 ⇒ chance 变 NaN ⇒ 永远判 false ⇒ 接话一次都不会发生 ✗
-          const rawChance = Number(config.chat?.lifeRelayChance);
-          const chance = Math.min(1, Math.max(0, Number.isFinite(rawChance) ? rawChance : 0.5));
-          if (idle >= warm) {
-            let peers = [];
+          const lastAt = Number(recentStore.lastAt(g)) || 0;
+          /* ⚠️⚠️⚠️ 2026-11-25 修（用户截图：20:44 / 20:49 / 20:54 连着三条 @同一个号，
+           *   还都绕同一件事，群友直接问「啥情况@<主人>」）——
+           *
+           *   病根：这段原来自己算「冷场 `lifeRelayWarmMs`（默认 5 分钟）就接话」，
+           *   而这个定时器**每 5 分钟跑一次** ⇒ 群里只要一直冷场，就**每格发一条** ✗
+           *   而正规那套 `peerChat`（冷场 15 分钟 + 冷却 90 分钟 + 每天 3 条）**压根没被问过**
+           *   —— 它排在后面，还被这里的 `continue` 跳过 ⇒ 有配额的被没配额的挤掉 ✗
+           *   更糟：对方那个号断线不说话 ⇒ 群里永远冷场 ⇒ 一直 @ 一个不会回应的人。
+           *
+           *   ⇒ 改成**先过 `peerChat.shouldPing`**（9–23 点 / 冷场 / 冷却 / 日上限全走它），
+           *     发出去之后 `noteReply` 记账 ⇒ 两条路共用同一份配额，不会再刷 ✓
+           */
+          const gate = (() => {
             try {
-              peers = peerChat.peersOf(g);
-            } catch {
-              peers = [];
+              return peerChat.shouldPing(nowMs, g, lastAt);
+            } catch (e) {
+              return { ok: false, reason: `判定出错：${e.message}` };
             }
+          })();
+          if (gate.ok) {
             let speaker = '';
-            for (const p of peers) {
+            for (const p of gate.peers ?? []) {
               try {
                 if (recentStore.lastFromUid(g, p, 1).length) {
                   speaker = String(p);
@@ -1242,11 +1338,11 @@ if (true) {
                 /* 拿不到就当它没说话 */
               }
             }
-            const take = speaker && (idle >= cold || Math.random() < chance);
+            const take = !!speaker;
             if (take) {
               let said = '';
               try {
-                said = await peerChat.compose(g, speaker, idle);
+                said = await peerChat.compose(g, speaker, gate.idleMs ?? 0);
               } catch (e) {
                 log.warn(`[日常] 群 ${g} 接同类的话生成失败（退回发日常事件）：${e.message}`);
                 said = '';
@@ -1257,9 +1353,12 @@ if (true) {
                     at: speaker,
                     atName: names.of(speaker, g) || '',
                   });
+                  try {
+                    peerChat.noteReply(g);
+                  } catch {}
                   log.info(
-                    `[日常] 群 ${g} 冷场 ${Math.round(idle / 60000)} 分钟 + ${speaker} 刚说过话` +
-                      ` ⇒ 这一格**接它的话**（不发日常事件）：「${said}」`,
+                    `[日常] 群 ${g} 冷场 ${Math.round((gate.idleMs ?? 0) / 60000)} 分钟 + ${speaker} 刚说过话` +
+                      ` ⇒ 这一格**接它的话**（走 peerChat 配额）：「${said}」`,
                   );
                   continue;
                 } catch (e) {
@@ -1267,6 +1366,8 @@ if (true) {
                 }
               }
             }
+          } else if (gate.reason) {
+            log.debug(`[日常] 群 ${g} 不接同类的话：${gate.reason}`);
           }
         }
 
@@ -1975,10 +2076,19 @@ if (config.remind?.enable !== false) {
     for (const it of remind.due()) {
       const f = fails.get(it.id) ?? { n: 0, since: Date.now() };
       try {
-        await bot.sendReminder(it);
+        /* ⚠️⚠️⚠️ 2026-11-25 改（用户：「**其实不用分两种吧**，普通提醒的话只要确实
+         *   提醒完毕就不自动续期了，watch 的话判断这件事情还没结束的话自动续期
+         *   下一个提醒就好了」）——
+         *
+         *   ⇒ 不再按 `kind` 分派：**所有到点任务都交给她自己处理**。
+         *     · 普通提醒（叫我起床）⇒ 她用自己的话说一句就完了；
+         *     · 要盯的事（GTA6 进度）⇒ 她自己搜、自己说、自己决定要不要再排下一次。
+         *   代码只负责"到点了"，**判断全在她**（用户要求全链路交模型）✓
+         */
+        log.info(`[提醒] 到点交给她：${it.what.slice(0, 40)}（${it.groupId ? `群 ${it.groupId}` : '私聊'}）`);
+        await bot.runDueTask(it);
         remind.markSent(it.id);
         fails.delete(it.id);
-        log.info(`[提醒] 到点已发出：${it.what.slice(0, 40)}（${it.groupId ? `群 ${it.groupId}` : '私聊'}）`);
       } catch (e) {
         f.n++;
         const waited = Date.now() - f.since;

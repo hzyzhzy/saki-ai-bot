@@ -679,18 +679,27 @@ export function lineCount(tier) {
  *
  * ⚠️ 抽出来的时候**内容一个字都没动**。
  */
-export function remindSystem(crit) {
+export function remindSystem(crit, dm = false) {
   // ⚠️ 2026-09-21：称呼从 `identity.address` 来（`owner` = 平时叫法、`ownerFormal` = 正式叫法）
   const o = persona.callOwner();
   const of = persona.callOwnerFormal() || o;
+  /* ⚠️ 2026-11-27 加 `dm`（用户：「**把余额提醒从 1 档群提前改成只对主人私聊提醒**」）——
+   *   原来这套提示词是**为群里写的**：要求"必须出现「<主人>」，光说'你'别人不知道在跟谁说"。
+   *   私聊里只有他一个人，那条要求反过来有害 —— 模型直接说"该充钱了"就会被那道验收闸判死 ✗
+   *   ⇒ `dm: true` 时换成私聊口径：提不提名字都行 ✓
+   *   ⚠️ 默认值 `false` ⇒ 快照工具（`test/prompt-snapshot.js`）和旧的调用点一个字都不变 ✓ */
   return [
     llm.personaLine(),
     '',
-    `现在你要在 QQ 群里**提醒${of} ${o} 充钱**（你的账户余额${crit ? '已经见底了' : '不太够了'}）。`,
+    dm
+      ? `现在你要**私聊**提醒${of} ${o} 充钱（你的账户余额${crit ? '已经见底了' : '不太够了'}）。`
+      : `现在你要在 QQ 群里**提醒${of} ${o} 充钱**（你的账户余额${crit ? '已经见底了' : '不太够了'}）。`,
     '',
     '硬要求：',
     '· 两句话以内，像随口说的一句话，**不要像系统通知**；',
-    `· **必须出现「${o}」** —— 群里说话得有指向，光说"你"别人不知道在跟谁说；`,
+    dm
+      ? `· 这是私聊，只有他一个人看 ⇒ **提不提名字都行**（叫「${o}」或者直接说话都可以）；`
+      : `· **必须出现「${o}」** —— 群里说话得有指向，光说"你"别人不知道在跟谁说；`,
     '· 🚫 **不许出现任何数字**（尤其不许报余额）；',
     '· 🚫 不许说"这个月"（余额是随用随充，没有月度概念）；',
     '· 🚫 不要卖惨、别写"别等我断了"这种狠话；',
@@ -700,13 +709,14 @@ export function remindSystem(crit) {
   ].join('\n');
 }
 
-export async function phraseLine(tier, fallback) {
+export async function phraseLine(tier, fallback, opts = {}) {
+  const dm = opts?.dm === true;
   const fb = String(fallback ?? '').trim() || pickLine(tier);
   const o = persona.callOwner();
   try {
     const crit = tier === 'critical';
     const out = await llm.phrase({
-      system: remindSystem(crit),
+      system: remindSystem(crit, dm),
       user: `参考语气（**别照抄，换个说法**）：${pickLine(tier, 0)} ／ ${pickLine(tier, 1)}`,
       maxTokens: 120,
       timeoutMs: 12000,
@@ -726,7 +736,9 @@ export async function phraseLine(tier, fallback) {
     // ⚠️ 2026-09-21：点名检查跟着 `address.owner` 走。
     //    ⚠️⚠️ 必须加 `o &&` —— 人设没填 owner 时 `o` 是空串，而 `includes('')` **永远为 true**，
     //    那样这道闸会**静默失效**（"没点名"的句子照样发到群里）。
-    if (o && !line.includes(o)) return ''; // 没指向
+    // ⚠️ 2026-11-27：`dm`（私聊）时**不要求点名** —— 那里只有他一个人，
+    //    模型说"该充钱了"完全合格；照旧卡这一道就等于一条都提醒不出来 ✗
+    if (!dm && o && !line.includes(o)) return ''; // 没指向
     if (/[0-9０-９]/.test(line)) return ''; // 报数了
     return line;
   } catch (e) {

@@ -57,12 +57,38 @@ function write(content) {
   renameSync(tmp, FILE);
 }
 
+/**
+ * 找出两个标记行的位置。
+ * ⚠️ **按整行认，不能用 `indexOf`**（2026-11-27 真踩）：文件头那段说明里只要提一次
+ *    `<!-- LEARNED:BEGIN -->` 原文，`indexOf(BEGIN)` 就会命中说明里的那一处 ⇒
+ *    取出来的"正文"是半行字 ⇒ 解析出 0 条、而文件看上去完全正常（validateFile 会报
+ *    "只有文字但没有 ## 主题"）。按行比值就没事：说明里那处不是一整行。
+ */
+function markerSpans(text) {
+  const s = String(text ?? '');
+  const lines = s.split('\n');
+  let beginStart = -1;
+  let beginEnd = -1;
+  let endStart = -1;
+  let off = 0;
+  for (const line of lines) {
+    const val = line.replace(/\r$/, '');
+    if (beginStart === -1 && val.trim() === BEGIN) {
+      beginStart = off;
+      beginEnd = off + line.length;
+    } else if (beginStart !== -1 && endStart === -1 && val.trim() === END) {
+      endStart = off;
+    }
+    off += line.length + 1;
+  }
+  return { beginStart, beginEnd, endStart };
+}
+
 /** 取出两个标记之间的正文 */
 function extractBlock(text) {
-  const i = text.indexOf(BEGIN);
-  const j = text.indexOf(END);
-  if (i === -1 || j === -1 || j < i) return '';
-  return text.slice(i + BEGIN.length, j);
+  const { beginEnd, endStart } = markerSpans(text);
+  if (beginEnd < 0 || endStart < 0 || endStart < beginEnd) return '';
+  return String(text).slice(beginEnd, endStart);
 }
 
 /** 把正文按 `## 主题` 切成条目 */
@@ -249,11 +275,117 @@ function upsertIntoFile(fileName, title, body) {
 }
 
 /**
+ * 她的笔记是三段：是什么 / 什么时候用 / 别弄错。
+ *
+ * ⚠️ 为什么不再存「他的原话 + 由谁于何时录入」：一份档案里十几条都是那个样子，
+ *    读起来像审计日志，模型也只能照条文答（原话还是零散的，比如「明天上号每人发1949绿宝石币」，
+ *    过两天"明天"是哪天都没人知道了）。改成三段式才是**她自己的笔记**。
+ * ⚠️ 来源（谁教的、哪个群、什么时候）**不进正文** —— 那是审计信息，已经写在
+ *    `logs/learned-changelog.md` 里；正文里留着只会每轮占提示词。
+ */
+const NOTE_PARTS = [
+  ['what', '是什么'],
+  ['when', '什么时候用'],
+  ['warn', '别弄错'],
+];
+
+/** 把一则笔记渲染成 markdown 正文（空的那几段直接不写） */
+export function renderNote(note = {}) {
+  return NOTE_PARTS.map(([k, label]) => {
+    const v = String(note[k] ?? '').trim();
+    return v ? `${label}：${v}` : '';
+  })
+    .filter(Boolean)
+    .join('\n');
+}
+
+const NOTE_SYS = `你在整理一个 QQ 机器人的学习笔记：把群友刚教她的一条东西，
+写成她自己以后能看懂、能用上的一则笔记。
+
+只输出 JSON，不要别的话：
+{"topic":"短标题","what":"是什么","when":"什么时候用得上","warn":"容易搞错的地方","merge":"同一条已有笔记的标题"}
+
+判据：
+· topic 一眼能认出是什么事，20 字以内；别把原话整句搬过来。
+· what 一句话说清这件事（第三人称陈述，120 字以内）。
+· when 什么场合该想起它（80 字以内）；想不出就留空串。
+· warn 容易搞错的地方 / 以前踩过的坑（80 字以内）；没有就留空串。
+· merge 若这条跟【已有笔记】里某一条其实是同一件事（换个说法，或是对它的更正），
+  就填那条的标题，一字不差；不是同一件事就留空串。
+⚠️ 他的话里没有的细节一个字都别加；拿不准就照原话写。`;
+
+/** 从模型输出里抠出那五个字段（抠不到就回落成"照原话记"） */
+function parseNoteJson(raw, fallback) {
+  const s = String(raw ?? '');
+  const i = s.indexOf('{');
+  const j = s.lastIndexOf('}');
+  if (i === -1 || j <= i) return fallback;
+  try {
+    const o = JSON.parse(s.slice(i, j + 1));
+    return {
+      topic: String(o.topic ?? '').trim().slice(0, 40) || fallback.topic,
+      what: String(o.what ?? '').trim().slice(0, 400) || fallback.what,
+      when: String(o.when ?? '').trim().slice(0, 200),
+      warn: String(o.warn ?? '').trim().slice(0, 200),
+      merge: String(o.merge ?? '').trim().slice(0, 40),
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+/** 现有笔记的标题 + 一句话摘要（给改写判断"是不是同一件事"用；界面也用它列目录） */
+export function topicList() {
+  return listEntries().map((e) => ({
+    title: e.title,
+    gist: String(e.body ?? '')
+      .split('\n')
+      .map((x) => x.replace(/^(是什么|什么时候用|别弄错)[：:]\s*/, '').trim())
+      .find(Boolean) ?? '',
+  }));
+}
+
+async function rewriteNote(topic, fact, existing = []) {
+  const known = existing.length
+    ? existing.map((x) => `- ${x.title}${x.gist ? `：${x.gist.slice(0, 60)}` : ''}`).join('\n')
+    : '（还没有）';
+  const raw = await phrase({
+    system: NOTE_SYS,
+    user: `他教的：\n主题：${topic}\n内容：${fact}\n\n【已有笔记】\n${known}`,
+    maxTokens: 320,
+  });
+  return parseNoteJson(raw, { topic, what: fact, when: '', warn: '', merge: '' });
+}
+
+/**
+ * 生成一则笔记。**任何一步失败都照原话记下来** —— 宁可记得机械，也不能把知识丢了。
+ * @param {(topic:string, fact:string, existing:Array)=>Promise<object>} [rewrite] 测试可以注入
+ */
+async function makeNote(topic, fact, meta = {}) {
+  const fallback = { topic, what: fact, when: '', warn: '', merge: '' };
+  try {
+    const fn = typeof meta.rewrite === 'function' ? meta.rewrite : rewriteNote;
+    const n = await fn(topic, fact, topicList());
+    if (!n || typeof n !== 'object') return fallback;
+    return { ...fallback, ...n };
+  } catch (e) {
+    log.warn(`笔记改写失败（照原话记下来）：${e.message}`);
+    return fallback;
+  }
+}
+
+/** 教学来源那一行（只给专题库和变更日志用，不进她的笔记） */
+const stamp = (fact, meta) =>
+  `${fact}\n\n> 由 ${meta.byName ?? meta.by ?? '未知'} 于 ${now()} 通过 ${
+    meta.where ?? '群聊'
+  } 教学录入。`;
+
+/**
  * 新增或覆盖一个主题。
  * @param {string} topic 主题名（同名的会被覆盖）
  * @param {string} fact 内容
- * @param {{by?:string, byName?:string, where?:string}} meta 来源信息
- * @returns {{ok:boolean, replaced:boolean, error?:string, topic:string}}
+ * @param {{by?:string, byName?:string, where?:string, rewrite?:Function}} meta 来源信息
+ * @returns {{ok:boolean, replaced:boolean, merged?:boolean, error?:string, topic:string}}
  */
 export async function learn(topic, fact, meta = {}) {
   const t = String(topic ?? '').trim();
@@ -265,35 +397,25 @@ export async function learn(topic, fact, meta = {}) {
   if (f.length > MAX_FACT) return { ok: false, error: `内容太长（限 ${MAX_FACT} 字）`, topic: t };
 
   const text = read();
-  if (!text.includes(BEGIN) || !text.includes(END)) {
+  const span = markerSpans(text);
+  if (span.beginEnd < 0 || span.endStart < 0) {
     return { ok: false, error: 'learned.md 缺少标记行，已被破坏', topic: t };
   }
 
-  const block = extractBlock(text);
-  const entries = parseEntries(block);
-
-  // 同名主题覆盖；否则追加
-  const idx = entries.findIndex((e) => e.title === t);
-  const replacedOld = idx !== -1;
-  const oldBody = replacedOld ? entries[idx].body : '';
-
-  const stamped = `${f}\n\n> 由 ${meta.byName ?? meta.by ?? '未知'} 于 ${now()} 通过 ${
-    meta.where ?? '群聊'
-  } 教学录入。`;
+  const entries = parseEntries(extractBlock(text));
 
   // ⚠️⚠️ 2026-09-30：**先让模型判断这条该进哪一份**（用户要求
   //    「以后学习到的知识也直接通过模型自动分到不同资料库」）。
-  //    分到专题库就直接写那边；说不清 / 分类失败 → 走老路径写进 learned.md。
+  //    分到专题库就直接写那边；说不清 / 分类失败 → 落 learned.md 当她的笔记。
   const cat = await classify(t, f);
   const target = TARGETS[cat] ?? TARGETS.other;
-  const logLine = `- ${now()} **${replacedOld ? '覆盖' : '新增'}**「${t}」 by ${
-    meta.byName ?? meta.by ?? '?'
-  } → ${target}${oldBody ? `\n  - 被覆盖的旧内容：${oldBody.split('\n')[0].slice(0, 120)}` : ''}`;
 
   if (target !== 'learned.md') {
     try {
-      const r = upsertIntoFile(target, t, stamped);
-      insertChangeLog(logLine);
+      const r = upsertIntoFile(target, t, stamp(f, meta));
+      insertChangeLog(
+        `- ${now()} **${r.replaced ? '覆盖' : '新增'}**「${t}」 by ${meta.byName ?? meta.by ?? '?'} → ${target}`,
+      );
       log.info(
         `教学「${t}」→ ${target}（${r.replaced ? '覆盖' : '新增'}，${f.length} 字，分类 ${cat}）`,
       );
@@ -314,25 +436,39 @@ export async function learn(topic, fact, meta = {}) {
       }
       return { ok: true, replaced: r.replaced, topic: t, file: target, cat };
     } catch (e) {
-      // ⚠️ 写专题库失败**不能把知识丢了** —— 往下走老路径，写进 learned.md
+      // ⚠️ 写专题库失败**不能把知识丢了** —— 往下走，写进 learned.md
       log.error(`写入 ${target} 失败: ${e.message}（回落 learned.md）`);
     }
   }
 
-  const entry = { title: t, body: stamped };
+  // ── 落 learned.md：写成一则笔记，同一件事合并进已有那条 ──────────────
+  const note = await makeNote(t, f, meta);
+  const mergedInto = note.merge && entries.some((e) => e.title === note.merge) ? note.merge : '';
+  const title = mergedInto || note.topic || t;
+  const idx = entries.findIndex((e) => e.title === title);
+  const replacedOld = idx !== -1;
+  const oldBody = replacedOld ? entries[idx].body : '';
+
+  const entry = { title, body: renderNote(note) };
   if (replacedOld) entries[idx] = entry;
   else entries.push(entry);
 
   // 重建文件
-  let out = text.slice(0, text.indexOf(BEGIN) + BEGIN.length);
+  let out = text.slice(0, span.beginEnd);
   out += renderEntries(entries);
-  out += text.slice(text.indexOf(END));
+  out += text.slice(span.endStart);
 
-  insertChangeLog(logLine);
+  insertChangeLog(
+    `- ${now()} **${replacedOld ? '覆盖' : '新增'}**「${title}」 by ${
+      meta.byName ?? meta.by ?? '?'
+    } → learned.md${mergedInto ? `（合并进已有「${mergedInto}」）` : ''}${
+      oldBody ? `\n  - 被覆盖的旧内容：${oldBody.split('\n')[0].slice(0, 120)}` : ''
+    }`,
+  );
 
   try {
     write(out);
-    log.info(`learned.md ${replacedOld ? '覆盖' : '新增'}主题「${t}」（${f.length} 字）`);
+    log.info(`learned.md ${replacedOld ? '覆盖' : '新增'}笔记「${title}」（${f.length} 字${mergedInto ? '，合并' : ''}）`);
     // ⚠️ 2026-10-06：这里也要记撤回快照 —— 分类失败 / 归到 other 的那条走的就是这条路。
     //    ⚠️ `before` 是**这次写之前的整份 learned.md**（`text` 就是函数开头读的那份）。
     try {
@@ -341,13 +477,20 @@ export async function learn(topic, fact, meta = {}) {
         gid: String(meta.groupId ?? meta.gid ?? ''),
         before: text,
         after: out,
-        title: t,
+        title,
         added: !replacedOld,
       });
     } catch (e) {
       log.warn(`教学撤回快照没记上（不影响教学本身）：${e.message}`);
     }
-    return { ok: true, replaced: replacedOld, topic: t, file: 'learned.md', cat };
+    return {
+      ok: true,
+      replaced: replacedOld,
+      merged: Boolean(mergedInto),
+      topic: title,
+      file: 'learned.md',
+      cat,
+    };
   } catch (e) {
     log.error(`写入 learned.md 失败: ${e.message}`);
     return { ok: false, error: e.message, topic: t };
@@ -416,13 +559,14 @@ function now() {
  */
 export function validateFile(text) {
   const t = String(text ?? '');
-  const i = t.indexOf(BEGIN);
-  const j = t.indexOf(END);
-  if (i === -1) return { ok: false, error: `缺少 ${BEGIN} 这一行（这是代码用来定位条目的标记，不能删）` };
-  if (j === -1) return { ok: false, error: `缺少 ${END} 这一行` };
-  if (j < i) return { ok: false, error: `${END} 跑到 ${BEGIN} 前面了` };
+  const span = markerSpans(t);
+  if (span.beginEnd < 0) {
+    return { ok: false, error: `缺少 ${BEGIN} 这一行（这是代码用来定位条目的标记，不能删）` };
+  }
+  if (span.endStart < 0) return { ok: false, error: `缺少 ${END} 这一行` };
+  if (span.endStart < span.beginEnd) return { ok: false, error: `${END} 跑到 ${BEGIN} 前面了` };
 
-  const block = t.slice(i + BEGIN.length, j);
+  const block = t.slice(span.beginEnd, span.endStart);
   const entries = parseEntries(block);
 
   // ⚠️ 「有内容但没有一条 `## 主题`」= 解析器眼里的**空档案** —— 内容全丢了，
@@ -450,9 +594,10 @@ export function forget(topic, meta = {}) {
   if (idx === -1) return { ok: false, error: `没有找到主题「${t}」` };
 
   const removed = entries.splice(idx, 1)[0];
-  let out = text.slice(0, text.indexOf(BEGIN) + BEGIN.length);
+  const span = markerSpans(text);
+  let out = text.slice(0, span.beginEnd);
   out += renderEntries(entries);
-  out += text.slice(text.indexOf(END));
+  out += text.slice(span.endStart);
   insertChangeLog(`- ${now()} **删除**「${t}」`);
   write(out);
   log.info(`learned.md 删除主题「${t}」`);

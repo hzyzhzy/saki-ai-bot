@@ -37,6 +37,29 @@ const DIR = KNOWLEDGE_DIR;
 const KDIR = knowledgePrivateDir();
 /** 学习档案单独处理（优先级更高），不参与下面的通用拼接 */
 const LEARNED = 'learned.md';
+
+/**
+ * 最近一篇日记（`diary/YYYY-MM-DD.md`）。
+ * ⚠️ 这里**直接读盘、不 import `diary.js`** —— 那个模块会连带 llm/recent，
+ *    而 knowledge.js 是所有提示词的拼装点，多引一层容易成环。
+ * @returns {{date:string, text:string}|null}
+ */
+function latestDiary() {
+  const dir = join(knowledgePrivateDir(), 'diary');
+  try {
+    const names = readdirSync(dir)
+      .filter((f) => /^\d{4}-\d{2}-\d{2}\.md$/.test(f))
+      .sort();
+    if (!names.length) return null;
+    const f = names[names.length - 1];
+    const raw = readFileSync(join(dir, f), 'utf8');
+    // 去掉文件头那行 `# 2026-11-27 星期四`
+    const text = raw.replace(/^#\s+[^\n]*\n+/, '').trim();
+    return text ? { date: f.replace(/\.md$/, ''), text } : null;
+  } catch {
+    return null;
+  }
+}
 /**
  * ⚠️ **群资料库**目录（2026-09-15 晚加，<主人> 要求）：
  *    `knowledge/groups/<群号>.md` —— **只在该群里注入**。
@@ -187,6 +210,15 @@ function load() {
       for (const n of readdirSync(root)) {
         if (!n.toLowerCase().endsWith('.md')) continue;
         if (n.toLowerCase() === LEARNED) continue; // 学习档案单独处理
+        /* ⚠️⚠️⚠️ 2026-11-24 加（用户：「排」；起因是缓存卡在 75%）——
+         *   `memes-auto.md` 由 `src/memes-auto.js` **每 16 分钟**自动重写一次，
+         *   而它进了知识库就是**最前面那 11 万字里的一段** ⇒ 它一变，
+         *   整条提示词的前缀缓存**全部作废**（实测云端 `cached` 一直卡在 8 万上下、
+         *   每轮白算 2~3 万 token）✗
+         *   ⚠️ 它**不注入也照样在用**：`memes.js` 的 `memesFor(text)` 命中梗时
+         *      会单独给一段 —— 那才是"用到才给"的正确用法，
+         *      知识库里这份是**全量重复注入**（0.9 KB 白占 + 每 16 分钟废一次缓存）✓ */
+        if (n.toLowerCase() === 'memes-auto.md') continue;
         if (collected.some((c) => c.name.toLowerCase() === n.toLowerCase())) continue;
         collected.push({ name: n, file: join(root, n), from: 'knowledge' });
       }
@@ -1372,6 +1404,27 @@ export function knowledgeText(opts = {}) {
         learned,
       ].join('\n'),
     );
+  }
+  // ⚠️ 2026-11-27：**最近写的日记**（`src/diary.js` 每天夜里写一篇，只给她自己看）。
+  //    为什么带进提示词：不带的话她根本不知道自己昨天写过什么，日记就只是躺在文件夹里的一堆字。
+  //    ⚠️ 只带**最近一篇**、且截断（默认 900 字）—— 日记是长期记忆，不是这一轮的谈资。
+  //    ⚠️ 放在 kTail（每轮会变的那一段）里，不碰静态前缀 ⇒ 不影响缓存 ✓
+  try {
+    const d = latestDiary();
+    if (d) {
+      pushTail(
+        [
+          '# 你最近写的日记（你自己写的，不是别人跟你说的）',
+          '',
+          `这是你 ${d.date} 那天写的。可以照着它想起自己那几天在过什么日子；`,
+          '但**别把日记原样念出来**，也别跟人提「我写了日记」—— 有人问起近况才用它。',
+          '',
+          d.text.slice(0, 900),
+        ].join('\n'),
+      );
+    }
+  } catch (e) {
+    log.debug(`拼日记失败（忽略）：${e.message}`);
   }
   /* ⚠️⚠️ 2026-10-22：**短期共享记忆**（用户要求）
    *   「建立一个新短期记忆**共享**知识库：最近发了哪些视频、B站收到了什么评论回复、

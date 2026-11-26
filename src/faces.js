@@ -99,6 +99,9 @@ export function faceGroups() {
     who: list[0].who ?? '',
     when: list[0].when ?? '',
     desc: list[0].desc ?? '',
+    // ⚠️ 2026-11-25：类别（笑/无语/疑惑/害羞/生气/难过/震惊/围观/动作）——
+    //    匹配时只在同类里挑，别发到完全无关的那种（见 matchFaces 里那段）
+    mood: list[0].mood ?? '',
     variants: list,
   }));
 }
@@ -149,7 +152,7 @@ export function faceDetailText() {
 function slimGroup(g) {
   const who = g.who && !/角色不确定|不确定|未知/.test(g.who) ? g.who.replace(/（.*?）$/, '') : '';
   const when = String(g.when ?? '').replace(/[ ；]+$/g, '').replace(/。$/, '');
-  return { tag: g.tag, who, when, count: g.count, desc: g.desc ?? '' };
+  return { tag: g.tag, who, when, count: g.count, desc: g.desc ?? '', mood: g.mood ?? '' };
 }
 
 /**
@@ -166,7 +169,7 @@ function slimGroup(g) {
  * ⚠️ 这是**检索**（tag / 适用场合 / 描述的字面相似度），不是"理解人话"的快判；
  *    兜底永远给清单，最坏情况也比"凭记忆瞎写"准 ✓
  */
-export function matchFaces(emotion = '', limit = 8) {
+export function matchFaces(emotion = '', limit = 8, opts = {}) {
   const groups = faceGroups();
   if (!groups.length) return [];
   const want = String(emotion ?? '').trim();
@@ -193,7 +196,41 @@ export function matchFaces(emotion = '', limit = 8) {
     return { g, score: score + bonus };
   });
   scored.sort((a, b) => b.score - a.score);
-  return scored.slice(0, n).map((x) => slimGroup(x.g));
+  /* ⚠️⚠️⚠️ 2026-11-25 加（用户：「把类似的表情分类，这样不会发和需要发的表情类型
+   *   完全无关的情况」）——
+   *
+   *   实测只按字集相似度不够准：「笑到不行」判定成了「难过（崩溃）」、
+   *   「难过」判成了「无语」—— **top1 一错、整类跟着错**，比原来还糟 ✗
+   *
+   *   ⇒ 先过一层**词 → 类别**（她写的词里出现"笑/无语/哭/厉害"这类就定下类别），
+   *     判得出类别就**只在该类里排**；判不出（纯自然描述，如"有点尴尬又不想认输"）
+   *     才退回"按 top1 的类别过滤" ⇒ 至少不会发到完全无关的那一类 ✓
+   *   ⚠️ 这是**把她的词映射到库的类别**，不是替她决定要不要发（工具调用仍由她发起）。
+   */
+  const w = String(want ?? '');
+  const MOOD_WORDS = [
+    ['笑', ['笑', '哈哈', '乐', '开心', '好笑', '搞笑', '庆祝', '耶', '欢呼']],
+    ['无语', ['无语', '无奈', '扶额', '懒得', '冷淡', '白眼', '走了', '盯']],
+    ['疑惑', ['疑惑', '不懂', '思考', '琢磨', '问号', '？', '?', '懵']],
+    ['害羞', ['害羞', '脸红', '不好意思', '撒娇', '抱', '贴贴', '亲']],
+    ['生气', ['生气', '恼', '骂', '威胁', '得意', '嘲', '哼']],
+    ['难过', ['难过', '委屈', '哭', '崩', '惨', '伤心']],
+    ['震惊', ['震惊', '厉害', '佩服', '太强', '好强', '磕', '喜欢', '认同', '惊']],
+    ['围观', ['围观', '吃瓜', '看戏', '蹲', '划水', '摸鱼']],
+    ['动作', ['挥手', '比手', '就绪', '到岗', '准备', '出发', '干活']],
+  ];
+  const forced = w ? MOOD_WORDS.find(([, ws]) => ws.some((k) => w.includes(k)))?.[0] : '';
+  if (forced && !opts.anyMood) {
+    const inMood = scored.filter((x) => (x.g.mood ?? '') === forced).slice(0, n).map((x) => slimGroup(x.g));
+    if (inMood.length) return inMood;
+  }
+  const top = scored.slice(0, n).map((x) => slimGroup(x.g));
+  const mood = top[0]?.mood;
+  if (mood && !opts.anyMood) {
+    const same = top.filter((x) => x.mood === mood);
+    if (same.length) return same;
+  }
+  return top;
 }
 
 /** `[xx]` 里那些**不是表情**的占位符（描别人消息用的），模糊匹配时必须排除 */

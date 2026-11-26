@@ -739,8 +739,22 @@ function humanWhen(t, now = Date.now()) {
  * @param {number} [n]
  * @returns {{userId:string, self:boolean, at:number}[]} 从早到晚
  */
-export function speakers(groupId, n = 8) {
-  const list = store.get(String(groupId)) ?? [];
+/**
+ * 这条消息**引用的是谁**（`{id, self, name, text}`，没引用/查不到就是 null）。
+ *
+ * ⚠️ 「说话判断」要用它：只看到 `[引用#数字]` 时，judge 会把"有引用"当成
+ *    "引用我的话"而放行，于是去接一句本来不该接的（真实踩过）。
+ * ⚠️ 归属是异步回填的 ⇒ 判定那一刻可能还是 null，调用方要按"看不出是谁"处理。
+ */
+export function replyTargetOf(groupId, messageId) {
+  const list = store.get(String(groupId ?? ''));
+  const id = String(messageId ?? '');
+  if (!list?.length || !id) return null;
+  const hit = list.find((m) => m.messageId && String(m.messageId) === id);
+  return hit?.replyTo ?? null;
+}
+
+export function speakers(groupId, n = 8) {  const list = store.get(String(groupId)) ?? [];
   return list.slice(-Math.max(1, n)).map((m) => ({
     userId: String(m.userId ?? ''),
     self: m.self === true,
@@ -917,17 +931,21 @@ export function contextText(groupId, excludeText = '', excludeIds = [], opts = {
       const quote = m.replyTo.text ? `：${m.replyTo.text}` : `（#${m.replyTo.id}）`;
       body = `${who}${quote} ${body.replace(/\[引用#[^\]]*\]/g, '').trim()}`.trim();
     }
-    // ⚠️ 方括号占位符一律换成人话（她照着上下文学方括号那个坑，见下面的长注释）
+    /* ⚠️⚠️ 2026-11-24 改（用户：「**表情包也要识图，但是要有分类**」）——
+     *   原来所有图都换成同一句「（发了张图）」⇒ 她分不清那是**表情包**还是**截图/照片**，
+     *   于是一个表情包也可能被她当成"他发我的图"去描述 ✗
+     *   ⇒ 拆成两类，各给人话说法；**表情包那条必须放前面**（否则被图片那条先吃掉）✓ */
     body = body.replace(
-      /\[(图片|照片|表情包|动画表情|动图|贴纸|gif|sticker|img|image)\]/gi,
-      '（发了张图）',
+      /\[(表情包|动画表情|贴纸|sticker)\]/gi,
+      '（发了个表情包）',
     );
+    body = body.replace(/\[(图片|照片|动图|gif|img|image)\]/gi, '（发了张图）');
     // ⚠️ 2026-09-29 加（用户截图：她复读群友那句时把 emoji 变成了字面的
     //    `[QQ表情][QQ表情][QQ表情]`，群友以为"她不能发表情"✗）：
     //    `QQ表情` 原来**漏在**上面那条正则外面 ⇒ 上下文里一直是方括号形式
     //    ⇒ 她既可能**复读出去**（已在 `repeat.js` 那边修掉），也可能**照着学**。
     //    ⇒ 一起换成人话。
-    body = body.replace(/\[QQ表情\]/gi, '（发了个表情）');
+    body = body.replace(/\[QQ表情\]/gi, '（发了个 QQ 表情）');
     // ⚠️ 2026-09-26：**这一条 @ 了谁** —— 和上面的 `[@了你]` 同一个位置、同一个口径。
     //    没有它的话，「他说的」这种话她根本无从知道在指谁
     //    （用户截图那次就是这个：`@她 @一个小阿萨 他说的` → 她答「哪个他…名字呢」✗）。
@@ -1026,8 +1044,13 @@ export function contextText(groupId, excludeText = '', excludeIds = [], opts = {
    *   这里原来只有**顺序**（旧→新），没有任何"哪句是刚说的"标注 ⇒ 模型按篇幅平均看，
    *   经常放着最近那句不接。现场（截图）：他先回了个「对」、紧接着只 @ 了她一下，
    *   她回「啧，怎么又@我」，那个「对」完全没接 ✗
-   *   ⇒ 把**最后一行**（最新那句）显式标出来，和 lite 那条路的标记口径一致 ✓ */
-  if (lines.length) lines[lines.length - 1] += '　←（最近这一句，先接它）';
+   *   ⇒ 把**最后一行**（最新那句）显式标出来，和 lite 那条路的标记口径一致 ✓
+   * ⚠️ 2026-11-24 再改（用户：「**最新信息权重最高，历史权重随时间下降，不是不看，
+   *   可能最新的消息和之前的消息有联系**」）——
+   *   原来标的是「**先接它**」⇒ 她真的只接那一句、把它复述一遍（截图：Nova 说「图还没刷
+   *   出来」，她回「诺斯那几张我这边也没刷出来」，纯复述，连带「几张」都是编的）✗
+   *   ⇒ 改成"**权重最高**"，而不是"只管它" ✓ */
+  if (lines.length) lines[lines.length - 1] += '　←（最近这句，权重最高；前面几句可能跟它是同一件事）';
   return roleNote + peerNote + botNote + head + lines.join('\n');
 }
 
@@ -1124,6 +1147,21 @@ export function lastBotLines(groupId, { n = 6, uids = [] } = {}) {
  * @param {number} [n] 最多取几句（时间正序返回）
  * @returns {string[]}
  */
+/**
+ * ⚠️⚠️ 2026-11-25 加：**她自己**最近说过的话（`self === true`）。
+ * ⚠️ 别用 `lastFromUid` —— 它明确排除她自己（`m?.self !== true`），取不到 ✗
+ */
+export function lastSelfText(groupId, n = 1) {
+  const g = String(groupId ?? '');
+  const arr = store.get(g);
+  if (!Array.isArray(arr) || !arr.length) return [];
+  return arr
+    .filter((m) => m?.self === true)
+    .slice(-Math.max(1, Number(n) || 1))
+    .map((m) => String(m?.text ?? '').trim())
+    .filter(Boolean);
+}
+
 export function lastFromUid(groupId, uid, n = 3) {
   const g = String(groupId ?? '');
   const u = String(uid ?? '').trim();

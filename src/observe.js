@@ -37,15 +37,20 @@
  * | 性格不断细化 | 压缩提示词里**硬性要求**；代码再加一道**条数不许减少**的校验（减少了就拒绝写入） |
  * | 好感度不能修改 | 好感度**根本不在这里** —— 它在 `src/affinity.js` + `state/affinity.json`，这个模块**一个字都不碰**（连提示词里都不提它） |
  */
-import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync, rmSync } from 'node:fs';
+import { readFileSync, readdirSync, writeFileSync, renameSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import { config, ROOT, KNOWLEDGE_DIR, knowledgePrivateDir, stateDir } from './config.js';
 import { log } from './log.js';
 import { reloadKnowledge, groupFileName } from './knowledge.js';
-import { groupsOf } from './names.js';
+import { groupsOf, label as nameLabel } from './names.js';
 import { backupKnowledge } from './backup.js';
 import { streamChat } from './llm.js';
 import * as thinkLog from './think-log.js';
+// ⚠️ 2026-11-27：「QQ号 ↔ 昵称」通讯录（认识视图按 QQ 号合并用）
+// ⚠️ 别名必须叫 peopleOf —— merge() 里已经有个局部变量 `people`（parsePeople 的结果）
+import * as peopleOf from './people.js';
+// ⚠️ 2026-11-27：口癖动态库（`phrases.md`，按号一份）
+import * as phrasesOf from './phrases.js';
 
 /** 把流式输出收成一段文本 */
 async function collect(messages, meta = {}) {
@@ -73,7 +78,15 @@ async function collect(messages, meta = {}) {
   } finally {
     try {
       if (tlId) {
-        thinkLog.finish(tlId, { reply: out, usage: report.usage, cost: report.cost, failed: !out.trim() });
+        thinkLog.finish(tlId, {
+          reply: out,
+          usage: report.usage,
+          cost: report.cost,
+          // ⚠️ 2026-11-26：卡片上要能看出这条是哪个模型写的（`streamChat` 写进 report 的）
+          model: report.model,
+          modelNote: report.degraded ? '（已自动降级）' : '',
+          failed: !out.trim(),
+        });
       }
     } catch {}
   }
@@ -97,7 +110,7 @@ let seen = 0;
 /** 防止并发跑两次 */
 let running = false;
 /** 统计 */
-const stats = { runs: 0, added: 0, lastRunAt: 0, lastError: '', compressRuns: 0, lastCompressAt: 0 };
+const stats = { runs: 0, added: 0, lastRunAt: 0, lastError: '', compressRuns: 0, lastCompressAt: 0, lastGroupAt: {} };
 
 /**
  * 「上次压缩是什么时候」**必须落盘**（2026-09-14）。
@@ -116,8 +129,22 @@ function loadState() {
     if (!existsSync(STATE_FILE)) return;
     const j = JSON.parse(readFileSync(STATE_FILE, 'utf8'));
     stats.lastCompressAt = Number(j?.lastCompressAt) || 0;
+    // 每群上一次总结的时间（落盘：重启后不能立刻又跑一遍同一个群）
+    stats.lastGroupAt = (j && typeof j.lastGroupAt === 'object' && j.lastGroupAt) || {};
   } catch (e) {
     log.debug(`观察状态读取失败（当作空的）：${e.message}`);
+  }
+}
+
+function touchGroup(gid) {
+  try {
+    stats.lastGroupAt = stats.lastGroupAt || {};
+    stats.lastGroupAt[String(gid || '')] = Date.now();
+    const keep = Object.entries(stats.lastGroupAt).sort((a, b) => b[1] - a[1]).slice(0, 60);
+    stats.lastGroupAt = Object.fromEntries(keep);
+    saveState();
+  } catch (e) {
+    log.debug(`记录群总结时间失败：${e.message}`);
   }
 }
 
@@ -125,7 +152,11 @@ function saveState() {
   try {
     mkdirSync(join(stateDir()), { recursive: true });
     const tmp = `${STATE_FILE}.tmp`;
-    writeFileSync(tmp, JSON.stringify({ lastCompressAt: stats.lastCompressAt }, null, 2), 'utf8');
+    writeFileSync(
+      tmp,
+      JSON.stringify({ lastCompressAt: stats.lastCompressAt, lastGroupAt: stats.lastGroupAt ?? {} }, null, 2),
+      'utf8',
+    );
     renameSync(tmp, STATE_FILE);
   } catch (e) {
     log.debug(`观察状态写盘失败：${e.message}`);
@@ -171,6 +202,20 @@ export function note(event, text) {
   // 机器人自己说的不算「观察对象」
   if (String(event.user_id) === String(event.self_id)) return;
 
+  // ⚠️ 顺手记一份「QQ号 ↔ 昵称」（`state/people.json`）：
+  //    记忆里只存昵称，而昵称会改、也会被写成十几种（实测 Anon 一个人 13 种）⇒
+  //    认识视图要**按 QQ 号合并**，靠的就是这张表。成本：内存改个对象，3 秒后才落盘。
+  try {
+    peopleOf.touch({
+      uid: String(event.user_id ?? ''),
+      nick: event.sender?.nickname,
+      card: event.sender?.card,
+      gid: String(event.group_id ?? ''),
+    });
+  } catch (e) {
+    log.debug(`[通讯录] 记一笔失败（忽略）：${e.message}`);
+  }
+
   pending.push({
     name: event.sender?.card || event.sender?.nickname || String(event.user_id),
     userId: String(event.user_id),
@@ -194,6 +239,16 @@ export function pendingCount() {
   return pending.length;
 }
 
+/** 测试用：把"旧记忆 + 这次新观察"的合并结果单独拿出来验（不写盘、不调模型） */
+export function __merge(existing, parsed) {
+  return merge(existing, parsed);
+}
+
+/** 测试用：解析模型输出（不写盘、不调模型） */
+export function __parseSections(raw) {
+  return parseSections(raw);
+}
+
 export function status() {
   return {
     enable: config.observe?.enable !== false,
@@ -214,16 +269,19 @@ function targetFileFor(groupId, fromPrivate = false) {
   if (gid) {
     const name = groupFileName(gid);
     if (name) return join(KDIR, name);
-    // ⚠️ 2026-09-17：私聊的人**第一次**被总结时，`dm/<QQ号>.md` 还不存在，
-    //    而 `groupFileName()` 查的是**已加载**的表 → 查不到。
-    //    这里必须能把路径**算出来**，否则会掉进下面的 FILE 分支，
-    //    把**私聊内容写进共享的群记忆**里 —— 那是会被所有群看到的地方 ✗✗
-    if (gid.startsWith('dm:')) return join(KDIR, 'dm', `${gid.slice(3)}.md`);
-    // ⚠️⚠️ 2026-09-17：**私聊归到群号、但那个群还没有自己的资料库文件** ——
-    //    这种情况**绝不能**掉回共享的 `group-memory.md`（所有群都看得到，等于泄漏）。
-    //    改成**就地给这个群建一份** `groups/<群号>.md`。
-    //    （这条是 `test/dm-memory.js` 【3】抓出来的 —— 我第一版就是这么漏的。）
-    if (fromPrivate) return join(KDIR, 'groups', `${gid}.md`);
+    if (gid.startsWith('dm:')) {
+      // ⚠️ 2026-09-17：私聊的人**第一次**被总结时，`dm/<QQ号>.md` 还不存在，
+      //    而 `groupFileName()` 查的是**已加载**的表 → 查不到。
+      //    这里必须能把路径**算出来**，否则会掉进下面的 FILE 分支，
+      //    把**私聊内容写进共享的群记忆**里 —— 那是会被所有群看到的地方 ✗✗
+      return join(KDIR, 'dm', `${gid.slice(3)}.md`);
+    }
+    // ⚠️⚠️ 群聊**一律**写这个群自己的资料库（没有就地建一份）。
+    //    以前没有资料库文件的群会掉回共享 `group-memory.md` ⇒ 好几个群的大事混在一个文件里，
+    //    等于把 A 群发生的事当成 B 群的记忆。大事绝不跨群合并。
+    //    （私聊归到群号的那条 `fromPrivate` 路径也是同一个落点，保留参数只为兼容调用处）
+    void fromPrivate;
+    return join(KDIR, 'groups', `${gid}.md`);
   }
   return FILE;
 }
@@ -319,39 +377,148 @@ function currentObserved(file = FILE) {
     const i = raw.indexOf(BEGIN);
     const j = raw.indexOf(END);
     if (i < 0 || j < 0) return '';
-    return raw.slice(i + BEGIN.length, j).trim();
+    // ⚠️ 群友条目后面的 `<!--u:QQ号-->` 是给程序认人用的，**别喂给模型**
+    //    （喂了她会学着在输出里写 HTML 注释）
+    return raw
+      .slice(i + BEGIN.length, j)
+      .replace(/<!--\s*u:\d+\s*-->/g, '')
+      .trim();
   } catch {
     return '';
   }
 }
 
-const PROMPT = `你在帮一个 QQ 群客服机器人**暗中积累**对群和群友的了解。
+/**
+ * 这批消息里出现了**早就认识的人**（主人 / 服主）时，单独标一行。
+ *
+ * 不标的话模型只能从这批消息里认识他 —— 她见过的都是"今天冒出来的人在点模型名"，
+ * 于是把他写成「新冒泡的群友」。已有的旧记忆如果恰好被压到后面，这个错就每次都会犯。
+ */
+function knownFaces(gid, batch) {
+  const owner = String(config.ownerQQ ?? '').trim();
+  if (!owner) return '';
+  const hit = Array.isArray(batch) && batch.some((m) => String(m?.userId ?? '') === owner);
+  if (!hit) return '';
+  let name = '';
+  try {
+    name = String(nameLabel(owner, gid) ?? '').trim();
+  } catch {}
+  if (!name || name === owner) name = '主人';
+  return (
+    '# 早就认识的人（不是你这次才见到的，别写成「新冒泡的群友」「新成员」）\n' +
+    `- ${name}（QQ ${owner}）：把机器人叫起来的人、服务器服主；这批里出现的他本人就是老熟人。\n`
+  );
+}
 
-你会看到一批群聊记录，以及**它已经记下的内容**。请输出**这次新观察到的东西**。
+/**
+ * **同一个人可能在好几个群里**：群友的描述可以跨群合并（在 A 群看出来的性子，B 群也用得上），
+ * 所以把别的群记过、而这一批里也出现的那些人，作为参考贴进来。
+ *
+ * ⚠️ 只取「群友」那一节 —— **大事绝不跨群**（各群的事只在各群自己的文件里）。
+ */
+function siblingPeople(gid, batch) {
+  const names = new Set(
+    (Array.isArray(batch) ? batch : []).map((m) => String(m?.name ?? '').trim()).filter(Boolean),
+  );
+  if (!names.size) return '';
+  let files = [];
+  try {
+    files = readdirSync(join(KDIR, 'groups')).filter((f) => f.endsWith('.md'));
+  } catch {
+    return '';
+  }
+  const out = [];
+  for (const f of files) {
+    if (f === `${gid}.md`) continue;
+    let raw = '';
+    try {
+      raw = readFileSync(join(KDIR, 'groups', f), 'utf8');
+    } catch {
+      continue;
+    }
+    const i = raw.indexOf(BEGIN);
+    const j = raw.indexOf(END);
+    if (i < 0 || j < 0) continue;
+    const area = raw.slice(i + BEGIN.length, j);
+    const peoplePart = area.split(/^#+\s*大事/m)[0];
+    for (const line of peoplePart.split(/\r?\n/)) {
+      const t = line.replace(/^[-*·]\s*/, '').trim();
+      if (!t) continue;
+      const n = nameOf(t);
+      if (!n || !names.has(n)) continue;
+      const body = t.replace(/^\**\s*[^：:]{1,24}\s*[：:]\**\s*/, '').trim();
+      if (body) out.push(`- ${n}：${body.slice(0, 160)}`);
+    }
+  }
+  if (!out.length) return '';
+  return (
+    '# 这些人在**别的群**里也被记过（同一个人，可以参考着写，别当成新人）\n' +
+    `${out.slice(0, 12).join('\n').slice(0, 1500)}\n`
+  );
+}
+
+const PROMPT = `你在帮一个 QQ 群客服机器人**维护**对群和群友的了解。这不是一次性印象，是一份会一直修的记忆。
+你会看到**它现在已经记着的**，以及**一批新的群聊记录**。请输出**更新后的结论**。
 
 ## 输出格式（严格照做）
 
 ### 群友
-- 昵称：一句话描述这个人（爱好、说话风格、在意什么、怎么跟他打交道）
+- 昵称：这个人的**完整最新评价**（爱好、说话风格、在意什么、怎么跟他打交道）
 
 ### 大事
 - 日期或「最近」：一句话说清发生了什么
 
-## 硬要求
+### 值得记住
+- 主题｜内容
 
-- **只写新东西**。已经记过的不要重复写。
-- **没观察到就留空**（那一节下面什么都不写），**绝对不要为了凑数编**。
-- ⚠️ **群友观察尽量多写**（最多 12 条）—— 用户要的是**性格不断细化**：
-  · 同一件事反复出现的（总问同一个问题、总在某时段冒泡）→ **那就是性格，写下来**
-  · 已经记过这个人的，可以**再补一条更细的**（新角度、新场合下的表现）
-  · 宁可多记一条细节，也别因为"大概记过了"就跳过
+### 口癖
+- 词｜怎么用
+
+## 「口癖」这节怎么挑（0~3 条）
+
+这里写**群里反复出现、大家都跟着用的说法** —— 口头禅、谐音梗、网络词、流行语。
+
+- ✅ 该写：真能看出"不止一个人在用"的词，后面跟一句**它该怎么用 / 什么场合甩**
+  （例：牛魔 ｜ 谐音梗，被反复逗到烦了甩一个）。
+- ❌ 不该写：一次性玩梗、某人独创的一句、需要解释半天的黑话、正经术语。
+- ⚠️ 已经在【已有口癖】里的**不要再写**；拿不准就不写。
+- 没有可写的，就写一行「无」。
+- 每条一行，写成「词 ｜ 怎么用」（词 ≤12 字）。
+
+## 「值得记住」这节怎么挑（0~2 条，宁缺勿滥）
+
+这一节是给**它自己的笔记**用的：以后有人问起，它得答得上来的那种事。
+
+- ✅ 该记：**教给它的规矩和约定**（「这类事要问管理员」「报错先看启动器版本」）、
+  **服务器 / 群里的长期事实**（「现在支持 Fabric 了」「群里禁发链接」）、
+  **长期有效的安排**（「每周六晚开活动」）。
+- ❌ 不该记：闲聊、吐槽、情绪、提问、**一次性通知**（「明天发币」「今晚谁在线」）、
+  某个人的性格（那属于「群友」那节，不要重复写）。
+- ⚠️ 已经在「已经记下的」里有的**不要再写**；拿不准就不写。
+- 没有可记的，就写一行「无」。
+- 每条一行，写成「主题｜内容」（主题 20 字以内，内容一句话说清）。
+
+## 怎么更新（这是重点）
+
+- ⚠️⚠️ **可以直接改、删、重写旧的那条** —— 但必须**把旧内容和这批新记录放在一起判断**，
+  依据只有一条：哪个更接近他真实的样子。这不是只做追加。
+- **你写的一行 = 这个人现在的完整评价**（旧的 + 这次新看到的融合好），**不是只写新增的部分**。
+  旧描述里仍然成立的要留在新版本里；被新观察推翻的，就**改成新的**，别让两句并存。
+- ⚠️ **偏差较大时，以当前记录为准，把旧评价往现在的表现上修正**：
+  · 旧的说「经常问 X」，可最近几次都不是这样 ⇒ 改成现在的样子，或者删掉那条
+  · 旧的说「新人 / 刚来」而现在明显很熟 ⇒ 删掉这种过期描述
+  · 一次性的事（某天突发一句）不要写成性格；反复出现的才是性格
+- **没提到的人不要动**（不输出就行，旧内容原样留着）。
+- ⚠️ **「已经记下的」那些人你早就认识** —— 绝对不能写成「新冒泡的群友」「新成员」「初次出现」。
+- **同一个昵称只输出一行**，昵称照抄旧的那个，别自己换写法、别加粗星号。
+- **没观察到变化就留空**（那一节下面什么都不写），**绝对不要为了凑数编**。
 - 大事最多 3 条。**宁少勿滥。**
 - ⚠️ **只写从聊天里真能看出来**的。看不出来就不写。
 - **不写隐私**：真实姓名、学校、住址、联系方式、家庭情况一律不要。
 - **不写负面标签**（「这人很烦」「情商低」这种不要）。写客观特点就行。
 - 描述要**有助于以后跟他说话**（比如「喜欢发脑洞梗，接住他的梗他就高兴」）。
-- 不要写「我记录了他」这类话。
-- 只输出上面那两节，不要开场白、不要解释。`;
+- 不要写「我记录了」这类话。
+- 只输出上面那三节，不要开场白、不要解释。`;
 
 /**
  * 压缩用的提示词（2026-09-14 要求）。
@@ -373,15 +540,17 @@ const COMPRESS_PROMPT = `你在帮一个 QQ 群客服机器人**整理**它的�
 
 ## 两节的整理规矩**完全不同**，看清了再动
 
-### 「群友」这节 —— ⚠️ **只许细化，一条都不许删**
+### 「群友」这节 —— ✅ **可以改、可以删，但别把细节弄没**
 
-- 每一条都是**性格特征**，是长期有用的东西，**再啰嗦也不许删**。
-- 你可以做的是：
-  · 把**同一个人的多条**合并成一条，但**信息只能变多不能变少**（细节全保留）
+- 每一条都是长期有用的**性格特征**，默认留着；但必须**判断它还准不准**。
+- 你要做的：
+  · 把**同一个人的多条**合并成一条（细节全保留）
   · 把啰嗦的说法**改写得更准**（「爱刷屏」→「习惯连发多条短消息、爱复读别人的话」）
+  · ⚠️ **明显对不上现在表现的旧评价，直接改成现在这样，或者删掉** ——
+    依据只有一条：哪个更接近他真实的样子（例：旧的说「新人」，可早就是熟人了 ⇒ 删掉「新人」）
   · 补上**跨条目的共性**（比如三个人都爱在深夜冒泡，可以在各自那条里点出来）
-- ❌ **不许**因为"时间久了"就把某条删掉
 - ❌ **不许**把具体细节抽象成空话（「人挺好的」这种等于删掉）
+- ❌ **不许**为了精简把一批人整个删掉 —— 认识的人要留着
 
 ### 「大事」这节 —— ✅ **可以按时间压缩**
 
@@ -443,9 +612,18 @@ export async function summarize(opts = {}) {
   //    所以补一条**时间兜底**：这一群里**最老的一条**超过 `maxAgeMs` 就总结，
   //    哪怕只剩几条也总结。消息多的群照旧按条数触发，两条路互不影响。
   const maxAgeMs = Math.max(60000, Number(config.observe?.maxAgeMs) || 6 * 3600 * 1000);
+  // 每群最小间隔：条数/时间任一条刚触发过一次，就不许马上再跑一遍。
+  // 没有它时小群会在几分钟内反复总结同一批人，旧记忆被写成一堆重复碎片。
+  const minGapMs = Math.max(60000, Number(config.observe?.minGapMs) || 30 * 60 * 1000);
   const nowMs = Date.now();
-  const jobs = [...byGroup.entries()].filter(([, list]) => {
+  const skipGap = [];
+  const jobs = [...byGroup.entries()].filter(([gid, list]) => {
     if (opts.force) return true;
+    const last = Number(stats.lastGroupAt?.[gid]) || 0;
+    if (last && nowMs - last < minGapMs) {
+      skipGap.push(gid);
+      return false;
+    }
     if (list.length >= threshold) return true;
     const oldest = list[0]?.at ?? nowMs;
     return nowMs - oldest >= maxAgeMs;
@@ -454,15 +632,27 @@ export async function summarize(opts = {}) {
     const most = Math.max(...[...byGroup.values()].map((l) => l.length));
     return {
       ok: false,
-      reason: `还没攒够（最多的一群 ${most}/${threshold} 条；或者等满 ${Math.round(maxAgeMs / 3600000)} 小时）`,
+      reason: skipGap.length
+        ? `距上次总结还不到 ${Math.round(minGapMs / 60000)} 分钟（${skipGap.length} 个群在等）`
+        : `还没攒够（最多的一群 ${most}/${threshold} 条；或者等满 ${Math.round(maxAgeMs / 3600000)} 小时）`,
     };
   }
 
   running = true;
   const done = new Set();
   let totalAdded = 0;
+  /** 这一轮"值得记住"抽出来的知识 —— 交给调用方落盘（observe 不 import learned，免得成环） */
+  const harvest = [];
+  /** 这一轮归纳出来的口癖（交给调用方写 `phrases.md` 这个动态库） */
+  const harvestPhrases = [];
   try {
     for (const [gid, list] of jobs) {
+      // 触发依据写进日志：以后"怎么又跑了一次"能直接从这几行看出来
+      log.info(
+        `[观察] 群 ${gid || '(无群号)'} 开始总结：这批 ${list.length} 条，最老一条 ` +
+          `${Math.round((nowMs - (list[0]?.at ?? nowMs)) / 60000)} 分钟前，` +
+          `上次总结 ${stats.lastGroupAt?.[gid] ? Math.round((nowMs - stats.lastGroupAt[gid]) / 60000) + ' 分钟前' : '没有记录'}`,
+      );
       const batch = list.slice(-threshold);
       for (const m of batch) done.add(m);
       const file = targetFileFor(gid, list.some((m) => m.fromPrivate));
@@ -473,9 +663,22 @@ export async function summarize(opts = {}) {
 
       const existing = currentObserved(file);
       const user = [
-        existing ? `# 已经记下的\n${existing.slice(0, 2000)}\n` : '# 已经记下的\n（还没有，这是第一次）\n',
+        // ⚠️ 旧记忆**整段**给她（原来是 slice(0,2000)，而自动区能到四五千字）——
+        //    截断之后每次只看得到最近写的那几个人，于是反复写同一批、老群友永远"没见过"。
+        existing ? `# 已经记下的（这些人你早就认识，不是新面孔）\n${existing.slice(0, 8000)}\n` : '# 已经记下的\n（还没有，这是第一次）\n',
+        knownFaces(gid, batch),
+        siblingPeople(gid, batch),
+        // ⚠️ 已有口癖（别重复写同一批词；口癖库是动态的，见 `phrases.js`）
+        (() => {
+          try {
+            const list = phrasesOf.listPhrases().map((x) => x.word);
+            return list.length ? `# 已有口癖（这些已经记着了，别再写）\n${list.slice(0, 80).join('、')}\n` : '';
+          } catch {
+            return '';
+          }
+        })(),
         `# 这批群聊记录（${batch.length} 条${gid ? `，群 ${gid}` : ''}）\n${lines}`,
-      ].join('\n');
+      ].filter(Boolean).join('\n');
 
       const res = await collect(
   [{ role: 'system', content: PROMPT }, { role: 'user', content: user }],
@@ -495,11 +698,14 @@ export async function summarize(opts = {}) {
       }
 
       const parsed = parseSections(raw);
+      if (parsed.notes.length) harvest.push({ gid, items: parsed.notes });
+      if (parsed.phrases.length) harvestPhrases.push(...parsed.phrases);
       const added = parsed.people.length + (parsed.events.length ? 1 : 0);
       if (!added) {
         log.info(`[观察] 群 ${gid || '(无群号)'} 这次没观察到新东西`);
         stats.runs++;
         stats.lastRunAt = Date.now();
+        touchGroup(gid);
         continue;
       }
 
@@ -519,6 +725,7 @@ export async function summarize(opts = {}) {
       stats.runs++;
       stats.added += added;
       stats.lastRunAt = Date.now();
+      touchGroup(gid);
       log.info(
         `[观察] 群 ${gid || '(无群号)'} 总结完成：新增 ${parsed.people.length} 条群友观察、${parsed.events.length} 条大事 → ${file.replace(ROOT, '.')}`,
       );
@@ -527,7 +734,7 @@ export async function summarize(opts = {}) {
     // 只清掉**这次真的处理过**的那些（别的群没攒够的要留着）
     if (done.size) pending = pending.filter((m) => !done.has(m));
     reloadKnowledge(); // 立刻生效，不用重启
-    return { ok: true, added: totalAdded, groups: jobs.length };
+    return { ok: true, added: totalAdded, groups: jobs.length, notes: harvest, phrases: harvestPhrases };
   } catch (e) {
     stats.lastError = e.message;
     log.warn(`[观察] 总结失败：${e.message}`);
@@ -537,10 +744,26 @@ export async function summarize(opts = {}) {
   }
 }
 
-/** 把模型输出切成两节 */
+/**
+ * 把「值得记住」那一行拆成 `{topic, fact}`（`主题｜内容`）。
+ * 拆不出来返回 null —— 调用方直接跳过，别硬猜。
+ */
+export function splitNoteLine(line) {
+  const m = /^(.{1,40}?)[｜|]\s*(.+)$/.exec(String(line ?? '').trim());
+  if (!m) return null;
+  const topic = m[1].trim().replace(/^[-*·\s]+/, '');
+  const fact = m[2].trim();
+  if (topic.length < 2 || fact.length < 4) return null;
+  return { topic, fact };
+}
+
+/** 把模型输出切成三节 */
 function parseSections(raw) {
   const people = [];
   const events = [];
+  const notes = [];
+  // ⚠️ 2026-11-27：群里反复出现的说法（口头禅 / 谐音梗）—— 交给动态口癖库，不进群记忆文件
+  const phrases = [];
   let mode = '';
   for (const line of raw.split(/\r?\n/)) {
     const t = line.trim();
@@ -552,15 +775,33 @@ function parseSections(raw) {
       mode = 'events';
       continue;
     }
+    if (/^#+\s*值得记住/.test(t) || /^值得记住[:：]?$/.test(t)) {
+      mode = 'notes';
+      continue;
+    }
+    if (/^#+\s*口癖/.test(t) || /^口癖[:：]?$/.test(t)) {
+      mode = 'phrases';
+      continue;
+    }
     if (!t || t === '-' || /^#+\s/.test(t)) continue;
     const item = t.replace(/^[-*·]\s*/, '').trim();
     if (!item || item.length < 4) continue;
+    if (mode === 'notes') {
+      if (/^(无|没有|无。)$/.test(item)) continue;
+      if (notes.length < 2) notes.push(item);
+      continue;
+    }
+    if (mode === 'phrases') {
+      if (/^(无|没有|无。)$/.test(item)) continue;
+      if (phrases.length < 3) phrases.push(item);
+      continue;
+    }
     // ⚠️ 性格（群友）**不设小上限**：用户要的是"不断细化"
     //    （原来这里限 5 条，等于把细节扔了）。只用一个宽松的护栏防刷屏。
     if (mode === 'people' && people.length < 12) people.push(item);
     if (mode === 'events' && events.length < 3) events.push(item);
   }
-  return { people, events };
+  return { people, events, notes, phrases };
 }
 
 /**
@@ -571,40 +812,74 @@ function parseSections(raw) {
  *    等于性格**永远停在 20 条、细节被慢慢冲掉**，和"不断细化"正好相反。
  *    大事仍然限 20（那个本来就要靠 `compress()` 按时间压）。
  */
+/** 昵称归一化：去掉 markdown 星号/列表符，取冒号前那一截（** 和「新增/性格」这类碎片前缀都不能混进来） */
+const NAME_NOISE = /^(新增|性格|补充|备注|特点|观察|其他)\s*$/;
+function nameOf(s) {
+  const t = String(s ?? '').replace(/\*\*/g, '').replace(/^[-*·]\s*/, '').trim();
+  const m = /^(.{1,24}?)[：:]/.exec(t);
+  const n = (m ? m[1] : t.slice(0, 16)).replace(/\s+/g, '').trim();
+  return NAME_NOISE.test(n) ? '' : n;
+}
+
+/** 把"群友"那节拆成 {昵称 → 若干句}；没有昵称的碎片行挂到上一个人身上，绝不单独成条 */
+function parsePeople(lines) {
+  const out = new Map();
+  let last = '';
+  for (const raw of lines) {
+    const t = String(raw).replace(/^[-*·]\s*/, '').trim();
+    if (!t) continue;
+    const n = nameOf(t);
+    const body = n ? t.replace(/^\**\s*[^：:]{1,24}\s*[：:]\**\s*/, '').trim() : t;
+    if (n) last = n;
+    if (!last) continue;
+    const cur = out.get(last) ?? [];
+    if (body && !cur.some((x) => x.includes(body) || body.includes(x))) cur.push(body);
+    out.set(last, cur);
+  }
+  return out;
+}
+
 function merge(existing, parsed) {
   const old = existing.split(/\r?\n/).filter((l) => l.trim());
-  const oldPeople = [];
   const oldEvents = [];
+  const peopleLines = [];
   let mode = '';
   for (const l of old) {
     const t = l.trim();
     if (/^#+\s*群友/.test(t)) { mode = 'p'; continue; }
     if (/^#+\s*大事/.test(t)) { mode = 'e'; continue; }
-    // ⚠️ 「最后更新」这类元信息别当成条目攒下来（之前每次跑都追加一行，越积越多）
     if (/^>\s*最后更新/.test(t)) continue;
     if (!t || t.startsWith('>')) continue;
-    if (mode === 'p') oldPeople.push(t);
-    else if (mode === 'e') oldEvents.push(t);
+    if (mode === 'p') peopleLines.push(t.replace(/<!--\s*u:\d+\s*-->/g, '').trim());
+    else if (mode === 'e') oldEvents.push(t.replace(/^[-*·]\s*/, '').trim());
   }
 
-  // 简单去重：新条目的「昵称/主体」如果已经在旧条目里出现过，就不再重复
-  const keyOf = (s) => (s.replace(/^[-*·]\s*/, '').split(/[:：]/)[0] || '').slice(0, 8);
-  const seenKeys = new Set(oldPeople.map(keyOf));
-  const freshPeople = parsed.people.filter((p) => !seenKeys.has(keyOf(p)));
+  // 模型给的是**这个人的完整最新评价**（旧内容 + 这批新记录融过一遍）⇒ 同名直接覆盖。
+  // 旧条目只在"这批没提到这个人"时原样留着，不会被无谓改写。
+  const people = parsePeople(peopleLines);
+  for (const [name, facts] of parsePeople(parsed.people)) {
+    if (facts.length) people.set(name, facts);
+  }
+  // ⚠️ 2026-11-27：每条群友后面带一个 **QQ 号的 HTML 注释**（`<!--u:123456-->`）。
+  //    为什么：昵称会改、模型还会把同一个人写成十几种（实测 Anon 13 种），按昵称合并不认。
+  //    注释只在文件里存，给她看的内容会被剥掉（见 `currentObserved()` / `recognize()`）✓
+  const freshPeople = [...people.entries()].map(([name, facts]) => {
+    const uid = peopleOf.uidOfName(name) || peopleOf.uidOfName(name.replace(/[（(].*?[）)]/g, '').trim());
+    return `${name}：${facts.join('；')}${uid ? ` <!--u:${uid}-->` : ''}`;
+  });
 
-  const seenEv = new Set(oldEvents.map((e) => e.slice(0, 12)));
-  const freshEvents = parsed.events.filter((e) => !seenEv.has(e.slice(0, 12)));
+  const seenEv = new Set(oldEvents.map((e) => e.replace(/\*\*/g, '').slice(0, 12)));
+  const freshEvents = parsed.events.filter((e) => !seenEv.has(e.replace(/\*\*/g, '').slice(0, 12)));
 
   const PEOPLE_KEEP = Number(config.observe?.keepPeople) > 0 ? Number(config.observe.keepPeople) : 60;
   const EVENTS_KEEP = Number(config.observe?.keepEvents) > 0 ? Number(config.observe.keepEvents) : 20;
 
   const out = [];
   out.push('### 群友', '');
-  if (freshPeople.length) out.push(...freshPeople.map((p) => `- ${p}`));
-  if (oldPeople.length) out.push(...oldPeople.slice(0, PEOPLE_KEEP));
+  if (freshPeople.length) out.push(...freshPeople.slice(0, PEOPLE_KEEP).map((p) => `- ${p}`));
   out.push('', '### 大事', '');
   if (freshEvents.length) out.push(...freshEvents.map((e) => `- ${e}`));
-  if (oldEvents.length) out.push(...oldEvents.slice(0, EVENTS_KEEP));
+  for (const e of oldEvents.slice(0, EVENTS_KEEP)) out.push(`- ${String(e).replace(/^[-*·]\s*/, '').trim()}`);
   out.push('', `> 最后更新：${new Date().toLocaleString('zh-CN')}`);
   return out.join('\n');
 }
@@ -667,14 +942,15 @@ export async function compress(opts = {}) {
 
     const after = parseSections(raw);
 
-    // ⚠️⚠️ 保险：性格**不许变少**（用户明确要求"不能删除"）
-    if (after.people.length < before.people.length) {
+    // ⚠️ 保险：允许合并/修正/删掉过时的评价，但**不许把画像砍没** ——
+    //    降幅超过三分之一就整次作废（那是"精简"过头，不是"更准"）。
+    if (before.people.length >= 6 && after.people.length < Math.ceil(before.people.length * 0.67)) {
       log.warn(
-        `[观察] 压缩后性格条目变少了（${before.people.length} → ${after.people.length}），**整次作废不写盘**`,
+        `[观察] 压缩把性格从 ${before.people.length} 条砍到 ${after.people.length} 条（超过三分之一），**整次作废不写盘**`,
       );
       return {
         ok: false,
-        reason: `压缩把性格从 ${before.people.length} 条砍到 ${after.people.length} 条，已作废`,
+        reason: `压缩把性格从 ${before.people.length} 条砍到 ${after.people.length} 条，降幅过大，已作废`,
         peopleBefore: before.people.length,
         peopleAfter: after.people.length,
       };
@@ -703,7 +979,7 @@ export async function compress(opts = {}) {
     stats.lastCompressAt = Date.now();
     saveState();
     log.info(
-      `[观察] 压缩完成：性格 ${before.people.length} → ${after.people.length} 条（只能变多），` +
+      `[观察] 压缩完成：性格 ${before.people.length} → ${after.people.length} 条，` +
         `大事 ${before.events.length} → ${after.events.length} 条`,
     );
     return {

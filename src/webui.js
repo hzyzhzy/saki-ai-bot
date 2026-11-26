@@ -38,13 +38,15 @@ import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import yaml from 'js-yaml';
 
-import { config, reloadConfig, validate, ROOT, CONFIG_FILE, KNOWLEDGE_DIR, paramsFor, personaDir, personaId, ACCOUNT, SHARED_SECTIONS } from './config.js';
+import { config, reloadConfig, validate, ROOT, CONFIG_FILE, KNOWLEDGE_DIR, knowledgePrivateDir, paramsFor, personaDir, personaId, ACCOUNT, SHARED_SECTIONS } from './config.js';
 // ⚠️ 2026-10-07 多 QQ 号：账号目录（`accounts/<QQ>.yml`）的读写都走它。
 //    ⚠️ 这个文件导入它**不构成环** —— `accounts.js` 只依赖 node 内建 + js-yaml。
 import * as accounts from './accounts.js';
 // ⚠️ 2026-10-07 加：「机器人池」自动同步（同类池互相加、不同类池复用）——
 //    见 `src/pools.js` 顶部那段说明。
 import * as pools from './pools.js';
+// ⚠️ 2026-11-26：`/api/reload` 要刷**提醒/定时任务**（手工改 state/*remind.json 后不用重启）
+import * as remind from './remind.js';
 import { log } from './log.js';
 // ⚠️ 2026-10-09：`llmFetch` 一起引进来 —— "拉取模型列表"要**走代理**（见下面 `/api/models` 那段）
 import { ping, llmFetch } from './llm.js';
@@ -221,6 +223,12 @@ const KNOW = KNOWLEDGE_DIR;
  *    那种 bug 最难查：界面上看到的是 A 文件，机器人加载的是 B 文件）。
  */
 function knowPath(name) {
+  // ⚠️ 2026-11-27：**按号的私有知识目录优先**（`knowledge/accounts/<QQ>/`）——
+  //    副号的 `learned.md` / `groups/<群号>.md` 在那里，而这里原来只认 `personaDir()` 和
+  //    共用目录 ⇒ 副号在界面上改「她的笔记」会写到**共用**那份上（串号）✗
+  //    ⚠️ 主号的 `knowledgePrivateDir()` 就是共用目录本身 ⇒ 这一步对他等于没加，行为不变 ✓
+  const priv = join(knowledgePrivateDir(), name);
+  if (priv !== join(KNOW, name) && existsSync(priv)) return priv;
   const p = join(personaDir(), name);
   return existsSync(p) ? p : join(KNOW, name);
 }
@@ -295,10 +303,17 @@ function safeKnowName(raw) {
   //    极简提示词在 `personas/<id>/prompt/lite.md`，原来这条白名单只认
   //    `groups/<群号>.md` 和**纯文件名** ⇒ `prompt/lite.md` 会被判"非法文件名"，
   //    界面上就算列出来了也存不进去 ✗
-  const m = s.match(/^(?:(?:groups|prompt)\/)?([\w.\-]+\.md)$/);
+  // ⚠️⚠️ 2026-11-27 加 `dm/` 和 `diary/` 这两层：记忆页要把**私聊记忆**（`knowledge/dm/<QQ>.md`）
+  //    和**日记**（`knowledge/diary/YYYY-MM-DD.md`）也列出来并允许改，
+  //    原来这条白名单只认 `groups/<群号>.md`、`prompt/<文件>.md` 和纯文件名 ⇒ 那些既打不开也存不进去 ✗
+  const m = s.match(/^(?:(?:groups|prompt|dm|diary)\/)?([\w.\-]+\.md)$/);
   if (!m) return '';
   // 群资料库那层只允许 `groups/<群号>.md`（群号是数字）
   if (s.startsWith('groups/') && !/^groups\/\d+\.md$/.test(s)) return '';
+  // 私聊记忆那层只允许 `dm/<QQ号>.md`
+  if (s.startsWith('dm/') && !/^dm\/\d+\.md$/.test(s)) return '';
+  // 日记那层只允许 `diary/YYYY-MM-DD.md`
+  if (s.startsWith('diary/') && !/^diary\/\d{4}-\d{2}-\d{2}\.md$/.test(s)) return '';
   // 人设包的 prompt 那层只允许字母数字点划线（和文件名同一条规则，防 `../`）
   if (s.startsWith('prompt/') && !/^prompt\/[\w.\-]+\.md$/.test(s)) return '';
   return s;
@@ -3421,7 +3436,26 @@ const routes = {
       ok: true,
       groupId: gid,
       overrides: config.groupParams?.[gid] ?? {},
-      params: { life: paramsFor('life', gid), quest: paramsFor('quest', gid), chat: paramsFor('chat', gid) },
+      params: {
+        life: paramsFor('life', gid),
+        quest: paramsFor('quest', gid),
+        chat: paramsFor('chat', gid),
+        /* ⚠️ 2026-11-25 加：定时任务（按群）——
+         *   allowAt    = 被 @ / 私聊时，允许她自己排定时任务
+         *   allowMemory= 允许她**从群里大事**里自己发现值得盯的事并排任务（低频率巡检）
+         *   watchMinGapMs / watchPerDay = watch 类任务的最短间隔 / 每天上限 */
+        remind: (() => {
+          const r = config.groupParams?.[gid]?.remind ?? {};
+          const g = config.remind ?? {};
+          const num = (v, d) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : d);
+          return {
+            allowAt: r.allowAt !== false,
+            allowMemory: r.allowMemory === true,
+            watchMinGapMs: num(r.watchMinGapMs, num(g.watchMinGapMs, 30 * 60 * 1000)),
+            watchPerDay: num(r.watchPerDay, num(g.watchPerDay, 8)),
+          };
+        })(),
+      },
     });
   },
 
@@ -3519,7 +3553,8 @@ const routes = {
     }
     for (const [kind, fields] of Object.entries(b.patch ?? {})) {
       // ⚠️ `chat` = 收紧度这类"她怎么说话"的参数（2026-09-15 晚加）
-      if (!['life', 'quest', 'chat'].includes(kind) || !fields || typeof fields !== 'object') continue;
+      // ⚠️ 2026-11-25：`remind` = 定时任务的两个开关 + 两个数字（按群）
+      if (!['life', 'quest', 'chat', 'remind'].includes(kind) || !fields || typeof fields !== 'object') continue;
       cur[kind] ??= {};
       for (const [k, v] of Object.entries(fields)) {
         if (v === null) delete cur[kind][k];
@@ -4236,6 +4271,128 @@ const routes = {
     }
   },
 
+  /* ⚠️ 2026-11-27 加：**记忆页**用的清单。
+   *    单独一个接口是因为它按"记忆"归类（群记忆 / 主人与熟人 / 学过的 / 私聊记忆），
+   *    而 `/api/knowledge/list` 是按"知识库"归类（还混着服务器知识、人设、动画库）。
+   *    ⚠️ 读写**复用** `GET/POST /api/knowledge` —— 那条路已经带了备份、learned 格式校验、热重载 ✓ */
+  'GET /api/memory/list': async (_req, res) => {
+    try {
+      const mod = await import('./memory-overview.js');
+      send(res, 200, { ok: true, ...mod.memoryOverview(knowledgePrivateDir()) });
+    } catch (e) {
+      log.warn(`[记忆页] 列清单失败：${e.message}`);
+      send(res, 500, { ok: false, error: e.message });
+    }
+  },
+
+  /* ⚠️ 2026-11-27 加：**记忆页里的「区段」读写**。
+   *    有些"记忆"只是某份文件中间的一段（自动维护区）：`owner.md` 的 `OWNER-RECENT`
+   *    （他最近在忙什么）、`learned.md` 的 `LEARNED`（她的笔记）。
+   *    界面里把整份 owner.md 塞给它是不对的 —— 里面大半是他本人的静态资料，
+   *    存回去更会把别的内容冲掉 ✗ ⇒ 单独两条：**只读那一段、只写那一段**。
+   *    ⚠️ 段名走白名单（`EDITABLE_SEGMENTS`），写之前确认这一段真的在文件里。 */
+  'GET /api/memory/segment': async (_req, res, url) => {
+    const name = safeKnowName(url.searchParams.get('name'));
+    const seg = String(url.searchParams.get('seg') ?? '').trim().toUpperCase();
+    if (!name) return send(res, 400, { ok: false, error: '非法文件名' });
+    if (!/^[A-Z][A-Z-]{2,24}$/.test(seg)) return send(res, 400, { ok: false, error: '非法区段名' });
+    try {
+      const mod = await import('./memory-overview.js');
+      const got = mod.readSegment(knowledgePrivateDir(), name, seg);
+      if (!got) return send(res, 404, { ok: false, error: '这份文件里没有那一段' });
+      send(res, 200, { ok: true, name, seg, content: got.body });
+    } catch (e) {
+      send(res, 500, { ok: false, error: e.message });
+    }
+  },
+
+  'POST /api/memory/segment': async (req, res) => {
+    const b = JSON.parse((await readBody(req)).toString('utf8'));
+    const name = safeKnowName(b.name);
+    const seg = String(b.seg ?? '').trim().toUpperCase();
+    const content = String(b.content ?? '')
+      .replace(/\r\n/g, '\n')
+      .trim();
+    if (!name) return send(res, 400, { ok: false, error: '非法文件名' });
+    const mod = await import('./memory-overview.js');
+    if (!mod.EDITABLE_SEGMENTS.has(seg)) {
+      return send(res, 400, { ok: false, error: `「${seg}」这一段是自动维护的，界面里不能改` });
+    }
+    const target = knowPath(name);
+    if (!existsSync(target)) return send(res, 404, { ok: false, error: '文件不存在' });
+
+    let text = '';
+    try {
+      text = readFileSync(target, 'utf8');
+    } catch (e) {
+      return send(res, 500, { ok: false, error: e.message });
+    }
+    // ⚠️ 按**整行**认标记再换中间（不能用 indexOf —— 文件头说明里会提到标记原文，
+    //    那会命中说明里那一处，把别的内容冲掉）。逻辑在 memory-overview 里，和读用同一套。
+    const next = mod.replaceSegment(text, seg, content);
+    if (next === null) {
+      return send(res, 400, { ok: false, error: `文件里找不到 ${seg} 的标记（被删了？）` });
+    }
+
+    // learned.md 的笔记段还要过一遍格式校验（和整份保存同一个规矩：
+    // 改坏了 `learn()` / `forget()` 会静默失效，宁可不存）
+    if (name === 'learned.md') {
+      const v = learnedValidate(next);
+      if (!v.ok) {
+        log.warn(`界面想保存 learned.md 的笔记段但格式不合格：${v.error}`);
+        return send(res, 400, { ok: false, error: `${v.error}（这次没保存）` });
+      }
+    }
+
+    backupKnowledge(target);
+    writeFileSync(target, next, 'utf8');
+    log.info(`管理界面更新了 ${name} 的 ${seg} 段（${content.length} 字）`);
+    const info = reloadKnowledge();
+    send(res, 200, { ok: true, reloaded: info });
+  },
+
+  /* ⚠️ 2026-11-27 加：**一次性导入群成员名单**（QQ号 ↔ 昵称/群名片）。
+   *    为什么需要：群记忆里只存昵称，而昵称会改 ⇒ 同一个人被写成十几种（实测 Anon 13 种）。
+   *    认识视图要**按 QQ 号合并**，就得有这张表；靠"每收一条消息记一笔"慢慢攒太慢，
+   *    这里直接问协议端要一次全量名单。⚠️ 只读、不写知识库、不改任何印象。 */
+  'POST /api/memory/import-members': async (_req, res) => {
+    try {
+      if (!bot || typeof bot.call !== 'function') {
+        return send(res, 400, { ok: false, error: '这个进程没有机器人实例（界面起的？）' });
+      }
+      const mod = await import('./people.js');
+      const gids = new Set();
+      for (const base of [knowledgePrivateDir(), KNOWLEDGE_DIR]) {
+        try {
+          for (const f of readdirSync(join(base, 'groups'))) {
+            if (/^\d+\.md$/.test(f)) gids.add(f.replace(/\.md$/, ''));
+          }
+        } catch {
+          /* 没这个目录 */
+        }
+      }
+      const out = [];
+      for (const gid of gids) {
+        try {
+          const r = await bot.call('get_group_member_list', { group_id: gid }, { timeoutMs: 25000 });
+          const arr = Array.isArray(r) ? r : Array.isArray(r?.data) ? r.data : [];
+          for (const m of arr) {
+            mod.touch({ uid: m.user_id, nick: m.nickname, card: m.card, gid });
+          }
+          out.push({ gid, got: arr.length });
+          log.info(`[通讯录] 群 ${gid} 导入 ${arr.length} 人`);
+        } catch (e) {
+          out.push({ gid, error: e.message });
+          log.warn(`[通讯录] 群 ${gid} 导入失败：${e.message}`);
+        }
+      }
+      mod.flush();
+      send(res, 200, { ok: true, groups: out, size: mod.size() });
+    } catch (e) {
+      send(res, 500, { ok: false, error: e.message });
+    }
+  },
+
   'GET /api/knowledge/list': async (_req, res) => {
     const DESC = {
       'persona.md': '人设（性格、语气、行为规则、它自己的能力）',
@@ -4256,8 +4413,8 @@ const routes = {
       //    这一份**谁问都读**，所以界面里得能直接编辑它。
       'friends.md': '熟人 / 朋友（服主现实里的朋友、老同学）· ⚠️ **谁问都读，写之前想清楚**',
       'learned.md':
-        '学习档案（群里「记住：…」教的短知识，优先级最高）。⚠️ 格式有要求：每条必须是 `## 主题` 开头，' +
-        '而且要保留 `<!-- LEARNED:BEGIN -->` / `END` 两行标记 —— 保存时会校验，不合格会拒绝保存',
+        '她的笔记（群里教过她的事，写成「是什么 / 什么时候用 / 别弄错」三段；同一件事再教一遍会合并进已有那条）。' +
+        '⚠️ 每条必须以 `## 主题` 开头，并保留 `<!-- LEARNED:BEGIN -->` / `END` 两行标记 —— 保存时会校验，改了会拒绝保存',
     };
     try {
       // ⚠️ 动画库的名字**不能写死在这张表里** —— 库名是人设声明的（`anime/<库名>.md`），
@@ -4903,7 +5060,21 @@ const routes = {
     //    现在名字叫「重载配置」的这个按钮，把知识库一起带上，符合预期。
     const knowledge = reloadKnowledge();
     life.reload();
-    log.info(`管理界面重载：config + 表情库 + 知识库 + 日常事件库（${knowledge.files} 个文件）`);
+    /* ⚠️ 2026-11-26 加：把**提醒/定时任务**也刷一遍 ——
+     *   原来这里只刷 config / 表情 / 知识库 / 日常事件 ⇒ 手工改了 `state/*remind.json`
+     *   之后必须**重启进程**才生效（调试定时任务时反复重启很费事）✗
+     *   ⚠️ 提醒是**按号分文件**的（`state/accounts/<QQ>/remind.json`），
+     *      这里只能刷**当前这个进程所属号**那一份 ✓ */
+    let remindN = -1;
+    try {
+      remind.reload();
+      remindN = remind.status()?.pending ?? -1;
+    } catch (e) {
+      log.debug(`重载提醒失败：${e.message}`);
+    }
+    log.info(
+      `管理界面重载：config + 表情库 + 知识库 + 日常事件库 + 提醒（${knowledge.files} 个文件｜提醒 ${remindN} 条）`,
+    );
     send(res, 200, {
       ok: true,
       config: configForUi(),

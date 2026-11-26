@@ -610,6 +610,9 @@
       <!-- ⚠️ 2026-09-21：人设<b>单独一页</b>（能直接切换核心人设 + 改名字/称呼/口癖/动画库） -->
       <button data-tab="persona">人设</button>
       <button data-tab="knowledge">知识库</button>
+      <!-- ⚠️ 2026-11-27 加：**记忆单独一页** —— 群记忆 / 你的事 / 学过的 / 私聊记忆都在那儿，
+           之后要加的日记、认识页也放进去（用户要求「所有关于记忆的都在那里显示」） -->
+      <button data-tab="memory">记忆</button>
       <button data-tab="faces">表情包</button>
     </div>
     <div class="navsec">
@@ -879,6 +882,9 @@
     .tc-reply { font-size:14px; color:var(--text); background:var(--card); border-left:4px solid var(--ok); padding:8px 10px; border-radius:6px; white-space:pre-wrap; word-break:break-word; min-height:20px; }
     .tc-meta { font-size:12px; color:var(--dim); margin-left:10px; white-space:nowrap; }
     .tc-meta b { color:var(--warn); }
+    /* ⚠️ 2026-11-26：卡片头上那个**这条消息实际用的模型**（降级时换色，一眼看出不对劲） */
+    .tc-model { font-family:ui-monospace,Consolas,monospace; font-weight:600; color:var(--accent); }
+    .tc-model.warn { color:var(--warn); }
     .tc-reply:empty::after { content:"（还没开始写）"; color:#aab; font-size:12px; }
     /* ⚠️ 2026-11-13：左侧导航原来没 overflow，加了两个按钮之后"思考链"就被裁在视口外、
        永远点不到（用户截图里功能组最后只到"二级剧情"）。给它自己滚动。 */
@@ -899,6 +905,8 @@
     nav .navin::-webkit-scrollbar { width: 0; height: 0; display: none; }
     .tc-meta { font-size:12px; color:#7a8a99; margin-left:10px; white-space:nowrap; }
     .tc-meta b { color:#c47a2c; }
+    .tc-model { font-family:ui-monospace,Consolas,monospace; font-weight:600; color:#6ea8f0; }
+    .tc-model.warn { color:#fbbf24; }
   </style>
   <script>
   (() => {
@@ -1140,7 +1148,16 @@
       if (!el) return;
       const pt = Number(it.pt) || 0;
       const ct = Number(it.ct) || 0;
-      if (!pt && !ct && it.cost == null) { el.textContent = ""; return; }
+      /* ⚠️ 2026-11-26 加（「思考链卡片加上那条对话使用的模型，自动降级了也要能正确显示」）——
+       *   模型名放最前面：一眼就能看出这条是主模型、备选模型，还是降级之后那个小模型。
+       *   降级/换模型时后面跟一句人话（`modelNote`），并且**换成警示色** ✓ */
+      const model = String(it.model || '').trim();
+      const mNote = String(it.modelNote || '').trim();
+      const modelTxt = model
+        ? '<span class="tc-model' + (mNote ? ' warn' : '') + '">' + esc(model) +
+          (mNote ? ' ' + esc(mNote) : '') + '</span>　'
+        : '';
+      if (!pt && !ct && it.cost == null && !model) { el.textContent = ""; return; }
       const cached = Number(it.cached) || 0;
       const rt = Number(it.rt) || 0;
       const n = (x) => x.toLocaleString("en-US");
@@ -1148,6 +1165,7 @@
       const cacheTxt = pt ? "（缓存 " + n(cached) + "，" + Math.round((cached / pt) * 100) + "%）" : "";
       const rtTxt = rt ? "，其中思考 " + n(rt) : "";
       el.innerHTML =
+        modelTxt +
         "输入 <b>" + n(pt) + "</b> tok" + cacheTxt +
         "　输出 <b>" + n(ct) + "</b> tok" + rtTxt +
         (money ? "　花费 <b>" + money + "</b>" : "");
@@ -2042,6 +2060,44 @@
       <h2>表情列表 <span class="pill" id="face-count"></span></h2>
       <p class="hint">点「编辑」可以改标签和适用场合。标签是模型调用时写的名字。</p>
       <div class="faces" id="faces"></div>
+    </div>
+  </section>
+
+  <!-- 记忆（她记着的东西）—— 跟「知识库」分开：那边是资料，这边是记忆 -->
+  <section id="tab-memory" class="hidden">
+    <div class="card">
+      <h2>记忆 · 她记着的东西</h2>
+      <p class="hint">
+        <b>所有「她攒下来的记忆」都在这一页</b>：群记忆、你的事、学过的短知识、私聊记忆。
+        服务器资料 / 人设 / 动画库在「知识库」那一页。点一行就打开，改完保存立即生效（不用重启）。
+      </p>
+      <p class="hint" style="margin-top:6px">
+        ⚠️ 这里写的每一条她都会当成<b>真事</b>；写错了，她就会照着错的答。
+      </p>
+    </div>
+
+    <div id="mem-sections"></div>
+
+    <!-- ⚠️ 2026-11-27：编辑器改成**在点的那一行下面原地展开**（用户：「直接在原地卡片展开，
+         关闭之后回到原位，现在一关闭就到最下面了」）。这里只留一个隐藏模板，
+         展开时克隆一份插到那一行后面；收起后连模板都不动，滚动位置还原。 -->
+    <template id="mem-editor-tpl">
+      <div class="card" style="margin:8px 0">
+        <h2 id="mem-title">打开一个文件</h2>
+        <p class="hint" id="mem-desc"></p>
+        <label>内容</label>
+        <textarea id="mem-content" rows="14"></textarea>
+        <div class="btns">
+          <button class="act" onclick="saveMemory()" id="mem-save">保存</button>
+          <button class="ghost" onclick="closeMemory()">收起</button>
+          <span class="msg" id="msg-mem"></span>
+        </div>
+      </div>
+    </template>
+
+    <div class="card">
+      <h2>之后要加的（先占个位）</h2>
+      <p class="hint" id="mem-planned">—</p>
     </div>
   </section>
 
@@ -4731,11 +4787,12 @@ document.querySelectorAll('nav button').forEach(b => {
     //     2026-10-15 加「B站分享」时**又漏了一次** —— `bili` 没加进这个数组 ⇒
     //     点过去是一片空白（连卡片都不显示，因为它的 section 一直挂着 `hidden`）✗
     //     ⇒ 现在有一条套件断言**自动对账**（`test/webui.js`：每个 `data-tab` 都得在这个数组里）✓）
-    ['model','groups','faces','knowledge','persona','qzone','life','bili','biliPub','biliCmt','voice','quest','groupcfg','affinity','workmode','tools','think','qqlogin','status','about','accounts'].forEach(t => {
+    ['model','groups','faces','knowledge','memory','persona','qzone','life','bili','biliPub','biliCmt','voice','quest','groupcfg','affinity','workmode','tools','think','qqlogin','status','about','accounts'].forEach(t => {
       const el = $('tab-' + t);
       if (el) el.classList.toggle('hidden', t !== b.dataset.tab);
     });
     if (b.dataset.tab === 'knowledge') loadKnowledge();
+    if (b.dataset.tab === 'memory') loadMemory();
     if (b.dataset.tab === 'persona') personaRefresh();
     if (b.dataset.tab === 'faces') renderFaces();
     if (b.dataset.tab === 'groups') { loadGroupRespond(); fillStrictForGroup(); }
@@ -6036,6 +6093,8 @@ async function fillGroupParams() {
   const oL = ov.life || {};
   const oQ = ov.quest || {};
   const oC = ov.chat || {};
+  // ⚠️ 2026-11-25：定时任务（按群）—— 两个开关 + 两个数字
+  const R = p.remind || {};
   // ⚠️ 2026-10-05：同类池（按群，一串 QQ 号）—— 它是**顶层**字段，不在 life/quest/chat 里。
   const peers = Array.isArray(ov.peers) ? ov.peers : [];
   // ⚠️ 2026-10-06：不同类池（同样是顶层的一串 QQ 号）—— 和同类池**正好相反**。
@@ -6068,6 +6127,24 @@ async function fillGroupParams() {
     <div class="hint" style="margin:0 0 8px">
       下面是<b>这个群自己的一份</b>（框里就是它现在实际生效的值）——
       改完保存只写进这个群，<b>不影响别的群</b>。没动过的群用的是内置起点。
+    </div>
+
+    <div style="border:1px dashed var(--line);border-radius:8px;padding:8px;margin-bottom:8px">
+      <b>定时任务（她自己排）</b>
+      <div class="hint" style="margin:4px 0">
+        她可以自己定「过一会儿提醒你」或「隔一阵汇报某件事的进展」（比如盯某款游戏的破解进度）——
+        <b>时间、要不要 @ 人、要不要接着盯下一次，全是她自己判断</b>。这里只管"允不允许"和频率上限。
+      </div>
+      <div class="kv" style="flex-wrap:wrap;gap:8px">
+        <label title="被 @ 或者私聊时，允许她自己排定时任务">被 @ 时可以排 ${onoff('gp-remind-at', R.allowAt !== false)}</label>
+        <label title="允许她从「群里大事」里自己发现值得盯的事（低频巡检）">从群里大事排 ${onoff('gp-remind-mem', R.allowMemory === true)}</label>
+        <label title="同一个关注任务两次之间至少隔多久">最短间隔
+          <input type="number" id="gp-remind-gap" min="5" max="720" style="width:70px"
+            value="${Math.round(Number(R.watchMinGapMs || 1800000) / 60000)}"> 分钟</label>
+        <label title="每天最多跑几次关注任务">每天最多
+          <input type="number" id="gp-remind-day" min="1" max="48" style="width:70px"
+            value="${val(R.watchPerDay)}"> 次</label>
+      </div>
     </div>
 
     <div style="border:1px dashed var(--line);border-radius:8px;padding:8px;margin-bottom:8px">
@@ -6250,6 +6327,18 @@ async function saveGroupParams(el) {
     },
     // ⚠️ 2026-10-06 加：`answerServer`（**回不回服务器消息**，默认关，见 bot.js 的 `answerServerIn`）
     chat: { strictness: numOrNull('gp-chat-strict'), answerServer: boolOrNull('gp-chat-answerserver') },
+    /* ⚠️ 2026-11-25 加：定时任务（按群）——
+     *   allowAt / allowMemory 两个开关 + 最短间隔(分钟) / 每天上限。
+     *   ⚠️ 开关用 `boolOrNull`：没这项就写 null（= 不覆盖，用默认）。 */
+    remind: (() => {
+      const gapMin = $('gp-remind-gap') ? Number($('gp-remind-gap').value) : NaN;
+      return {
+        allowAt: boolOrNull('gp-remind-at'),
+        allowMemory: boolOrNull('gp-remind-mem'),
+        watchMinGapMs: Number.isFinite(gapMin) && gapMin > 0 ? Math.round(gapMin * 60000) : null,
+        watchPerDay: numOrNull('gp-remind-day'),
+      };
+    })(),
   };
   /* ⚠️⚠️ 2026-10-23 修（用户：「**还是点不了保存啊**」）——
    *
@@ -8920,6 +9009,223 @@ async function saveKnowledge() {
     body: JSON.stringify({ name: $('k-file').value, content: $('k-content').value })
   });
   flash(el, r.ok, r.ok ? '已保存并生效' : ('保存失败：' + r.error));
+}
+
+// ── 记忆页（她会记住的东西）──────────────────────────────────
+// ⚠️ 清单来自 `GET /api/memory/list`（按"记忆"归类）。条目分两种，读写路线不同：
+//    · **整份文件**（relationship / friends / nicknames / memes…）⇒ `GET/POST /api/knowledge`
+//    · **文件中间的一段**（`owner.md` 的 OWNER-RECENT＝他最近在忙什么、群印象的
+//      AUTO-OBSERVE、`learned.md` 的 LEARNED）⇒ `GET/POST /api/memory/segment`
+//      ⚠️ 区段**只能读/写那一段** —— 拿整份 owner.md 去存会把他本人的静态资料冲掉 ✗
+//    两条路都自带备份 + 热重载，别在这页另开一套写盘。
+let MEM_SECTIONS = [];
+let MEM_OPEN = null; // { name, seg, label, readonly }
+let MEM_SCROLL = null; // 展开前记住滚动位置，收起时还原（不然一关就跑到最下面）
+
+const memKey = (it) => `${it.name}::${it.seg || ''}`;
+
+async function loadMemory() {
+  const box = $('mem-sections');
+  if (!box) return;
+  // 重渲染会把原位展开的编辑器一起冲掉 ⇒ 先收起（不还原滚动，调用方自己管）
+  closeMemory(true);
+  box.innerHTML = '<div class="card"><p class="hint">读取中…</p></div>';
+  const r = await api('/api/memory/list');
+  if (!r.ok) {
+    box.innerHTML = `<div class="card"><p class="hint">读不到：${esc(r.error || '未知错误')}</p></div>`;
+    return;
+  }
+  MEM_SECTIONS = r.sections || [];
+  // 她已经认识的人（只读聚合视图：数据就是上面那几份群记忆里的「群友」）
+  const rec = r.recognize || [];
+  // 最近发生的事：从各群记忆的「大事」汇总（`recent-events.md` 那份没人自动写，所以是空的）
+  const recent = r.recent || { items: [], handwritten: false };
+  box.innerHTML = MEM_SECTIONS.map((s) => `
+    <div class="card">
+      <h2>${esc(s.title)} <span class="pill">${s.items.length}</span></h2>
+      <p class="hint">${esc(s.desc || '')}</p>
+      <table class="tbl">
+        <tr><th>这一份是什么</th><th>位置</th><th>条数</th><th>大小</th><th>改过</th><th></th></tr>
+        ${s.items.map((it) => `
+          <tr>
+            <td><b>${esc(it.label || it.name)}</b>${it.readonly ? ' <span class="pill">自动维护</span>' : ''}${it.desc ? `<div class="hint">${esc(it.desc)}</div>` : ''}</td>
+            <td class="mono">${esc(it.name)}${it.seg ? `<div class="hint">${esc(it.seg)} 段</div>` : ''}</td>
+            <td>${it.count ? it.count + ' 条' : '—'}</td>
+            <td>${(it.size / 1024).toFixed(1)} KB</td>
+            <td class="mono">${esc(it.mtime || '')}</td>
+            <td><button class="ghost" onclick="openMemory('${esc(it.name)}','${esc(it.seg || '')}',this)">${it.readonly ? '查看' : '打开'}</button></td>
+          </tr>`).join('')}
+      </table>
+    </div>`).join('') + (recent.items.length ? `
+    <div class="card">
+      <h2>最近发生的事 <span class="pill">${recent.items.length}</span></h2>
+      <p class="hint">
+        从各群记忆的「大事」汇总出来的（只读）——
+        这些是群观察每批**真正写下来**的事。⚠️ 以前这里显示的是 recent-events.md，
+        但那个文件**没有任何代码在写**（文件头那句「用记住工具追加」早就过时了）⇒ 永远空。
+        ${recent.handwritten ? '你自己手写的那份里也有内容。' : ''}
+      </p>
+      <table class="tbl">
+        <tr><th>发生了什么</th><th>来源</th></tr>
+        ${recent.items.map((x) => `
+          <tr><td>${esc(x.text)}</td><td class="mono">${esc(x.from)}</td></tr>`).join('')}
+      </table>
+      <div class="btns" style="margin:8px 0 0">
+        <button class="ghost" onclick="openMemory('recent-events.md','',this)">打开 recent-events.md（你手写的那份）</button>
+      </div>
+    </div>` : '') + (rec.length ? `
+    <div class="card">
+      <h2>认识 <span class="pill">${rec.length}</span></h2>
+      <p class="hint">
+        她对群里这些人的认识 —— 只读。数据就是上面那几份群记忆里的「群友」那一节。
+        <b>同一个人按 QQ 号合并</b>（昵称可以改，所以不按昵称算），显示的是他的 QQ 昵称；
+        最后一列是这条印象来自哪个群。
+      </p>
+      <div class="btns" style="margin:0 0 8px">
+        <button class="ghost" onclick="importMembers()" id="mem-import">导入群成员名单（一次性，让昵称对得上 QQ 号）</button>
+        <span class="msg" id="msg-import"></span>
+      </div>
+      <table class="tbl">
+        <tr><th>谁</th><th>她怎么认识他</th><th>来自</th></tr>
+        ${rec.map((p) => `
+          <tr>
+            <td><b>${esc(p.name)}</b>${p.aliases > 1 ? `<div class="hint">合并了 ${p.aliases} 处写法</div>` : ''}</td>
+            <td>${esc(p.note)}</td>
+            <td class="mono">${esc((p.from || []).join('、'))}</td>
+          </tr>`).join('')}
+      </table>
+    </div>` : '');
+
+  const planned = r.planned || [];
+  const card = $('mem-planned')?.closest('.card');
+  // 两件都做完了（日记 / 认识）⇒ 那张「之后要加的」卡就不显示了
+  if (card) card.style.display = planned.length ? '' : 'none';
+  $('mem-planned').innerHTML = planned.length
+    ? planned.map((p) => `<b>${esc(p.name)}</b> —— ${esc(p.desc || '')}`).join('<br>')
+    : '—';
+
+  // 编辑器开着的那份如果已经不在清单里（换了号 / 文件被删），收起它
+  if (MEM_OPEN && !MEM_SECTIONS.some((s) => s.items.some((i) => memKey(i) === memKey(MEM_OPEN)))) {
+    closeMemory();
+  }
+}
+
+/**
+ * 打开一段记忆：**在点的那张卡片里原地展开**（不再跳到页面最下面那块固定编辑器）。
+ * ⚠️ 收起时要把滚动位置还原 —— 不然一关就跑到最下面（用户反馈的正是这个）。
+ * 整份走 `/api/knowledge`，区段走 `/api/memory/segment`。
+ */
+async function openMemory(name, seg = '', btn) {
+  const key = `${name}::${seg}`;
+  // 再点同一个 = 收起（一个按钮开关，不新增东西）
+  if (MEM_OPEN && memKey(MEM_OPEN) === key) {
+    closeMemory();
+    return;
+  }
+  const meta = MEM_SECTIONS.flatMap((s) => s.items).find((i) => memKey(i) === key);
+  const url = seg
+    ? `/api/memory/segment?name=${encodeURIComponent(name)}&seg=${encodeURIComponent(seg)}`
+    : `/api/knowledge?name=${encodeURIComponent(name)}`;
+  const r = await api(url);
+
+  // 先收起上一个（但别还原滚动），再在当前卡片里展开
+  closeMemory(true);
+  MEM_SCROLL = window.scrollY;
+
+  const card = btn?.closest('.card');
+  const tpl = $('mem-editor-tpl');
+  if (!card || !tpl) return;
+  const node = tpl.content.firstElementChild.cloneNode(true);
+  node.id = 'mem-editor';
+  card.appendChild(node);
+
+  MEM_OPEN = { name, seg, label: meta?.label || name, readonly: !!meta?.readonly };
+  $('mem-title').textContent = (meta?.label || name) + (seg ? `（${seg} 段）` : '');
+  $('mem-desc').textContent = [
+    seg ? `${name} 里的 ${seg} 段` : name,
+    meta?.count ? `${meta.count} 条` : '',
+    meta?.size ? `${meta.size} 字` : '',
+    meta?.mtime ? `改过 ${meta.mtime}` : '',
+    meta?.desc || '',
+  ]
+    .filter(Boolean)
+    .join('　');
+  $('msg-mem').textContent = '';
+  const ta = $('mem-content');
+  if (!r.ok) {
+    ta.value = '';
+    flash($('msg-mem'), false, '读取失败：' + (r.error || '未知错误'));
+    node.scrollIntoView({ block: 'nearest' });
+    return;
+  }
+  ta.value = r.content;
+  // 自动维护的那几段（群印象 / 梗库自动收录）只给看
+  ta.readOnly = MEM_OPEN.readonly;
+  $('mem-save').disabled = MEM_OPEN.readonly;
+  $('mem-save').textContent = MEM_OPEN.readonly ? '自动维护' : '保存';
+  node.scrollIntoView({ block: 'nearest' });
+  if (!MEM_OPEN.readonly) ta.focus({ preventScroll: true });
+}
+
+async function saveMemory() {
+  if (!MEM_OPEN || MEM_OPEN.readonly) return;
+  const url = MEM_OPEN.seg ? '/api/memory/segment' : '/api/knowledge';
+  const body = MEM_OPEN.seg
+    ? { name: MEM_OPEN.name, seg: MEM_OPEN.seg, content: $('mem-content').value }
+    : { name: MEM_OPEN.name, content: $('mem-content').value };
+  const r = await api(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  if (!r.ok) {
+    flash($('msg-mem'), false, '保存失败：' + (r.error || ''));
+    return;
+  }
+  // 存完收起 + 重新拉清单，然后**回到原来那一屏**（别让人跟着页面乱跳）
+  const y = MEM_SCROLL ?? window.scrollY;
+  closeMemory(true);
+  await loadMemory();
+  window.scrollTo(0, y);
+}
+
+/**
+ * 收起原位展开的编辑器。
+ * @param {boolean} [quiet] true = 不还原滚动位置（留着给紧接着的重新渲染用）
+ */
+function closeMemory(quiet = false) {
+  MEM_OPEN = null;
+  const node = $('mem-editor');
+  if (node) node.remove();
+  if (!quiet && MEM_SCROLL != null) {
+    const y = MEM_SCROLL;
+    MEM_SCROLL = null;
+    window.scrollTo(0, y);
+  } else if (quiet) {
+    MEM_SCROLL = null;
+  }
+}
+
+/** 一次性把群成员名单拉下来（QQ号 ↔ 昵称/群名片），「认识」才能按 QQ 号合并 */
+async function importMembers() {
+  const btn = $('mem-import');
+  const msg = $('msg-import');
+  if (!btn || btn.disabled) return;
+  btn.disabled = true;
+  flash(msg, true, '正在导入…（大群要几秒）');
+  try {
+    const r = await api('/api/memory/import-members', { method: 'POST' });
+    if (r.ok) {
+      const got = (r.groups || []).reduce((n, g) => n + (g.got || 0), 0);
+      const bad = (r.groups || []).filter((g) => g.error);
+      flash(msg, true, `导入了 ${got} 人，通讯录共 ${r.size} 人${bad.length ? `（${bad.length} 个群失败）` : ''}`);
+      await loadMemory();
+    } else {
+      flash(msg, false, '导入失败：' + (r.error || '未知错误'));
+    }
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 // 启动：先拉知识文件列表，再读第一个

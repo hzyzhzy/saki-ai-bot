@@ -1628,6 +1628,8 @@ function load() {
   cfg.observe.threshold = Math.max(20, Number(cfg.observe.threshold) || 200);
   // 多久检查一次（毫秒）
   cfg.observe.checkIntervalMs = Math.max(60000, Number(cfg.observe.checkIntervalMs) || 600000);
+  // 同一个群两次总结之间至少隔多久（防小群几分钟就重跑一遍、把旧记忆写成重复碎片）
+  cfg.observe.minGapMs = Math.max(60000, Number(cfg.observe.minGapMs) || 30 * 60 * 1000);
 
  // ── 「他的资料」自动更新（2026-10-03 要求，实现见 src/owner-update.js）──
   //    场景：他在私聊里聊到自己的生活变化（「我毕业了」），`owner.md` 里那条要跟着改。
